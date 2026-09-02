@@ -108,6 +108,7 @@ from cpython.bytes cimport (PyBytes_FromStringAndSize,
 
 import datetime
 import os
+import sys
 import threading
 import time
 import uuid
@@ -497,6 +498,28 @@ cdef inline void_int reserve_buffer(
     cdef line_sender_error* err = NULL
     if not line_sender_buffer_reserve(buffer, additional, &err):
         raise c_err_to_py(err)
+
+
+cdef inline bint _is_oidc_terminal_for_foreground(object exc):
+    """Whether ``exc`` is an OIDC failure that a foreground retry cannot clear.
+
+    ``OidcInteractionRequired`` and ``OidcConfigError`` carry a *retryable*
+    native code on purpose: an attached transport's background drainer keeps
+    queued store-and-forward frames alive while a human signs in, rather than
+    abandoning them. A foreground ``dataframe()`` call has nothing to wait for
+    -- the token path is documented never to prompt -- so retrying only burns
+    the reconnect budget before raising the same error.
+
+    Resolved through ``sys.modules`` instead of an import: if ``questdb.auth``
+    was never imported then no OIDC error can exist, so this costs one dict
+    lookup on the ordinary error path, and it cannot re-enter the import of the
+    very module that imports this extension.
+    """
+    cdef object mod = sys.modules.get('questdb.auth._errors')
+    if mod is None:
+        return False
+    return isinstance(
+        exc, (mod.OidcInteractionRequired, mod.OidcConfigError))
 
 
 cdef object _utf8_decode_error(
@@ -5932,6 +5955,16 @@ cdef void_int _direct_dataframe_run(
                 &committed_prefix)
             return 0
         except QuestDBError as exc:
+            # An OIDC failure that needs a human is not a transport blip: the
+            # native side classifies it as a retryable SocketError so an
+            # attached transport's background drainer keeps queued frames
+            # alive while someone signs in. A foreground dataframe() call has
+            # no such reason to wait -- retrying re-polls a provider that is
+            # documented never to prompt, so the call would stall for the whole
+            # reconnect budget (300s by default) only to raise the same error.
+            # Fail fast and let the caller run sign_in().
+            if _is_oidc_terminal_for_foreground(exc):
+                raise
             # FailoverRetry = transient flush/sync; SocketError = a
             # re-borrow that has not reached a live primary yet.
             if exc.code not in (
