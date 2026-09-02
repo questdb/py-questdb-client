@@ -412,6 +412,18 @@ cdef class OidcDeviceAuth:
         if builder == NULL:
             raise MemoryError()
         try:
+            # These three are required positionals, so validate them as such
+            # here rather than letting the optional-string path drop a None and
+            # leave the field unset. Native then reports the field as missing
+            # from QuestDB's /settings and tells the caller to pass it
+            # explicitly -- advice that makes no sense for a constructor that
+            # never contacts /settings, and names a builder method this API does
+            # not have. `from_questdb` keeps the optional path, where they are
+            # genuine overrides.
+            _oidc_required_utf8(client_id, 'client_id')
+            _oidc_required_utf8(token_endpoint, 'token_endpoint')
+            _oidc_required_utf8(
+                device_authorization_endpoint, 'device_authorization_endpoint')
             _oidc_builder_set_string(builder, client_id, 'client_id', 0)
             _oidc_builder_set_string(builder, scope, 'scope', 1)
             _oidc_builder_set_string(builder, audience, 'audience', 2)
