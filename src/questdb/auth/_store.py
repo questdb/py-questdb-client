@@ -42,6 +42,10 @@ class FileTokenStore:
     cross-process locking. On POSIX it creates directories with mode ``0700``
     and token files with mode ``0600``. This Python object carries only the
     selected directory into :class:`OidcDeviceAuth`.
+
+    ``directory`` is expanded (``~``) and made absolute at construction, so a
+    later :func:`os.chdir` cannot move the store; read back the resolved value
+    from :attr:`directory`.
     """
 
     def __init__(self, directory: Any):
@@ -57,7 +61,17 @@ class FileTokenStore:
                 '(str, bytes, or os.PathLike)') from exc
         if not path:
             raise OidcConfigError('the token store directory is required')
-        self._directory = os.fsdecode(path)
+        # Expand and absolutise, exactly as at_default_location() already does.
+        # Without this the value was handed to the native side verbatim and
+        # resolved against the process CWD: FileTokenStore('~/qdb-tokens') wrote
+        # a long-lived plaintext refresh token into a directory literally named
+        # '~' under the working directory -- often a repo checkout -- and a
+        # relative path silently followed the process around, so a chdir re-ran
+        # the whole device flow and left a second copy of the credential
+        # somewhere else. Resolve once, at construction, so the location is
+        # fixed and inspectable via `.directory`.
+        self._directory = os.path.abspath(
+            os.path.expanduser(os.fsdecode(path)))
 
     @classmethod
     def at(cls, directory: Any) -> 'FileTokenStore':

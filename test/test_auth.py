@@ -449,6 +449,37 @@ class NativeOidcTest(unittest.TestCase):
                     OidcConfigError, 'token_store directory'):
                 make_auth(token_store=token_store)
 
+    def test_file_store_directory_is_expanded_and_absolute(self):
+        # The directory used to be handed to native verbatim and resolved
+        # against the process CWD, so FileTokenStore('~/qdb-tokens') wrote a
+        # long-lived plaintext refresh token into a directory literally named
+        # '~' below the working directory, and a relative path followed a
+        # chdir -- re-running the device flow and leaving a second copy of the
+        # credential elsewhere.
+        home = os.path.expanduser('~')
+        self.assertEqual(
+            FileTokenStore('~/qdb-tokens').directory,
+            os.path.join(home, 'qdb-tokens'))
+        self.assertNotIn('~', FileTokenStore('~/qdb-tokens').directory)
+
+        store = FileTokenStore('rel-tokens')
+        self.assertTrue(os.path.isabs(store.directory))
+        cwd_relative = os.path.join(os.getcwd(), 'rel-tokens')
+        self.assertEqual(store.directory, cwd_relative)
+
+        # Pinned at construction: a later chdir must not move the store.
+        with tempfile.TemporaryDirectory() as other:
+            previous = os.getcwd()
+            try:
+                os.chdir(other)
+                self.assertEqual(store.directory, cwd_relative)
+            finally:
+                os.chdir(previous)
+
+        # An absolute path is already resolved and passes through untouched.
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(FileTokenStore.at(directory).directory, directory)
+
     def test_default_file_store_environment_override(self):
         with mock.patch.dict(
                 os.environ,
