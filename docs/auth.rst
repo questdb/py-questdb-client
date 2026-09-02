@@ -78,8 +78,11 @@ subclasses — :class:`~questdb.auth.OidcConfigError`,
 :class:`~questdb.auth.OidcInteractionRequired`,
 :class:`~questdb.auth.OidcDeviceFlowError`, and
 :class:`~questdb.auth.OidcTimeoutError`. ``OidcError`` is a
-:class:`QuestDBError <questdb.QuestDBError>` subclass (``code``
-``QuestDBErrorCode.AuthError``).
+:class:`QuestDBError <questdb.QuestDBError>` subclass. Its ``code`` mirrors the
+client's own classification: ``QuestDBErrorCode.AuthError`` for a terminal auth
+failure, ``SocketError`` for one treated as retryable (a transient token pull on
+a reconnect), and ``ConfigError`` for a misconfiguration — so retry logic that
+keys on ``code`` handles an OIDC failure exactly as it handles any other.
 
 Because a token is fetched on every connect, reconnect, and flush, a
 transport attached with ``oidc_auth=`` can raise a token failure (an

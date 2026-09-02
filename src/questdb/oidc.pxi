@@ -43,6 +43,7 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
     cdef object status = None
     cdef object retry_after = None
     cdef bint in_doubt = False
+    cdef object code
     cdef object exc
 
     from questdb.auth._errors import (
@@ -67,6 +68,14 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
     # an OIDC error after a partial write -- an except-QuestDBError retry or
     # dead-letter handler keys on .in_doubt to avoid replaying a landed write.
     in_doubt = questdb_error_in_doubt(err)
+    # Carry the native classification too. The non-OIDC path does this via
+    # c_err_to_fields; the OIDC path used to hardcode AuthError and drop it.
+    # Native deliberately reclassifies a recoverable token-provider failure as a
+    # retryable SocketError so failover polls it again, and QuestDB.dataframe()'s
+    # reconnect loop gates on exactly that code -- stamping AuthError turned a
+    # retryable reconnect into an immediate raise, so `oidc_auth=` silently lost
+    # the retry that `token=` still had.
+    code = c_err_code_to_py(questdb_error_get_code(err))
     memset(&view, 0, sizeof(questdb_oidc_error_view))
     view.struct_size = sizeof(questdb_oidc_error_view)
     if questdb_error_oidc_get_view(err, &view):
@@ -79,11 +88,11 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
         if view.kind == QUESTDB_OIDC_ERROR_CONFIG:
             exc = OidcConfigError(
                 message, status=status, retry_after=retry_after,
-                in_doubt=in_doubt)
+                in_doubt=in_doubt, code=code)
         elif view.kind == QUESTDB_OIDC_ERROR_NETWORK:
             exc = OidcNetworkError(
                 message, status=status, retry_after=retry_after,
-                in_doubt=in_doubt)
+                in_doubt=in_doubt, code=code)
         elif view.kind == QUESTDB_OIDC_ERROR_DEVICE_FLOW:
             exc = OidcDeviceFlowError(
                 message,
@@ -91,7 +100,7 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
                 error_description=description,
                 status=status,
                 retry_after=retry_after,
-                in_doubt=in_doubt)
+                in_doubt=in_doubt, code=code)
         elif view.kind == QUESTDB_OIDC_ERROR_TIMEOUT:
             # OidcTimeoutError is an OidcDeviceFlowError, and the native side
             # attaches the IdP error (e.g. "expired_token"); carry it through
@@ -102,21 +111,21 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
                 error_description=description,
                 status=status,
                 retry_after=retry_after,
-                in_doubt=in_doubt)
+                in_doubt=in_doubt, code=code)
         elif view.kind == QUESTDB_OIDC_ERROR_INTERACTION_REQUIRED:
             exc = OidcInteractionRequired(
                 message, status=status, retry_after=retry_after,
-                in_doubt=in_doubt)
+                in_doubt=in_doubt, code=code)
         elif view.kind == QUESTDB_OIDC_ERROR_CANCELLED:
             exc = OidcCancelledError(
                 message, status=status, retry_after=retry_after,
-                in_doubt=in_doubt)
+                in_doubt=in_doubt, code=code)
         else:
             exc = OidcError(
                 message, status=status, retry_after=retry_after,
-                in_doubt=in_doubt)
+                in_doubt=in_doubt, code=code)
     else:
-        exc = OidcError(message, in_doubt=in_doubt)
+        exc = OidcError(message, in_doubt=in_doubt, code=code)
     return exc
 
 

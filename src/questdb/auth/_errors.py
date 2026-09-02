@@ -43,16 +43,23 @@ from questdb._client import QuestDBError, QuestDBErrorCode
 class OidcError(QuestDBError):
     """Base class for every error raised by :mod:`questdb.auth`.
 
-    A subclass of :class:`~questdb.QuestDBError` (with ``code``
-    ``QuestDBErrorCode.AuthError``), so a transport attached with ``oidc_auth=``
-    whose token acquisition fails is caught by an existing ``except
-    QuestDBError`` handler; catch :class:`OidcError` — or a typed subclass such
-    as :class:`OidcInteractionRequired` — to handle auth failures specifically.
+    A subclass of :class:`~questdb.QuestDBError`, so a transport attached with
+    ``oidc_auth=`` whose token acquisition fails is caught by an existing
+    ``except QuestDBError`` handler; catch :class:`OidcError` — or a typed
+    subclass such as :class:`OidcInteractionRequired` — to handle auth failures
+    specifically.
+
+    ``code`` mirrors the native classification: ``QuestDBErrorCode.AuthError``
+    for a terminal auth failure, ``SocketError`` for one the client considers
+    retryable (a transient token-provider failure on a reconnect), and
+    ``ConfigError`` for a misconfiguration. Retry logic that keys on ``code``
+    therefore treats an OIDC failure exactly as it treats any other.
     """
 
     def __init__(self, *args, status: Optional[int] = None,
                  retry_after: Optional[int] = None,
-                 in_doubt: bool = False):
+                 in_doubt: bool = False,
+                 code=None):
         # Strip terminal/bidi/zero-width control characters from every string
         # message argument before it can reach a display sink. Error messages
         # routinely interpolate untrusted IdP fields (error_description, response
@@ -73,8 +80,16 @@ class OidcError(QuestDBError):
         # in_doubt threads through to the base so the OIDC error path reports
         # delivery uncertainty consistently with the non-OIDC QuestDBError path;
         # an ``except QuestDBError`` retry/dead-letter handler reads it.
+        # `code` mirrors the native classification when the binding builds this
+        # from a native error, and defaults to AuthError for a directly
+        # constructed one. Hardcoding AuthError discarded the code the native
+        # side had deliberately chosen -- notably the retryable SocketError that
+        # `classify_provider_error` assigns to a recoverable token-provider
+        # failure -- so callers keying on `.code` mis-classified it.
         QuestDBError.__init__(
-            self, QuestDBErrorCode.AuthError, args[0] if args else '',
+            self,
+            QuestDBErrorCode.AuthError if code is None else code,
+            args[0] if args else '',
             in_doubt=in_doubt)
         self.args = args
         # HTTP status behind a non-JSON HTTP response (else None), so the poll
@@ -125,7 +140,8 @@ class OidcDeviceFlowError(OidcError):
             error_description: Optional[str] = None,
             status: Optional[int] = None,
             retry_after: Optional[int] = None,
-            in_doubt: bool = False):
+            in_doubt: bool = False,
+            code=None):
         # Forward status to OidcError so a device-flow error raised in response
         # to a known HTTP status carries it (e.g. for a caller inspecting
         # err.status), rather than always reporting None. in_doubt likewise
@@ -133,7 +149,7 @@ class OidcDeviceFlowError(OidcError):
         # uncertainty relative to the non-OIDC path.
         super().__init__(
             message, status=status, retry_after=retry_after,
-            in_doubt=in_doubt)
+            in_doubt=in_doubt, code=code)
         # error / error_description come straight from the untrusted IdP
         # response and are exposed as attributes (a caller may re-display them),
         # so strip them too — same rationale as the message in OidcError. Coerce

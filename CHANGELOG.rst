@@ -37,7 +37,10 @@ Highlights:
   path remain non-interactive, silently refreshing when possible and otherwise
   raising :class:`~questdb.auth.OidcInteractionRequired`.
 * Auth failures are typed :class:`~questdb.auth.OidcError` subclasses of
-  :class:`~questdb.QuestDBError` (``code`` ``QuestDBErrorCode.AuthError``). A
+  :class:`~questdb.QuestDBError`, whose ``code`` mirrors the client's own
+  classification (``AuthError`` when terminal, ``SocketError`` when the failure
+  is retryable, ``ConfigError`` for a misconfiguration), so retry logic keying
+  on ``code`` treats an auth failure like any other. A
   transport attached with ``oidc_auth=`` can raise one from the same
   ``flush`` / ``dataframe`` / ``row`` / ``query`` / :func:`questdb.connect`
   call, so an existing ``except QuestDBError`` retry or dead-letter handler

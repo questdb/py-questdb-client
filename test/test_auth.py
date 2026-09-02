@@ -1305,6 +1305,49 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 sender.flush()
             self.assertIsInstance(ctx.exception, questdb.QuestDBError)
 
+    def test_oidc_error_carries_the_native_error_code(self):
+        # The OIDC branch of c_err_to_py used to stamp AuthError on every native
+        # error, discarding the code native had deliberately chosen. Native
+        # reclassifies a recoverable token-provider failure as a retryable
+        # SocketError so failover polls it again, and QuestDB.dataframe()'s
+        # reconnect loop gates on exactly that code -- so `oidc_auth=` silently
+        # lost the retry that a fixed `token=` still had. Two decoders in this
+        # package also disagreed: the reader path reads the code directly and
+        # reported SocketError for the very same error.
+        auth = make_auth()  # never signed in -> InteractionRequired
+        with questdb.Sender(
+                questdb.Protocol.Http,
+                '127.0.0.1',
+                9000,
+                oidc_auth=auth,
+                auto_flush=False,
+                protocol_version=2) as sender:
+            sender.row(
+                'oidc_code', columns={'value': 1},
+                at=questdb.ServerTimestamp)
+            with self.assertRaises(OidcInteractionRequired) as ctx:
+                sender.flush()
+        # Retryable, and recognised as such by the dataframe reconnect gate.
+        self.assertIs(
+            ctx.exception.code, questdb.QuestDBErrorCode.SocketError)
+        self.assertIn(
+            ctx.exception.code,
+            (questdb.QuestDBErrorCode.FailoverRetry,
+             questdb.QuestDBErrorCode.SocketError))
+
+        # A native configuration failure keeps its own code rather than
+        # collapsing to AuthError.
+        with OidcTestServer(settings_config_overrides={
+                'acl.oidc.enabled': False}) as server:
+            with self.assertRaises(OidcConfigError) as cfg:
+                OidcDeviceAuth.from_questdb(server.url, interactive=False)
+        self.assertIs(cfg.exception.code, questdb.QuestDBErrorCode.ConfigError)
+
+        # A directly constructed error still defaults to AuthError, so the
+        # documented `except QuestDBError` contract is unchanged.
+        self.assertIs(
+            OidcError('x').code, questdb.QuestDBErrorCode.AuthError)
+
     def test_query_and_connect_surface_typed_oidc_error(self):
         # The read/connect side, like flush/dataframe above: an unsigned
         # provider's token pull fails at reader-borrow / pool-connect and
