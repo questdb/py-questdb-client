@@ -50,9 +50,18 @@ def in_ipython_kernel() -> bool:
     ip = get_ipython()
     if ip is None:
         return False
-    # ZMQInteractiveShell == notebook/qtconsole/lab; TerminalInteractiveShell
-    # == ipython in a terminal.
-    return ip.__class__.__name__ == 'ZMQInteractiveShell'
+    # A ZMQ kernel shell carries the live kernel; TerminalInteractiveShell does
+    # not. This is the same signal _kernel_allows_stdin reads, and unlike an
+    # exact class-name test it holds for the subclasses real frontends ship:
+    # Google Colab (google.colab._shell.Shell) and Spyder
+    # (spyder_kernels.console.shell.SpyderShell) both subclass
+    # ZMQInteractiveShell, so a name match reported False for them and refused
+    # sign-in outright. Fall back to walking the MRO by name for an exotic
+    # frontend that leaves `kernel` unset.
+    if getattr(ip, 'kernel', None) is not None:
+        return True
+    return any(
+        base.__name__ == 'ZMQInteractiveShell' for base in type(ip).__mro__)
 
 
 def _kernel_allows_stdin() -> bool:
@@ -93,8 +102,8 @@ def detect_interactive() -> bool:
     """
     Best-effort detection of whether a human can complete the sign-in.
 
-    Interactive when attached to a TTY, or inside an IPython kernel whose
-    frontend accepts stdin. A notebook executor (papermill / ``nbclient`` /
+    Interactive when stderr is a TTY — the stream the prompt is written to —
+    or inside an IPython kernel whose frontend accepts stdin. A notebook executor (papermill / ``nbclient`` /
     ``nbconvert --execute``) runs a real kernel — so :func:`in_ipython_kernel`
     is ``True`` — but with no human to authorize; it executes with
     ``allow_stdin=False``, which :func:`_kernel_allows_stdin` detects, so the
@@ -104,8 +113,13 @@ def detect_interactive() -> bool:
     if in_ipython_kernel():
         return _kernel_allows_stdin()
     try:
-        return bool(sys.stdin and sys.stdin.isatty()
-                    and sys.stdout and sys.stdout.isatty())
+        # stderr, not stdout: that is where TerminalRenderer writes the prompt,
+        # and what the native auto-detect this overrides checks. Gating on
+        # stdout refused sign-in for `python job.py > results.csv` run at a real
+        # terminal, where the prompt would have been perfectly visible. stdin is
+        # not required either -- the user authorizes in a browser, and nothing
+        # here reads from it.
+        return bool(sys.stderr and sys.stderr.isatty())
     except Exception:
         return False
 

@@ -176,6 +176,64 @@ class NativeOidcTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {'IPython': ipython}):
             self.assertTrue(in_ipython_kernel())
 
+    def test_zmq_shell_subclasses_are_detected_as_kernels(self):
+        # Google Colab (google.colab._shell.Shell) and Spyder
+        # (spyder_kernels.console.shell.SpyderShell) subclass
+        # ZMQInteractiveShell, so an exact class-name test reported False for
+        # them: detect_interactive() then fell through to the isatty() check,
+        # which is False in any ZMQ kernel, and sign-in was refused outright
+        # before a device code was ever requested. The bundled tests missed it
+        # because they fake the shell as a name-only class with no base.
+        zmq_base = type('ZMQInteractiveShell', (), {})
+        for name in ('Shell', 'SpyderShell'):
+            with self.subTest(shell=name):
+                shell = type(name, (zmq_base,), {})()
+                ipython = types.ModuleType('IPython')
+                ipython.get_ipython = lambda shell=shell: shell
+                with mock.patch.dict(sys.modules, {'IPython': ipython}):
+                    self.assertTrue(in_ipython_kernel())
+                    # ...so a ZMQ kernel is never mistaken for a bare TTY.
+                    self.assertTrue(_render.detect_interactive())
+
+    def test_live_kernel_attribute_identifies_a_kernel_shell(self):
+        # The primary signal is the live kernel, which every ZMQ frontend
+        # carries regardless of its class name.
+        shell = type('SomeVendorShell', (), {})()
+        shell.kernel = types.SimpleNamespace(_allow_stdin=True)
+        ipython = types.ModuleType('IPython')
+        ipython.get_ipython = lambda: shell
+        with mock.patch.dict(sys.modules, {'IPython': ipython}):
+            self.assertTrue(in_ipython_kernel())
+
+    def test_interactivity_follows_stderr_not_stdout(self):
+        # TerminalRenderer writes the prompt to stderr, and so does the native
+        # auto-detect this overrides. Gating on stdout refused sign-in for
+        # `python job.py > results.csv` at a real terminal, where the prompt
+        # would have been perfectly visible.
+        ipython = types.ModuleType('IPython')
+        ipython.get_ipython = lambda: None
+
+        class Stream:
+            def __init__(self, tty):
+                self._tty = tty
+
+            def isatty(self):
+                return self._tty
+
+        cases = [
+            # (stdout, stderr, expected)
+            (False, True, True),   # redirected stdout, terminal stderr
+            (True, False, False),  # redirected stderr: prompt goes nowhere
+            (True, True, True),
+            (False, False, False),
+        ]
+        for out_tty, err_tty, expected in cases:
+            with self.subTest(stdout=out_tty, stderr=err_tty):
+                with mock.patch.dict(sys.modules, {'IPython': ipython}), \
+                        mock.patch.object(_render.sys, 'stdout', Stream(out_tty)), \
+                        mock.patch.object(_render.sys, 'stderr', Stream(err_tty)):
+                    self.assertEqual(_render.detect_interactive(), expected)
+
     def test_notebook_executor_without_stdin_is_non_interactive(self):
         # A notebook executor (papermill / nbclient / nbconvert --execute) runs a
         # real ZMQ kernel -- in_ipython_kernel() is True -- but with
