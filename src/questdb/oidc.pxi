@@ -658,17 +658,35 @@ cdef class OidcDeviceAuth:
         """Permanently close this provider and cancel interruptible waits.
 
         A sign-in, silent-refresh coordination, or bundled file-store lock wait
-        running on another thread is asked to stop. The call waits for that
-        operation to leave the native authentication critical section. Cloned
-        native handles retained by attached transports share the closed state.
-        Idempotent.
+        running on another thread is asked to stop, and the in-memory credential
+        is dropped. Cloned native handles retained by attached transports share
+        the closed state. Idempotent.
+
+        The call waits for the running operation to leave the native
+        authentication critical section — except when called *from inside this
+        provider's own renderer callback*, which executes within that section:
+        there it publishes the close and returns without waiting, since waiting
+        would deadlock against itself. The credential is dropped either way; a
+        later ``close()`` from an ordinary thread performs the wait.
+
+        The persisted entry is deliberately left behind so :meth:`clear` can
+        still remove it after closing.
         """
         cdef questdb_error* err = NULL
         cdef bint ok
         cdef PyThreadState* gs = NULL
-        if self._raw == NULL or self._closed:
+        if self._raw == NULL:
             self._closed = True
             return
+        # Deliberately NOT short-circuited on ``self._closed``. A close
+        # published from inside a renderer callback -- the Ctrl-C cancel path --
+        # marks the provider closed without draining, because the callback runs
+        # inside the very critical section the drain waits on. Skipping the
+        # native call here on that flag left the drain permanently unperformed:
+        # the later ``close()`` (or ``__exit__``) that could safely drain became
+        # a no-op. Native close is idempotent and cheap on an already-closed
+        # provider, so calling through unconditionally restores the documented
+        # behaviour at no meaningful cost.
         _ensure_doesnt_have_gil(&gs)
         ok = questdb_oidc_auth_close(self._raw, &err)
         _ensure_has_gil(&gs)
