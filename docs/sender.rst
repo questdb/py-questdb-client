@@ -264,6 +264,119 @@ performance:
                            dtype=pd.ArrowDtype(pa.decimal128(12, 6)))
     })
 
+.. _sender_qwp_column_types:
+
+UUID, IPV4, BINARY, CHAR, DATE, LONG256 and GEOHASH Columns
+-----------------------------------------------------------
+
+Starting with QuestDB server version 10.0.0 -- the first production QWP
+implementation -- a QWP sender (``udp::``, ``ws::`` or ``wss::``) can
+write these seven column types. They are auto-created like
+any other column, except that a ``GEOHASH`` column's precision is fixed
+when the column is created, so a table holding one is usually created up
+front.
+
+Row by row
+~~~~~~~~~~
+
+``UUID``, ``IPV4`` and ``BINARY`` are written with the Python types that
+already mean them — :class:`uuid.UUID`, :class:`ipaddress.IPv4Address`,
+and ``bytes`` / ``bytearray`` / ``memoryview``. The other four need a
+wrapper, because the Python type they would otherwise arrive as already
+means a different QuestDB column type: a ``str`` is VARCHAR, an ``int``
+is LONG, and a ``datetime`` is TIMESTAMP. The wrappers are
+:class:`Char <questdb.Char>`, :class:`DateMillis <questdb.DateMillis>`,
+:class:`Long256 <questdb.Long256>` and :class:`Geohash <questdb.Geohash>`.
+
+.. literalinclude:: ../examples/qwp_column_types.py
+   :language: python
+
+A few things worth knowing about the wrappers:
+
+* :class:`DateMillis <questdb.DateMillis>` is a millisecond timestamp, not
+  a civil date — that is what QuestDB ``DATE`` holds. Build it from
+  milliseconds, from a :class:`datetime.datetime` with
+  ``DateMillis.from_datetime``, or from the clock with ``DateMillis.now()``.
+* :class:`Geohash <questdb.Geohash>` carries bits *and* precision.
+  ``Geohash.from_string('u33d8')`` packs one to twelve base32 characters
+  at five bits each. Within one buffer's worth of rows a column's
+  precision is fixed by the first row that reaches it, and a later row at
+  a different precision is rejected by
+  :meth:`Sender.row <questdb.Sender.row>` itself. A flush clears the pin,
+  so a precision the server's column does not have comes back from the
+  server rather than being caught locally.
+* :class:`Long256 <questdb.Long256>` takes an unsigned integer below
+  ``2**256``.
+* :class:`Char <questdb.Char>` takes exactly one UTF-16 code unit, so a
+  character outside the Basic Multilingual Plane does not fit — use a
+  ``str`` (VARCHAR) for those.
+
+DataFrames
+~~~~~~~~~~
+
+A DataFrame states these types through the column's own Arrow type where
+the type is specific enough to say so, and through ``schema_overrides``
+where it is not:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 14 43 43
+
+   * - Column type
+     - Arrow type
+     - ``schema_overrides``
+   * - ``UUID``
+     - ``pa.uuid()``
+     - ``'uuid'``
+   * - ``LONG256``
+     - —
+     - ``'long256'``
+   * - ``IPV4``
+     - —
+     - ``'ipv4'`` on a ``uint32`` column
+   * - ``CHAR``
+     - —
+     - ``'char'`` on a ``uint16`` column
+   * - ``GEOHASH``
+     - —
+     - ``('geohash', bits)`` on a signed integer column
+   * - ``DATE``
+     - ``pa.timestamp('ms')``, ``pa.date32()``, ``pa.date64()``
+     - —
+   * - ``BINARY``
+     - ``pa.binary()``, ``pa.large_binary()``,
+       ``pa.binary(n)`` on the Arrow columnar path
+     - —
+
+.. literalinclude:: ../examples/qwp_column_types_dataframe.py
+   :language: python
+
+.. warning::
+
+   Bulk ``GEOHASH`` ingestion treats each integer as a raw bit pattern. It
+   validates that the declared precision is in ``1..=60`` and fits the signed
+   integer carrier, but it does **not** verify that an individual value fits
+   that precision. For example, a value of ``32`` needs six bits; declaring
+   it as ``GEOHASH(5b)`` is accepted.
+
+   If the declared precision is wrong for the encoded data, the write can
+   succeed and QuestDB can store a different GEOHASH location or ``NULL``.
+   Only the low ``ceil(precision / 8)`` bytes are encoded, and the exact result
+   of an inconsistent value is unspecified. This is a semantic data-integrity
+   risk, not a memory-safety risk for otherwise valid NumPy/Arrow buffers.
+   Validate bulk values before sending them, or use
+   :class:`Geohash <questdb.Geohash>` on the row path for strict per-value
+   validation. Malformed custom Arrow C Data structures remain invalid input.
+
+Reading a query result back and writing it out again keeps all of these
+types. A pandas dtype holds an Arrow type and no field, so the claim
+travels in ``df.attrs['questdb']``, which
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` reads — no second
+round of ``schema_overrides``. All three ``to_pandas`` backends
+round-trip, in whatever shape they hand the columns back. A column you
+dropped, renamed or retyped simply loses its claim, and ``symbols`` /
+``schema_overrides`` outrank it.
+
 Populating Designated Timestamps
 --------------------------------
 
@@ -1192,17 +1305,24 @@ The same :class:`QuestDB <questdb.QuestDB>` can ingest DataFrames through the po
 path with :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`. DataFrame ingestion always uses the direct
 (non-store-and-forward) column sender, independent of ``sf_dir``.
 
-On success, the call returns only after every row has been committed. Most
-loads queue their batches and commit once at the end. A very large Arrow load
-checkpoints about every 100 batches to keep memory bounded. The client may
-checkpoint earlier if the connection cannot queue another batch or if a batch
-must be split to fit. If a later batch fails, the exception means that the load
-did not finish, not necessarily that no rows landed. Any already committed
-prefix from that call remains in the table, and retrying the entire DataFrame
-can duplicate it unless the table uses suitable ``DEDUP UPSERT KEYS``.
+On success, the call returns only after every row has been committed. The first
+successful batch on a fresh direct connection is already a commit boundary;
+later batches are pipelined until the final commit. A very large Arrow load
+adds a checkpoint about every 100 batches to keep memory bounded, and the
+client may checkpoint earlier if deferred capacity fills or a batch must be
+split to fit. The 100-batch interval therefore limits the uncommitted tail; it
+is not a promise that the earlier batches are safe to replay.
 
-On a transient connection failure, the client re-sends from the caller's
-DataFrame only when it knows that no rows landed. Otherwise it reports the
-error instead of risking a blind retry.
+On a transient connection failure, the client re-sends the original,
+replayable DataFrame only if no batch from the call was successfully published
+and the failed native operation is not ``in_doubt``. Once any batch may have
+committed, it raises rather than replaying from row zero and exposes
+``in_doubt=True`` for the whole DataFrame call, even if the final native write
+alone was provably not delivered. The exception still means the load did not
+finish: an already committed prefix remains in the table, and an
+application-level retry of the entire DataFrame can duplicate it unless the
+table uses suitable ``DEDUP UPSERT KEYS``. A consumed one-shot Arrow stream is
+also not replayable; when no batch could have landed that separate condition
+raises with ``in_doubt=False`` and asks for a fresh reader.
 
 * Any :ref:`authentication parameters <sender_conf_auth>` such as ``username``, ``token``, et cetera.

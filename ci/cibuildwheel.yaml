@@ -18,11 +18,12 @@ stages:
               sudo find /etc/apt -name '*.list' -o -name '*.sources' \
                   | sudo xargs -r sed -i 's|http://ports.ubuntu.com|https://ports.ubuntu.com|g'
               sudo apt-get update --error-on=any
-              sudo apt-get install -y python3-pip python3-venv
-              python3 -m pip install --upgrade pip --break-system-packages
-              python3 -m pip install cibuildwheel --break-system-packages
+              sudo apt-get install -y python3.12 python3-pip python3.12-venv
+              python3.12 --version
+              python3.12 -m pip install --upgrade pip --break-system-packages
+              python3.12 -m pip install cibuildwheel --break-system-packages
             displayName: Install dependencies
-          - bash: python3 -m cibuildwheel --output-dir wheelhouse .
+          - bash: python3.12 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp310-manylinux_aarch64 cp311-manylinux_aarch64 cp312-manylinux_aarch64"
@@ -43,11 +44,12 @@ stages:
               sudo find /etc/apt -name '*.list' -o -name '*.sources' \
                   | sudo xargs -r sed -i 's|http://ports.ubuntu.com|https://ports.ubuntu.com|g'
               sudo apt-get update --error-on=any
-              sudo apt-get install -y python3-pip python3-venv
-              python3 -m pip install --upgrade pip --break-system-packages
-              python3 -m pip install cibuildwheel --break-system-packages
+              sudo apt-get install -y python3.12 python3-pip python3.12-venv
+              python3.12 --version
+              python3.12 -m pip install --upgrade pip --break-system-packages
+              python3.12 -m pip install cibuildwheel --break-system-packages
             displayName: Install dependencies
-          - bash: python3 -m cibuildwheel --output-dir wheelhouse .
+          - bash: python3.12 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp313*-manylinux_aarch64 cp314*-manylinux_aarch64"
@@ -68,11 +70,12 @@ stages:
               sudo find /etc/apt -name '*.list' -o -name '*.sources' \
                   | sudo xargs -r sed -i 's|http://ports.ubuntu.com|https://ports.ubuntu.com|g'
               sudo apt-get update --error-on=any
-              sudo apt-get install -y python3-pip python3-venv
-              python3 -m pip install --upgrade pip --break-system-packages
-              python3 -m pip install cibuildwheel --break-system-packages
+              sudo apt-get install -y python3.12 python3-pip python3.12-venv
+              python3.12 --version
+              python3.12 -m pip install --upgrade pip --break-system-packages
+              python3.12 -m pip install cibuildwheel --break-system-packages
             displayName: Install dependencies
-          - bash: python3 -m cibuildwheel --output-dir wheelhouse .
+          - bash: python3.12 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp310-musllinux_aarch64 cp311-musllinux_aarch64 cp312-musllinux_aarch64"
@@ -93,11 +96,12 @@ stages:
               sudo find /etc/apt -name '*.list' -o -name '*.sources' \
                   | sudo xargs -r sed -i 's|http://ports.ubuntu.com|https://ports.ubuntu.com|g'
               sudo apt-get update --error-on=any
-              sudo apt-get install -y python3-pip python3-venv
-              python3 -m pip install --upgrade pip --break-system-packages
-              python3 -m pip install cibuildwheel --break-system-packages
+              sudo apt-get install -y python3.12 python3-pip python3.12-venv
+              python3.12 --version
+              python3.12 -m pip install --upgrade pip --break-system-packages
+              python3.12 -m pip install cibuildwheel --break-system-packages
             displayName: Install dependencies
-          - bash: python3 -m cibuildwheel --output-dir wheelhouse .
+          - bash: python3.12 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp313*-musllinux_aarch64 cp314*-musllinux_aarch64"
@@ -108,13 +112,18 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
           - task: UsePythonVersion@0
+            inputs: {versionSpec: "3.12"}
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
-          - bash: cibuildwheel --output-dir wheelhouse .
+          - bash: python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64"
@@ -125,13 +134,18 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
           - task: UsePythonVersion@0
+            inputs: {versionSpec: "3.12"}
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
-          - bash: cibuildwheel --output-dir wheelhouse .
+          - bash: python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp313*-manylinux_x86_64 cp314*-manylinux_x86_64"
@@ -142,13 +156,18 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
           - task: UsePythonVersion@0
+            inputs: {versionSpec: "3.12"}
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
-          - bash: cibuildwheel --output-dir wheelhouse .
+          - bash: python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp310-musllinux* cp311-musllinux* cp312-musllinux*"
@@ -159,13 +178,18 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
           - task: UsePythonVersion@0
+            inputs: {versionSpec: "3.12"}
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
-          - bash: cibuildwheel --output-dir wheelhouse .
+          - bash: python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp313*-musllinux* cp314*-musllinux*"
@@ -176,13 +200,18 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
           - task: UsePythonVersion@0
+            inputs: {versionSpec: "3.12"}
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
-          - bash: cibuildwheel --output-dir wheelhouse .
+          - bash: python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: pp*
@@ -194,13 +223,18 @@ stages:
         pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
           - task: UsePythonVersion@0
+            inputs: {versionSpec: "3.12"}
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
-          - bash: cibuildwheel --output-dir wheelhouse .
+          - bash: python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp310-* cp311-*"
@@ -216,13 +250,18 @@ stages:
         pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
           - task: UsePythonVersion@0
+            inputs: {versionSpec: "3.12"}
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
-          - bash: cibuildwheel --output-dir wheelhouse .
+          - bash: python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp312-* cp313-*"
@@ -233,13 +272,18 @@ stages:
         pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
           - task: UsePythonVersion@0
+            inputs: {versionSpec: "3.12"}
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
-          - bash: cibuildwheel --output-dir wheelhouse .
+          - bash: python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp314-*"
@@ -250,13 +294,18 @@ stages:
         pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
           - task: UsePythonVersion@0
+            inputs: {versionSpec: "3.12"}
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
               python3 -m pip install cibuildwheel
             displayName: Install dependencies
-          - bash: cibuildwheel --output-dir wheelhouse .
+          - bash: python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_BUILD: "cp314t-*"
@@ -267,7 +316,12 @@ stages:
         pool: {vmImage: 'windows-2025'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
           - task: UsePythonVersion@0
+            inputs: {versionSpec: "3.12"}
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
@@ -285,7 +339,7 @@ stages:
               }
 
               where.exe cl.exe
-              cibuildwheel --output-dir wheelhouse .
+              python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               CIBW_ENVIRONMENT: "MSSdk=1 DISTUTILS_USE_SDK=1 SETUP_DO_GIT_SUBMODULE_INIT=1"
@@ -300,7 +354,12 @@ stages:
         pool: {vmImage: 'windows-2025'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            fetchDepth: 1
+            lfs: false
+            submodules: true
           - task: UsePythonVersion@0
+            inputs: {versionSpec: "3.12"}
           - bash: |
               set -o errexit
               python3 -m pip install --upgrade pip
@@ -318,7 +377,7 @@ stages:
               }
 
               where.exe cl.exe
-              cibuildwheel --output-dir wheelhouse .
+              python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
               # List versions explicitly, as the other jobs do. A `*win_amd64*`

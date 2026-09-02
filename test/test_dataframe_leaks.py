@@ -164,17 +164,30 @@ class TestCategoricalArrowLeak(unittest.TestCase):
 @unittest.skipUnless(psutil is not None, 'psutil not installed')
 class TestPyobjColumnarLeak(unittest.TestCase):
     """Guards the calloc'd ``pyobj_built_t`` builders
-    (``_dataframe_columnar_build_{str,int,float,bool,uuid,ipv4,bytes}_pyobj``)
-    reached by ``QuestDB.dataframe`` for object-dtype columns: every native
-    buffer (data, validity bitmap, str byte arena) must be freed on the
-    success and all-valid (bitmap-dropped) paths, and the pooled connection
-    must be returned on every call."""
+    (``_dataframe_columnar_build_{str,int,float,bool,uuid,ipv4,bytes,
+    long256,fsb}_pyobj``) reached by ``QuestDB.dataframe`` for
+    object-dtype columns: every native buffer (data, validity bitmap, str
+    byte arena) must be freed on the success and all-valid
+    (bitmap-dropped) paths, borrowed BINARY memoryviews must be released
+    on success and failure, and the pooled connection must be returned on
+    every call.
+
+    The last two builders are reached only through a
+    ``df.attrs['questdb']`` claim -- object-dtype ints under ``long256``
+    and object-dtype ``bytes`` under ``uuid`` or ``long256`` -- which is
+    the shape ``to_pandas(dtype_backend='numpy_nullable')`` hands those
+    columns back as. They allocate 16 or 32 bytes a row plus a bitmap, so
+    the frames below carry the claim."""
 
     ROWS = 2048
 
+    @staticmethod
+    def _ts(n):
+        return pd.Series(pd.to_datetime(np.arange(n), unit='s'))
+
     def _frames(self):
         n = self.ROWS
-        ts = pd.Series(pd.to_datetime(np.arange(n), unit='s'))
+        ts = self._ts(n)
 
         def col(values, null_step):
             return pd.Series(
@@ -188,10 +201,23 @@ class TestPyobjColumnarLeak(unittest.TestCase):
         bools = pd.Series([bool(i & 1) for i in range(n)], dtype=object)
         uuids = [uuid.UUID(int=i) for i in range(n)]
         ips = [ipaddress.IPv4Address(i) for i in range(n)]
-        blobs = [b'value_%06d' % i for i in range(n)]
+        blobs = []
+        for i in range(n):
+            value = b'value_%06d' % i
+            kind = i % 3
+            if kind == 0:
+                blobs.append(value)
+            elif kind == 1:
+                blobs.append(bytearray(value))
+            else:
+                blobs.append(memoryview(value))
+        long256_ints = [(1 << 255) + i for i in range(n)]
+        uuid_bytes = [uuid.UUID(int=i).bytes for i in range(n)]
+        long256_bytes = [
+            (i).to_bytes(32, 'little') for i in range(n)]
         frames = []
         for null_step in (0, 7):
-            frames.append(pd.DataFrame({
+            frame = pd.DataFrame({
                 'ts': ts,
                 's': col(strs, null_step),
                 'i': col(ints, null_step),
@@ -200,7 +226,16 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                 'u': col(uuids, null_step),
                 'ip': col(ips, null_step),
                 'by': col(blobs, null_step),
-            }))
+                'l256': col(long256_ints, null_step),
+                'u_fsb': col(uuid_bytes, null_step),
+                'l_fsb': col(long256_bytes, null_step),
+            })
+            frame.attrs['questdb'] = {
+                'version': 1, 'columns': {
+                    'l256': {'kind': 'long256'},
+                    'u_fsb': {'kind': 'uuid'},
+                    'l_fsb': {'kind': 'long256'}}}
+            frames.append(frame)
         return frames
 
     def _assert_stable(self, work, warmup, measure):
@@ -222,6 +257,122 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                             df, table_name='t', at='ts', symbols=False)
 
                 self._assert_stable(work, warmup=150, measure=1800)
+
+    def test_binary_memoryview_error_path_no_leak(self):
+        """A frame rejected on its last BINARY cell must leave no native
+        memory behind. Every cell before the bad one is borrowed, copied
+        and released inside the row loop, so at most one buffer is open
+        at a time; what this measures is the partially built column and
+        its offset table, which the unwind has to free. The bad cell is
+        caught by the itemsize / contiguity check, so this exercises the
+        pre-`PyObject_GetBuffer` branch. ``PyBuffer_Release`` itself is a
+        refcount question RSS cannot answer; it is asserted directly by
+        ``TestBinaryBufferRelease`` below.
+        """
+        from qwp_ws_ack_server import QwpAckServer
+
+        def invalid_frame():
+            values = []
+            for i in range(96):
+                value = (b'value_%06d_' % i) + b'x' * 256
+                kind = i % 3
+                if kind == 0:
+                    values.append(value)
+                elif kind == 1:
+                    values.append(bytearray(value))
+                else:
+                    values.append(memoryview(value))
+            values.append(memoryview(b'invalid')[::2])
+            return pd.DataFrame({
+                'by': pd.Series(values, dtype=object),
+            })
+
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                    'query_pool_min=0;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def work():
+                    try:
+                        client.dataframe(
+                            invalid_frame(), table_name='t',
+                            at=qi.ServerTimestamp, symbols=False)
+                    except qi.QuestDBError as exc:
+                        if exc.code != qi.QuestDBErrorCode.BadDataFrame:
+                            raise
+                        if "Bad column 'by' at row 96" not in str(exc):
+                            raise AssertionError(
+                                f'unexpected BINARY validation error: {exc}')
+                    else:
+                        raise AssertionError(
+                            'invalid BINARY memoryview was accepted')
+
+                self._assert_stable(work, warmup=200, measure=2400)
+
+    def test_pyobj_error_after_a_partial_bitmap_no_leak(self):
+        """A column rejected part-way through must free what it had
+        already built, bitmap included.
+
+        Every other error-path test puts the bad value at row 0, so
+        ``pyobj_built_free`` only ever runs on a struct with nothing
+        written yet -- the allocations it has to release are not there
+        to be missed. Here the nulls before the bad row have grown the
+        validity bitmap and the values before it have filled the data
+        buffer, so the unwind runs with both live. One frame per
+        builder that raises: the string arena, the fixed-width integer
+        buffer, and the two claimed builders' 16- and 32-byte slots.
+        """
+        from qwp_ws_ack_server import QwpAckServer
+        n = 512
+        bad_at = n - 1
+
+        def col(good, bad, null_step=5):
+            return pd.Series(
+                [None if i % null_step == 0
+                 else (bad if i == bad_at else good(i))
+                 for i in range(n)],
+                dtype=object)
+
+        # A lone surrogate cannot be encoded as UTF-8; an integer past
+        # the signed 64-bit range overflows; a claimed UUID or LONG256
+        # cell has to be exactly 16 or 32 bytes wide.
+        cases = [
+            ('s', col(lambda i: f'value_{i:06}', '\ud800'), None),
+            ('i', col(lambda i: i, 2 ** 63), None),
+            ('l256', col(lambda i: (1 << 255) + i, -1), 'long256'),
+            ('u_fsb', col(lambda i: uuid.UUID(int=i).bytes, b'short'),
+             'uuid'),
+            ('l_fsb', col(lambda i: (i).to_bytes(32, 'little'), b'short'),
+             'long256'),
+        ]
+        frames = []
+        for name, values, kind in cases:
+            frame = pd.DataFrame({'ts': self._ts(n), name: values})
+            if kind is not None:
+                frame.attrs['questdb'] = {
+                    'version': 1, 'columns': {name: {'kind': kind}}}
+            frames.append((name, frame))
+
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                    'query_pool_min=0;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def work():
+                    for name, frame in frames:
+                        try:
+                            client.dataframe(
+                                frame, table_name='t', at='ts',
+                                symbols=False)
+                        except qi.QuestDBError as exc:
+                            if repr(name) not in str(exc):
+                                raise AssertionError(
+                                    f'error did not name {name!r}: {exc}')
+                        else:
+                            raise AssertionError(
+                                f'column {name!r} was accepted')
+
+                self._assert_stable(work, warmup=150, measure=1200)
 
     @unittest.skipUnless(pa is not None, 'pyarrow not installed')
     def test_promoted_columnar_path_no_leak(self):
@@ -252,6 +403,213 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                         df, table_name='t', at='ts', symbols=False)
 
                 self._assert_stable(work, warmup=150, measure=1800)
+
+
+class TestBinaryBufferRelease(unittest.TestCase):
+    """``PyObject_GetBuffer`` on a memoryview BINARY cell must be paired
+    with a ``PyBuffer_Release``. A missing release is a refcount leak of
+    a fixed size, which the RSS harness above cannot see. It is visible
+    directly instead: while any buffer is exported, the underlying
+    ``bytearray`` refuses to be re-sized with
+
+      BufferError: Existing exports of data: object cannot be re-sized
+
+    so a ``bytearray`` that accepts ``append`` afterwards proves the
+    client let go of it.
+    """
+
+    @staticmethod
+    def _conf(port):
+        return (f'ws::addr=127.0.0.1:{port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                'query_pool_min=0;')
+
+    def _assert_released(self, backing, view):
+        view.release()
+        try:
+            backing.append(0)
+        except BufferError as exc:
+            self.fail(f'client kept a Py_buffer on the cell: {exc}')
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_good_path_releases(self):
+        from qwp_ws_ack_server import QwpAckServer
+        backing = bytearray(b'value_0')
+        view = memoryview(backing)
+        frame = pd.DataFrame({'by': pd.Series([view], dtype=object)})
+        with QwpAckServer() as server:
+            with qi.QuestDB.from_conf(self._conf(server.port)) as client:
+                client.dataframe(
+                    frame, table_name='t', at=qi.ServerTimestamp,
+                    symbols=False)
+        del frame
+        gc.collect()
+        self._assert_released(backing, view)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_error_path_releases_earlier_cells(self):
+        """The bad cell sits after the good one, so the good cell's
+        buffer is released by the ``finally`` inside the row loop rather
+        than by reaching the end of the column."""
+        from qwp_ws_ack_server import QwpAckServer
+        backing = bytearray(b'value_0')
+        view = memoryview(backing)
+        frame = pd.DataFrame({
+            'by': pd.Series(
+                [view, memoryview(b'invalid')[::2]], dtype=object)})
+        with QwpAckServer() as server:
+            with qi.QuestDB.from_conf(self._conf(server.port)) as client:
+                with self.assertRaises(qi.QuestDBError):
+                    client.dataframe(
+                        frame, table_name='t', at=qi.ServerTimestamp,
+                        symbols=False)
+        del frame
+        gc.collect()
+        self._assert_released(backing, view)
+
+    def test_row_path_releases(self):
+        """`Buffer.row` borrows the same way `dataframe()` does, through
+        its own `PyObject_GetBuffer` / `PyBuffer_Release` pair in
+        `_column_binary`. Both tests above drive `client.dataframe`, so
+        without this one the row API -- which is where BINARY cells were
+        added -- has nothing asserting it lets the buffer go."""
+        backing = bytearray(b'value_0')
+        view = memoryview(backing)
+        buffer = qi.Buffer._new_qwp()
+        buffer.row('t', columns={'by': view}, at=qi.TimestampNanos(1))
+        del buffer
+        gc.collect()
+        self._assert_released(backing, view)
+
+    def test_row_path_releases_on_a_rejected_row(self):
+        """A row that fails after the BINARY cell has been borrowed
+        unwinds through the `finally`, so the export is dropped there
+        too. `Geohash` is rejected for mixing precisions within the
+        column, which happens after the earlier cells are written."""
+        backing = bytearray(b'value_0')
+        view = memoryview(backing)
+        buffer = qi.Buffer._new_qwp()
+        buffer.row(
+            't', columns={'by': memoryview(b'first'), 'g': qi.Geohash(1, 1)},
+            at=qi.TimestampNanos(1))
+        before = len(buffer)
+        with self.assertRaises(qi.QuestDBError):
+            buffer.row(
+                't', columns={'by': view, 'g': qi.Geohash(1, 5)},
+                at=qi.TimestampNanos(2))
+        self.assertEqual(len(buffer), before)
+        del buffer
+        gc.collect()
+        self._assert_released(backing, view)
+
+
+@unittest.skipUnless(pd is not None, 'pandas not installed')
+@unittest.skipUnless(psutil is not None, 'psutil not installed')
+class TestClosedHandleDataframeLeak(unittest.TestCase):
+    """`QuestDB.dataframe()` claims a `qdb_pystr_buf` for the call. The
+    handle check that raises on a closed pool runs first, so an
+    allocation made ahead of it has nothing to free it and a retry loop
+    against a closed handle leaks one per attempt."""
+
+    def test_a_closed_handle_leaks_nothing(self):
+        frame = pd.DataFrame({
+            'a': np.arange(1024, dtype=np.int64),
+            'ts': pd.to_datetime(np.arange(1024), unit='s')})
+        handle = qi.QuestDB.from_conf(
+            'ws::addr=127.0.0.1:1;lazy_connect=true;'
+            'sender_pool_min=0;pool_reap=manual;')
+        handle.close()
+
+        def work():
+            with self.assertRaises(qi.QuestDBError):
+                handle.dataframe(
+                    frame, table_name='closed', at='ts')
+
+        # Enough attempts that a per-call leak of a few dozen bytes
+        # clears the 3 MiB-per-window floor `_assert_no_leak`
+        # allows for allocator noise.
+        _assert_no_leak(self, work, warmup=20000, measure=900000)
+
+
+@unittest.skipUnless(pa is not None, 'pyarrow not installed')
+@unittest.skipUnless(psutil is not None, 'psutil not installed')
+class TestCapsuleOverridesLeak(unittest.TestCase):
+    """The Arrow capsule path allocates an override array per call and
+    imports a schema per stream. Cover both successful override sends and
+    streams refused by the guarded FFI preflight."""
+
+    # Each override is 24 bytes, so a leak of one array per call only
+    # shows up when many columns are claimed at once: at 1000 columns a
+    # leaked array is 24 KiB, so the 400 calls in one window add up to
+    # about 9.6 MB. `_assert_no_leak` reads anything under 3 MiB a
+    # window as allocator noise.
+    #
+    # The call count stays small because every call waits for a
+    # WebSocket ack, which costs about 40 ms on the Linux CI agents
+    # however small the frame is -- tens of thousands of calls would run
+    # for hours there. More columns per call give the same signal in far
+    # less time. An imported Arrow schema holds 4096 nodes including its
+    # root envelope, so at most 4095 are top-level columns. The `gh` and
+    # `ts` columns below consume two of those slots, leaving 4093 as the
+    # largest usable `COLUMNS` value for this fixture.
+    COLUMNS = 1000
+
+    def test_overrides_leak_nothing(self):
+        from qwp_ws_ack_server import QwpAckServer
+        data = {}
+        overrides = {}
+        for i in range(self.COLUMNS):
+            data[f'u{i}'] = pa.array([b'\x00' * 16], pa.binary(16))
+            overrides[f'u{i}'] = 'uuid'
+        data['gh'] = pa.array([1], pa.int32())
+        overrides['gh'] = ('geohash', 20)
+        data['ts'] = pa.array([0], pa.timestamp('us'))
+        frame = pa.table(data)
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                    # Ingest-only mock server: skip the eager reader-pool
+                    # connect, which would time out waiting for server info.
+                    'query_pool_min=0;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def work():
+                    client.dataframe(
+                        frame, table_name='caps', at='ts',
+                        schema_overrides=overrides)
+
+                _assert_no_leak(self, work, warmup=200, measure=2400)
+
+    def test_rejected_stream_leaks_nothing(self):
+        from qwp_ws_ack_server import QwpAckServer
+        nested = pa.StructArray.from_arrays(
+            [pa.array([1], type=pa.int32())], names=['value'])
+        frame = pa.table({
+            'nested': nested,
+            'ts': pa.array([0], type=pa.timestamp('us')),
+        })
+        # This intentionally sends no frames for several minutes on slower
+        # wheel builders. Keep the otherwise useful mock-server idle timeout
+        # from turning that expected silence into a harness error.
+        with QwpAckServer(idle_timeout_s=None) as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                    'query_pool_min=0;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def work():
+                    with self.assertRaises(qi.QuestDBError) as raised:
+                        client.dataframe(
+                            frame, table_name='caps', at='ts')
+                    self.assertEqual(
+                        raised.exception.code,
+                        qi.QuestDBErrorCode.ArrowUnsupportedColumnKind)
+
+                # Rejection happens before a WebSocket send, so enough calls
+                # to expose a small per-stream leak remain inexpensive.
+                _assert_no_leak(self, work, warmup=20000, measure=900000)
+            frames = server.wait_binary_frames_settled()
+            stats = server.snapshot()
+        self.assertEqual(frames, 0)
+        self.assertEqual(stats['errors'], [])
 
 
 if __name__ == '__main__':

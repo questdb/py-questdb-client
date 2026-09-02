@@ -1,5 +1,10 @@
 trigger: none
 
+variables:
+  pyarrowVersion: ""
+  polarsVersion: ""
+  arrowProducerPins: ""
+
 stages:
   - stage: BuildAndTest
     displayName: "Building and testing"
@@ -12,29 +17,65 @@ stages:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
               pythonVersion: "3.12"
+              questdbVersion: ""
+              requireQwpRowTypes: ""
+              buildDocs: true
+              runClaimGrid: true
             linux-pandas2:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
               pythonVersion: "3.12"
               pandasVersion: "2.3.3"
+              pyarrowVersion: "25.0.1"
+              polarsVersion: "1.44.1"
+              arrowProducerPins: "pandas=2.3.3,pyarrow=25.0.1,polars=1.44.1"
+              questdbVersion: ""
+              requireQwpRowTypes: ""
             linux-pandas310:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
               pythonVersion: "3.10"
               pandasVersion: "2.3.3"
+              questdbVersion: ""
+              requireQwpRowTypes: ""
             linux-qdb-master:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
               pythonVersion: "3.12"
               vsQuestDbMaster: true
+              questdbVersion: ""
+              requireQwpRowTypes: ""
+            # The QWP-only column types are supported from QuestDB 10,
+            # the first production QWP. The three legs that pin no
+            # version run the 9.4.3 beta and skip them;
+            # `linux-qdb-master` builds from the repo, which is past 10,
+            # and runs them. Every test that writes one of these types
+            # lives in a class whose `setUp` asks for
+            # `FIRST_QWP_ROW_TYPES_RELEASE`, so the skip covers the
+            # whole class rather than the calls somebody remembered to
+            # write, and a test.py meta-test reads both test files and
+            # fails on a test that writes one from a class with no gate.
+            # This leg pins a 10 release and sets requireQwpRowTypes,
+            # which turns those skips into failures: otherwise a run
+            # covering none of it looks exactly like a run that passed.
+            linux-qdb10:
+              imageName: "ubuntu-latest"
+              poolName: "Azure Pipelines"
+              pythonVersion: "3.12"
+              questdbVersion: "10.0.0"
+              requireQwpRowTypes: "1"
             mac:
               imageName: "macos-latest"
               poolName: "Azure Pipelines"
               pythonVersion: "3.12"
+              questdbVersion: ""
+              requireQwpRowTypes: ""
             windows-msvc-2022:
               imageName: "windows-2025"
               poolName: "Azure Pipelines"
               pythonVersion: "3.12"
+              questdbVersion: ""
+              requireQwpRowTypes: ""
         pool:
           name: $(poolName)
           vmImage: $(imageName)
@@ -51,14 +92,32 @@ stages:
               python3 --version
               python3 -m pip install cython
             displayName: "Install cython"
-          - script: python3 ci/pip_install_deps.py
+          - script: >-
+              python3 ci/pip_install_deps.py
+              --pyarrow-version=$(pyarrowVersion)
+              --polars-version=$(polarsVersion)
             displayName: "Install pandas 3.x"
             condition: eq(variables.pandasVersion, '')
-          - script: python3 ci/pip_install_deps.py --pandas-version==$(pandasVersion)
+          - script: >-
+              python3 ci/pip_install_deps.py
+              --pandas-version=$(pandasVersion)
+              --pyarrow-version=$(pyarrowVersion)
+              --polars-version=$(polarsVersion)
             displayName: "Install pandas $(pandasVersion)"
             condition: ne(variables.pandasVersion, '')
           - script: python3 proj.py build
             displayName: "Build"
+          # `proj.py doc` runs Sphinx with `-nW`, so an unresolvable
+          # reference in a docstring fails here. Read the Docs builds
+          # without it and renders the dangling reference instead, so
+          # without this step nothing catches one: the build was left
+          # broken twice during review, once by a private-alias
+          # annotation and once by an unqualified `:class:` target.
+          - script: |
+              python3 -m pip install -r docs/requirements.txt
+              python3 proj.py doc
+            displayName: "Build docs"
+            condition: eq(variables.buildDocs, true)
           - template: templates/clone_questdb.yaml
             parameters:
               condition: eq(variables.vsQuestDbMaster, true)
@@ -86,15 +145,32 @@ stages:
               jdkDirectory: "$(JAVA_HOME)"
               options: "-DskipTests -Pbuild-web-console$(CLIENT_PROFILE)"
             condition: eq(variables.vsQuestDbMaster, true)
+          # The claim grid is 630 cells against an in-process mock and
+          # runs in one process, so it is cheap enough to gate on. The
+          # re-entrancy grid is a subprocess per cell and stays nightly
+          # (`.github/workflows/grids.yml`).
+          #
+          # Gated because the meta-tests in `test.py` read the
+          # checked-in table rather than running it, so on their own
+          # they pass against a stale one: a change that alters what a
+          # claim does would otherwise reach the default branch and
+          # surface the next morning.
+          - script: python3 proj.py grid claim
+            displayName: "Claim grid"
+            condition: eq(variables.runClaimGrid, true)
           - script: python3 proj.py test 1
             displayName: "Test vs released"
             env:
               JAVA_HOME: $(JAVA_HOME_25_X64)
+              QDB_VERSION: $(questdbVersion)
+              TEST_QUESTDB_REQUIRE_QWP_ROW_TYPES: $(requireQwpRowTypes)
+              TEST_QUESTDB_ARROW_PRODUCER_PINS: $(arrowProducerPins)
           - script: python3 proj.py test 1
             displayName: "Test vs master"
             env:
               JAVA_HOME: $(JAVA_HOME)
               QDB_REPO_PATH: "./questdb"
+              TEST_QUESTDB_REQUIRE_QWP_ROW_TYPES: "1"
             condition: eq(variables.vsQuestDbMaster, true)
       - job: TestsAgainstVariousNumpyVersion1x
         pool:

@@ -1,11 +1,57 @@
 # See: dataframe.md for technical overview.
 
 from decimal import Decimal
-import ipaddress as _ipaddress
+import sys
 import uuid as _uuid
 
 from cpython.bytes cimport PyBytes_AsString
 from .mpdecimal_compat cimport decimal_pyobj_to_binary
+
+# `decimal_pyobj_to_binary` reinterprets a Decimal's memory with the struct
+# layout of CPython's `_decimal` accelerator, without checking that it is
+# looking at one. Reading any other interpreter's Decimal that way is
+# undefined behaviour, so the layout has to be established first.
+#
+# The interpreter is checked as well as the module. `Decimal is
+# _decimal.Decimal` only says that the `decimal` module is backed by
+# something named `_decimal`, which is true on other interpreters that ship
+# their own `_decimal` under the same name and a different shape -- so on
+# its own it admits exactly the case it is meant to exclude.
+cdef str _PY_IMPL_NAME = sys.implementation.name
+cdef bint _DECIMAL_IS_C
+if _PY_IMPL_NAME == 'cpython':
+    try:
+        import _decimal as _decimal_accel
+        _DECIMAL_IS_C = Decimal is getattr(_decimal_accel, 'Decimal', None)
+    except ImportError:
+        _DECIMAL_IS_C = False
+else:
+    _DECIMAL_IS_C = False
+
+
+# The type object behind `decimal.Decimal`, for reading an object's real
+# type through `Py_TYPE` rather than its `__class__`.
+cdef PyTypeObject* _DECIMAL_C_TYPE = <PyTypeObject*><PyObject*>Decimal
+
+
+cdef inline bint _is_decimal(object value) noexcept:
+    """Whether `value` really is a `decimal.Decimal`.
+
+    `isinstance` asks the object for its `__class__`, which any object
+    can set to whatever it likes, and `decimal_pyobj_to_binary` goes on
+    to read the object's raw memory with CPython's `Decimal` struct
+    layout: it takes `mpd.len` limbs from the `mpd.data` pointer it
+    finds there. An object that merely claims to be a `Decimal` sends it
+    walking unrelated heap memory, which reaches the wire as a bogus
+    value or takes the interpreter down with a segfault. `Py_TYPE` is
+    the object's real type and nothing can forge it.
+
+    A genuine `Decimal` subclass still passes. A subclass lays its own
+    fields after the base struct, so the fields read here stay at the
+    offsets the layout expects.
+    """
+    return PyObject_TypeCheck(value, _DECIMAL_C_TYPE)
+
 
 # Auto-flush settings.
 # The individual `interval`, `row_count` and `byte_count`
@@ -19,14 +65,20 @@ cdef struct auto_flush_mode_t:
 
 
 cdef struct auto_flush_t:
-    line_sender* sender
+    # The sender's own `_impl` field, not a copy of what was in it. A
+    # frame's plan build and its cells run the caller's Python, and a
+    # `close()` arriving from there frees the sender and leaves the
+    # field NULL -- which the auto-flush below already reads as "no
+    # sender, nothing to flush". A copy taken before the run would
+    # instead be a freed pointer handed to `line_sender_flush`.
+    line_sender** sender_slot
     auto_flush_mode_t mode
     int64_t* last_flush_ms
 
 
 cdef auto_flush_t auto_flush_blank() noexcept nogil:
     cdef auto_flush_t af
-    af.sender = NULL
+    af.sender_slot = NULL
     af.mode.enabled = False
     af.mode.interval = -1
     af.mode.row_count = -1
@@ -74,6 +126,53 @@ cdef inline uint64_t bswap64(uint64_t value) noexcept:
       ((value & 0x000000000000FF00u) << 40u) |
       ((value & 0x00000000000000FFu) << 56u))
 
+# Bound once at import. The test below runs per cell in the DataFrame
+# IPV4 builder and per column value in `Buffer.row`, where reaching
+# through the module for each of the two classes is the whole cost.
+cdef object _IPV4_ADDRESS = ipaddress.IPv4Address
+cdef object _IPV4_INTERFACE = ipaddress.IPv4Interface
+cdef object _IPV6_ADDRESS = ipaddress.IPv6Address
+cdef object _UUID = _uuid.UUID
+
+# `int.to_bytes`, unbound so a subclass cannot narrow the result. The
+# row path uses it per UUID cell, where reaching through `int` for it
+# each time is the whole cost.
+cdef object _INT_TO_BYTES = int.to_bytes
+
+
+# Why an `IPv4Interface` is refused, worded once for the three places
+# that refuse one. `IPv4Interface` subclasses `IPv4Address`, so any
+# message listing the accepted types reads as a contradiction on its
+# own: it names the parent of the thing it has just turned away, and
+# says nothing about the prefix that is the actual reason. Each caller
+# adds the remedy its own shape calls for.
+cdef str _IPV4_INTERFACE_REASON = (
+    'ipaddress.IPv4Interface carries a network prefix, which a QuestDB '
+    'IPV4 column has nowhere to keep.')
+
+
+cdef str _ipv4_interface_df_message(object df_col_name):
+    """The DataFrame-path refusal for an ``IPv4Interface`` cell, naming
+    a remedy that works on a whole column."""
+    return (
+        _IPV4_INTERFACE_REASON
+        + f' Pass the addresses instead, e.g. df[{df_col_name!r}] = '
+        + f'df[{df_col_name!r}].map(lambda value: value.ip).')
+
+
+cdef inline bint _is_ipv4_address(object value):
+    """``IPv4Interface`` subclasses ``IPv4Address`` but carries a network
+    prefix that QuestDB's IPV4 column has nowhere to keep, so it is not
+    accepted as an address. Every other subclass is."""
+    # An exact `IPv4Address` is the overwhelmingly common cell and
+    # settles both questions at once: it is an address, and it is not
+    # the interface subclass.
+    if type(value) is _IPV4_ADDRESS:
+        return True
+    return (isinstance(value, _IPV4_ADDRESS)
+            and not isinstance(value, _IPV4_INTERFACE))
+
+
 cdef struct col_chunks_t:
     size_t n_chunks
     ArrowArray* chunks  # We calloc `n_chunks + 1` of these.
@@ -109,11 +208,240 @@ cdef enum col_target_t:
     col_target_column_i32 = 13
     col_target_column_f32 = 14
     col_target_column_uuid = 15
+    # Reserved. No source resolves to it: LONG256 on the Arrow columnar
+    # path is claimed by field metadata or `schema_overrides` and goes
+    # out through `col_target_column_arrow`, and on the NumPy planner a
+    # `long256` round-trip claim rides on `col_target_column_i64` with a
+    # `qwp_numpy_s32` override. Re-listing it means giving it an entry in
+    # `_TARGET_TO_SOURCES` as well, which is otherwise indexed unguarded.
     col_target_column_long256 = 16
     col_target_column_ipv4 = 17
     col_target_column_binary = 18
     # Generic Arrow field passthrough to the Rust importer; column-QWP only.
     col_target_column_arrow = 19
+
+
+# The version stamped into `df.attrs['questdb']` by the egress and
+# required by the two ingest-side readers. Bump it only when the claim
+# vocabulary changes in a way an older client would misread.
+cdef int _ROUNDTRIP_META_VERSION = 1
+
+
+class _RoundtripClaim(dict):
+    """The ``df.attrs['questdb']`` payload: a ``dict`` that declines to
+    be copied.
+
+    pandas deep-copies the whole of ``attrs`` every time it propagates
+    it -- ``NDFrame.__finalize__`` does ``self.attrs =
+    deepcopy(other.attrs)`` -- and that runs once per column while a
+    frame is being exported or sliced. With a per-column claim the copy
+    is itself the size of the frame, so the pass is quadratic in the
+    column count: ``pyarrow.table(df)`` on a 1024-column frame spends
+    710 ms of its 730 ms inside ``copy.deepcopy``, against 26 ms once
+    the claim declines to copy and 23 ms for the same frame carrying no
+    claim at all. Most of those copies are pandas' own -- its Arrow
+    export reads the frame a column at a time -- so the claim has to be
+    cheap to copy wherever the frame goes, not only inside this client.
+
+    Declining to copy is sound because the claim cannot be edited. It
+    only recalls what each column held when it was read, so there is
+    nothing two copies of a frame could legitimately disagree about,
+    and every way ``dict`` offers to change its contents raises here,
+    at every depth.
+
+    It is still a ``dict``, so it indexes, iterates, compares and
+    serializes exactly like a plain mapping, and a hand-written plain
+    ``dict`` is read on the way in just the same, provided it carries
+    the same two keys this one does::
+
+        {'version': 1, 'columns': {'src_ip': {'kind': 'ipv4'}}}
+
+    ``version`` is required and is checked rather than merely carried,
+    so a mapping written without it is not a claim this client reads
+    and every column in it is ignored. To change what a frame claims,
+    assign a whole new mapping to ``df.attrs['questdb']``. The nested
+    ``columns`` mapping is frozen too, so unpack that one as well::
+
+        df.attrs['questdb'] = {
+            'version': 1,
+            'columns': {
+                **df.attrs['questdb']['columns'],
+                'grade': {'kind': 'char'}}}
+
+    Or state the type outright with ``schema_overrides`` / ``symbols``,
+    which outrank the claim.
+    """
+    __slots__ = ('_built',)
+
+    def __init__(self, mapping=()):
+        # Every mapping inside the claim is frozen too, so no part of
+        # it can be edited in place. `dict.__init__` inserts at the C
+        # level and so is not turned away by the override below --
+        # which also means calling `__init__` again on a built claim
+        # would edit it in place, past every other guard.
+        #
+        # Refused on the second call rather than on a non-empty target:
+        # a result with no columns builds an empty claim, and gating on
+        # emptiness left that one re-initialisable.
+        # An unset slot raises on read, so `getattr` with a default is
+        # what distinguishes the first call from a later one.
+        if getattr(self, '_built', False):
+            self._immutable()
+        self._built = True
+        items = mapping.items() if isinstance(mapping, dict) else mapping
+        dict.__init__(self, [
+            (key, _RoundtripClaim(value) if isinstance(value, dict) else value)
+            for key, value in items])
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __copy__(self):
+        return self
+
+    def __reduce__(self):
+        # Pickling round-trips through a plain dict payload, so an
+        # unpickled claim is a claim and not a bare dict.
+        return (_RoundtripClaim, (dict(self),))
+
+    def _immutable(self, *args, **kwargs):
+        raise TypeError(
+            "df.attrs['questdb'] records what each column held when it "
+            'was read and cannot be edited in place, because every copy '
+            'of the frame shares it. Assign a whole new mapping to '
+            "df.attrs['questdb'] instead; the nested 'columns' mapping "
+            'is frozen too, so unpack that one as well: '
+            "df.attrs['questdb'] = {'version': 1, 'columns': "
+            "{**df.attrs['questdb']['columns'], "
+            "'grade': {'kind': 'char'}}}. Or state the type outright "
+            'with schema_overrides / symbols, which outrank the '
+            'claim.')
+
+    # Every method `dict` has that changes its contents. Blocking them
+    # one by one is what lets the claim be shared rather than copied,
+    # so the set has to be complete: the test walks `dir(dict)` and
+    # calls each name, which turns a missing entry here into a test
+    # failure rather than a claim that changes under a frame sharing it.
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    __ior__ = _immutable
+    setdefault = _immutable
+    pop = _immutable
+    popitem = _immutable
+    update = _immutable
+    clear = _immutable
+
+
+cdef object _roundtrip_columns_meta(object frame):
+    """The ``columns`` map of a frame's ``df.attrs['questdb']``, or
+    ``None`` where the frame carries no claim this client can read.
+
+    Both ingest-side readers start here, so a malformed or
+    future-versioned ``attrs`` is turned away in one place rather than
+    at two call sites with two different sets of guards.
+
+    The version is checked rather than merely carried. The claim's
+    vocabulary can gain kinds, and a client that applied a version it
+    does not understand would silently write the wrong column type --
+    the outcome the claim exists to prevent.
+    """
+    cdef object attrs, qmeta, cols_meta
+    attrs = getattr(frame, 'attrs', None)
+    if not isinstance(attrs, dict):
+        return None
+    qmeta = attrs.get('questdb')
+    if not isinstance(qmeta, dict):
+        return None
+    version = qmeta.get('version')
+    if (not _is_integral_not_bool(version)
+            or int(version) != _ROUNDTRIP_META_VERSION):
+        return None
+    cols_meta = qmeta.get('columns')
+    if not isinstance(cols_meta, dict):
+        return None
+    return cols_meta
+
+
+cdef str _roundtrip_kind(object meta):
+    """The ``kind`` of one column's claim, or ``None`` where the entry
+    is not a claim.
+
+    ``kind`` is user data, and one of its readers looks it up in a dict.
+    Hashing is the only step there that can fail, so an unhashable value
+    -- a list, say, from metadata that went through JSON -- would raise
+    ``TypeError`` where the contract promises the claim is skipped.
+    Holding it to ``str`` here settles that for both readers.
+    """
+    cdef object kind
+    if not isinstance(meta, dict):
+        return None
+    kind = meta.get('kind')
+    if not isinstance(kind, str):
+        return None
+    return kind
+
+
+cdef _log_roundtrip_claim_route(object name, str kind):
+    """Say that a column's claim named a type this write cannot apply.
+
+    The claim is read by the columnar writers. A frame serialized a row
+    at a time never reaches them, so a claim of one of the QWP-only
+    kinds does nothing here. The column reaches the database as its own
+    dtype decides -- typically a LONG, BINARY, or TIMESTAMP rather than
+    the claimed type -- and the table it creates has that type. Without
+    this nothing says so.
+
+    Separate from `_log_roundtrip_claim_dropped`, which answers a
+    different question: there the column cannot carry the kind, here
+    the route cannot apply it. The remedy differs with it.
+    """
+    # This is a diagnostic about a write that remains valid. Keep it out
+    # of `warnings.warn`: under `-W error` a Python warning would become
+    # an exception, abort the write, and be translated by `_dataframe`
+    # into an unrelated InvalidApiCall error.
+    logging.getLogger('questdb').warning(
+        'questdb: column %r carries a df.attrs[\'questdb\'] claim of '
+        'kind %r, which this write cannot apply. The claim is read when '
+        'a frame is written a column at a time; this one is being '
+        'written a row at a time, so the column goes out as its own '
+        'dtype decides rather than as the claimed type, and a table '
+        'created by this write gets that resulting type. Use '
+        'QuestDB.dataframe(), or Sender.dataframe() over a '
+        'ws:: or wss:: configuration, to have the claim applied.',
+        name,
+        kind)
+
+
+cdef bint _row_route_drops_roundtrip_kind(str kind) except -1:
+    """Whether row serialization has no way to apply this claim.
+
+    DATE deliberately has no Arrow override: its Arrow type is the
+    claim. It still belongs here because the row route does not run the
+    normalization that puts that type back on a NumPy datetime column.
+    """
+    return kind == 'date' or kind in _ATTRS_OVERRIDE_KINDS
+
+
+cdef void_int _dataframe_log_claims_this_route_drops(object df) except -1:
+    """Log every claim the row-serializing write silently ignores.
+
+    Placed at `_dataframe`, which is the one entry `Buffer.dataframe`,
+    `SenderTransaction.dataframe` and `Sender.dataframe` over the
+    row-serializing protocols all arrive through, so a fourth caller
+    inherits the notice rather than having to remember it.
+    """
+    cdef object cols_meta = _roundtrip_columns_meta(df)
+    cdef object name
+    cdef object meta
+    cdef str kind
+    if not cols_meta:
+        return 0
+    for name, meta in cols_meta.items():
+        kind = _roundtrip_kind(meta)
+        if (kind is not None
+                and _row_route_drops_roundtrip_kind(kind)):
+            _log_roundtrip_claim_route(name, kind)
+    return 0
 
 
 cdef dict _TARGET_NAMES = {
@@ -188,14 +516,12 @@ cdef enum col_source_t:
     col_source_decimal64_arrow =        803000
     col_source_decimal128_arrow =       804000
     col_source_decimal256_arrow =       805000
-    # FixedSizeBinary(16) — the canonical Arrow shape egress emits
-    # for UUID columns (with or without the `arrow.uuid` extension
-    # wrapper, which we strip on input). Column-QWP only; row-ILP
-    # has no serializer for this source.
+    # `arrow.uuid`-labeled FixedSizeBinary(16) — the canonical Arrow
+    # shape egress emits for UUID columns. The label is what claims the
+    # column as UUID: an unlabeled 16-byte column is opaque bytes and
+    # routes through `col_source_arrow_passthrough` to BINARY. Column-QWP
+    # only; row-ILP has no serializer for this source.
     col_source_fsb16_arrow =            901000
-    # FixedSizeBinary(32) — the canonical shape egress emits for
-    # LONG256 columns. Column-QWP only.
-    col_source_fsb32_arrow =            902000
     # PyObject sniff outputs for QuestDB-specific wire kinds.
     col_source_uuid_pyobj =             903100
     col_source_ipv4_pyobj =             904100
@@ -228,7 +554,7 @@ cdef dict _PYOBJ_SOURCE_DESCR = {
     col_source_t.col_source_uuid_pyobj: "UUID",
     col_source_t.col_source_ipv4_pyobj: "IPv4Address",
     col_source_t.col_source_datetime_pyobj: "datetime",
-    col_source_t.col_source_bytes_pyobj: "bytes",
+    col_source_t.col_source_bytes_pyobj: "bytes/bytearray/memoryview",
 }
 
 
@@ -310,9 +636,6 @@ cdef dict _TARGET_TO_SOURCES = {
     col_target_t.col_target_column_uuid: {
         col_source_t.col_source_fsb16_arrow,
         col_source_t.col_source_uuid_pyobj,
-    },
-    col_target_t.col_target_column_long256: {
-        col_source_t.col_source_fsb32_arrow,
     },
     col_target_t.col_target_column_binary: {
         col_source_t.col_source_bytes_pyobj,
@@ -409,9 +732,13 @@ cdef tuple _FIELD_TARGETS_QWP = (
     col_target_t.col_target_column_arr_f64,
     col_target_t.col_target_column_decimal,
     # QuestDB-extension types whose Arrow source is unique
-    # (FixedSizeBinary widths).
+    # (`arrow.uuid`-labeled FixedSizeBinary(16)). LONG256 is absent:
+    # its only claim is `questdb.column_type=long256` field metadata,
+    # which pyarrow drops when it exports a single column, so this
+    # planner can never select that target. Claiming LONG256 belongs to
+    # the Rust Arrow ingestion path, via `schema_overrides`, and a
+    # 32-byte column is refused here rather than sent as opaque bytes.
     col_target_t.col_target_column_uuid,
-    col_target_t.col_target_column_long256,
     col_target_t.col_target_column_binary,
     col_target_t.col_target_column_arrow)
 
@@ -572,8 +899,6 @@ cdef enum col_dispatch_code_t:
         col_target_t.col_target_column_uuid + col_source_t.col_source_fsb16_arrow
     col_dispatch_code_column_uuid__uuid_pyobj = \
         col_target_t.col_target_column_uuid + col_source_t.col_source_uuid_pyobj
-    col_dispatch_code_column_long256__fsb32_arrow = \
-        col_target_t.col_target_column_long256 + col_source_t.col_source_fsb32_arrow
     col_dispatch_code_column_ipv4__u32_arrow = \
         col_target_t.col_target_column_ipv4 + col_source_t.col_source_u32_arrow
     col_dispatch_code_column_ipv4__ipv4_pyobj = \
@@ -1330,6 +1655,13 @@ cdef void_int _dataframe_series_as_arrow(
         _dataframe_series_to_arrow_chunks(pandas_col), col)
     
 
+# Canonical Apache Arrow extension name that claims a
+# `FixedSizeBinary(16)` column as a UUID whose bytes are RFC 4122
+# big-endian. The native client reads it from the exported schema's
+# `ARROW:extension:name` metadata.
+cdef str _ARROW_EXT_UUID = 'arrow.uuid'
+
+
 cdef const char* _ARROW_FMT_INT8 = "c"
 cdef const char* _ARROW_FMT_INT16 = "s"
 cdef const char* _ARROW_FMT_INT32 = "i"
@@ -1367,7 +1699,11 @@ cdef void_int _dataframe_category_series_as_arrow(
             'Expected a category of strings, ' +
             f'got a category of {pandas_col.series.dtype.categories.dtype}.')
 
-cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrowtype, col_t *col) except -1:
+cdef void_int _dataframe_series_resolve_arrow(
+        PandasCol pandas_col,
+        object arrowtype,
+        col_t *col,
+        bint qwp_planner) except -1:
     cdef bint is_decimal_col = False
     _dataframe_require_pyarrow()
     if arrowtype.id == _PYARROW.lib.Type_STRING:
@@ -1382,14 +1718,90 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
         return 0
 
     # Unwrap pyarrow extension types (e.g. `arrow.uuid` wrapping
-    # `FixedSizeBinary(16)`) to their storage type so dispatch picks
-    # the storage-shape source. The wire format is identical for both
-    # forms; pyarrow may or may not have the extension registered at
-    # runtime, so we accept either input and produce the same source.
+    # `FixedSizeBinary(16)`) to their storage type so dispatch picks the
+    # storage-shape source, but keep the extension name: it is what makes
+    # a 16-byte column a UUID rather than opaque BINARY.
     # pyarrow exposes no `Type_EXTENSION` constant in all versions we
     # support; check via `BaseExtensionType` instead.
+    #
+    # The name is legible here only where pyarrow built an extension
+    # *type*. `arrow.uuid` is a canonical extension registered from
+    # pyarrow 18 on, and a column carries the type when it comes from
+    # `pa.uuid()` or is imported over the C data interface or IPC, both
+    # of which rebuild it from the field's `ARROW:extension:name` key.
+    # That key written as plain field metadata — `pa.Table.from_arrays`
+    # over a hand-built schema, say — stays on the field, and a pandas
+    # `ArrowDtype` holds a type and no field, so it never reaches this
+    # planner. Building the column from `pa.uuid()` is the one spelling
+    # readable from both sides.
+    cdef object ext_name = None
     if isinstance(arrowtype, _PYARROW.lib.BaseExtensionType):
+        ext_name = arrowtype.extension_name
         arrowtype = arrowtype.storage_type
+
+    # Sixteen and thirty-two bytes are the two fixed-size binary widths
+    # that mean something else in QuestDB: UUID and LONG256. On the
+    # column-QWP planner an unlabelled column of either width is refused
+    # rather than sent as BINARY, because this planner cannot tell "I
+    # want opaque bytes" from "I meant UUID and the claim did not
+    # survive pandas", and guessing wrong auto-creates a table with the
+    # wrong column type and says nothing.
+    #
+    # The Arrow capsule path makes the opposite choice deliberately: it
+    # accepts an unlabelled column of either width as BINARY, because
+    # `schema_overrides` gives the caller a way to say otherwise there
+    # and this planner has none. That asymmetry is the whole of it, and
+    # `QuestDB.dataframe`'s docstring states it for users.
+    #
+    # The check does not consult the pyarrow version. `pa.uuid()` exists
+    # from pyarrow 18 on, so which remedies the message can name varies,
+    # but which columns are accepted must not: an optional dependency's
+    # version deciding whether a write errors or lands as the wrong type
+    # is a worse trap than either outcome on its own.
+    #
+    # Row-ILP takes neither branch. It has no LONG256 and no BINARY at
+    # all, so every remedy below is a dead end there; the column falls
+    # through to the resolver's own "could not map to any ILP type".
+    if (qwp_planner
+            and arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
+            and arrowtype.byte_width == 32):
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad column {pandas_col.name!r}: a 32-byte '
+            f'fixed_size_binary column claims no QuestDB type on this '
+            f'path. To store LONG256, either pass '
+            f'`schema_overrides={{{pandas_col.name!r}: \'long256\'}}` to '
+            f'QuestDB.dataframe() with a fully Arrow-backed frame — '
+            f'every column an ArrowDtype, e.g. '
+            f'df.convert_dtypes(dtype_backend="pyarrow") — or hand '
+            f'QuestDB.dataframe() a pa.Table or pa.RecordBatch whose '
+            f'field for this column carries '
+            f'`questdb.column_type=long256` metadata, which a pandas '
+            f'frame cannot carry. To store the bytes as BINARY, pass '
+            f'them as an object column of bytes.')
+
+    if (qwp_planner
+            and arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
+            and arrowtype.byte_width == 16
+            and ext_name is None):
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            f'Bad column {pandas_col.name!r}: a 16-byte '
+            f'fixed_size_binary column claims no QuestDB type on this '
+            f'path. To store UUIDs, either '
+            + (f'build the column as `pa.uuid()`, or '
+               if hasattr(_PYARROW, 'uuid')
+               else f'upgrade to pyarrow 18 or newer and build the '
+                    f'column as `pa.uuid()` — the `arrow.uuid` '
+                    f'extension type does not exist in pyarrow '
+                    f'{_PYARROW.__version__} — or ')
+            + f'pass the values as an object-dtype column of '
+            f'`uuid.UUID`, or claim the type with '
+            f'`schema_overrides={{{pandas_col.name!r}: \'uuid\'}}`, '
+            f'which needs QuestDB.dataframe() with a fully Arrow-backed '
+            f'frame — every column an ArrowDtype, e.g. '
+            f'df.convert_dtypes(dtype_backend="pyarrow"). To store the '
+            f'bytes as BINARY, pass them as an object column of bytes.')
 
     cdef object t_dec32 = getattr(_PYARROW.lib, 'Type_DECIMAL32', None)
     cdef object t_dec64 = getattr(_PYARROW.lib, 'Type_DECIMAL64', None)
@@ -1421,11 +1833,9 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
     elif arrowtype.id == _PYARROW.lib.Type_INT64:
         col.setup.source = col_source_t.col_source_i64_arrow
     elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
-            and arrowtype.byte_width == 16):
+            and arrowtype.byte_width == 16
+            and ext_name == _ARROW_EXT_UUID):
         col.setup.source = col_source_t.col_source_fsb16_arrow
-    elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
-            and arrowtype.byte_width == 32):
-        col.setup.source = col_source_t.col_source_fsb32_arrow
     elif arrowtype.id == _PYARROW.lib.Type_UINT32:
         col.setup.source = col_source_t.col_source_u32_arrow
     else:
@@ -1455,6 +1865,49 @@ cdef inline bint _dataframe_is_null_pyobj(PyObject* obj) noexcept:
         (obj == <PyObject*>_PANDAS_NAT) or
         _dataframe_is_float_nan(obj))
 
+
+_ROW_WRAPPER_COLUMNAR_ROUTE = (
+    'To write this type from a DataFrame, use a QWP/WebSocket columnar call '
+    '(`QuestDB.dataframe()`, `PooledSender.dataframe()`, or '
+    '`Sender.dataframe()` over `ws::` / `wss::`). `Buffer.dataframe()` and '
+    '`Sender.dataframe()` over other protocols serialize rows and cannot '
+    'apply `schema_overrides`.')
+
+
+cdef object _dataframe_row_wrapper_df_message(
+        object col_name, PyObject* obj):
+    """A working DataFrame route for a scalar wrapper learned from row()."""
+    if isinstance(<object>obj, Char):
+        return (
+            'questdb.Char is a row-ingestion wrapper, not a DataFrame cell '
+            f'type. {_ROW_WRAPPER_COLUMNAR_ROUTE} On that route, replace '
+            'each wrapper with `ord(value.value)` in a uint16 column in a '
+            'fully Arrow-backed frame and pass '
+            f'`schema_overrides={{{col_name!r}: \'char\'}}`.')
+    if isinstance(<object>obj, DateMillis):
+        return (
+            'questdb.DateMillis is a row-ingestion wrapper, not a DataFrame '
+            'cell type. Build the column as Arrow `timestamp(\'ms\')`, '
+            '`date32()`, or `date64()` values instead; DATE is identified by '
+            'its Arrow type and has no `schema_overrides` kind.')
+    if isinstance(<object>obj, Long256):
+        return (
+            'questdb.Long256 is a row-ingestion wrapper, not a DataFrame cell '
+            f'type. {_ROW_WRAPPER_COLUMNAR_ROUTE} On that route, replace '
+            'each wrapper with its unsigned value encoded as 32 little-endian '
+            'bytes in a binary column in a fully Arrow-backed frame and pass '
+            f'`schema_overrides={{{col_name!r}: \'long256\'}}`.')
+    if isinstance(<object>obj, Geohash):
+        return (
+            'questdb.Geohash is a row-ingestion wrapper, not a DataFrame cell '
+            f'type. {_ROW_WRAPPER_COLUMNAR_ROUTE} On that route, replace '
+            'each wrapper with its `.bits` value in a signed-integer column '
+            'in a fully Arrow-backed frame and pass '
+            f'`schema_overrides={{{col_name!r}: (\'geohash\', '
+            f'{(<object>obj).precision})}}`; every value in the column must '
+            'use that precision.')
+    return None
+
 # noinspection PyUnreachableCode
 cdef void_int _dataframe_series_sniff_pyobj(
         PandasCol pandas_col, col_t* col) except -1:
@@ -1474,6 +1927,7 @@ cdef void_int _dataframe_series_sniff_pyobj(
     cdef npy_int arr_type
     cdef cnp.dtype arr_descr  # A cython defn for `PyArray_Descr*`
     cdef str arr_type_name
+    cdef object wrapper_message
 
     _dataframe_series_as_pybuf(pandas_col, col)
     obj_arr = <PyObject**>(col.setup.pybuf.buf)
@@ -1506,17 +1960,30 @@ cdef void_int _dataframe_series_sniff_pyobj(
                         f'Bad column {pandas_col.name!r}: ' +
                         'Unsupported object column containing a numpy array ' +
                         f'of an unsupported element type {arr_type_name}.')
-            elif PyBytes_CheckExact(obj):
+            elif (PyBytes_Check(<object>obj) or
+                  PyByteArray_Check(<object>obj) or
+                  PyMemoryView_Check(<object>obj)):
                 col.setup.source = col_source_t.col_source_bytes_pyobj
             elif isinstance(<object>obj, _uuid.UUID):
                 col.setup.source = col_source_t.col_source_uuid_pyobj
-            elif isinstance(<object>obj, _ipaddress.IPv4Address):
+            elif _is_ipv4_address(<object>obj):
                 col.setup.source = col_source_t.col_source_ipv4_pyobj
             elif isinstance(<object>obj, datetime.datetime):
                 col.setup.source = col_source_t.col_source_datetime_pyobj
-            elif isinstance(<object>obj, Decimal):
+            elif _is_decimal(<object>obj):
                 col.setup.source = col_source_t.col_source_decimal_pyobj
+            elif isinstance(<object>obj, _IPV4_INTERFACE):
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
+                    f'Bad column {pandas_col.name!r}: ' +
+                    _ipv4_interface_df_message(pandas_col.name))
             else:
+                wrapper_message = _dataframe_row_wrapper_df_message(
+                    pandas_col.name, obj)
+                if wrapper_message is not None:
+                    raise QuestDBError(
+                        QuestDBErrorCode.BadDataFrame,
+                        f'Bad column {pandas_col.name!r}: ' + wrapper_message)
                 raise QuestDBError(
                     QuestDBErrorCode.BadDataFrame,
                     f'Bad column {pandas_col.name!r}: ' +
@@ -1530,7 +1997,7 @@ cdef void_int _dataframe_series_sniff_pyobj(
     
 
 cdef void_int _dataframe_resolve_source_and_buffers(
-        PandasCol pandas_col, col_t* col) except -1:
+        PandasCol pandas_col, col_t* col, bint qwp_planner) except -1:
     cdef object dtype = pandas_col.dtype
     cdef int ts_col_source = _dataframe_classify_timestamp_dtype(dtype)
     if ts_col_source != 0:
@@ -1637,7 +2104,8 @@ cdef void_int _dataframe_resolve_source_and_buffers(
     elif isinstance(dtype, _NUMPY_OBJECT):
         _dataframe_series_sniff_pyobj(pandas_col, col)
     elif isinstance(dtype, _PANDAS.ArrowDtype):
-        _dataframe_series_resolve_arrow(pandas_col, dtype.pyarrow_dtype, col)
+        _dataframe_series_resolve_arrow(
+            pandas_col, dtype.pyarrow_dtype, col, qwp_planner)
     else:
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
@@ -1658,12 +2126,20 @@ cdef void_int _dataframe_resolve_target(
             col.setup.target = target
             return 0
     if col.setup.source in _COLUMNAR_ONLY_PYOBJ_SOURCES:
+        # `QuestDB.dataframe()` is named with the configuration that
+        # reaches it: `questdb.connect()` takes `ws::` / `wss::` only,
+        # so a `udp::` or ILP sender told to go there would find no
+        # door. `Sender.row()` is the one that opens from where they
+        # are, on any QWP protocol.
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
             f'Column {pandas_col.name!r} holds '
-            f'{_PYOBJ_SOURCE_DESCR[col.setup.source]} objects, which are only '
-            f'supported on the columnar QuestDB.dataframe() path, not the '
-            f'row-oriented Sender.dataframe().')
+            f'{_PYOBJ_SOURCE_DESCR[col.setup.source]} objects, which the '
+            f'row-serializing Sender.dataframe() cannot write on any '
+            f'protocol. Pass the values to Sender.row(), which takes them '
+            f'on a udp::, ws:: or wss:: sender, or write the frame with '
+            f'QuestDB.dataframe() over a ws:: or wss:: configuration, '
+            f'which sends it columnar.')
     raise QuestDBError(
         QuestDBErrorCode.BadDataFrame,
         f'Could not map column source type (code {col.setup.source} for ' +
@@ -1691,7 +2167,8 @@ cdef void_int _dataframe_resolve_cols(
         qdb_pystr_buf* b,
         list pandas_cols,
         col_t_arr* cols,
-        bint* any_cols_need_gil_out) except -1:
+        bint* any_cols_need_gil_out,
+        bint qwp_planner) except -1:
     cdef size_t index
     cdef size_t len_dataframe_cols = len(pandas_cols)
     cdef PandasCol pandas_col
@@ -1714,7 +2191,7 @@ cdef void_int _dataframe_resolve_cols(
         # sort among columns with the same `.meta_target`.
         col.setup.orig_index = index
 
-        _dataframe_resolve_source_and_buffers(pandas_col, col)
+        _dataframe_resolve_source_and_buffers(pandas_col, col, qwp_planner)
         _dataframe_init_cursor(col)
         if col_source_needs_gil(col.setup.source):
             any_cols_need_gil_out[0] = True
@@ -1776,7 +2253,9 @@ cdef void_int _dataframe_resolve_args(
     cdef list pandas_cols = [
         PandasCol(name, df.dtypes.iloc[index], series)
         for index, (name, series) in enumerate(df.items())]
-    _dataframe_resolve_cols(b, pandas_cols, cols, any_cols_need_gil_out)
+    cdef bint qwp_planner = field_targets is _FIELD_TARGETS_QWP
+    _dataframe_resolve_cols(
+        b, pandas_cols, cols, any_cols_need_gil_out, qwp_planner)
     name_col = _dataframe_resolve_table_name(
         b,
         df,
@@ -1787,8 +2266,7 @@ cdef void_int _dataframe_resolve_args(
         col_count,
         c_table_name_out)
     at_col = _dataframe_resolve_at(
-        df, cols, at, col_count, at_value_out,
-        field_targets is _FIELD_TARGETS_QWP)
+        df, cols, at, col_count, at_value_out, qwp_planner)
     _dataframe_resolve_symbols(df, pandas_cols, cols, name_col, at_col, symbols)
     _dataframe_resolve_cols_target_name_and_dc(
         b, pandas_cols, cols, field_targets)
@@ -2844,10 +3322,18 @@ cdef void_int serialize_decimal_py_obj(line_sender_buffer *buf, line_sender_colu
     cdef uint8_t[32] unscaled
     cdef int unscaled_length
 
-    if not isinstance(<object>value, Decimal):
+    if not _is_decimal(<object>value):
         raise ValueError(
             'Expected an object of type Decimal, got an object of type ' +
             _fqn(type(<object>value)) + '.')
+    if not _DECIMAL_IS_C:
+        raise ValueError(
+            f'DECIMAL columns are encoded by reading the memory of a '
+            f'`decimal.Decimal` in the layout CPython\'s `_decimal` '
+            f'accelerator gives it, so they need CPython with that '
+            f'accelerator present; this interpreter is '
+            f'{_PY_IMPL_NAME!r}. Send the value as a float or as a '
+            f'string instead, or use a CPython build.')
 
     unscaled_length = decimal_pyobj_to_binary(
         value,
@@ -3215,12 +3701,18 @@ cdef void_int _dataframe_handle_auto_flush(
     cdef line_sender_error* marker_err = NULL
     cdef bint flush_ok
     cdef bint marker_ok
-    if (af.sender == NULL) or (not should_auto_flush(&af.mode, ls_buf, af.last_flush_ms[0])):
+    cdef line_sender* sender = NULL
+    # Read now, not when the run started: a `close()` from a cell's own
+    # Python nulls the field, and this is the point that would otherwise
+    # flush through the pointer it left behind.
+    if af.sender_slot != NULL:
+        sender = af.sender_slot[0]
+    if (sender == NULL) or (not should_auto_flush(&af.mode, ls_buf, af.last_flush_ms[0])):
         return 0
 
     # Always temporarily release GIL during a flush.
     had_gil = _ensure_doesnt_have_gil(gs)
-    flush_ok = line_sender_flush(af.sender, ls_buf, &flush_err)
+    flush_ok = line_sender_flush(sender, ls_buf, &flush_err)
     if flush_ok:
         af.last_flush_ms[0] = line_sender_now_micros() // 1000
     else:
@@ -3256,15 +3748,26 @@ cdef size_t _CELL_GIL_BLIP_INTERVAL = 40000
 
 
 cdef void_int _dataframe(
+        Buffer owner,
         auto_flush_t af,
         line_sender_buffer* ls_buf,
-        qdb_pystr_buf* b,
         object df,
         object table_name,
         object table_name_col,
         object symbols,
         object at) except -1:
+    """Serialize a whole frame into `owner`'s native buffer, row by row.
+
+    `owner` is the `Buffer` whose `ls_buf` and `b` these are. It drives
+    the same native buffer `Buffer.row` does -- rewind points included
+    -- so it counts into the same `_row_depth`, and everything that
+    refuses to clear or flush a buffer part-way through a row refuses
+    part-way through a frame too. A cell of Python objects can run
+    arbitrary code, so the callers that could come back in are the same
+    ones.
+    """
     cdef dataframe_plan_t plan = dataframe_plan_blank()
+    cdef qdb_pystr_buf* b = NULL
     cdef line_sender_error* err = NULL
     cdef size_t row_index
     cdef size_t col_index
@@ -3276,7 +3779,31 @@ cdef void_int _dataframe(
     cdef bint was_auto_flush = False
     cdef bint plan_has_content
 
+    # Refused, not counted, when a row or another frame is already
+    # part-way through this buffer: the plan below clears the marker
+    # the outer row rewinds to, and an outer failure would then leave
+    # its part-written row in the buffer. This covers every route
+    # that arrives here -- `Buffer.dataframe`,
+    # `SenderTransaction.dataframe` and `Sender.dataframe` on the ILP
+    # protocols. `Sender.dataframe` over QWP/WebSocket takes its own
+    # connection and checks there.
+    owner._check_not_in_row('dataframe')
+    # The run's string storage is its own. The plan's table and column
+    # names live in it for the whole frame, and `qdb_pystr_buf_clear`
+    # drops every chunk past the first, so a `clear()` re-entered from a
+    # cell's own Python would free storage the plan is still reading
+    # names out of. Private storage is storage no caller can reach to
+    # recycle, which is what keeps that safe without a guard having to
+    # name every route a `clear()` can arrive through.
+    b = qdb_pystr_buf_new()
+    if b == NULL:
+        raise MemoryError()
+    owner._row_depth += 1
     try:
+        # Said before the plan is built, so a frame refused for its
+        # shape still hears which of its claims this route would have
+        # ignored.
+        _dataframe_log_claims_this_route_drops(df)
         _dataframe_plan_build(
             b,
             df,
@@ -3367,6 +3894,27 @@ cdef void_int _dataframe(
                     f'): {e}  [dc={<int>col.dispatch_code}]') from e
             else:
                 raise
+        except BaseException:
+            # Whatever ends the run, the part-written row goes with it:
+            # the buffer rewinds here, the `finally` below clears the
+            # marker, and `_row_depth` returns to zero behind it, so
+            # every guard downstream reads the buffer as idle. Anything
+            # that is not an `Exception` -- an interrupt, an exit --
+            # then goes on as itself rather than wrapped as a data
+            # error. `Buffer._row` holds the same property with a bare
+            # `except:`.
+            #
+            # This is the property held, not a closed list of cases.
+            # In particular, an aware datetime object column computes
+            # `dt - _EPOCH_AWARE_UTC`, which can call the caller's
+            # `tzinfo.utcoffset()` while this row and its rewind marker
+            # are live. If that hook raises an interrupt, an exit, or
+            # another `BaseException`, this branch restores the buffer
+            # before propagating it unchanged. It also keeps that rule
+            # true for any future cell serializer that calls Python.
+            if not line_sender_buffer_rewind_to_marker(ls_buf, &err):
+                raise c_err_to_py(err)
+            raise
     except Exception as e:
         if not isinstance(e, QuestDBError):
             raise QuestDBError(
@@ -3380,5 +3928,5 @@ cdef void_int _dataframe(
         if plan_has_content:
             line_sender_buffer_clear_marker(ls_buf)
         dataframe_plan_release(&plan)
-        if plan_has_content:
-            qdb_pystr_buf_clear(b)
+        qdb_pystr_buf_free(b)
+        owner._leave_row()

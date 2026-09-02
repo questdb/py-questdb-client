@@ -23,8 +23,12 @@
 ################################################################################
 
 __all__ = [
+    "Char",
     "ConnectionEvent",
     "ConnectionEventKind",
+    "DateMillis",
+    "Geohash",
+    "Long256",
     "PooledReader",
     "PooledSender",
     "Protocol",
@@ -53,7 +57,11 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from ipaddress import IPv4Address
+from typing import (
+    Any, Callable, Dict, Iterator, List, Optional, SupportsIndex, Tuple,
+    Union)
+from uuid import UUID
 
 import numpy as np
 import pandas as pd
@@ -113,10 +121,14 @@ class QuestDBError(Exception):
     @property
     def in_doubt(self) -> bool:
         """
-        Whether the failed operation may already have delivered its input.
+        Whether replaying the input supplied to this call may duplicate rows.
+        The failed native write may be ambiguous, or an earlier direct QWP
+        publication in the same higher-level call may already have committed.
 
-        Retrying the same input when this is true can duplicate rows unless the
-        destination table has an appropriate deduplication guarantee.
+        Retrying that input when this is true requires an appropriate
+        application- or table-level deduplication guarantee. A false value says
+        only that duplicate delivery is not known to be possible; a consumed
+        one-shot input may still be impossible to replay.
         """
 
     @property
@@ -333,6 +345,112 @@ class TimestampNanos:
     def value(self) -> int:
         """Number of nanoseconds (Unix epoch timestamp, UTC)."""
 
+
+class Char:
+    """A QuestDB CHAR value stored as one UTF-16 code unit.
+
+    A character outside the Basic Multilingual Plane needs a surrogate
+    pair and cannot fit. CHAR has no physical ``NULL`` sentinel:
+    ``'\\x00'`` is stored as code unit 0, though some SQL operations
+    treat it as CHAR's null/absent marker.
+    """
+
+    def __init__(self, value: str): ...
+    @property
+    def value(self) -> str: ...
+
+
+class DateMillis:
+    """A QuestDB DATE millisecond timestamp, not a civil date.
+
+    How ``row()`` writes a DATE column. DataFrames claim DATE from the
+    column's Arrow type instead — ``pa.timestamp('ms')``, ``pa.date32()``,
+    or ``pa.date64()`` — so there is no DATE cell type and no ``'date'``
+    kind for ``schema_overrides``. A NumPy ``datetime64[ms]`` dtype has no
+    route of its own to DATE and widens to a microsecond TIMESTAMP, unless
+    a ``df.attrs['questdb']`` claim names the column DATE and puts the
+    Arrow type back on it. That claim is written as ``{'kind': 'date'}``
+    under the column's entry in the version-1 claim mapping.
+    DATE is QWP-only: over ILP, datetime columns all land as TIMESTAMP.
+
+    ``INT64_MIN`` is QuestDB's ``NULL`` sentinel for DATE. It is accepted
+    and reads back as ``NULL``.
+
+    ``millis`` is any whole number that is not a ``bool``, so a
+    ``numpy.int64`` or a pandas cell works as a plain ``int`` does.
+
+    ``SupportsIndex`` is as near as an annotation gets. ``bool`` is a
+    subtype of ``int``, so no type can exclude it, and an object with
+    ``__index__`` that is not a ``numbers.Integral`` satisfies the
+    annotation without satisfying the constructor. Both are refused at
+    run time and neither is a type error.
+    """
+
+    def __init__(self, millis: SupportsIndex): ...
+    @classmethod
+    def from_datetime(cls, dt: datetime) -> DateMillis: ...
+    @classmethod
+    def now(cls) -> DateMillis: ...
+    @property
+    def value(self) -> int: ...
+
+
+class Long256:
+    """An unsigned 256-bit integer for a QuestDB LONG256 column.
+
+    The value must satisfy ``0 <= value < 2**256``. The one whose four
+    64-bit limbs are all ``0x8000000000000000`` is accepted but reads
+    back from QuestDB as ``NULL``.
+
+    ``value`` is any whole number that is not a ``bool``, so a
+    ``numpy.int64`` or a pandas cell works as a plain ``int`` does. As
+    for :class:`DateMillis`, the annotation cannot say so; the refusal
+    is at run time.
+    """
+
+    def __init__(self, value: SupportsIndex): ...
+    @property
+    def value(self) -> int: ...
+
+
+class Geohash:
+    """A QuestDB GEOHASH value represented by bits and precision.
+
+    ``bits`` is the value and ``precision`` its width in bits, 1 to 60.
+    This scalar wrapper requires ``0 <= bits < 2**precision``. Bulk
+    NumPy/Arrow GEOHASH columns deliberately do not perform that
+    per-value check; see :meth:`QuestDB.dataframe`.
+
+    Precision is pinned per column within one buffer's worth of rows: a
+    later cell disagreeing with the first is rejected by ``row()``
+    itself, and the buffer is rewound to what it held before that row.
+    A flush clears the pin, so a precision the server's column does not
+    have is the server's to reject, at flush time.
+
+    Both are any whole number that is not a ``bool``, so a
+    ``numpy.int64`` or a pandas cell works as a plain ``int`` does. As
+    for :class:`DateMillis`, the annotation cannot say so; the refusal
+    is at run time.
+    """
+
+    def __init__(self, bits: SupportsIndex, precision: SupportsIndex): ...
+    @classmethod
+    def from_string(cls, value: str) -> Geohash: ...
+    @property
+    def bits(self) -> int: ...
+    @property
+    def precision(self) -> int: ...
+
+
+TransactionColumnValue = Union[
+    None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime,
+    np.ndarray, Decimal]
+RowColumnValue = Union[
+    None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime,
+    np.ndarray, Decimal, UUID, IPv4Address, bytes, bytearray, memoryview, Char,
+    DateMillis, Long256, Geohash]
+
+
 class SenderTransaction:
     """
     A transaction for a specific table.
@@ -352,14 +470,12 @@ class SenderTransaction:
 
     def __init__(self, sender: Sender, table_name: str): ...
     def __enter__(self) -> SenderTransaction: ...
-    def __exit__(self, exc_type, _exc_value, _traceback) -> bool: ...
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool: ...
     def row(
         self,
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
-        columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
-        ] = None,
+        columns: Optional[Dict[str, TransactionColumnValue]] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> SenderTransaction:
         """
@@ -368,6 +484,9 @@ class SenderTransaction:
         The table name is taken from the transaction.
 
         **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 9.0.0 or higher.
+
+        UUID, IPV4, BINARY, CHAR, DATE, LONG256, and GEOHASH are QWP-only and
+        are not supported by this ILP/HTTP-only transaction API.
         """
 
     def dataframe(
@@ -400,6 +519,15 @@ class SenderTransaction:
 
         This will clear the buffer.
         """
+
+
+#: What ``schema_overrides`` accepts: a kind on its own, or a kind and its
+#: argument. Only ``'geohash'`` takes one, the precision in bits -- any
+#: whole number that is not a ``bool``, so a ``numpy.int64`` read out of
+#: an array works as a plain ``int`` does. The precision is validated but
+#: bulk values are not checked against it: a wrong precision can be accepted
+#: and store a different GEOHASH location or ``NULL``.
+SchemaOverrides = Dict[str, Union[str, Tuple[str, SupportsIndex]]]
 
 
 class Buffer:
@@ -449,6 +577,11 @@ class Buffer:
 
         This method is designed to be called only in conjunction with
         ``sender.flush(buffer, clear=False)``.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) if a
+        :func:`Buffer.row <questdb.ingress.Buffer.row>` or
+        :func:`Buffer.dataframe <questdb.ingress.Buffer.dataframe>` call
+        on this buffer is still in progress.
         """
 
     def __len__(self) -> int:
@@ -466,9 +599,7 @@ class Buffer:
         table_name: str,
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
-        columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
-        ] = None,
+        columns: Optional[Dict[str, RowColumnValue]] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> Buffer:
         """
@@ -538,10 +669,40 @@ class Buffer:
               - `TIMESTAMP <https://questdb.com/docs/reference/api/ilp/columnset-types#timestamp>`_
             * - ``Decimal``
               - `DECIMAL <https://questdb.com/docs/reference/api/ilp/columnset-types#decimal>`_
+            * - ``UUID``
+              - UUID (QWP-only)
+            * - ``IPv4Address``
+              - IPV4 (QWP-only)
+            * - ``bytes``, ``bytearray``, or ``memoryview``
+              - BINARY (QWP-only)
+            * - ``Char``
+              - CHAR (QWP-only)
+            * - ``DateMillis``
+              - DATE (QWP-only)
+            * - ``Long256``
+              - LONG256 (QWP-only)
+            * - ``Geohash``
+              - GEOHASH (QWP-only)
             * - ``None``
               - *Column is skipped and not serialized.*
 
         **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 9.0.0 or higher.
+
+        The seven QWP-only types require protocol ``udp``, ``ws``, or ``wss``
+        and QuestDB 10 or newer, the first production QWP implementation.
+        Their reserved ``NULL`` sentinels are accepted:
+        IPV4 ``0.0.0.0``, DATE ``INT64_MIN``, UUID
+        ``80000000-0000-0000-8000-000000000000``, and LONG256 with all four
+        limbs equal to ``0x8000000000000000``. CHAR has no physical ``NULL``
+        sentinel: ``'\\x00'`` is stored as code unit 0, although some SQL
+        operations treat it as CHAR's null/absent marker. GEOHASH has no
+        collision, and empty BINARY ``b''`` is distinct from ``NULL``.
+
+        A bare ``int`` is a 64-bit LONG, so a value outside
+        ``-2**63 .. 2**63-1`` raises ``OverflowError``. On a QWP buffer the
+        message names ``Long256``, the wrapper that sends it as a 256-bit
+        LONG256 instead; an ILP buffer, which has no LONG256 to offer,
+        reports the bare conversion failure.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible
@@ -555,8 +716,8 @@ class Buffer:
             have the same effect as skipping the key: If the column already
             existed, it will be recorded as ``NULL``, otherwise it will not be
             created.
-        :param columns: A dictionary of column names to ``bool``, ``int``,
-            ``float``, ``str``, ``TimestampMicros`` or ``datetime`` values.
+        :param columns: A dictionary mapping column names to the supported
+            column values listed above.
             As a convenience, you can also pass a ``None`` value which will
             have the same effect as skipping the key: If the column already
             existed, it will be recorded as ``NULL``, otherwise it will not be
@@ -580,9 +741,12 @@ class Buffer:
         """
         Add a pandas DataFrame to the buffer.
 
-        Also see the :func:`Sender.dataframe` method if you're
-        not using the buffer explicitly. It supports the same parameters
-        and also supports auto-flushing.
+        Also see :func:`Sender.dataframe` if you are not using the buffer
+        explicitly. Over ILP and QWP/UDP it accepts the arguments shown here
+        and adds auto-flushing. Over QWP/WebSocket it instead uses the direct
+        columnar path, additionally accepting ``max_rows_per_batch`` and
+        ``schema_overrides``; see :meth:`QuestDB.dataframe` for that path's
+        supported column types and arguments.
 
         This feature requires the ``pandas``, ``numpy`` and ``pyarrow``
         package to be installed.
@@ -977,28 +1141,16 @@ class PooledSender:
         table_name: str,
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
-        columns: Optional[
-            Dict[
-                str,
-                Union[
-                    None,
-                    bool,
-                    int,
-                    float,
-                    str,
-                    TimestampMicros,
-                    TimestampNanos,
-                    datetime,
-                    np.ndarray,
-                    Decimal,
-                ],
-            ]
-        ] = None,
+        columns: Optional[Dict[str, RowColumnValue]] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> PooledSender:
         """Append one row to this sender's QWP buffer. If a configured
         auto-flush threshold is breached, this publishes without waiting for
-        an acknowledgement; a publish error propagates from ``row()``."""
+        an acknowledgement; a publish error propagates from ``row()``.
+
+        See :func:`Buffer.row` for supported column types, protocol
+        restrictions, server requirements, and ``NULL``-sentinel behavior.
+        """
 
     def dataframe(
         self,
@@ -1009,7 +1161,7 @@ class PooledSender:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[SchemaOverrides] = None,
     ) -> PooledSender:
         """
         Bulk-load a DataFrame over a direct columnar connection borrowed
@@ -1197,22 +1349,44 @@ class QuestDB:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[SchemaOverrides] = None,
     ) -> QuestDB:
         """
         Ingest a dataframe through the pooled columnar QWP path.
 
         Ingestion always uses the direct (non-store-and-forward) column
         sender, independent of ``sf_dir``. On success, the call returns only
-        after every DataFrame batch has been committed. Most loads queue their
-        batches and commit once at the end. Large Arrow inputs checkpoint about
-        every 100 batches to keep memory bounded. The client may checkpoint
-        earlier if the connection cannot queue another batch or if a batch must
-        be split to fit. If a later batch fails, the exception means that the
-        load did not finish, not necessarily that no rows landed. Any already
-        committed prefix from this call remains, and retrying the whole
-        DataFrame can duplicate it unless the destination table uses suitable
-        ``DEDUP UPSERT KEYS``.
+        after every DataFrame batch has been committed. The first successful
+        batch on a fresh direct connection is already a commit boundary;
+        subsequent batches are pipelined until the final commit. Large Arrow
+        inputs add a checkpoint about every 100 batches to bound the
+        uncommitted tail. The client may checkpoint earlier if deferred
+        capacity fills or a batch must be split to fit.
+
+        On a transient connection failure, the client re-sends the original,
+        replayable DataFrame only when no batch was successfully published and
+        the failed operation is not ``in_doubt``. Otherwise it raises rather
+        than replaying from row zero. If a batch from this call may have
+        committed, the raised error has ``in_doubt=True`` even when the final
+        native write alone was provably not delivered. The load did not
+        finish, but any already committed prefix remains; an application-level
+        retry of the whole DataFrame can duplicate it unless the destination
+        table uses suitable ``DEDUP UPSERT KEYS``. A consumed one-shot stream
+        may instead be non-replayable with ``in_doubt=False`` when no rows
+        could have landed; that error asks for a fresh reader. Server-side
+        rejections (e.g. a schema mismatch) surface as a plain
+        :class:`QuestDBError`; the structured ``sender_error`` diagnostic
+        is attached only by the store-and-forward senders.
+
+        Bulk GEOHASH columns treat each integer as a raw bit pattern. The
+        declared precision must be in ``1..=60`` and fit the signed carrier,
+        but values are not checked against it. For example, ``32`` under
+        ``GEOHASH(5b)`` is accepted. A wrong precision can therefore let the
+        write succeed while storing a different GEOHASH location or ``NULL``;
+        the exact result is unspecified. This is a semantic data-integrity
+        risk, not a memory-safety risk for otherwise valid NumPy/Arrow buffers.
+        Validate bulk values before sending them. Malformed custom Arrow C
+        Data structures remain invalid input.
 
         ``at`` names the designated timestamp column (by name or index),
         or a fixed ``TimestampNanos`` / ``datetime`` shared by every row,
@@ -1247,11 +1421,13 @@ class QuestDB:
         safety limit: any batch exceeding the negotiated per-batch byte
         cap is split regardless of it, and a single row is never bounded
         by it. Each batch is one unit of client memory and server-side
-        apply. Sliceable Arrow inputs checkpoint about every 100 batches,
-        so ``max_rows_per_batch * 100`` rows approximates their periodic
-        replay window. The NumPy planner normally commits once after the
-        whole frame. Either path may checkpoint earlier when deferred
-        capacity fills. Raise ``max_rows_per_batch`` for narrow numeric
+        apply. The first successful batch on a fresh connection is a commit
+        boundary. Sliceable Arrow inputs add another checkpoint about every
+        100 batches, so ``max_rows_per_batch * 100`` rows approximates the
+        maximum periodic uncommitted tail, not a whole-source replay window.
+        The NumPy planner pipelines the remaining batches until its final
+        commit. Either path may checkpoint earlier when deferred capacity
+        fills. Raise ``max_rows_per_batch`` for narrow numeric
         rows; lower it for very wide rows or tight memory. Streaming Arrow
         input (``pa.RecordBatchReader``) is not re-batched — the producer's
         batch size governs its checkpoint window.
@@ -1332,14 +1508,50 @@ class QuestDB:
         """
         Close the client and its connection pool.
 
-        Idempotent. When called from inside one of this handle's own
-        ``error_handler`` / ``connection_listener`` callbacks, it does
-        not wait for a concurrent ``close()`` on another thread to
-        finish; the in-flight callback completes after that close
-        returns.
+        Closing is one-way: once a ``close()`` proceeds -- rather
+        than being refused outright, as from inside one of the
+        handle's own calls or callbacks -- the handle refuses new
+        work, while work already in flight drains: a call in progress
+        runs to completion, and an outstanding lease keeps working
+        until its holder closes it. The native pool is torn down by
+        the first ``close()`` that finds nothing using the handle, or
+        when the handle itself is collected.
+
+        The wait for the drain is bounded. Every five seconds it
+        reports what it is still waiting for through the ``questdb``
+        logger at ``WARNING``. After a minute ``QuestDBError`` is
+        raised with ``code`` set to
+        ``QuestDBErrorCode.InvalidApiCall``, naming how many leases and
+        calls are still outstanding. The handle stays closing -- it
+        never goes back to open -- and a later ``close()`` resumes the
+        wait and finishes the teardown. A lease held by the calling
+        thread, or by a thread that has since finished, can never be
+        returned: close every lease before closing the handle.
+
+        Idempotent: closing a closed handle returns without doing
+        anything, and no ``close()`` returns success unless the
+        teardown has run.
+
+        When called from inside one of this handle's own
+        ``error_handler`` / ``connection_listener`` callbacks, it
+        never waits: it closes immediately when nothing is using the
+        handle, refuses when leases or calls are outstanding (close
+        from another thread to wait for the drain), and returns
+        without waiting when a concurrent ``close()`` is already
+        running -- possibly before that close finishes. The handle
+        only moves toward closed, never back to open.
         """
 
-    def __exit__(self, exc_type, _exc_val, _exc_tb): ...
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Close the handle at the end of a ``with`` block.
+
+        Leaving the block on an exception still closes, but a close
+        that cannot finish is reported through the ``questdb`` logger
+        instead of raised, so it does not replace the exception being
+        reported. Leaving the block normally raises as :meth:`close`
+        does.
+        """
 
 
 class QueryResult:
@@ -1662,9 +1874,7 @@ class Sender:
         table_name: str,
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
-        columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
-        ] = None,
+        columns: Optional[Dict[str, RowColumnValue]] = None,
         at: Union[TimestampNanos, datetime, ServerTimestampType],
     ) -> Sender:
         """
@@ -1673,9 +1883,8 @@ class Sender:
         This may be sent automatically depending on the ``auto_flush`` setting
         in the constructor.
 
-        Refer to the :func:`Buffer.row` documentation for details on arguments.
-
-        **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 9.0.0 or higher.
+        See :func:`Buffer.row` for supported column types, protocol
+        restrictions, server requirements, and ``NULL``-sentinel behavior.
         """
 
     def dataframe(
@@ -1687,7 +1896,7 @@ class Sender:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[SchemaOverrides] = None,
     ) -> Sender:
         """
         Write a Pandas DataFrame to QuestDB.
@@ -1700,6 +1909,10 @@ class Sender:
         and ``schema_overrides`` apply only there). The direct load has no
         ordering relationship with rows buffered via :meth:`row` and does not
         flush them.
+
+        ``table_name_col`` follows the same split: the row-serializing
+        protocols accept it, QWP/WebSocket writes one table per call and
+        rejects it with ``UnsupportedDataFrameShapeError``.
 
         Example:
 
@@ -1724,8 +1937,13 @@ class Sender:
             with qi.Sender.from_env() as sender:
                 sender.dataframe(df, table_name='race_metrics', at='ts')
 
-        This method builds on top of the :func:`Buffer.dataframe` method.
-        See its documentation for details on arguments.
+        Over QWP/WebSocket, supported column types and arguments mirror
+        :meth:`QuestDB.dataframe`, including UUID, IPV4, BINARY, GEOHASH,
+        LONG256, CHAR, DATE, ``schema_overrides`` and round-trip claims in
+        ``df.attrs['questdb']``. Over ILP and QWP/UDP, see
+        :func:`Buffer.dataframe` for the row-serializing mappings;
+        ``max_rows_per_batch`` and ``schema_overrides`` do not apply on those
+        protocols.
 
         Additionally, this method also supports auto-flushing the buffer
         as specified in the ``Sender``'s ``auto_flush`` constructor argument.
@@ -1856,7 +2074,7 @@ class Sender:
             closing.
         """
 
-    def __exit__(self, exc_type, _exc_val, _exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         """
         Flush pending and disconnect at the end of a ``with`` block.
 

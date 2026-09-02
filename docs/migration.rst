@@ -90,14 +90,22 @@ handle; the sender variants exist as conveniences and share the same path:
         sender.dataframe(frame, table_name='weather', at='ts')
 
 On success, each call returns only after every row in the source has been
-committed. Most loads queue their batches and commit once at the end. To keep
-memory bounded, a very large Arrow load checkpoints about every 100 batches.
-The client may checkpoint earlier if the connection cannot queue another batch
-or if a batch must be split to fit. If a later batch fails, the exception means
-that the load did not finish, not necessarily that no rows landed. Any already
-committed prefix from that call remains in the table, and retrying the entire
-DataFrame can duplicate it unless the table uses suitable
-``DEDUP UPSERT KEYS``.
+committed. The first successful batch on a fresh direct connection is already
+a commit boundary; subsequent batches are pipelined until the final commit.
+To keep memory bounded, a very large Arrow load adds a checkpoint about every
+100 batches, and the client may checkpoint earlier if deferred capacity fills
+or a batch must be split to fit. This interval caps the uncommitted tail; it is
+not a safe whole-source replay window.
+
+After a transient failure, the client replays the original source only if no
+batch was successfully published and the failed operation is not ``in_doubt``.
+Otherwise it raises. When any batch from the call may have committed, the
+public exception has ``in_doubt=True`` even if the final native write itself
+was provably not delivered. The load may then have an already committed
+prefix, and an application-level retry of the entire DataFrame can duplicate
+it unless the table uses suitable ``DEDUP UPSERT KEYS``. A consumed one-shot
+stream can be non-replayable with ``in_doubt=False`` when no rows could have
+landed; its error asks the caller to supply a fresh reader.
 
 These calls are independent of ``sf_dir``, and none converts the DataFrame
 into row calls. ``dataframe()`` opens a direct connection just for that call
