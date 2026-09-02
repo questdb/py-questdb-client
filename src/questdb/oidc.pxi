@@ -27,6 +27,31 @@
 # Python retains presentation and adapter conveniences only.
 
 
+# Live providers, keyed by the opaque integer handed to native as `user_data`.
+#
+# Native is given a key rather than a `PyObject*` so that the release callback
+# -- which can run on an abandoned acquisition worker long after the owning
+# handles are gone, potentially past the start of interpreter finalization --
+# owns no Python reference and never needs the GIL. Entries are added when the
+# handler is installed and removed in `__dealloc__`, both on managed threads
+# holding the GIL, so the dict needs no lock of its own.
+#
+# The value is a weakref: the registry must not keep a provider alive, or a
+# `with` block's exit would never collect one.
+cdef object _OIDC_PROVIDERS = {}
+cdef size_t _oidc_last_provider_id = 0
+
+
+def _debug_oidc_registry_size():
+    """Internal test hook: live entries in the provider registry.
+
+    Native no longer owns a Python reference, so nothing but ``__dealloc__``
+    removes an entry; a stale one would be a slow leak that no weakref
+    assertion catches.
+    """
+    return 0 if _OIDC_PROVIDERS is None else len(_OIDC_PROVIDERS)
+
+
 cdef inline object _oidc_text(const char* buf, size_t length):
     if buf == NULL:
         return None
@@ -256,17 +281,31 @@ cdef void _oidc_event_trampoline(
     _oidc_event_dispatch(user_data, event)
 
 
-cdef void _oidc_user_data_release(void* user_data) noexcept with gil:
-    Py_DECREF(<object>user_data)
-
-
 cdef void _oidc_user_data_release_trampoline(
         void* user_data) noexcept nogil:
-    # At shutdown Python deliberately leaks this final reference rather than
-    # attempting to enter an interpreter whose runtime is already torn down.
-    if qdb_py_is_finalizing():
-        return
-    _oidc_user_data_release(user_data)
+    """Deliberately empty: the final release must never enter Python.
+
+    ``user_data`` is an opaque integer key, not a Python object pointer, and
+    nothing was allocated for it -- so there is nothing to free here and no
+    reason to acquire the GIL.
+
+    This has to hold because the release can run on a thread the interpreter
+    does not manage and cannot join. A token provider's acquisition is isolated
+    onto its own worker so shutdown can abandon it (``bearer_header_isolated_
+    until``); that worker keeps the provider closure -- and therefore the
+    callback state -- until its own HTTP call returns, which may be well after
+    the owning handles are gone and the interpreter has begun finalizing.
+    Dropping the last reference there used to run a ``Py_DECREF`` behind a
+    ``Py_IsFinalizing`` check, and no such check can be made safe: finalization
+    can begin between the test and ``PyGILState_Ensure``, which then hangs the
+    thread or faults. Holding no Python reference at all removes the hazard
+    rather than narrowing its window.
+
+    The provider is instead reached through ``_OIDC_PROVIDERS`` under the GIL,
+    and its entry is dropped in ``__dealloc__``, which always runs on a managed
+    thread.
+    """
+    pass
 
 
 cdef void _oidc_builder_set_string(
@@ -311,6 +350,9 @@ cdef class OidcDeviceAuth:
     cdef questdb_oidc_auth* _raw
     cdef object _renderer
     cdef bint _closed
+    # Key into `_OIDC_PROVIDERS`, and the `user_data` native holds. 0 = never
+    # registered.
+    cdef size_t _provider_id
     # A KeyboardInterrupt/SystemExit delivered inside a renderer callback,
     # parked for sign_in() to re-raise once the native call returns.
     cdef object _interrupt
@@ -320,6 +362,7 @@ cdef class OidcDeviceAuth:
         self._renderer = None
         self._closed = False
         self._interrupt = None
+        self._provider_id = 0
 
     cdef void _require_open(self) except *:
         if self._raw == NULL:
@@ -565,19 +608,27 @@ cdef class OidcDeviceAuth:
             if not callable(getattr(self._renderer, callback_name, None)):
                 raise OidcConfigError(
                     f'renderer callback {callback_name} must be callable')
-        event_user_data = PyWeakref_NewRef(self, None)
-        Py_INCREF(event_user_data)
+        # Hand native an opaque integer key, not a `PyObject*`. Native callback
+        # state then owns no Python reference, so its release callback -- which
+        # can run on an abandoned acquisition worker after the interpreter has
+        # begun finalizing -- never needs the GIL. See
+        # `_oidc_user_data_release_trampoline`.
+        global _oidc_last_provider_id
+        _oidc_last_provider_id += 1
+        self._provider_id = _oidc_last_provider_id
+        # A weakref, so the registry never keeps a provider alive. The provider
+        # owns the renderer, keeping provider/renderer cycles fully visible to
+        # Python's cyclic GC. Attached transports retain the provider.
+        _OIDC_PROVIDERS[self._provider_id] = PyWeakref_NewRef(self, None)
         if not questdb_oidc_builder_event_handler(
                 builder,
                 _oidc_event_trampoline,
-                <void*>event_user_data,
+                <void*>self._provider_id,
                 _oidc_user_data_release_trampoline,
                 &err):
-            Py_DECREF(event_user_data)
+            _OIDC_PROVIDERS.pop(self._provider_id, None)
+            self._provider_id = 0
             raise _oidc_err_to_py(err)
-        # Native callback state owns only the extra reference to this weakref.
-        # The provider owns the renderer, keeping provider/renderer cycles fully
-        # visible to Python's cyclic GC. Attached transports retain the provider.
         _ensure_doesnt_have_gil(&gs)
         self._raw = questdb_oidc_builder_build(builder, &err)
         _ensure_has_gil(&gs)
@@ -759,21 +810,32 @@ cdef class OidcDeviceAuth:
             issuer=_strip_control(issuer) if issuer is not None else None)
 
     def __dealloc__(self):
+        # Drop the registry entry here rather than from native's release
+        # callback: __dealloc__ always runs on a managed thread holding the
+        # GIL, whereas that callback may not. A stale entry would otherwise
+        # keep a dead weakref indefinitely.
+        if self._provider_id != 0:
+            if _OIDC_PROVIDERS is not None:
+                _OIDC_PROVIDERS.pop(self._provider_id, None)
+            self._provider_id = 0
         if self._raw != NULL:
             questdb_oidc_auth_free(self._raw)
             self._raw = NULL
 
 
 cdef object _oidc_provider_from_user_data(void* user_data):
-    cdef PyObject* provider_obj = NULL
-    cdef int provider_state
-    try:
-        provider_state = PyWeakref_GetRef(
-            <object>user_data, &provider_obj)
-        if provider_state <= 0:
-            if provider_state < 0:
-                PyErr_Clear()
-            return None
-        return <object>provider_obj
-    finally:
-        Py_XDECREF(provider_obj)
+    """Resolve the provider a native event belongs to. Requires the GIL.
+
+    ``user_data`` is the integer key handed to native at registration, never a
+    Python object pointer -- see ``_oidc_user_data_release_trampoline``. A
+    missing key or a dead weakref both mean the provider is gone, which is not
+    an error: the flow is simply no longer observed.
+    """
+    cdef object registry = _OIDC_PROVIDERS
+    if registry is None:
+        # Module globals are cleared at interpreter shutdown.
+        return None
+    ref = registry.get(<size_t>user_data)
+    if ref is None:
+        return None
+    return ref()
