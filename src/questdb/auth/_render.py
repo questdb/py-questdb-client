@@ -621,11 +621,14 @@ class Renderer:
     without waiting for the flow to leave the critical section — waiting there
     would deadlock against the callback itself.
 
-    The rejection is raised whenever *any* callback for this handler is running,
-    including on a different thread, so a concurrent
+    The rejection applies to any thread, not only the callback's own, because a
+    callback may hand work to another thread and wait for it — so a blocking
+    call there would deadlock just the same. A concurrent
     :meth:`~questdb.auth.OidcDeviceAuth.token` elsewhere — a pooled PG-wire
-    checkout, say — can fail while a prompt is on screen. Acquire the token
-    before starting a sign-in rather than during one.
+    checkout, say — therefore succeeds only from a *valid cached token*, which
+    needs no lock the callback holds; if a fresh acquisition would be required
+    it is refused until the prompt finishes. Sign in before putting a provider
+    behind a connection pool, so pooled checkouts hit that cache.
 
     Callbacks are best-effort: an exception raised by one is logged and never
     aborts an otherwise-successful sign-in. ``KeyboardInterrupt`` and
