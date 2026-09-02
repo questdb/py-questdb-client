@@ -164,10 +164,32 @@ cdef inline void _oidc_validate_bool(
     raise OidcConfigError(f'{name} must be a bool')
 
 
+cdef void _oidc_cancel_from_callback(OidcDeviceAuth provider) noexcept:
+    """Publish the provider's close from inside its own event callback.
+
+    Native splits close into a lock-free signal and a drain, and skips only the
+    drain while a callback is running, so this neither blocks nor trips the
+    callback-reentry guard. Errors are swallowed deliberately: this runs on the
+    interrupt path, where the pending ``KeyboardInterrupt`` is the thing worth
+    surfacing.
+    """
+    cdef questdb_error* err = NULL
+    if provider._raw == NULL:
+        return
+    if not questdb_oidc_auth_close(provider._raw, &err):
+        if err != NULL:
+            questdb_error_free(err)
+        return
+    provider._closed = True
+
+
 cdef void _oidc_event_dispatch(
         void* user_data,
         const questdb_oidc_event* event) noexcept with gil:
-    renderer = _oidc_renderer_from_user_data(user_data)
+    provider = _oidc_provider_from_user_data(user_data)
+    if provider is None:
+        return
+    renderer = (<OidcDeviceAuth>provider)._renderer
     if renderer is None:
         return
     try:
@@ -198,6 +220,21 @@ cdef void _oidc_event_dispatch(
             renderer.on_failure(
                 _oidc_text(event.message, event.message_len) or
                 'OIDC sign-in failed.')
+    except (KeyboardInterrupt, SystemExit) as exc:
+        # sign_in() releases the GIL for the whole native flow, so this callback
+        # is the only place Python bytecode runs on the caller's thread -- and
+        # therefore where CPython delivers a pending SIGINT. Swallowing it here
+        # made Ctrl-C print a traceback and change nothing, leaving sign_in()
+        # polling until the device code expired, with every later Ctrl-C eaten
+        # the same way. Stash it for sign_in() to re-raise, and cancel the flow
+        # so it actually stops.
+        (<OidcDeviceAuth>provider)._interrupt = exc
+        if event.kind in (
+                QUESTDB_OIDC_EVENT_PROMPT, QUESTDB_OIDC_EVENT_WAITING):
+            # Only the waiting phase needs cancelling. On SUCCESS/FAILURE the
+            # flow is already ending, and closing there would discard a token
+            # that was just acquired.
+            _oidc_cancel_from_callback(<OidcDeviceAuth>provider)
     except BaseException:
         logging.getLogger('questdb').exception('OIDC renderer callback failed')
 
@@ -265,11 +302,15 @@ cdef class OidcDeviceAuth:
     cdef questdb_oidc_auth* _raw
     cdef object _renderer
     cdef bint _closed
+    # A KeyboardInterrupt/SystemExit delivered inside a renderer callback,
+    # parked for sign_in() to re-raise once the native call returns.
+    cdef object _interrupt
 
     def __cinit__(self):
         self._raw = NULL
         self._renderer = None
         self._closed = False
+        self._interrupt = None
 
     cdef void _require_open(self) except *:
         if self._raw == NULL:
@@ -533,14 +574,28 @@ cdef class OidcDeviceAuth:
             raise _oidc_err_to_py(err)
 
     def sign_in(self):
-        """Run interactive sign-in if no cached or refreshable token exists."""
+        """Run interactive sign-in if no cached or refreshable token exists.
+
+        ``Ctrl-C`` during the wait cancels the flow and raises
+        ``KeyboardInterrupt``. Cancelling closes the provider, so build a new
+        one to try again.
+        """
         cdef questdb_error* err = NULL
         cdef bint ok
         cdef PyThreadState* gs = NULL
         self._require_open()
+        self._interrupt = None
         _ensure_doesnt_have_gil(&gs)
         ok = questdb_oidc_auth_sign_in(self._raw, &err)
         _ensure_has_gil(&gs)
+        interrupt = self._interrupt
+        self._interrupt = None
+        if interrupt is not None:
+            # The interrupt is what the user asked for; the native error is
+            # just the cancellation it caused.
+            if err != NULL:
+                questdb_error_free(err)
+            raise interrupt
         if not ok:
             raise _oidc_err_to_py(err)
 
@@ -669,7 +724,7 @@ cdef class OidcDeviceAuth:
             self._raw = NULL
 
 
-cdef object _oidc_renderer_from_user_data(void* user_data):
+cdef object _oidc_provider_from_user_data(void* user_data):
     cdef PyObject* provider_obj = NULL
     cdef int provider_state
     try:
@@ -679,6 +734,6 @@ cdef object _oidc_renderer_from_user_data(void* user_data):
             if provider_state < 0:
                 PyErr_Clear()
             return None
-        return (<OidcDeviceAuth><object>provider_obj)._renderer
+        return <object>provider_obj
     finally:
         Py_XDECREF(provider_obj)

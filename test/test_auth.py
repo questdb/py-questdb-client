@@ -709,6 +709,59 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             with auth:
                 pass
 
+    def test_keyboard_interrupt_in_renderer_aborts_sign_in(self):
+        # sign_in() releases the GIL for the whole native device flow, so a
+        # renderer callback is the only place CPython can deliver a pending
+        # SIGINT on the caller's thread. `except BaseException` used to swallow
+        # it: Ctrl-C printed an "OIDC renderer callback failed" traceback and
+        # sign_in() kept polling to the device-code deadline, eating every
+        # later Ctrl-C the same way.
+        class InterruptingRenderer(RecordingRenderer):
+            def on_waiting(self, seconds_left):
+                super().on_waiting(seconds_left)
+                raise KeyboardInterrupt
+
+        pending = (400, {'error': 'authorization_pending'}, None)
+        with OidcTestServer(device_token_response=pending) as server:
+            auth = make_discovered_auth(
+                server, renderer=InterruptingRenderer())
+            started = time.monotonic()
+            with self.assertRaises(KeyboardInterrupt):
+                auth.sign_in()
+            # Promptly, not after the device code expires.
+            self.assertLess(time.monotonic() - started, 10)
+        # The interrupt cancels the flow, which closes the provider.
+        with self.assertRaisesRegex(OidcCancelledError, 'closed'):
+            auth.token()
+
+    def test_renderer_can_close_the_provider_from_its_callback(self):
+        # close() is the only cancellation lever a renderer has -- a notebook
+        # "Cancel" button in on_waiting has nothing else to call. The native
+        # callback-reentry guard used to reject it, so the affordance could not
+        # be built at all. Native now publishes the close lock-free and skips
+        # only the drain, so this must succeed.
+        outcome = []
+        holder = []
+
+        class CancellingRenderer(RecordingRenderer):
+            def on_waiting(self, seconds_left):
+                super().on_waiting(seconds_left)
+                try:
+                    holder[0].close()
+                    outcome.append('closed')
+                except BaseException as exc:  # noqa: BLE001
+                    outcome.append(exc)
+
+        pending = (400, {'error': 'authorization_pending'}, None)
+        with OidcTestServer(device_token_response=pending) as server:
+            auth = make_discovered_auth(server, renderer=CancellingRenderer())
+            holder.append(auth)
+            started = time.monotonic()
+            with self.assertRaises(OidcCancelledError):
+                auth.sign_in()
+            self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(outcome[:1], ['closed'])
+
     def test_renderer_on_failure_receives_native_message(self):
         # A terminal device-flow error emits FAILURE. The binding must map
         # event.message -> on_failure; event.identity is NULL for FAILURE, so a
