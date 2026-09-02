@@ -1334,6 +1334,69 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                     table_name='oidc_auto_flush',
                     at=questdb.ServerTimestamp)
 
+    def test_token_provider_failure_is_narrated_to_the_listener(self):
+        # Regression: the Bearer header is resolved ABOVE the endpoint loop, so
+        # its failure returned before auth_failed() (inside the loop) and
+        # all_endpoints_unreachable() (after it) could run. A QWP/WS connect
+        # round whose token pull failed therefore emitted no event and wrote no
+        # log -- while the round is retryable and the reconnect budget restarts
+        # each time, so the sender kept trying in complete silence and the
+        # operator's first symptom was unrelated store backpressure.
+        events = []
+        auth = make_auth()  # never signed in
+        try:
+            db = questdb.connect(
+                'ws::addr=127.0.0.1:19009;',
+                oidc_auth=auth,
+                connection_listener=events.append,
+                connection_event_inbox_capacity=32)
+            db.close()
+        except OidcInteractionRequired:
+            pass
+        deadline = time.monotonic() + 5
+        while not events and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(events, 'the failed token pull was never narrated')
+        event = events[0]
+        self.assertIs(event.kind, questdb.ConnectionEventKind.AuthFailed)
+        # No endpoint attribution: nothing was contacted, the credential failed.
+        self.assertIsNone(event.host)
+        self.assertIsNone(event.port)
+        # The cause must carry the actionable detail, not just a code.
+        self.assertIn('sign_in', event.cause_msg)
+
+    def test_pool_dataframe_fails_fast_when_sign_in_is_required(self):
+        # Regression: native classifies an OIDC token failure as a retryable
+        # SocketError so a transport's background drainer keeps queued frames
+        # alive while a human signs in. QuestDB.dataframe()'s reconnect gate
+        # keyed on that code alone, so a foreground call re-polled a provider
+        # that is documented never to prompt, stalling for the WHOLE reconnect
+        # budget (300s by default) before raising the very same error.
+        #
+        # A generous budget is used deliberately: it is what makes the
+        # assertion meaningful. Before the fix this took the full budget; the
+        # gate now recognises the OIDC kind and re-raises immediately.
+        budget_s = 60
+        df = pd.DataFrame({
+            'value': [1],
+            'ts': pd.to_datetime([1700000000], unit='s')})
+        auth = make_auth()  # never signed in
+        db = questdb.connect(
+            'ws::addr=127.0.0.1:19009;lazy_connect=on;'
+            f'reconnect_max_duration_millis={budget_s * 1000};',
+            oidc_auth=auth)
+        try:
+            started = time.monotonic()
+            with self.assertRaises(OidcInteractionRequired):
+                db.dataframe(df, table_name='oidc_ff', at='ts')
+            elapsed = time.monotonic() - started
+            self.assertLess(
+                elapsed, budget_s / 4,
+                'dataframe() burned the reconnect budget on an OIDC failure '
+                'that only an interactive sign_in() can clear')
+        finally:
+            db.close()
+
     def test_flush_surfaces_typed_oidc_error(self):
         # The plain row()/flush() path (not the dataframe path) whose OIDC token
         # pull fails at connect surfaces the typed OidcError through c_err_to_py.
@@ -1657,6 +1720,87 @@ class RenderSanitizerTest(unittest.TestCase):
                 'verification_uri': 'https://idp.example/v',
                 'verification_uri_complete': 'https://evil.example/c'}),
             'https://idp.example/v')
+
+    # -- a native refusal is final: nothing may re-promote the display text --
+    def _refused_prompt(self):
+        # Native rejects (never truncates) an actionable URL past its
+        # MAX_DISPLAY_FIELD_CHARS, because a cut URL can still parse as a valid
+        # *different* URL. What reaches the renderer is the truncated DISPLAY
+        # string plus browser_target=None.
+        real = ('https://idp.example.com/device?next=' + 'a' * 430
+                + '&redirect=https://evil.example')
+        display = real[:_render._MAX_ACTIONABLE_URL_CHARS] + '…'
+        return real, display, {
+            'user_code': 'ABCD-EFGH',
+            'verification_uri': display,
+            'verification_uri_complete': display,
+            'browser_target': None,
+            'expires_in': 600,
+            'interval': 5}
+
+    def test_native_refusal_yields_no_actionable_target(self):
+        # Regression: the fallback chain used to re-promote the truncated
+        # display string, handing the user a live link and a QR for a URL the
+        # identity provider never issued and native had explicitly declined.
+        real, display, resp = self._refused_prompt()
+        target = _render._verification_target(resp)
+        self.assertIsNone(target)
+        self.assertNotEqual(target, real)
+        # The key being present at all is what marks the verdict as native's.
+        self.assertTrue(_render._native_adjudicated(resp))
+
+    def test_native_refusal_leaves_prompt_inert_but_visible(self):
+        _real, _display, resp = self._refused_prompt()
+        renderer = _render.JupyterRenderer(qr=False)
+        renderer._resp = resp
+        head = ''.join(renderer._prompt_head())
+        self.assertNotIn('<a href', head)
+        self.assertNotIn('authorize directly', head)
+        # Still shown, escaped and copyable -- refusing to open is not hiding.
+        self.assertIn('idp.example.com', head)
+
+    def test_native_refusal_encodes_no_qr(self):
+        _real, _display, resp = self._refused_prompt()
+        stream = io.StringIO()
+        _render.TerminalRenderer(stream=stream, qr=True).on_prompt(resp)
+        self.assertIsNone(_render._verification_target(resp))
+        self.assertIn('idp.example.com', stream.getvalue())
+
+    def test_native_vetted_target_still_drives_the_link(self):
+        # The refusal path must not disturb the ordinary case.
+        resp = {
+            'user_code': 'A',
+            'verification_uri': 'https://idp.example.com/device',
+            'verification_uri_complete': 'https://idp.example.com/device?c=A',
+            'browser_target': 'https://idp.example.com/device?c=A',
+            'expires_in': 600, 'interval': 5}
+        self.assertEqual(
+            _render._verification_target(resp),
+            'https://idp.example.com/device?c=A')
+        renderer = _render.JupyterRenderer(qr=False)
+        renderer._resp = resp
+        self.assertIn('<a href', ''.join(renderer._prompt_head()))
+
+    def test_custom_renderer_without_browser_target_keeps_fallback(self):
+        # A pure-Python renderer builds its own dict with no browser_target
+        # key; key ABSENCE (not a None value) selects the origin-matching
+        # fallback, so custom renderers are unaffected.
+        resp = {
+            'verification_uri': 'https://idp.example.com/device',
+            'verification_uri_complete': 'https://idp.example.com/device?c=A'}
+        self.assertFalse(_render._native_adjudicated(resp))
+        self.assertEqual(
+            _render._verification_target(resp),
+            'https://idp.example.com/device?c=A')
+
+    def test_over_long_url_is_rejected_not_truncated(self):
+        # The same bound native applies, enforced on the fallback path too.
+        long_url = 'https://idp.example.com/d?p=' + 'a' * 400
+        self.assertGreater(len(long_url), _render._MAX_ACTIONABLE_URL_CHARS)
+        self.assertIsNone(_render._safe_link_url(long_url))
+        self.assertIsNone(_render._verification_target({
+            'verification_uri': long_url,
+            'verification_uri_complete': long_url}))
 
     def test_jupyter_renderer_sanitizes_and_escapes_untrusted_fields(self):
         # The "Jupyter-first" renderer writes untrusted, MITM-tamperable IdP
