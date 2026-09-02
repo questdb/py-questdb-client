@@ -149,6 +149,10 @@ def _verification_uri_complete(resp: Dict[str, Any]) -> Optional[str]:
 # destination host, so such a URL is never made clickable/auto-opened.
 _SAFE_HOST_RE = re.compile(r'\A[a-z0-9._:-]+\Z')
 
+# Mirrors the native vetter's MAX_DISPLAY_FIELD_CHARS. Keep the two in step: a
+# URL native refuses to vet must not become clickable here either.
+_MAX_ACTIONABLE_URL_CHARS = 256
+
 
 def _safe_link_url(url: Optional[str]) -> Optional[str]:
     """
@@ -188,6 +192,17 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
     # passes a _strip_control'd value via _safe_target, which removes these
     # already, so this never fires there; it closes the standalone footgun.)
     if any(c in url for c in '\t\n\r'):
+        return None
+    # Bound the length exactly as the native vetter does (its
+    # MAX_DISPLAY_FIELD_CHARS). Every other untrusted display field is capped
+    # and marked with an ellipsis, but an actionable URL is rejected instead of
+    # truncated: a cut URL can still parse as a perfectly valid *different* URL,
+    # whose host passes the check below because truncation leaves the authority
+    # intact. A genuine verification URL is far below this bound. Native applies
+    # this to `browser_target`; applying it here too means a custom renderer
+    # that builds its own response dict (no `browser_target` key, so the
+    # fallback path below runs) gets the same protection.
+    if len(url) > _MAX_ACTIONABLE_URL_CHARS:
         return None
     try:
         parts = urllib.parse.urlparse(url)
@@ -287,27 +302,39 @@ def _matched_complete(resp: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _native_adjudicated(resp: Dict[str, Any]) -> bool:
+    """Whether this response came from a native device-flow event.
+
+    Native always sets the ``browser_target`` key on a prompt event — to the
+    vetted URL, or to ``None`` when it refused to vet one. Key *presence* is
+    therefore the signal that the native side has already adjudicated these
+    URLs; a custom pure-Python renderer builds a dict without it.
+    """
+    return 'browser_target' in resp
+
+
 def _verification_target(resp: Dict[str, Any]) -> Optional[str]:
     """The single URL to auto-open, encode as a QR, or make a one-click link.
 
-    Prefers the native-vetted ``browser_target`` when present; otherwise the
-    origin-matched ``verification_uri_complete`` (see :func:`_matched_complete`),
-    else the vetted ``verification_uri``.
+    On a native event the native verdict is final: ``browser_target`` is the
+    vetted URL, and ``None`` means native *refused* to vet one — this returns
+    ``None`` rather than falling back, because the values it would fall back to
+    are display strings, not targets. Native rejects an over-long URL rather
+    than truncating it, precisely because a truncated URL can still parse as a
+    valid *different* URL; falling back to the truncated display string would
+    hand the user exactly the destination native declined to offer.
 
-    For the two fallback branches the target cannot diverge from the host shown
-    in the link the user reads, and Python enforces that here:
+    Only when the key is absent — a custom renderer supplying its own response
+    dict — does the origin-matching fallback apply: the origin-matched
+    ``verification_uri_complete`` (see :func:`_matched_complete`), else the
+    vetted ``verification_uri``. For those branches the target cannot diverge
+    from the host shown in the link the user reads, and Python enforces it:
     :func:`_matched_complete` drops an off-origin ``complete``, and
-    ``verification_uri`` *is* the shown host. For the ``browser_target`` branch
-    that guarantee is delegated to the native side, which vets the URL and
-    derives it from the same device-authorization response as the shown
-    ``verification_uri``; this function does not independently re-check its
-    origin against the shown host.
+    ``verification_uri`` *is* the shown host.
     """
-    # Native OIDC events carry the one URL independently vetted for browser,
-    # link and QR use. Prefer it when present; pure-Python callers retain the
-    # origin-matching fallback for compatibility with custom renderers.
-    native_target = _safe_target(resp.get('browser_target'))
-    return (native_target or _matched_complete(resp)
+    if _native_adjudicated(resp):
+        return _safe_target(resp.get('browser_target'))
+    return (_matched_complete(resp)
             or _safe_target(_verification_uri(resp)))
 
 
@@ -589,7 +616,16 @@ class Renderer:
     :meth:`~questdb.auth.OidcDeviceAuth.clear` — each raises rather than
     deadlocking. :meth:`~questdb.auth.OidcDeviceAuth.close` is the exception and
     is safe here: it is how a renderer offers a "cancel" affordance, and how
-    another thread aborts a running device flow.
+    another thread aborts a running device flow. Called from inside a callback
+    it publishes the close and drops the in-memory credential, but returns
+    without waiting for the flow to leave the critical section — waiting there
+    would deadlock against the callback itself.
+
+    The rejection is raised whenever *any* callback for this handler is running,
+    including on a different thread, so a concurrent
+    :meth:`~questdb.auth.OidcDeviceAuth.token` elsewhere — a pooled PG-wire
+    checkout, say — can fail while a prompt is on screen. Acquire the token
+    before starting a sign-in rather than during one.
 
     Callbacks are best-effort: an exception raised by one is logged and never
     aborts an otherwise-successful sign-in. ``KeyboardInterrupt`` and
@@ -729,11 +765,22 @@ class JupyterRenderer(Renderer):
         # pass the raw fields and let the single canonical target drive the href,
         # the QR and the displayed (IDNA-normalized) label uniformly.
         raw_uri = _verification_uri(resp)
+        # When native adjudicated these URLs and refused to vet one, nothing on
+        # this panel becomes actionable: the URL is still shown (inert, escaped,
+        # copyable) but carries no href, and the one-click affordance below is
+        # dropped. Falling back to the displayed value would hand the user the
+        # very destination native declined to offer -- and since native rejects
+        # an over-long URL rather than truncating it, that value may be a
+        # truncated string that parses as a valid *different* URL.
+        native_refused = (_native_adjudicated(resp)
+                          and _verification_target(resp) is None)
+        href = None if native_refused else raw_uri
         code = html.escape(_strip_control(str(resp.get('user_code') or '')))
         body = [
             '<div style="font-size:1.05em;font-weight:600;margin-bottom:6px">'
             '🔐 Sign in to QuestDB</div>',
-            f'<div>Open {_render_link(raw_uri)} and enter code:</div>',
+            f'<div>Open {_render_link(href, text=_display_url(raw_uri))} '
+            f'and enter code:</div>',
             f'<div style="font-size:1.6em;font-family:monospace;'
             f'letter-spacing:2px;margin:6px 0">{code}</div>',
         ]
@@ -742,7 +789,7 @@ class JupyterRenderer(Renderer):
         # label is fixed text, so its host is never shown, and a complete on a
         # different host would silently send the click to the attacker while the
         # primary link above still reads as the trusted host.
-        matched = _matched_complete(resp)
+        matched = None if native_refused else _matched_complete(resp)
         if matched:
             body.append(
                 '<div>' + _render_link(
