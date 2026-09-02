@@ -20,6 +20,7 @@ class OidcTestServer:
             *,
             initial_access_token='AT-initial',
             initial_expires_in=300,
+            device_expires_in=600,
             refresh_token='RT-1',
             refreshed_access_token='AT-refreshed',
             refreshed_expires_in=300,
@@ -30,6 +31,12 @@ class OidcTestServer:
             settings_config_overrides=None):
         self.initial_access_token = initial_access_token
         self.initial_expires_in = initial_expires_in
+        # Device-code lifetime. A cancellation test should pass a short value:
+        # if the cancellation it asserts ever regresses, sign_in() blocks for
+        # this long before the assertion after it can even run, so the default
+        # turns a failure into a ten-minute stall that the CI watchdog re-arms
+        # past rather than a visible test failure.
+        self.device_expires_in = device_expires_in
         self.refresh_token = refresh_token
         self.refreshed_access_token = refreshed_access_token
         self.refreshed_expires_in = refreshed_expires_in
@@ -150,7 +157,7 @@ class OidcTestServer:
                 'verification_uri': self.url + '/verify',
                 'verification_uri_complete': (
                     self.url + '/verify?user_code=WXYZ-1234'),
-                'expires_in': 600,
+                'expires_in': self.device_expires_in,
                 'interval': 5,
             })
             return

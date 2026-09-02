@@ -833,7 +833,11 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 raise KeyboardInterrupt
 
         pending = (400, {'error': 'authorization_pending'}, None)
-        with OidcTestServer(device_token_response=pending) as server:
+        # A short device-code lifetime so a regressed cancellation surfaces as a
+        # fast failure rather than a multi-minute stall that only the job
+        # timeout would notice.
+        with OidcTestServer(
+                device_token_response=pending, device_expires_in=20) as server:
             auth = make_discovered_auth(
                 server, renderer=InterruptingRenderer())
             started = time.monotonic()
@@ -864,7 +868,8 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                     outcome.append(exc)
 
         pending = (400, {'error': 'authorization_pending'}, None)
-        with OidcTestServer(device_token_response=pending) as server:
+        with OidcTestServer(
+                device_token_response=pending, device_expires_in=20) as server:
             auth = make_discovered_auth(server, renderer=CancellingRenderer())
             holder.append(auth)
             started = time.monotonic()
@@ -872,6 +877,27 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 auth.sign_in()
             self.assertLess(time.monotonic() - started, 10)
         self.assertEqual(outcome[:1], ['closed'])
+
+    def test_interrupt_on_success_does_not_discard_the_new_token(self):
+        # oidc.pxi cancels the flow only for PROMPT/WAITING: on SUCCESS the
+        # token has just been acquired and closing there would throw it away.
+        # Dropping that condition passes the whole suite otherwise, because the
+        # only interrupt test raises from on_waiting.
+        class InterruptOnSuccess(RecordingRenderer):
+            def on_success(self, identity, expires_in):
+                super().on_success(identity, expires_in)
+                raise KeyboardInterrupt
+
+        renderer = InterruptOnSuccess()
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(server, renderer=renderer)
+            # The interrupt is still the user's, so it is re-raised...
+            with self.assertRaises(KeyboardInterrupt):
+                auth.sign_in()
+            self.assertEqual(len(renderer.successes), 1)
+            # ...but the provider must remain open and keep the token it just
+            # acquired, rather than cancelling itself on the way out.
+            self.assertEqual(auth.token(), server.initial_access_token)
 
     def test_renderer_on_failure_receives_native_message(self):
         # A terminal device-flow error emits FAILURE. The binding must map
@@ -1162,6 +1188,30 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertEqual(err.error, 'access_denied')
         self.assertEqual(err.error_description, 'The user denied the request.')
         self.assertEqual(err.status, 400)
+
+    def test_oidc_error_strips_control_characters_from_idp_text(self):
+        # Regression: OidcError.__init__ sanitizes every message argument
+        # because an uncaught traceback reaches a terminal or a notebook, both
+        # of which interpret ANSI, and the IdP fields interpolated into these
+        # messages are attacker- or MITM-controllable. Native does NOT strip
+        # them on this path -- only the device-flow *event* text is sanitized --
+        # so the Python layer is the only sink guard. Every existing test uses
+        # clean strings, so deleting that call passed the whole suite.
+        hostile = 'The user \x1b[31mdenied‮​ it.'
+        with OidcTestServer(device_token_response=(400, {
+                'error': 'access_\x1b[32mdenied',
+                'error_description': hostile}, None)) as server:
+            auth = make_discovered_auth(server)
+            with self.assertRaises(OidcDeviceFlowError) as ctx:
+                auth.sign_in()
+        err = ctx.exception
+        for field in (str(err), repr(err), err.error, err.error_description):
+            self.assertNotIn('\x1b', field, 'an ANSI escape survived')
+            self.assertNotIn('‮', field, 'a bidi override survived')
+            self.assertNotIn('​', field, 'a zero-width char survived')
+        # Stripped, not dropped: the readable text must survive.
+        self.assertIn('denied', err.error_description)
+        self.assertIn('denied', err.error)
 
     def test_expired_device_code_maps_to_timeout_with_idp_error(self):
         # `expired_token` maps to OidcTimeoutError (a OidcDeviceFlowError), and

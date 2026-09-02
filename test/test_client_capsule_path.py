@@ -925,6 +925,38 @@ class TestSchemaOverrides(unittest.TestCase):
         self.assertIn(value.bytes[::-1], payload)
         self.assertNotIn(value.bytes, payload)
 
+    def test_object_dtype_uuid_column_reaches_the_wire_in_qwp_order(self):
+        # The object-dtype `uuid.UUID` route (_dataframe_columnar_build_uuid_pyobj
+        # -> qwp_numpy_s16) is a DIFFERENT native entry point from the Arrow
+        # routes above, and it was the one changed to hand over canonical RFC
+        # 4122 bytes and rely on native to reverse them. Every other UUID test
+        # drives an Arrow path, so a double reversal or a missed one here would
+        # store every UUID byte-reversed with nothing failing.
+        #
+        # Asserted against concrete bytes rather than a round-trip: a round-trip
+        # through one symmetric transform passes whichever way the bytes run.
+        import uuid as uuid_mod
+        import pandas as pd
+        value = uuid_mod.UUID('123e4567-e89b-12d3-a456-426614174000')
+        df = pd.DataFrame({
+            'u': pd.Series([value], dtype=object),
+            'ts': pd.to_datetime([_ts_us(2025, 1, 1)], unit='us'),
+        })
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='uuids_pyobj', at='ts', symbols=False)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(value.bytes[::-1], payload)
+        self.assertNotIn(value.bytes, payload)
+
     @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_schema_overrides_long256_forwards_verbatim(self):
         value = bytes(range(32))
