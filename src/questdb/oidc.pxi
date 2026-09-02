@@ -276,6 +276,29 @@ cdef void _oidc_event_dispatch(
 cdef void _oidc_event_trampoline(
         void* user_data,
         const questdb_oidc_event* event) noexcept nogil:
+    """Enter Python to run the renderer, from whichever thread native uses.
+
+    Unlike the release callback -- which owns nothing and never enters Python
+    (see ``_oidc_user_data_release_trampoline``) -- this one must, because
+    running the renderer *is* its job. That is safe for a reason worth stating,
+    since it is not local to this function:
+
+    Renderer events are emitted only by the device flow, which is reached only
+    through ``sign_in()``. That is a foreground call, so for the whole time
+    events can arrive the interpreter is running, the calling thread is blocked
+    inside the native call, and the provider is strongly referenced by that
+    frame. There is no background refresh path that renders: ``token()`` is
+    non-interactive and silent. So this cannot be reached by an abandoned worker
+    after the interpreter has begun finalizing -- the hazard that made the
+    release callback stop entering Python at all.
+
+    The ``qdb_py_is_finalizing`` check is therefore belt-and-braces rather than
+    load-bearing. It is retained for an embedder that tears down the interpreter
+    while another thread is still inside ``sign_in()``, but note it is a TOCTOU:
+    finalization can begin between the check and the GIL acquisition, and no
+    check can close that. Keeping the flow foreground-only is what makes this
+    path safe.
+    """
     if qdb_py_is_finalizing():
         return
     _oidc_event_dispatch(user_data, event)
@@ -395,12 +418,54 @@ cdef class OidcDeviceAuth:
             token_store=None):
         """Configure a provider from explicit IdP endpoints.
 
+        ``client_id``, ``device_authorization_endpoint`` and ``token_endpoint``
+        are required. Use :meth:`from_questdb` to discover them from a QuestDB
+        server instead.
+
         ``groups_in_token`` selects the token kind: ``False`` (the default)
         returns the access token; ``True`` selects the ID token.
         It does not modify ``scope``; include ``openid`` explicitly when the
         identity provider requires it to issue an ID token. Unlike
         :meth:`from_questdb` there is no server-advertised default to inherit
         here, so the kind is always chosen explicitly and defaults to ``False``.
+
+        Because this is an extension type, ``help()`` and the rendered API
+        reference cannot introspect the signature, so every parameter is
+        documented here:
+
+        * ``scope`` — the OAuth scope string, sent verbatim on both the initial
+          request and every refresh.
+        * ``audience`` / ``issuer`` — optional. ``issuer`` additionally pins the
+          credential endpoints: one advertised by a QuestDB server must either
+          sit under the issuer's origin and path, or be confirmed by the IdP's
+          own discovery document.
+        * ``insecure`` — permits plaintext HTTP for the **QuestDB discovery
+          request only**. The identity provider is always held to HTTPS (or
+          loopback); this flag never relaxes that.
+        * ``ca_bundle`` — path to a PEM bundle used instead of the system roots
+          when contacting QuestDB and the IdP.
+        * ``open_browser`` — whether :meth:`sign_in` launches a browser at the
+          verification URL. Defaults to ``True``, and is suppressed
+          automatically inside a Jupyter kernel, where the browser would open on
+          the wrong machine.
+        * ``interactive`` — whether a prompt may be displayed at all. ``None``
+          (the default) detects it from the environment; ``False`` makes
+          :meth:`sign_in` fail rather than prompt, which is what a headless
+          service wants.
+        * ``qr`` — also render the verification URL as a QR code, for signing in
+          from a phone. Ignored when a custom ``renderer`` is supplied.
+        * ``renderer`` — a :class:`~questdb.auth.Renderer` presenting the prompt.
+          Its callbacks receive untrusted identity-provider text; see that
+          class for the sanitisation and re-entrancy rules.
+        * ``default_interval`` — seconds between device-code polls when the
+          identity provider does not specify one. A server-supplied interval,
+          and any ``Retry-After``, take precedence.
+        * ``timeout`` — the per-HTTP-request timeout in seconds (default 30,
+          maximum 120). This is **not** a deadline for the sign-in as a whole,
+          which is bounded by the device code's own lifetime.
+        * ``token_store`` — a :class:`~questdb.auth.FileTokenStore` enabling
+          plaintext on-disk persistence. Credentials stay in memory when this is
+          ``None``.
         """
         cdef questdb_oidc_builder* builder
         _oidc_validate_bool(groups_in_token, 'groups_in_token', False)
@@ -674,7 +739,14 @@ cdef class OidcDeviceAuth:
             raise _oidc_err_to_py(err)
 
     def token(self):
-        """Return a cached or silently refreshed token; never prompt."""
+        """Return a cached or silently refreshed token; never prompt.
+
+        Raises :class:`~questdb.auth.OidcInteractionRequired` when no cached or
+        silently refreshable credential is available -- notably before the first
+        :meth:`sign_in`, and once a refresh token has expired. This method never
+        displays a prompt, so that condition can only be cleared by calling
+        :meth:`sign_in` on a thread that may interact with the user.
+        """
         cdef questdb_error* err = NULL
         cdef questdb_oidc_token* token = NULL
         cdef const char* data = NULL
@@ -694,7 +766,12 @@ cdef class OidcDeviceAuth:
             questdb_oidc_token_free(token)
 
     def headers(self):
-        """Return an HTTP Authorization header containing the current token."""
+        """Return an HTTP Authorization header containing the current token.
+
+        A fresh ``{"Authorization": "Bearer ..."}`` dict on each call. Raises
+        whatever :meth:`token` raises, including
+        :class:`~questdb.auth.OidcInteractionRequired` before sign-in.
+        """
         return {'Authorization': 'Bearer ' + self.token()}
 
     def clear(self):

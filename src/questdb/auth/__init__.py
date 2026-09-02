@@ -55,7 +55,7 @@ lazily, only when used.
 
 from questdb._client import OidcDeviceAuth
 from ._config import OidcConfig
-from ._render import Renderer
+from ._render import Renderer, sanitize_display_text
 from ._errors import (
     OidcError,
     OidcConfigError,
@@ -83,5 +83,6 @@ __all__ = [
     'OidcTimeoutError',
     'Renderer',
     'psycopg_connect',
+    'sanitize_display_text',
     'sqlalchemy_engine',
 ]

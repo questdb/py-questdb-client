@@ -220,7 +220,9 @@ Security notes
   development. ``insecure=True`` applies only to QuestDB discovery transport.
 * Renderer callbacks receive raw, untrusted IdP text. The built-in renderers
   sanitize it and use the separately vetted ``browser_target`` for links and QR
-  codes. Custom renderers must sanitize callback fields for their terminal or
+  codes. :func:`~questdb.auth.sanitize_display_text` performs that stripping and
+  is exported for this purpose.
+  Custom renderers must sanitize callback fields for their terminal or
   HTML output sink and use ``browser_target`` for actionable URLs.
 * Avoid logging tokens, authorization headers, or PG connection parameters.
 

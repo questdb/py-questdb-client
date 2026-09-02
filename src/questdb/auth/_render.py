@@ -552,6 +552,22 @@ def _strip_control(text: Optional[str]) -> str:
     return ''.join(out)
 
 
+def sanitize_display_text(text: Optional[str]) -> str:
+    """Strip control, bidi and zero-width characters from untrusted text.
+
+    A custom :class:`Renderer` receives identity-provider fields verbatim --
+    the verification URL, the user code, error strings -- and is responsible
+    for sanitising them for its own output sink. This is the same routine the
+    built-in renderers use, exported so a custom one does not have to
+    reimplement it or reach for a private name.
+
+    ``html.escape`` is not a substitute: it guards markup, not the ANSI escapes
+    and bidi overrides that can spoof a prompt or hide the real sign-in URL.
+    """
+    return _strip_control(text)
+
+
+
 def format_prompt(resp: Dict[str, Any]) -> str:
     """Plain-text sign-in prompt (also used as the notebook fallback)."""
     # _display_url shows the IDNA/punycode host (and drops userinfo) so a
@@ -608,6 +624,8 @@ class Renderer:
     DOM must sanitise them itself (the built-ins strip control/bidi/zero-width
     characters and vet the verification host); echoing them raw re-opens the
     prompt-spoofing surface the built-in renderers close.
+    :func:`~questdb.auth.sanitize_display_text` is the routine they use, exported
+    for exactly this.
 
     **Concurrency.** The callbacks run while ``OidcDeviceAuth`` holds its
     (non-reentrant) acquisition lock, so a callback must not call back into the

@@ -175,6 +175,8 @@ See the :ref:`oidc_auth` guide for an overview.
    :members:
    :show-inheritance:
 
+.. autofunction:: questdb.auth.sanitize_display_text
+
 .. autoexception:: questdb.auth.OidcError
    :show-inheritance:
 
