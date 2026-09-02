@@ -50,6 +50,7 @@ from questdb.auth import (
     OidcTimeoutError,
     Renderer,
 )
+from questdb._client import _debug_oidc_registry_size
 from questdb.auth import _adapters
 from questdb.auth import _render
 from questdb.auth._render import (
@@ -1333,6 +1334,41 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                     pd.DataFrame({'value': [1]}),
                     table_name='oidc_auto_flush',
                     at=questdb.ServerTimestamp)
+
+    def test_native_holds_no_python_reference_for_its_callback(self):
+        # Regression: the event handler's user_data used to be an INCREF'd
+        # weakref, so the final native release ran a Py_DECREF -- possibly on an
+        # abandoned token-acquisition worker, which the interpreter neither
+        # manages nor joins, at an arbitrary later time. It was guarded by a
+        # Py_IsFinalizing check, but no such check can be made safe: finalization
+        # can begin between the test and PyGILState_Ensure.
+        #
+        # Native now receives an opaque integer key instead, so the release
+        # callback owns nothing and never enters Python. The registry entry is
+        # dropped in __dealloc__, which always runs on a managed thread -- and
+        # nothing else drops it, so a stale entry would be a slow leak that no
+        # weakref assertion catches.
+        baseline = _debug_oidc_registry_size()
+        provider = make_auth()
+        self.assertEqual(_debug_oidc_registry_size(), baseline + 1)
+        weak = weakref.ref(provider)
+        del provider
+        gc.collect()
+        self.assertIsNone(weak(), 'the registry must not keep a provider alive')
+        self.assertEqual(
+            _debug_oidc_registry_size(), baseline,
+            'the registry entry outlived its provider')
+
+    def test_provider_registry_does_not_grow_across_churn(self):
+        baseline = _debug_oidc_registry_size()
+        refs = []
+        for _ in range(200):
+            provider = make_auth()
+            refs.append(weakref.ref(provider))
+            del provider
+        gc.collect()
+        self.assertTrue(all(ref() is None for ref in refs))
+        self.assertEqual(_debug_oidc_registry_size(), baseline)
 
     def test_token_provider_failure_is_narrated_to_the_listener(self):
         # Regression: the Bearer header is resolved ABOVE the endpoint loop, so
