@@ -73,7 +73,6 @@ from cpython.datetime cimport (
     PyDateTime_DATE_GET_SECOND, PyDateTime_DATE_GET_MICROSECOND,
 )
 from cpython.bool cimport bool
-from cpython.exc cimport PyErr_Clear
 from cpython.ref cimport Py_XDECREF
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
 from cpython.object cimport PyObject
@@ -525,12 +524,18 @@ cdef inline void_int reserve_buffer(
 cdef inline bint _is_oidc_terminal_for_foreground(object exc):
     """Whether ``exc`` is an OIDC failure that a foreground retry cannot clear.
 
-    ``OidcInteractionRequired`` and ``OidcConfigError`` carry a *retryable*
+    ``OidcInteractionRequired`` alone needs this gate. It carries a *retryable*
     native code on purpose: an attached transport's background drainer keeps
     queued store-and-forward frames alive while a human signs in, rather than
     abandoning them. A foreground ``dataframe()`` call has nothing to wait for
     -- the token path is documented never to prompt -- so retrying only burns
     the reconnect budget before raising the same error.
+
+    Every other OIDC failure is already handled by the caller's code check:
+    ``classify_provider_error`` exempts ``OidcErrorKind::Config`` from the
+    reclassification to ``SocketError``, so an ``OidcConfigError`` arrives with
+    ``ConfigError`` (or ``AuthError`` when raised on the Python side) and is
+    terminal there.
 
     Resolved through ``sys.modules`` instead of an import: if ``questdb.auth``
     was never imported then no OIDC error can exist, so this costs one dict
@@ -540,8 +545,7 @@ cdef inline bint _is_oidc_terminal_for_foreground(object exc):
     cdef object mod = sys.modules.get('questdb.auth._errors')
     if mod is None:
         return False
-    return isinstance(
-        exc, (mod.OidcInteractionRequired, mod.OidcConfigError))
+    return isinstance(exc, mod.OidcInteractionRequired)
 
 
 cdef object _utf8_decode_error(
@@ -1413,9 +1417,9 @@ cdef class Buffer:
     cdef inline void_int _may_trigger_row_complete(self) except -1:
         cdef PyObject* sender = NULL
         if self._row_complete_sender != None:
-            # > 0 (not just truthy): PyWeakref_GetRef returns -1 on error, which
-            # would otherwise enter the branch with sender == NULL. Matches the
-            # OIDC renderer's PyWeakref_GetRef handling in oidc.pxi.
+            # > 0 (not just truthy): PyWeakref_GetRef returns -1 on error and
+            # leaves the out-pointer NULL, which a truthiness test would enter
+            # the branch on.
             if PyWeakref_GetRef(self._row_complete_sender, &sender) > 0:
                 try:
                     may_flush_on_row_complete(
@@ -3014,7 +3018,6 @@ cdef object _dataframe_columnar_plan_failures(
                 col_target_t.col_target_column_i32,
                 col_target_t.col_target_column_f32,
                 col_target_t.col_target_column_uuid,
-                col_target_t.col_target_column_long256,
                 col_target_t.col_target_column_ipv4,
                 col_target_t.col_target_column_binary,
                 col_target_t.col_target_column_arrow):
@@ -4162,8 +4165,7 @@ cdef void_int _dataframe_columnar_append_field(
             col_target_t.col_target_column_i8,
             col_target_t.col_target_column_i16,
             col_target_t.col_target_column_i32,
-            col_target_t.col_target_column_f32,
-            col_target_t.col_target_column_long256):
+            col_target_t.col_target_column_f32):
         _dataframe_columnar_call_arrow_append(
             chunk, col, row_offset, row_count)
         return 0
@@ -4467,7 +4469,6 @@ cdef void_int _dataframe_columnar_populate_chunk(
                 col_target_t.col_target_column_i32,
                 col_target_t.col_target_column_f32,
                 col_target_t.col_target_column_uuid,
-                col_target_t.col_target_column_long256,
                 col_target_t.col_target_column_ipv4,
                 col_target_t.col_target_column_binary,
                 col_target_t.col_target_column_arrow,

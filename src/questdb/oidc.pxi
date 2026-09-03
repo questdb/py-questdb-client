@@ -38,6 +38,10 @@
 #
 # The value is a weakref: the registry must not keep a provider alive, or a
 # `with` block's exit would never collect one.
+#
+# A module-level `cdef object` is a C static rather than an entry in the module
+# dict, so `_PyModule_Clear` never swaps it for None at interpreter shutdown:
+# readers need no None guard.
 cdef object _OIDC_PROVIDERS = {}
 cdef size_t _oidc_last_provider_id = 0
 
@@ -49,7 +53,7 @@ def _debug_oidc_registry_size():
     removes an entry; a stale one would be a slow leak that no weakref
     assertion catches.
     """
-    return 0 if _OIDC_PROVIDERS is None else len(_OIDC_PROVIDERS)
+    return len(_OIDC_PROVIDERS)
 
 
 cdef inline object _oidc_text(const char* buf, size_t length):
@@ -236,8 +240,12 @@ cdef void _oidc_event_dispatch(
                     event.verification_uri_complete,
                     event.verification_uri_complete_len),
                 # The bounded values the native polling loop actually uses,
-                # matching Java's complete device challenge.
-                'expires_in': <uint64_t>event.expires_in_seconds,
+                # matching Java's complete device challenge. Each is passed with
+                # the C type the event declares -- `expires_in` a double (as
+                # `on_waiting` and `on_success` also pass it), `interval` a
+                # uint64 -- rather than narrowed here: a C double->unsigned cast
+                # is in range only because native happens to clamp the lifetime.
+                'expires_in': event.expires_in_seconds,
                 'interval': event.interval_seconds,
                 # This is the only native-vetted actionable URL. Built-in
                 # renderers prefer it for links and QR codes.
@@ -608,7 +616,6 @@ cdef class OidcDeviceAuth:
         cdef bytes encoded
         cdef uint64_t timeout_ms
         cdef PyThreadState* gs = NULL
-        cdef object event_user_data
         from questdb.auth._errors import OidcConfigError
         from questdb.auth._render import (
             detect_interactive, in_ipython_kernel, make_renderer)
@@ -917,8 +924,7 @@ cdef class OidcDeviceAuth:
         # GIL, whereas that callback may not. A stale entry would otherwise
         # keep a dead weakref indefinitely.
         if self._provider_id != 0:
-            if _OIDC_PROVIDERS is not None:
-                _OIDC_PROVIDERS.pop(self._provider_id, None)
+            _OIDC_PROVIDERS.pop(self._provider_id, None)
             self._provider_id = 0
         if self._raw != NULL:
             questdb_oidc_auth_free(self._raw)
@@ -933,11 +939,7 @@ cdef object _oidc_provider_from_user_data(void* user_data):
     missing key or a dead weakref both mean the provider is gone, which is not
     an error: the flow is simply no longer observed.
     """
-    cdef object registry = _OIDC_PROVIDERS
-    if registry is None:
-        # Module globals are cleared at interpreter shutdown.
-        return None
-    ref = registry.get(<size_t>user_data)
+    ref = _OIDC_PROVIDERS.get(<size_t>user_data)
     if ref is None:
         return None
     return ref()

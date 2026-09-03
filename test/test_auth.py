@@ -89,13 +89,14 @@ def make_discovered_auth(server, **kwargs):
 def _live_weakref_count():
     """Live ``weakref.ref`` objects, after draining pending finalizers.
 
-    Each ``OidcDeviceAuth`` hands the native event handler a Py_INCREF'd
-    weakref to the provider; the native release callback must Py_DECREF it
-    exactly once. A leaked one stays alive (held by the native +1) and, since
-    ``weakref.ref`` instances are cyclic-GC tracked, shows up here. Collect
-    until the count settles rather than a fixed number of passes: CPython
-    stabilises in one or two, while PyPy stages cpyext finalization across
-    several, and a fixed count could undercount live-then-freed objects there.
+    Each ``OidcDeviceAuth`` puts a weakref to itself in the module-global
+    ``_OIDC_PROVIDERS`` registry (oidc.pxi), keyed by the opaque integer native
+    holds as ``user_data``; ``__dealloc__`` is the only thing that pops it. A
+    stranded entry keeps its weakref alive and, since ``weakref.ref`` instances
+    are cyclic-GC tracked, shows up here. Collect until the count settles
+    rather than a fixed number of passes: CPython stabilises in one or two,
+    while PyPy stages cpyext finalization across several, and a fixed count
+    could undercount live-then-freed objects there.
     """
     prev = None
     for _ in range(30):
@@ -576,18 +577,18 @@ class NativeOidcTest(unittest.TestCase):
         self.assertIsNone(renderer_ref())
         self.assertIsNone(auth_ref())
 
-    # A missing release leaks one weakref deterministically per construction,
-    # so a small count cleanly separates 0 (correct) from N (leaking); native
+    # A missed pop strands one weakref deterministically per construction, so a
+    # small count cleanly separates 0 (correct) from N (leaking); native
     # build() is ~100ms, so keep N modest. Threshold well below N, above any
     # PyPy staged-collection transient.
     _LEAK_ITERS = 20
 
-    def test_event_handler_weakref_released_on_success(self):
-        # Each OidcDeviceAuth installs a native event handler that owns a
-        # Py_INCREF'd weakref to the provider (oidc.pxi _finish_builder). When
-        # the provider is dropped, questdb_oidc_auth_free must fire the native
-        # release callback exactly once, Py_DECREF'ing that weakref. A missing
-        # release leaks one weakref object per construction.
+    def test_registry_weakref_released_on_success(self):
+        # Each OidcDeviceAuth registers a weakref to itself in _OIDC_PROVIDERS
+        # (oidc.pxi _finish_builder) under an integer key native keeps as
+        # user_data. Native owns no Python reference, so nothing but
+        # __dealloc__ pops the entry -- and a missed pop strands one weakref
+        # object per construction in a module-global dict.
         make_auth(renderer=Renderer())  # warm one-time module state
         before = _live_weakref_count()
         for _ in range(self._LEAK_ITERS):
@@ -596,8 +597,8 @@ class NativeOidcTest(unittest.TestCase):
         self.assertLess(
             after - before, 10,
             f'live weakref objects grew by {after - before} over '
-            f'{self._LEAK_ITERS} constructions; the native event-handler '
-            f'weakref is leaking')
+            f'{self._LEAK_ITERS} constructions; the provider registry is '
+            f'stranding weakrefs')
 
     # A path that reaches native build() rather than a Python pre-check: the
     # setter only stores it, and build() is what opens it. Anything rejected
@@ -671,23 +672,22 @@ class NativeOidcTest(unittest.TestCase):
 
     @unittest.skipIf(
         platform.python_implementation() == 'PyPy',
-        'Exact weakref bookkeeping (getweakrefcount over a native '
+        "Exact weakref bookkeeping (getweakrefcount over the binding's "
         'PyWeakref_NewRef) is CPython refcount semantics; PyPy cpyext does not '
         'guarantee the same count.')
-    def test_provider_holds_exactly_one_native_weakref(self):
-        # Directly observe the native machinery: the event handler owns exactly
-        # one weakref to the provider (event_user_data, oidc.pxi
-        # _finish_builder), Py_INCREF'd and handed to the native side. Nothing
-        # else references the provider weakly, so getweakrefcount sees exactly
-        # that one -- the +1 the release callback must later Py_DECREF.
+    def test_provider_holds_exactly_one_registry_weakref(self):
+        # Directly observe the registry bookkeeping: _finish_builder stores
+        # exactly one weakref to the provider in _OIDC_PROVIDERS (oidc.pxi).
+        # Nothing else references the provider weakly, so getweakrefcount sees
+        # exactly that one -- the entry __dealloc__ must later pop.
         auth = make_auth(renderer=Renderer())
         self.assertEqual(weakref.getweakrefcount(auth), 1)
-        (native_ref,) = weakref.getweakrefs(auth)  # exactly one; unpack asserts it
-        self.assertIs(native_ref(), auth)
+        (registry_ref,) = weakref.getweakrefs(auth)  # exactly one; unpack asserts it
+        self.assertIs(registry_ref(), auth)
         # A second provider gets its own independent weakref, not a shared one.
         other = make_auth(renderer=Renderer())
         self.assertEqual(weakref.getweakrefcount(other), 1)
-        self.assertIsNot(weakref.getweakrefs(other)[0], native_ref)
+        self.assertIsNot(weakref.getweakrefs(other)[0], registry_ref)
 
 
 class NativeOidcIntegrationTest(unittest.TestCase):
@@ -1293,9 +1293,9 @@ class NativeOidcIntegrationTest(unittest.TestCase):
     def test_full_lifecycle_loop_does_not_leak_weakrefs(self):
         # Construct -> sign_in -> token -> drop, repeatedly, against the mock
         # IdP. Exercises the native token acquisition/free path
-        # (questdb_oidc_token_free) and the event-handler weakref release across
-        # the FULL lifecycle, not just bare construction; a leaked
-        # event_user_data weakref would accumulate.
+        # (questdb_oidc_token_free) and the _OIDC_PROVIDERS pop across the FULL
+        # lifecycle, not just bare construction; a stranded registry weakref
+        # would accumulate.
         with OidcTestServer() as server:
             make_discovered_auth(server).sign_in()  # warm
             before = _live_weakref_count()
@@ -1308,7 +1308,7 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertLess(
             after - before, 10,
             f'live weakref objects grew by {after - before} over 12 '
-            f'sign-in/token lifecycles; a native weakref is leaking')
+            f'sign-in/token lifecycles; a registry weakref is leaking')
 
 
 class NativeTransportAttachmentTest(unittest.TestCase):

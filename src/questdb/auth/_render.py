@@ -661,13 +661,13 @@ class Renderer:
         ``resp`` describes the device-authorization challenge. Its text remains
         untrusted even though the native layer makes it display-safe; the
         verification URI and user code live under ``verification_uri`` /
-        ``verification_uri_complete`` / ``user_code``. ``expires_in`` and
-        ``interval`` are the bounded device-code lifetime and initial polling
-        interval, in seconds, used by the native polling loop. Native events
-        also carry ``browser_target`` — the single URL the native side has
-        vetted for opening / linkifying / QR-encoding; the built-in renderers
-        prefer it, and a custom renderer should use it (rather than the raw
-        ``verification_uri``) as the actionable target.
+        ``verification_uri_complete`` / ``user_code``. ``expires_in`` (a
+        ``float``) and ``interval`` (an ``int``) are the bounded device-code
+        lifetime and initial polling interval, in seconds, used by the native
+        polling loop. Native events also carry ``browser_target`` — the single
+        URL the native side has vetted for opening / linkifying / QR-encoding;
+        the built-in renderers prefer it, and a custom renderer should use it
+        (rather than the raw ``verification_uri``) as the actionable target.
         """
 
     def on_waiting(self, seconds_left: float) -> None:

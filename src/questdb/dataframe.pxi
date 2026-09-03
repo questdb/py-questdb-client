@@ -109,11 +109,10 @@ cdef enum col_target_t:
     col_target_column_i32 = 13
     col_target_column_f32 = 14
     col_target_column_uuid = 15
-    col_target_column_long256 = 16
-    col_target_column_ipv4 = 17
-    col_target_column_binary = 18
+    col_target_column_ipv4 = 16
+    col_target_column_binary = 17
     # Generic Arrow field passthrough to the Rust importer; column-QWP only.
-    col_target_column_arrow = 19
+    col_target_column_arrow = 18
 
 
 cdef dict _TARGET_NAMES = {
@@ -133,7 +132,6 @@ cdef dict _TARGET_NAMES = {
     col_target_t.col_target_column_i32: "int",
     col_target_t.col_target_column_f32: "float32",
     col_target_t.col_target_column_uuid: "uuid",
-    col_target_t.col_target_column_long256: "long256",
     col_target_t.col_target_column_ipv4: "ipv4",
     col_target_t.col_target_column_binary: "binary",
     col_target_t.col_target_column_arrow: "arrow",
@@ -404,9 +402,9 @@ cdef tuple _FIELD_TARGETS_QWP = (
     col_target_t.col_target_column_arr_f64,
     col_target_t.col_target_column_decimal,
     # QuestDB-extension types whose Arrow source is unique
-    # (`arrow.uuid`-labeled FixedSizeBinary(16)). LONG256 is absent:
-    # its claim is field metadata, which pyarrow drops when it exports a
-    # single pandas column. Claiming it belongs to the Rust Arrow path via
+    # (`arrow.uuid`-labeled FixedSizeBinary(16)). There is no LONG256 target
+    # at all: its claim is field metadata, which pyarrow drops when it exports
+    # a single pandas column. Claiming it belongs to the Rust Arrow path via
     # `schema_overrides`.
     col_target_t.col_target_column_uuid,
     col_target_t.col_target_column_binary,
