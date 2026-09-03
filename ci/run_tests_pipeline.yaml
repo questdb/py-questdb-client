@@ -1,5 +1,12 @@
 trigger: none
 
+variables:
+  # Supplies GIT_GITHUB_TOKEN, which templates/clone_questdb.yaml hands to gh so
+  # its questdb clone and submodule fetch do not go out to github.com
+  # anonymously -- see that file. Only the vsQuestDbMaster leg uses it; the
+  # other jobs run no git of their own.
+  - group: github-public-read
+
 stages:
   - stage: BuildAndTest
     displayName: "Building and testing"
