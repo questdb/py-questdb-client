@@ -150,6 +150,8 @@ The deprecated 4.x compatibility shim. New code imports from ``questdb``.
 questdb.auth
 ============
 
+.. py:module:: questdb.auth
+
 See the :ref:`oidc_auth` guide for an overview.
 
 .. autoclass:: questdb.auth.OidcDeviceAuth
