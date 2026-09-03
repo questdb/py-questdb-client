@@ -449,12 +449,18 @@ cdef inline object c_err_to_fields(questdb_error* err):
 cdef inline object c_err_to_py(line_sender_error* err):
     """Build the Python exception for a C error, which will be freed.
 
-    Returns an ``OidcError`` (from ``questdb.auth``) when the native error
-    carries an OIDC view -- reachable only on an ``oidc_auth`` transport --
-    otherwise a plain ``QuestDBError`` subclass. ``OidcError`` is itself a
-    ``QuestDBError`` subclass, so ``except QuestDBError`` still catches an OIDC
-    failure; catch ``OidcError`` (or a typed subclass) for auth-specific
-    handling.
+    Returns an ``OidcError`` (from ``questdb.auth``) when the native error has
+    an OIDC failure anywhere in its causal chain -- reachable only on an
+    ``oidc_auth`` transport -- otherwise a plain ``QuestDBError`` subclass.
+
+    Note the native predicate is "caused by", not "is": a transport that
+    re-classifies an error keeps the auth payload attached, so a flush or
+    failover failure whose root cause was a token refresh also lands here, with
+    the transport's own ``code`` and message preserved by
+    ``_oidc_err_to_py``. That is why ``OidcError`` must stay a ``QuestDBError``
+    subclass -- ``except QuestDBError`` keeps catching every such error --
+    while ``except OidcError`` (or a typed subclass) additionally selects the
+    ones an auth failure is behind.
     """
     cdef questdb_oidc_error_view oidc_view
     if err != NULL:
@@ -472,18 +478,34 @@ cdef inline object c_err_to_py(line_sender_error* err):
 cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     """Build the Python exception for a C error, which will be freed.
 
-    Like ``c_err_to_py`` but formats the ``QuestDBError`` message through
-    ``fmt``. A native error carrying an OIDC view (only on an ``oidc_auth``
-    transport) is returned as an unformatted ``OidcError`` -- ``fmt`` is a
-    flush/transport hint that does not apply to an auth error. ``OidcError``
-    is a ``QuestDBError`` subclass, so ``except QuestDBError`` catches it.
+    Like ``c_err_to_py`` but formats the message through ``fmt`` -- including
+    on the OIDC branch. ``questdb_error_oidc_get_view`` reports an OIDC failure
+    anywhere in the error's *causal chain*, not that the error is one: native
+    keeps the auth payload attached when a transport re-classifies an error on
+    its way out, so a failure whose root cause was a token refresh answers true
+    while its code and message remain the transport's. ``fmt`` is that
+    transport's context, so it applies; the caller cannot tell a pure auth
+    failure from a transport failure an auth error caused, and dropping the
+    context is only ever wrong for the second.
+
+    The OIDC branch is currently unreachable and the formatting is defensive:
+    the sole caller of this function is the TCP flush path, and native rejects
+    ``oidc_auth`` on TCP ("Bearer token providers are supported only for
+    ILP/HTTP(S) and QWP/WebSocket"). It is written to be correct if either side
+    of that changes, rather than left as a trap.
     """
+    cdef object oidc_exc
     cdef questdb_oidc_error_view oidc_view
     if err != NULL:
         memset(&oidc_view, 0, sizeof(questdb_oidc_error_view))
         oidc_view.struct_size = sizeof(questdb_oidc_error_view)
         if questdb_error_oidc_get_view(err, &oidc_view):
-            return _oidc_err_to_py(err)
+            oidc_exc = _oidc_err_to_py(err)
+            # Re-frame in place: the class and every typed attribute
+            # (.status / .retry_after / .error / .error_description / .code)
+            # must survive, and ``args`` is what ``Exception.__str__`` reads.
+            oidc_exc.args = (fmt.format(str(oidc_exc)),)
+            return oidc_exc
     cdef object tup = c_err_to_fields(err)
     if tup[0] == QuestDBErrorCode.ServerRejection:
         return QuestDBServerRejectionError(
@@ -5979,12 +6001,25 @@ cdef void_int _direct_dataframe_run(
             # A drained one-shot stream has no rows left to replay: retrying
             # would report success while writing nothing.
             if nonreplayable_consumed:
-                raise QuestDBError(
-                    exc.code,
+                # Re-raise the original exception with an appended note rather
+                # than rebuilding it as a bare QuestDBError. Rebuilding dropped
+                # the class: an OIDC token failure reaching here is an
+                # OidcNetworkError / OidcDeviceFlowError / OidcTimeoutError
+                # (each carries a retryable code by design, so it clears both
+                # the terminal-OIDC gate above and the code check below), and
+                # flattening it stopped `except OidcError` from matching and
+                # discarded .status / .retry_after / .error /
+                # .error_description -- the very attributes c_err_to_py
+                # promises are catchable. `args` is what Exception.__str__
+                # reads, and every field lives on the instance, so mutating it
+                # preserves code, in_doubt and sender_error for free. The
+                # f-string is evaluated before the assignment, so it still
+                # interpolates the original message.
+                exc.args = (
                     f'{exc} The input stream was already partially '
                     f'consumed and cannot be replayed; retry with a '
-                    f'fresh reader.',
-                    in_doubt=exc.in_doubt) from exc
+                    f'fresh reader.',)
+                raise
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 raise
