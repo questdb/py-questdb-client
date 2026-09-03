@@ -697,20 +697,33 @@ cdef class OidcDeviceAuth:
         # owns the renderer, keeping provider/renderer cycles fully visible to
         # Python's cyclic GC. Attached transports retain the provider.
         _OIDC_PROVIDERS[self._provider_id] = PyWeakref_NewRef(self, None)
-        if not questdb_oidc_builder_event_handler(
-                builder,
-                _oidc_event_trampoline,
-                <void*>self._provider_id,
-                _oidc_user_data_release_trampoline,
-                &err):
+        # Registered <=> built. Every failure after the insert above must drop
+        # the entry, not just the event-handler one: `__dealloc__` pops only the
+        # *current* `_provider_id`, and the already-initialized guard at the top
+        # of this function keys on `_raw != NULL`, which a failed build leaves
+        # NULL. So a caller that retries `__init__` on the same object -- a
+        # subclass catching OidcConfigError and calling `super().__init__()`
+        # again with a corrected endpoint, say -- would overwrite
+        # `_provider_id` and strand the previous key as a dead weakref in a
+        # module-global dict for the life of the process, once per retry.
+        # `_debug_oidc_registry_size` exists to catch exactly this.
+        try:
+            if not questdb_oidc_builder_event_handler(
+                    builder,
+                    _oidc_event_trampoline,
+                    <void*>self._provider_id,
+                    _oidc_user_data_release_trampoline,
+                    &err):
+                raise _oidc_err_to_py(err)
+            _ensure_doesnt_have_gil(&gs)
+            self._raw = questdb_oidc_builder_build(builder, &err)
+            _ensure_has_gil(&gs)
+            if self._raw == NULL:
+                raise _oidc_err_to_py(err)
+        except:
             _OIDC_PROVIDERS.pop(self._provider_id, None)
             self._provider_id = 0
-            raise _oidc_err_to_py(err)
-        _ensure_doesnt_have_gil(&gs)
-        self._raw = questdb_oidc_builder_build(builder, &err)
-        _ensure_has_gil(&gs)
-        if self._raw == NULL:
-            raise _oidc_err_to_py(err)
+            raise
 
     def sign_in(self):
         """Run interactive sign-in if no cached or refreshable token exists.

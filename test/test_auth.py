@@ -599,31 +599,75 @@ class NativeOidcTest(unittest.TestCase):
             f'{self._LEAK_ITERS} constructions; the native event-handler '
             f'weakref is leaking')
 
-    def test_event_handler_weakref_released_on_failed_build(self):
-        # An empty client_id passes the native string setters (they only
-        # validate UTF-8) but fails the native build() -- which runs AFTER the
-        # event handler is installed. The Py_INCREF'd weakref is then owned by
-        # the builder, and `finally: questdb_oidc_builder_free` (oidc.pxi
-        # __init__) must fire the release callback so it is not leaked once per
-        # failed construction. Confirms the no-auth-built ownership path.
-        def construct_and_fail():
-            with self.assertRaises(OidcConfigError):
-                OidcDeviceAuth(
-                    '',  # empty client_id: stored by the setter, rejected by build()
-                    'https://idp.example/device',
-                    'https://idp.example/token',
-                    interactive=False, open_browser=False,
-                    renderer=Renderer())
-        construct_and_fail()  # warm
-        before = _live_weakref_count()
+    # A path that reaches native build() rather than a Python pre-check: the
+    # setter only stores it, and build() is what opens it. Anything rejected
+    # earlier (an empty client_id, say, which `_oidc_required_utf8` refuses)
+    # never reaches the registry insert and so cannot exercise this at all.
+    _UNREADABLE_CA_BUNDLE = '/nonexistent/questdb-oidc-review/ca.pem'
+
+    def _construct_and_fail_in_build(self, target=None):
+        """Drive a native build() failure, optionally re-``__init__``-ing
+        ``target``. Asserts the failure really came from build()."""
+        args = ('questdb', 'https://idp.example/device',
+                'https://idp.example/token')
+        kwargs = dict(interactive=False, open_browser=False,
+                      renderer=Renderer(),
+                      ca_bundle=self._UNREADABLE_CA_BUNDLE)
+        with self.assertRaises(OidcError) as caught:
+            if target is None:
+                OidcDeviceAuth(*args, **kwargs)
+            else:
+                target.__init__(*args, **kwargs)
+        # Pin the trigger: if a future change starts rejecting `ca_bundle`
+        # before the builder is populated, this test would silently stop
+        # covering the post-registration path.
+        self.assertIn('CA bundle', str(caught.exception))
+
+    def test_registry_entry_is_dropped_the_moment_build_fails(self):
+        # The invariant is *registered <=> built*, and it has to hold at the
+        # moment of failure -- not merely by the time the object is collected.
+        # Asserting it after the failed object is dropped would prove nothing:
+        # `__dealloc__` pops the current `_provider_id` either way, so such a
+        # test passes with or without the unwind. Holding the half-built object
+        # alive is what makes this discriminate.
+        self._construct_and_fail_in_build()  # warm one-time module state
+        gc.collect()
+        baseline = _debug_oidc_registry_size()
+        auth = OidcDeviceAuth.__new__(OidcDeviceAuth)
+        self._construct_and_fail_in_build(target=auth)
+        self.assertEqual(
+            _debug_oidc_registry_size(), baseline,
+            'a failed native build() left its `_OIDC_PROVIDERS` entry behind; '
+            'the registry must not hold an entry for a provider that was '
+            'never built')
+        del auth
+        gc.collect()
+        self.assertEqual(_debug_oidc_registry_size(), baseline)
+
+    def test_registry_drains_when_init_is_retried_after_failed_build(self):
+        # The leak that survives `__dealloc__`: a failed build leaves `_raw`
+        # NULL, so the already-initialized guard does not fire on a retry, and
+        # a second `__init__` on the same object overwrites `_provider_id`.
+        # Without the unwind, the first key is stranded as a dead weakref in a
+        # module-global dict for the life of the process -- once per retry, and
+        # invisible to any weakref assertion.
+        gc.collect()
+        baseline = _debug_oidc_registry_size()
         for _ in range(self._LEAK_ITERS):
-            construct_and_fail()
-        after = _live_weakref_count()
-        self.assertLess(
-            after - before, 10,
-            f'live weakref objects grew by {after - before} over '
-            f'{self._LEAK_ITERS} failed constructions; the native '
-            f'event-handler weakref is leaking on the failed-build path')
+            auth = OidcDeviceAuth.__new__(OidcDeviceAuth)
+            self._construct_and_fail_in_build(target=auth)
+            # The retry succeeds, so the object ends up live and built.
+            auth.__init__(
+                'questdb', 'https://idp.example/device',
+                'https://idp.example/token',
+                interactive=False, open_browser=False, renderer=Renderer())
+            self.assertEqual(_debug_oidc_registry_size(), baseline + 1)
+            del auth
+            gc.collect()
+        self.assertEqual(
+            _debug_oidc_registry_size(), baseline,
+            f'the provider registry grew over {self._LEAK_ITERS} '
+            f'failed-then-retried initializations')
 
     @unittest.skipIf(
         platform.python_implementation() == 'PyPy',
@@ -1415,6 +1459,35 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 oidc_auth=object())
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_causally_oidc_error_keeps_the_transports_own_code(self):
+        # `questdb_error_oidc_get_view` reports an OIDC failure anywhere in the
+        # error's *causal chain*, not that the error is one. This pins that
+        # contract from the Python side, because `c_err_to_py` keys the
+        # exception type on it for every native error in the extension.
+        #
+        # The provider's InteractionRequired is re-classified to a retryable
+        # SocketError on its way out (`classify_provider_error` exempts only
+        # Config and Cancelled), so the outer code is the transport's while the
+        # OIDC payload rides along. Two things must hold at once: the typed
+        # class is available for auth-specific handling, and the transport's
+        # own classification is not overwritten by it -- retry logic keying on
+        # `.code` has to keep seeing SocketError, which is the whole reason
+        # native re-classifies.
+        auth = make_auth()
+        with questdb.Sender(
+                questdb.Protocol.Http, '127.0.0.1', 9000,
+                oidc_auth=auth, protocol_version=2) as sender:
+            sender.row('t', columns={'v': 1}, at=questdb.ServerTimestamp)
+            with self.assertRaises(OidcError) as caught:
+                sender.flush()
+        self.assertIsInstance(caught.exception, OidcInteractionRequired)
+        self.assertIs(caught.exception.code,
+                      questdb.QuestDBErrorCode.SocketError)
+        # And it stays catchable as the ordinary error type, which is what
+        # keeps every existing `except QuestDBError` handler working once a
+        # sender is given `oidc_auth=`.
+        self.assertIsInstance(caught.exception, questdb.QuestDBError)
+
     def test_dataframe_auto_flush_preserves_oidc_error(self):
         auth = make_auth()
         with questdb.Sender(
