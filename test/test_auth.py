@@ -182,10 +182,9 @@ class NativeOidcTest(unittest.TestCase):
         # Google Colab (google.colab._shell.Shell) and Spyder
         # (spyder_kernels.console.shell.SpyderShell) subclass
         # ZMQInteractiveShell, so an exact class-name test reported False for
-        # them: detect_interactive() then fell through to the isatty() check,
-        # which is False in any ZMQ kernel, and sign-in was refused outright
-        # before a device code was ever requested. The bundled tests missed it
-        # because they fake the shell as a name-only class with no base.
+        # them and the kernel's own stdin flag was never consulted. The bundled
+        # tests missed it because they fake the shell as a name-only class with
+        # no base.
         zmq_base = type('ZMQInteractiveShell', (), {})
         for name in ('Shell', 'SpyderShell'):
             with self.subTest(shell=name):
@@ -194,7 +193,7 @@ class NativeOidcTest(unittest.TestCase):
                 ipython.get_ipython = lambda shell=shell: shell
                 with mock.patch.dict(sys.modules, {'IPython': ipython}):
                     self.assertTrue(in_ipython_kernel())
-                    # ...so a ZMQ kernel is never mistaken for a bare TTY.
+                    # A real frontend allows stdin, so these stay interactive.
                     self.assertTrue(_render.detect_interactive())
 
     def test_live_kernel_attribute_identifies_a_kernel_shell(self):
@@ -207,11 +206,15 @@ class NativeOidcTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {'IPython': ipython}):
             self.assertTrue(in_ipython_kernel())
 
-    def test_interactivity_follows_stderr_not_stdout(self):
-        # TerminalRenderer writes the prompt to stderr, and so does the native
-        # auto-detect this overrides. Gating on stdout refused sign-in for
-        # `python job.py > results.csv` at a real terminal, where the prompt
-        # would have been perfectly visible.
+    def test_a_missing_tty_does_not_refuse_sign_in(self):
+        # detect_interactive() used to end in `sys.stderr.isatty()`, which
+        # refuses on the absence of evidence rather than evidence of absence:
+        # `prog 2>&1 | tee log` at a real terminal, a process supervisor, or an
+        # IDE run configuration all capture stderr and still show it to a human,
+        # and all were turned away from a sign-in that works -- with
+        # `interactive=True` only discoverable after the refusal. No stream
+        # combination is non-interactive any more; the Java client has no such
+        # detection either.
         ipython = types.ModuleType('IPython')
         ipython.get_ipython = lambda: None
 
@@ -222,26 +225,40 @@ class NativeOidcTest(unittest.TestCase):
             def isatty(self):
                 return self._tty
 
-        cases = [
-            # (stdout, stderr, expected)
-            (False, True, True),   # redirected stdout, terminal stderr
-            (True, False, False),  # redirected stderr: prompt goes nowhere
-            (True, True, True),
-            (False, False, False),
-        ]
-        for out_tty, err_tty, expected in cases:
+        for out_tty, err_tty in [(False, True), (True, False),
+                                 (True, True), (False, False)]:
             with self.subTest(stdout=out_tty, stderr=err_tty):
                 with mock.patch.dict(sys.modules, {'IPython': ipython}), \
                         mock.patch.object(_render.sys, 'stdout', Stream(out_tty)), \
                         mock.patch.object(_render.sys, 'stderr', Stream(err_tty)):
-                    self.assertEqual(_render.detect_interactive(), expected)
+                    self.assertTrue(_render.detect_interactive())
+
+    def test_a_broken_stderr_does_not_refuse_sign_in(self):
+        # The old isatty() call was wrapped in try/except returning False, so a
+        # stream whose isatty() raises (or a None stderr under pythonw) also
+        # refused. Nothing reads the stream to decide any more.
+        ipython = types.ModuleType('IPython')
+        ipython.get_ipython = lambda: None
+
+        class Exploding:
+            def isatty(self):
+                raise OSError('detached')
+
+        for stderr in (Exploding(), None):
+            with self.subTest(stderr=type(stderr).__name__):
+                with mock.patch.dict(sys.modules, {'IPython': ipython}), \
+                        mock.patch.object(_render.sys, 'stderr', stderr):
+                    self.assertTrue(_render.detect_interactive())
 
     def test_notebook_executor_without_stdin_is_non_interactive(self):
         # A notebook executor (papermill / nbclient / nbconvert --execute) runs a
         # real ZMQ kernel -- in_ipython_kernel() is True -- but with
-        # allow_stdin=False: no human can authorize. detect_interactive() must
-        # then be False so sign-in fails fast with OidcInteractionRequired instead
-        # of polling to the device-code deadline (a silent CI/notebook hang).
+        # allow_stdin=False: the frontend is stating at protocol level that no
+        # human can authorize. This is the ONLY signal that now makes
+        # detect_interactive() False, and unlike a TTY test it has no
+        # false-refusal mode -- so sign-in fails fast with
+        # OidcInteractionRequired instead of polling to the device-code deadline
+        # with a prompt rendered into an output nobody will open.
         for allow, expected in [(False, False), (True, True), (None, True)]:
             with self.subTest(allow_stdin=allow):
                 ipython = types.ModuleType('IPython')

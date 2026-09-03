@@ -456,10 +456,15 @@ cdef class OidcDeviceAuth:
           verification URL. Defaults to ``True``, and is suppressed
           automatically inside a Jupyter kernel, where the browser would open on
           the wrong machine.
-        * ``interactive`` — whether a prompt may be displayed at all. ``None``
-          (the default) detects it from the environment; ``False`` makes
-          :meth:`sign_in` fail rather than prompt, which is what a headless
-          service wants.
+        * ``interactive`` — whether :meth:`sign_in` may prompt at all.
+          ``False`` makes it fail immediately with
+          :class:`~questdb.auth.OidcInteractionRequired` rather than print a
+          device code nobody will read and poll until it expires, which is what
+          a headless service or a CI job wants. ``None`` (the default) prompts,
+          except in a notebook executed headlessly (papermill / ``nbclient`` /
+          ``nbconvert --execute``), whose kernel reports that no human can
+          answer. There is no terminal detection: a missing TTY is not evidence
+          of a missing human.
         * ``qr`` — also render the verification URL as a QR code, for signing in
           from a phone. Ignored when a custom ``renderer`` is supplied.
         * ``renderer`` — a :class:`~questdb.auth.Renderer` presenting the prompt.

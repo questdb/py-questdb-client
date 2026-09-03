@@ -100,28 +100,30 @@ def _kernel_allows_stdin() -> bool:
 
 def detect_interactive() -> bool:
     """
-    Best-effort detection of whether a human can complete the sign-in.
+    Whether :meth:`~questdb.auth.OidcDeviceAuth.sign_in` may prompt.
 
-    Interactive when stderr is a TTY — the stream the prompt is written to —
-    or inside an IPython kernel whose frontend accepts stdin. A notebook executor (papermill / ``nbclient`` /
-    ``nbconvert --execute``) runs a real kernel — so :func:`in_ipython_kernel`
-    is ``True`` — but with no human to authorize; it executes with
-    ``allow_stdin=False``, which :func:`_kernel_allows_stdin` detects, so the
-    device flow fails fast in those contexts instead of hanging until the
-    device code expires.
+    Only *positive evidence* that nobody can answer makes this ``False``. A
+    notebook executor — papermill, ``nbclient``, ``jupyter nbconvert
+    --execute`` — runs a real kernel, so :func:`in_ipython_kernel` is ``True``,
+    but issues every request with ``allow_stdin=False``. That is the frontend
+    stating at protocol level that no human is present, not a guess, and
+    :func:`_kernel_allows_stdin` reads it: the device flow then fails fast
+    instead of polling to the device-code deadline with a prompt rendered into
+    an ``.ipynb`` output nobody will open.
+
+    Everything else is interactive. There is deliberately no TTY check: a
+    missing TTY is not evidence of a missing human. ``prog 2>&1 | tee log`` at a
+    real terminal, a process supervisor, an IDE run configuration — all capture
+    stderr and still show it to someone, and all were refused a sign-in that
+    works perfectly, with the opt-out only discoverable after the refusal. The
+    Java client has no such detection either, and ``sign_in()`` is an explicit,
+    blocking, interactive-by-name call: honour it, and let the device code's own
+    lifetime bound a flow nobody answers. Pass ``interactive=False`` to opt in to
+    failing fast.
     """
     if in_ipython_kernel():
         return _kernel_allows_stdin()
-    try:
-        # stderr, not stdout: that is where TerminalRenderer writes the prompt,
-        # and what the native auto-detect this overrides checks. Gating on
-        # stdout refused sign-in for `python job.py > results.csv` run at a real
-        # terminal, where the prompt would have been perfectly visible. stdin is
-        # not required either -- the user authorizes in a browser, and nothing
-        # here reads from it.
-        return bool(sys.stderr and sys.stderr.isatty())
-    except Exception:
-        return False
+    return True
 
 
 def _verification_uri(resp: Dict[str, Any]) -> str:

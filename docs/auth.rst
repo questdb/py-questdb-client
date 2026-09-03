@@ -206,10 +206,18 @@ The custom renderer's prompt dictionary includes ``user_code``, both
 verification URLs, ``expires_in`` and ``interval`` in seconds, plus the vetted
 ``browser_target``.
 
-When no interactive terminal/frontend is available, ``sign_in()`` raises
-:class:`~questdb.auth.OidcInteractionRequired` instead of waiting indefinitely.
-Use a QuestDB service-account token or OAuth client-credentials flow for cron,
-CI, and unattended notebook execution.
+``sign_in()`` prompts by default, wherever it is called from: a missing TTY is
+not evidence of a missing human, so there is no terminal detection to refuse a
+sign-in that would have worked. A flow nobody answers is bounded by the device
+code's own lifetime.
+
+The one exception is a notebook executed headlessly (papermill, ``nbclient``,
+``jupyter nbconvert --execute``), whose kernel states that it accepts no input;
+there ``sign_in()`` raises :class:`~questdb.auth.OidcInteractionRequired`
+immediately rather than rendering a prompt into an output nobody will open.
+Pass ``interactive=False`` to get that fail-fast behaviour anywhere else, such
+as cron or CI. For unattended contexts generally, prefer a QuestDB
+service-account token or the OAuth client-credentials flow.
 
 Security notes
 ==============
