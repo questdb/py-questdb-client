@@ -109,6 +109,11 @@ def main(args):
     try_pip_install('pyarrow')
     try_pip_install('polars')
     try_pip_install('psutil')
+    # Optional OIDC extra. Without it `_qr_ascii` / `_qr_data_uri` return None,
+    # so every `qr=True` path in the renderers -- and every test that exercises
+    # one -- silently does nothing. Installing it here is what makes that
+    # coverage real rather than notional.
+    try_pip_install('qrcode')
 
     on_linux_is_glibc = (
             (not platform.system() == 'Linux') or

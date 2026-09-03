@@ -118,8 +118,15 @@ class OidcTestServer:
             'headers': {key.lower(): value
                         for key, value in handler.headers.items()},
             'body': body,
+            # Only the OAuth endpoints send form-encoded text. This fixture
+            # also serves `POST /write`, and it advertises protocol versions
+            # 1-3, so an ILP body arrives binary-encoded -- a float column is
+            # enough. Decoding it strictly killed the handler thread with
+            # UnicodeDecodeError, which the client saw as a bare
+            # "Peer disconnected" with nothing recorded, and the one existing
+            # /write test escaped only by sending an integer.
             'form': urllib.parse.parse_qs(
-                body.decode('utf-8'), keep_blank_values=True),
+                body.decode('utf-8', 'replace'), keep_blank_values=True),
         }
         with self._lock:
             self._requests.append(request)

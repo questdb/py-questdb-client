@@ -831,7 +831,13 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         renderer = WaitingRenderer()
         result = []
         pending = (400, {'error': 'authorization_pending'}, None)
-        with OidcTestServer(device_token_response=pending) as server:
+        # Short device lifetime, per the fixture's own warning: this asserts a
+        # cancellation, so if that ever regresses the sign-in must fail fast
+        # rather than block for the 600s default -- which the CI watchdog would
+        # re-arm past, turning a test failure into a stall. Both sibling
+        # cancellation tests already pass it.
+        with OidcTestServer(
+                device_token_response=pending, device_expires_in=20) as server:
             auth = make_discovered_auth(server, renderer=renderer)
 
             def sign_in():
@@ -1571,6 +1577,7 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         # The cause must carry the actionable detail, not just a code.
         self.assertIn('sign_in', event.cause_msg)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_pool_dataframe_fails_fast_when_sign_in_is_required(self):
         # Regression: native classifies an OIDC token failure as a retryable
         # SocketError so a transport's background drainer keeps queued frames
@@ -1928,49 +1935,90 @@ class RenderSanitizerTest(unittest.TestCase):
             'https://idp.example/v')
 
     # -- a native refusal is final: nothing may re-promote the display text --
+    #
+    # Block-drawing glyphs are how a terminal QR is emitted, so their absence
+    # is what "encoded no QR" actually means.
+    _QR_GLYPHS = '█▀▄'
+
     def _refused_prompt(self):
-        # Native rejects (never truncates) an actionable URL past its
-        # MAX_DISPLAY_FIELD_CHARS, because a cut URL can still parse as a valid
-        # *different* URL. What reaches the renderer is the truncated DISPLAY
-        # string plus browser_target=None.
-        real = ('https://idp.example.com/device?next=' + 'a' * 430
-                + '&redirect=https://evil.example')
-        display = real[:_render._MAX_ACTIONABLE_URL_CHARS] + '…'
-        return real, display, {
+        # The URL has to be one native refused for a reason the *local* vetting
+        # would not reach on its own, or these tests cannot tell "honoured
+        # native's verdict" from "rejected it here anyway".
+        #
+        # This fixture used to be an over-long URL paired with its truncated
+        # display string. That could never discriminate: the display was
+        # _MAX_ACTIONABLE_URL_CHARS + 1 long, so `_safe_link_url` refused it on
+        # length whatever `browser_target` said, and the tests passed against
+        # the very regression they name. (The over-long case has its own
+        # coverage in `test_over_long_url_is_rejected_not_truncated`.)
+        #
+        # A punycode host is the clean separator: native refuses an IDNA
+        # A-label as a confusable, while `_safe_link_url` deliberately accepts
+        # one -- `_display_url` renders hosts in punycode precisely so a
+        # homoglyph is visible rather than blocked. So the fallback here is
+        # both willing and able to promote this URL, and only the native
+        # verdict stops it.
+        real = 'https://xn--80ak6aa92e.com/device'
+        return real, {
             'user_code': 'ABCD-EFGH',
-            'verification_uri': display,
-            'verification_uri_complete': display,
+            'verification_uri': real,
+            'verification_uri_complete': real,
             'browser_target': None,
             'expires_in': 600,
             'interval': 5}
 
     def test_native_refusal_yields_no_actionable_target(self):
-        # Regression: the fallback chain used to re-promote the truncated
-        # display string, handing the user a live link and a QR for a URL the
-        # identity provider never issued and native had explicitly declined.
-        real, display, resp = self._refused_prompt()
-        target = _render._verification_target(resp)
-        self.assertIsNone(target)
-        self.assertNotEqual(target, real)
+        # Regression: the fallback chain used to re-promote the display string,
+        # handing the user a live link and a QR for a URL native had explicitly
+        # declined.
+        real, resp = self._refused_prompt()
+        self.assertIsNone(_render._verification_target(resp))
+        # The control that makes the assertion above mean something: with the
+        # verdict removed, the identical URL IS promoted. So the refusal is
+        # what suppressed it, not local vetting.
+        without_verdict = {
+            k: v for k, v in resp.items() if k != 'browser_target'}
+        self.assertFalse(_render._native_adjudicated(without_verdict))
+        self.assertEqual(_render._verification_target(without_verdict), real)
         # The key being present at all is what marks the verdict as native's.
         self.assertTrue(_render._native_adjudicated(resp))
 
     def test_native_refusal_leaves_prompt_inert_but_visible(self):
-        _real, _display, resp = self._refused_prompt()
+        real, resp = self._refused_prompt()
         renderer = _render.JupyterRenderer(qr=False)
         renderer._resp = resp
         head = ''.join(renderer._prompt_head())
         self.assertNotIn('<a href', head)
         self.assertNotIn('authorize directly', head)
         # Still shown, escaped and copyable -- refusing to open is not hiding.
-        self.assertIn('idp.example.com', head)
+        self.assertIn('xn--80ak6aa92e.com', head)
+        # And the control: the same URL, vetted, does get linkified.
+        vetted = dict(resp, browser_target=real)
+        renderer._resp = vetted
+        self.assertIn('<a href', ''.join(renderer._prompt_head()))
 
+    @unittest.skipIf(_render._qr_ascii('https://x.example/') is None,
+                     'qrcode not installed: the QR paths cannot be exercised')
     def test_native_refusal_encodes_no_qr(self):
-        _real, _display, resp = self._refused_prompt()
+        real, resp = self._refused_prompt()
         stream = io.StringIO()
         _render.TerminalRenderer(stream=stream, qr=True).on_prompt(resp)
-        self.assertIsNone(_render._verification_target(resp))
-        self.assertIn('idp.example.com', stream.getvalue())
+        rendered = stream.getvalue()
+        # The actual assertion: no QR was drawn. Previously this test only
+        # checked that the URL text appeared, so a renderer that encoded the
+        # refused URL passed it.
+        self.assertFalse(
+            any(glyph in rendered for glyph in self._QR_GLYPHS),
+            'a refused URL must not be encoded into a QR code')
+        self.assertIn('xn--80ak6aa92e.com', rendered)
+        # Control: the same renderer DOES draw one for a vetted target, so the
+        # assertion above is not passing merely because QR output is disabled.
+        vetted = io.StringIO()
+        _render.TerminalRenderer(stream=vetted, qr=True).on_prompt(
+            dict(resp, browser_target=real))
+        self.assertTrue(
+            any(glyph in vetted.getvalue() for glyph in self._QR_GLYPHS),
+            'the fixture cannot detect a QR at all')
 
     def test_native_vetted_target_still_drives_the_link(self):
         # The refusal path must not disturb the ordinary case.

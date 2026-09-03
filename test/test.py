@@ -155,7 +155,23 @@ if pd is not None and pyarrow is not None:
     from test_dataframe import TestPandasProtocolVersionV3
     from test_dataframe import TestNaTScalarDatetime
     from test_dataframe import TestColumnarPlanWithoutPyarrow
-elif pd is None:
+else:
+    # Say so loudly. `ci/pip_install_deps.py` swallows an unsatisfiable
+    # dependency ("Could not find a version that satisfies the requirement")
+    # and continues, so on a target with no pandas/pyarrow wheel this branch
+    # silently removes the entire DataFrame corpus while the job still reports
+    # green. A no-pandas run is legitimate and must not fail, but it must not
+    # be indistinguishable from a broken install either.
+    sys.stderr.write(
+        '\n'
+        '################################################################\n'
+        '# SKIPPING THE DATAFRAME TEST CORPUS                            #\n'
+        f'#   pandas  installed: {pd is not None!r:<38} #\n'
+        f'#   pyarrow installed: {pyarrow is not None!r:<38} #\n'
+        '# Expected only where those wheels do not exist for this target.#\n'
+        '################################################################\n\n')
+
+if pd is None:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
             buf = qi.Buffer(protocol_version=2)
