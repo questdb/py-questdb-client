@@ -54,7 +54,8 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Union
+from typing import (
+    Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union)
 
 import numpy as np
 import pandas as pd
@@ -63,6 +64,15 @@ from decimal import Decimal
 from .auth._config import OidcConfig
 from .auth._render import Renderer
 from .auth._store import FileTokenStore
+
+
+#: One ``schema_overrides`` value: a QuestDB column kind to reclassify a
+#: column as. ``'uuid'`` and ``'long256'`` claim binary columns of exactly 16
+#: and 32 bytes respectively; ``('geohash', bits)`` takes 1-60 bits.
+SchemaOverride = Union[
+    Literal['symbol', 'ipv4', 'char', 'uuid', 'long256'],
+    Tuple[Literal['geohash'], int],
+]
 
 
 class OidcDeviceAuth:
@@ -1083,7 +1093,7 @@ class PooledSender:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[Dict[str, SchemaOverride]] = None,
     ) -> PooledSender:
         """
         Bulk-load a DataFrame over a direct columnar connection borrowed
@@ -1272,7 +1282,7 @@ class QuestDB:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[Dict[str, SchemaOverride]] = None,
     ) -> QuestDB:
         """
         Ingest a dataframe through the pooled columnar QWP path.
@@ -1765,7 +1775,7 @@ class Sender:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[Dict[str, SchemaOverride]] = None,
     ) -> Sender:
         """
         Write a Pandas DataFrame to QuestDB.

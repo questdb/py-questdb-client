@@ -7552,6 +7552,15 @@ cdef class Sender:
 
         Note that any parameters already present in the configuration string
         cannot be overridden.
+
+        ``oidc_auth`` attaches a native rotating OIDC token provider — see
+        :class:`questdb.auth.OidcDeviceAuth` and the :ref:`oidc_auth` guide. It
+        is a Python argument only, with no configuration-string equivalent, and
+        is mutually exclusive with ``token``, ``username`` and ``password``.
+        Call :meth:`~questdb.auth.OidcDeviceAuth.sign_in` before the first
+        flush: connect and reconnect load or silently refresh a token but never
+        start an interactive device flow. Supported on HTTP(S) and
+        QWP/WebSocket; TCP is rejected.
         """
 
         cdef line_sender_error* err = NULL
@@ -7735,6 +7744,13 @@ cdef class Sender:
 
         Note that any parameters already present in the configuration string
         cannot be overridden.
+
+        ``oidc_auth`` attaches a native rotating OIDC token provider — see
+        :class:`questdb.auth.OidcDeviceAuth` and the :ref:`oidc_auth` guide.
+        Because it has no configuration-string equivalent, it is the one
+        credential that must be supplied here rather than through
+        ``QDB_CLIENT_CONF``, and it is mutually exclusive with ``token``,
+        ``username`` and ``password``.
         """
         cdef str conf_str = os.environ.get('QDB_CLIENT_CONF')
         if conf_str is None:

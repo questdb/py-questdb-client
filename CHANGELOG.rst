@@ -85,9 +85,11 @@ kernels, and supplies rotating Bearer tokens directly to QuestDB transports.
 
 Highlights:
 
-* :func:`questdb.connect`, :class:`questdb.Sender`, and
-  :meth:`questdb.Sender.from_conf` accept ``oidc_auth=``. They retain the shared
-  native provider and pull a fresh token for each connect or reconnect.
+* :func:`questdb.connect`, :class:`questdb.Sender`,
+  :meth:`questdb.Sender.from_conf`, :meth:`questdb.Sender.from_env` and
+  :meth:`questdb.QuestDB.from_conf` accept ``oidc_auth=``. They retain the
+  shared native provider and pull a fresh token for each connect or reconnect.
+  It is mutually exclusive with a fixed ``token``, ``username`` or ``password``.
 * :meth:`~questdb.auth.OidcDeviceAuth.sign_in` is the only interactive
   operation. :meth:`~questdb.auth.OidcDeviceAuth.token` and every transport
   path remain non-interactive, silently refreshing when possible and otherwise
