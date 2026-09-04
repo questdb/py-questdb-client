@@ -580,7 +580,19 @@ def format_prompt(resp: Dict[str, Any]) -> str:
     # link's origin (see _matched_complete); a complete on a different host is
     # dropped rather than shown, so the convenience URL can't point somewhere the
     # primary link does not.
-    complete = _matched_complete(resp)
+    #
+    # And drop it entirely when native adjudicated these URLs and refused to
+    # vet one: `browser_target` is None for a confusable IDNA host or a URL
+    # past the length cap, and Python's own _safe_target accepts A-labels that
+    # native rejects. The QR path already honours that verdict via
+    # _verification_target, so without this the same response yielded no QR but
+    # still printed the refused URL as an instruction to open -- and many
+    # terminals hyperlink it. The primary line above still shows the URL,
+    # IDNA-escaped and inert, because the user has no other way to sign in.
+    complete = (
+        None if (_native_adjudicated(resp)
+                 and _verification_target(resp) is None)
+        else _matched_complete(resp))
     lines = [
         '🔐 Sign in to QuestDB',
         f'   Open {uri}  and enter code:  {code}',

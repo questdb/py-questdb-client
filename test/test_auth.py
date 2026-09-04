@@ -371,6 +371,17 @@ class NativeOidcTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(OidcConfigError):
                 make_auth(default_interval=value)
 
+    def test_default_interval_is_bounded_at_the_native_ceiling(self):
+        # The old bound was the full uint64 range, but native casts to i64
+        # before clamping: 2**63 wrapped negative, floored to 0, and came back
+        # as the 5s MINIMUM, so the largest accepted value produced the FASTEST
+        # polling. Bound it where native clamps anyway.
+        for value in (1801, 1 << 63, (1 << 64) - 1):
+            with self.subTest(value=value), self.assertRaises(OidcConfigError):
+                make_auth(default_interval=value)
+        # The boundary itself is still accepted.
+        make_auth(default_interval=1800)
+
     def test_oidc_error_propagates_in_doubt(self):
         # The OIDC error path (_oidc_err_to_py) must carry the native in-doubt
         # flag through to the raised OidcError, exactly as the non-OIDC
@@ -2070,6 +2081,30 @@ class RenderSanitizerTest(unittest.TestCase):
             'browser_target': None,
             'expires_in': 600,
             'interval': 5}
+
+    def test_native_refusal_drops_the_open_directly_line(self):
+        # format_prompt derived the "(or open directly: ...)" line straight from
+        # _matched_complete, without consulting browser_target. So on a response
+        # native had refused to vet, the terminal prompt printed the refused URL
+        # as an instruction to open -- which many terminals hyperlink -- while
+        # the QR path on the very same response correctly drew nothing.
+        real, resp = self._refused_prompt()
+        rendered = _render.format_prompt(resp)
+        self.assertNotIn('open directly', rendered)
+        # The primary line still shows the URL: there is no other way to sign
+        # in, and it is rendered inert and IDNA-escaped.
+        self.assertIn('xn--80ak6aa92e.com', rendered)
+        # Control: with the verdict removed the same response DOES offer it, so
+        # the assertion above is not passing because the fixture simply has no
+        # origin-matched complete.
+        without_verdict = {
+            k: v for k, v in resp.items() if k != 'browser_target'}
+        self.assertIn(
+            'open directly', _render.format_prompt(without_verdict))
+        # And a vetted target keeps the line.
+        self.assertIn(
+            'open directly',
+            _render.format_prompt(dict(resp, browser_target=real)))
 
     def test_native_refusal_yields_no_actionable_target(self):
         # Regression: the fallback chain used to re-promote the display string,
