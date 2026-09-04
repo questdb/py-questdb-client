@@ -113,7 +113,14 @@ def main(args):
     # so every `qr=True` path in the renderers -- and every test that exercises
     # one -- silently does nothing. Installing it here is what makes that
     # coverage real rather than notional.
-    try_pip_install('qrcode')
+    #
+    # The `[pil]` extra matters for the same reason: bare `qrcode` gives the
+    # terminal renderer's ASCII art, but `_qr_data_uri` needs Pillow to encode
+    # a PNG, so the JUPYTER renderer's QR path stayed notional on a plain
+    # `qrcode` install -- its test skipped rather than failed, which is the
+    # quiet way to have no coverage. try_pip_install tolerates a target with no
+    # Pillow wheel; those legs skip that one test as before.
+    try_pip_install('qrcode[pil]')
 
     on_linux_is_glibc = (
             (not platform.system() == 'Linux') or

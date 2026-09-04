@@ -207,12 +207,23 @@ class NativeOidcTest(unittest.TestCase):
         self.assertFalse(
             build(False), 'an explicit False must not be overridden')
 
-    def test_documented_optional_booleans_retain_none(self):
-        auth = make_auth(interactive=None)
+    def test_optional_booleans_accept_none_on_both_constructors(self):
+        # Renamed from test_documented_optional_booleans_retain_none, which
+        # claimed more than it checked: OidcConfig exposes no `interactive`
+        # field, so the only assertion was on client_id and the test passed
+        # whether None was retained, coerced to False, or coerced to True.
+        # What it can honestly pin is that the tri-state values are ACCEPTED by
+        # both constructors -- the behaviour they select is covered by
+        # test_explicit_open_browser_overrides_the_kernel_guess and the
+        # detect_interactive tests.
+        auth = make_auth(interactive=None, open_browser=None)
         self.assertEqual(auth.config.client_id, 'questdb')
+        # Validation order: the booleans are checked before the url, so a bad
+        # url still reports the url rather than masking an accepted None.
         with self.assertRaisesRegex(OidcConfigError, 'url'):
             OidcDeviceAuth.from_questdb(
-                object(), groups_in_token=None, interactive=None)
+                object(), groups_in_token=None, interactive=None,
+                open_browser=None)
 
     def test_terminal_ipython_uses_terminal_renderer(self):
         ipython = types.ModuleType('IPython')
@@ -737,6 +748,27 @@ class NativeOidcTest(unittest.TestCase):
         # covering the post-registration path.
         self.assertIn('CA bundle', str(caught.exception))
 
+    def test_insecure_gates_plaintext_discovery(self):
+        # `insecure` was only ever type-checked: nothing asserted it DOES
+        # anything, so dropping the setter call would have left the suite green.
+        # The test server is loopback, where plaintext is allowed either way, so
+        # it cannot discriminate -- this uses TEST-NET-1 (RFC 5737), which is
+        # non-loopback and guaranteed unroutable, and a 1s timeout to bound the
+        # permitted case.
+        common = dict(interactive=False, open_browser=False,
+                      renderer=Renderer(), timeout=1)
+        url = 'http://192.0.2.1:9000'
+
+        # Refused at the config gate, before any socket is opened.
+        with self.assertRaises(OidcConfigError) as refused:
+            OidcDeviceAuth.from_questdb(url, insecure=False, **common)
+        self.assertIn('insecure', str(refused.exception).lower())
+
+        # Permitted: it gets as far as the network and fails there instead,
+        # which is what proves the gate was lifted rather than merely moved.
+        with self.assertRaises(OidcNetworkError):
+            OidcDeviceAuth.from_questdb(url, insecure=True, **common)
+
     def test_registry_entry_is_dropped_the_moment_build_fails(self):
         # The invariant is *registered <=> built*, and it has to hold at the
         # moment of failure -- not merely by the time the object is collected.
@@ -1005,6 +1037,31 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             # Promptly, not after the device code expires.
             self.assertLess(time.monotonic() - started, 10)
         # The interrupt cancels the flow, which closes the provider.
+        with self.assertRaisesRegex(OidcCancelledError, 'closed'):
+            auth.token()
+
+    def test_system_exit_in_renderer_aborts_sign_in(self):
+        # The dispatch parks `(KeyboardInterrupt, SystemExit)`, but only the
+        # Ctrl-C half was covered: narrowing that tuple to KeyboardInterrupt
+        # left the suite green while a SystemExit raised from a renderer -- an
+        # atexit-driven shutdown, or sys.exit() from a notebook Cancel button --
+        # fell through to the `except BaseException` logger, was swallowed, and
+        # left sign_in() polling to the device-code deadline.
+        class ExitingRenderer(RecordingRenderer):
+            def on_waiting(self, seconds_left):
+                super().on_waiting(seconds_left)
+                raise SystemExit(3)
+
+        pending = (400, {'error': 'authorization_pending'}, None)
+        with OidcTestServer(
+                device_token_response=pending, device_expires_in=20) as server:
+            auth = make_discovered_auth(server, renderer=ExitingRenderer())
+            started = time.monotonic()
+            with self.assertRaises(SystemExit) as ctx:
+                auth.sign_in()
+            # The original exception is re-raised, not a fresh one.
+            self.assertEqual(ctx.exception.code, 3)
+            self.assertLess(time.monotonic() - started, 10)
         with self.assertRaisesRegex(OidcCancelledError, 'closed'):
             auth.token()
 
@@ -2127,6 +2184,41 @@ class RenderSanitizerTest(unittest.TestCase):
             'browser_target': None,
             'expires_in': 600,
             'interval': 5}
+
+    @unittest.skipIf(_render._qr_data_uri('https://x.example/') is None,
+                     'qrcode not installed: the QR paths cannot be exercised')
+    def test_jupyter_qr_encodes_only_a_vetted_target(self):
+        # The Jupyter QR path had no coverage at all: every JupyterRenderer
+        # test constructs it with qr=False, so `_qr_img`, `_qr_data_uri` and the
+        # None/'' tri-state cache never ran -- in the renderer whose sink is raw
+        # HTML built from an untrusted device response, and whose QR is followed
+        # by a phone without anyone reading it first.
+        real, refused = self._refused_prompt()
+
+        renderer = _render.JupyterRenderer(qr=True)
+        renderer._resp = refused
+        html_out = ''.join(renderer._prompt_head())
+        self.assertNotIn(
+            'data:image/png;base64,', html_out,
+            'a URL native refused to vet must not be encoded into a QR')
+        # Control: the same renderer DOES draw one for a vetted target, so the
+        # assertion above cannot pass merely because QR output is unavailable.
+        vetted = _render.JupyterRenderer(qr=True)
+        vetted._resp = dict(refused, browser_target=real)
+        self.assertIn('data:image/png;base64,', ''.join(vetted._prompt_head()))
+
+        # '' is the built-but-unavailable state and must be distinguishable
+        # from None (not built yet), or a refused target would be retried on
+        # every countdown tick.
+        self.assertEqual(renderer._qr_html, '')
+        # A second prompt rebuilds it: a re-sign-in has a fresh user_code, so a
+        # cached image from the previous prompt would be stale. `_display` is
+        # stubbed because on_prompt would otherwise emit an IPython display
+        # object into the test runner's stdout.
+        with mock.patch.object(vetted, '_display') as display:
+            vetted.on_prompt(dict(refused, browser_target=real))
+        display.assert_called_once()
+        self.assertIn('data:image/png;base64,', display.call_args.args[0])
 
     def test_native_refusal_drops_the_open_directly_line(self):
         # format_prompt derived the "(or open directly: ...)" line straight from
