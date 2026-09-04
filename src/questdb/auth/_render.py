@@ -690,25 +690,48 @@ class TerminalRenderer(Renderer):
     """Plain-text rendering for terminals (writes to ``stderr`` by default)."""
 
     def __init__(self, stream: Optional[TextIO] = None, qr: bool = False):
-        self._stream = stream if stream is not None else sys.stderr
+        # Deliberately NOT resolved to sys.stderr here. A renderer is built
+        # during OidcDeviceAuth construction, which can be a long way from the
+        # sign_in() that renders through it: a provider built under
+        # contextlib.redirect_stderr, under pytest's capture, before a logging
+        # library reinstalls sys.stderr, or before a service daemonizes and
+        # closes fd 2, would otherwise write the device code to a stream that
+        # no longer goes anywhere. An explicit stream= is honoured as given.
+        self._stream = stream
         self._qr = qr
         self._countdown_active = False
+        # One warning per renderer, not one per countdown tick.
+        self._write_failed = False
 
     def _write(self, text: str) -> None:
+        stream = self._stream if self._stream is not None else sys.stderr
         try:
             try:
-                self._stream.write(text)
+                stream.write(text)
             except UnicodeEncodeError:
                 # The stream's encoding can't represent some chars (e.g. the
                 # emoji on a legacy Windows console or ascii PYTHONIOENCODING).
                 # Degrade only those, so the URL/code don't vanish and look like
                 # a silent hang.
-                enc = getattr(self._stream, 'encoding', None) or 'ascii'
-                self._stream.write(
+                enc = getattr(stream, 'encoding', None) or 'ascii'
+                stream.write(
                     text.encode(enc, 'replace').decode(enc, 'replace'))
-            self._stream.flush()
+            stream.flush()
         except Exception:
-            pass
+            # Swallowing is still right -- a broken console must not abort a
+            # sign-in that is otherwise working -- but silence is not. Without
+            # this, a prompt written to a closed or redirected stream vanished
+            # with no error and no log, and sign_in() went on polling until the
+            # device code expired with the user never having seen a code. Warn
+            # once, through logging rather than the stream that just failed.
+            if not self._write_failed:
+                self._write_failed = True
+                import logging
+                logging.getLogger('questdb').warning(
+                    'Could not write the OIDC sign-in prompt to %r. The device '
+                    'code cannot be displayed; pass a renderer= or a stream to '
+                    'TerminalRenderer, or call token()/headers() after signing '
+                    'in elsewhere.', stream, exc_info=True)
 
     def on_prompt(self, resp: Dict[str, Any]) -> None:
         self._write(format_prompt(resp) + '\n')
