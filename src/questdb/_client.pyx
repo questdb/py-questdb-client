@@ -487,11 +487,16 @@ cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     failure from a transport failure an auth error caused, and dropping the
     context is only ever wrong for the second.
 
-    The OIDC branch is currently unreachable and the formatting is defensive:
-    the sole caller of this function is the TCP flush path, and native rejects
-    ``oidc_auth`` on TCP ("Bearer token providers are supported only for
-    ILP/HTTP(S) and QWP/WebSocket"). It is written to be correct if either side
-    of that changes, rather than left as a trap.
+    There are two callers, and the OIDC branch is reachable from one of them:
+
+    * ``Sender.flush`` (in this file) applies ``fmt`` only on the TCP path,
+      where native rejects ``oidc_auth`` outright ("Bearer token providers are
+      supported only for ILP/HTTP(S) and QWP/WebSocket"), so the OIDC branch
+      cannot fire there.
+    * ``_dataframe_handle_auto_flush`` (``dataframe.pxi``) is
+      protocol-agnostic, so an HTTP or QWP sender built with ``oidc_auth=``
+      reaches this with a token failure during an auto-flush, and the
+      ``args`` re-frame below runs in production.
     """
     cdef object oidc_exc
     cdef questdb_oidc_error_view oidc_view
@@ -6085,8 +6090,17 @@ cdef void_int _capsule_consume_stream_with_hint(
                     f'Materialise to a `pa.Table` '
                     f'(`pa.Table.from_batches(reader)`) or re-batch '
                     f'at the source before passing.')
-            raise QuestDBError(
-                exc.code, f'{exc}\nHint: {hint}') from exc
+            # Append the hint in place rather than rebuilding as a bare
+            # QuestDBError, for the same reason `_direct_dataframe_run` does
+            # (see the note there): rebuilding drops the concrete class -- so
+            # `except QuestDBServerRejectionError` and `except OidcError` stop
+            # matching, along with .sender_error / .status / .retry_after --
+            # and silently resets .in_doubt to False, which the caller above
+            # reads to decide whether replaying could duplicate a landed write.
+            # The f-string is evaluated before the assignment, so it still
+            # interpolates the original message.
+            exc.args = (f'{exc}\nHint: {hint}',)
+            raise
         raise
 
 
