@@ -1358,15 +1358,15 @@ cdef extern from "questdb/ingress/qwp_sender.h":
         qwp_numpy_f64_ndarray = 31
         qwp_numpy_datetime64_m = 32
         qwp_numpy_datetime64_h = 33
-        column_sender_numpy_datetime64_D = 34
-        column_sender_numpy_datetime64_M = 35
-        column_sender_numpy_datetime64_Y = 36
-        column_sender_numpy_datetime64_W = 37
+        qwp_numpy_datetime64_D = 34
+        qwp_numpy_datetime64_M = 35
+        qwp_numpy_datetime64_Y = 36
+        qwp_numpy_datetime64_W = 37
         qwp_numpy_timedelta64_m = 38
         qwp_numpy_timedelta64_h = 39
-        column_sender_numpy_timedelta64_D = 40
-        column_sender_numpy_timedelta64_M = 41
-        column_sender_numpy_timedelta64_Y = 42
+        qwp_numpy_timedelta64_D = 40
+        qwp_numpy_timedelta64_M = 41
+        qwp_numpy_timedelta64_Y = 42
 
     cdef struct qwp_numpy_extras:
         int8_t decimal_scale
