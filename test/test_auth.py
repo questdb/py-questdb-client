@@ -160,7 +160,9 @@ class NativeOidcTest(unittest.TestCase):
                 'groups_in_token', 'insecure', 'open_browser', 'interactive',
                 'qr'):
             invalid_values = (0, 1, 'false', object())
-            if name != 'interactive':
+            # interactive and open_browser are tri-state: None means "decide
+            # from the environment", so it is a valid value for them.
+            if name not in ('interactive', 'open_browser'):
                 invalid_values += (None,)
             for value in invalid_values:
                 with self.subTest(name=name, value=value):
@@ -175,6 +177,35 @@ class NativeOidcTest(unittest.TestCase):
                 with self.assertRaisesRegex(OidcConfigError, name):
                     OidcDeviceAuth.from_questdb(
                         object(), **{name: 'false'})
+
+    def test_explicit_open_browser_overrides_the_kernel_guess(self):
+        # Regression: open_browser was `open_browser is True and not
+        # in_ipython_kernel()`, so an explicit True was silently dropped in ANY
+        # kernel -- including a local `jupyter lab`, where the browser and the
+        # reader are on the same machine and the guess is simply wrong. There
+        # was no way to ask for the browser at all.
+        #
+        # The kernel probe is only consulted for the default, so whether it is
+        # called is exactly the question: consulted => the caller's value was
+        # overridden; not consulted => it was honoured.
+        def build(open_browser):
+            probe = mock.Mock(return_value=True)
+            with mock.patch.object(
+                    _render, 'in_ipython_kernel', probe):
+                # An explicit renderer and interactive keep make_renderer() and
+                # detect_interactive() from consulting the probe as well.
+                make_auth(
+                    open_browser=open_browser,
+                    interactive=False,
+                    renderer=Renderer())
+            return probe.called
+
+        self.assertTrue(
+            build(None), 'the default must still defer to the kernel check')
+        self.assertFalse(
+            build(True), 'an explicit True must not be overridden')
+        self.assertFalse(
+            build(False), 'an explicit False must not be overridden')
 
     def test_documented_optional_booleans_retain_none(self):
         auth = make_auth(interactive=None)

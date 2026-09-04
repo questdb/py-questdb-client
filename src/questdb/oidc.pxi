@@ -62,6 +62,41 @@ cdef inline object _oidc_text(const char* buf, size_t length):
     return PyUnicode_FromStringAndSize(buf, <Py_ssize_t>length)
 
 
+# Resolved on first use and cached. See `_oidc_errors_module`.
+cdef object _OIDC_ERRORS_MOD = None
+
+
+cdef object _oidc_errors_module():
+    """The ``questdb.auth._errors`` module, or None if it cannot be reached.
+
+    Deliberately not imported eagerly from ``questdb/__init__.py``: that would
+    pull ``unicodedata`` / ``re`` / ``urllib.parse`` into every process that
+    imports questdb, for a module only an auth failure needs. Cached after the
+    first success so a long-running sender pays the lookup once rather than
+    re-entering the import machinery on every failure.
+
+    Returns None instead of raising. This runs while a failure is already being
+    reported, and it can be the *first* import of the package -- a caller who
+    took ``from questdb._client import OidcDeviceAuth`` never touches
+    ``questdb.auth``. If that first import lands during interpreter
+    finalization, where ``sys.meta_path`` is None and any import raises
+    ``ImportError``, letting it propagate would replace the flush or connect
+    error the caller actually needs with a misleading one about the import.
+    ``_oidc_err_to_py_unowned`` falls back to a plain ``QuestDBError`` carrying
+    the same native message and code, which is strictly better than that.
+    """
+    global _OIDC_ERRORS_MOD
+    if _OIDC_ERRORS_MOD is None:
+        mod = sys.modules.get('questdb.auth._errors')
+        if mod is None:
+            try:
+                import questdb.auth._errors as mod
+            except BaseException:
+                return None
+        _OIDC_ERRORS_MOD = mod
+    return _OIDC_ERRORS_MOD
+
+
 cdef object _oidc_err_to_py_unowned(questdb_error* err):
     cdef const char* msg_buf = NULL
     cdef size_t msg_len = 0
@@ -75,15 +110,26 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
     cdef object code
     cdef object exc
 
-    from questdb.auth._errors import (
-        OidcConfigError,
-        OidcCancelledError,
-        OidcDeviceFlowError,
-        OidcError,
-        OidcInteractionRequired,
-        OidcNetworkError,
-        OidcTimeoutError,
-    )
+    errors = _oidc_errors_module()
+    if errors is None:
+        # The typed classes are unreachable (see `_oidc_errors_module`). Report
+        # the native failure untyped rather than losing it: `except
+        # QuestDBError` still catches this, only `except OidcError` does not.
+        if err == NULL:
+            return QuestDBError(
+                QuestDBErrorCode.AuthError, 'Unknown native OIDC error.')
+        msg_buf = questdb_error_msg(err, &msg_len)
+        return QuestDBError(
+            c_err_code_to_py(questdb_error_get_code(err)),
+            _oidc_text(msg_buf, msg_len) or 'Unknown native OIDC error.',
+            in_doubt=questdb_error_in_doubt(err))
+    OidcConfigError = errors.OidcConfigError
+    OidcCancelledError = errors.OidcCancelledError
+    OidcDeviceFlowError = errors.OidcDeviceFlowError
+    OidcError = errors.OidcError
+    OidcInteractionRequired = errors.OidcInteractionRequired
+    OidcNetworkError = errors.OidcNetworkError
+    OidcTimeoutError = errors.OidcTimeoutError
 
     if err == NULL:
         return OidcError('Unknown native OIDC error.')
@@ -417,7 +463,7 @@ cdef class OidcDeviceAuth:
             issuer=None,
             insecure=False,
             ca_bundle=None,
-            open_browser=True,
+            open_browser=None,
             interactive=None,
             qr=False,
             renderer=None,
@@ -453,9 +499,12 @@ cdef class OidcDeviceAuth:
         * ``ca_bundle`` — path to a PEM bundle used instead of the system roots
           when contacting QuestDB and the IdP.
         * ``open_browser`` — whether :meth:`sign_in` launches a browser at the
-          verification URL. Defaults to ``True``, and is suppressed
-          automatically inside a Jupyter kernel, where the browser would open on
-          the wrong machine.
+          verification URL. ``None`` (the default) opens one, except inside a
+          Jupyter kernel, where the kernel may be on a different machine from
+          the person reading the notebook and the browser would open where
+          nobody is looking. Pass ``True`` to open one anyway — correct for a
+          *local* ``jupyter lab``, where that guess is wrong — or ``False`` to
+          never open one.
         * ``interactive`` — whether :meth:`sign_in` may prompt at all.
           ``False`` makes it fail immediately with
           :class:`~questdb.auth.OidcInteractionRequired` rather than print a
@@ -484,7 +533,7 @@ cdef class OidcDeviceAuth:
         cdef questdb_oidc_builder* builder
         _oidc_validate_bool(groups_in_token, 'groups_in_token', False)
         _oidc_validate_bool(insecure, 'insecure', False)
-        _oidc_validate_bool(open_browser, 'open_browser', False)
+        _oidc_validate_bool(open_browser, 'open_browser', True)
         _oidc_validate_bool(interactive, 'interactive', True)
         _oidc_validate_bool(qr, 'qr', False)
         builder = questdb_oidc_builder_new()
@@ -540,7 +589,7 @@ cdef class OidcDeviceAuth:
             device_authorization_endpoint=None,
             insecure=False,
             ca_bundle=None,
-            open_browser=True,
+            open_browser=None,
             interactive=None,
             qr=False,
             renderer=None,
@@ -566,7 +615,7 @@ cdef class OidcDeviceAuth:
 
         _oidc_validate_bool(groups_in_token, 'groups_in_token', True)
         _oidc_validate_bool(insecure, 'insecure', False)
-        _oidc_validate_bool(open_browser, 'open_browser', False)
+        _oidc_validate_bool(open_browser, 'open_browser', True)
         _oidc_validate_bool(interactive, 'interactive', True)
         _oidc_validate_bool(qr, 'qr', False)
         encoded_url = _oidc_required_utf8(url, 'url')
@@ -635,9 +684,18 @@ cdef class OidcDeviceAuth:
         if not questdb_oidc_builder_allow_insecure_transport(
                 builder, insecure is True, &err):
             raise _oidc_err_to_py(err)
+        if open_browser is None:
+            # Auto: suppress inside a Jupyter/ZMQ kernel, where the kernel may
+            # well be on a different machine from the person reading the
+            # notebook, so the browser would open where nobody is looking.
+            # That guess is wrong for a LOCAL `jupyter lab`, which is why an
+            # explicit True now overrides it instead of being silently dropped
+            # -- previously `open_browser=True` was a no-op in every kernel,
+            # with no way to ask for the browser at all.
+            open_browser = not in_ipython_kernel()
         if not questdb_oidc_builder_open_browser(
                 builder,
-                open_browser is True and not in_ipython_kernel(),
+                open_browser is True,
                 &err):
             raise _oidc_err_to_py(err)
         if interactive is None:
