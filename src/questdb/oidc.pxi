@@ -604,6 +604,20 @@ cdef class OidcDeviceAuth:
         force the ID-token or access-token kind regardless of the server. This
         differs from the direct constructor, whose ``groups_in_token`` defaults
         to ``False``.
+
+        ``url`` is the QuestDB server to discover from; ``client_id``,
+        ``scope``, ``audience``, ``issuer``, ``token_endpoint`` and
+        ``device_authorization_endpoint`` default to ``None``, meaning "take
+        the server's value", and any you pass override it. The remaining
+        parameters — ``insecure``, ``ca_bundle``, ``open_browser``,
+        ``interactive``, ``qr``, ``renderer``, ``default_interval``,
+        ``timeout`` and ``token_store`` — are not discovered at all and behave
+        exactly as documented on :meth:`__init__`; see there for each.
+
+        Note this call performs blocking network I/O: it fetches
+        ``/settings``, and may follow up with the identity provider's own
+        discovery document to confirm the advertised endpoints. Each request
+        is bounded by ``timeout``.
         """
         cdef bytes encoded_url
         cdef questdb_error* err = NULL

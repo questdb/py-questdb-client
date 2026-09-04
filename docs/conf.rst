@@ -348,6 +348,8 @@ You can additionally set the ``auth_timeout`` parameter (milliseconds) to
 control how long the client will wait for a response from the server during
 the authentication process. The default is 15 seconds.
 
+See the :ref:`auth_and_tls_example` example for more details.
+
 OIDC (rotating Bearer token)
 ----------------------------
 
@@ -364,8 +366,6 @@ alongside ``token``, ``username`` or ``password`` raises
 is rejected.
 
 See the :ref:`oidc_auth` guide.
-
-See the :ref:`auth_and_tls_example` example for more details.
 
 .. _sender_conf_tls:
 

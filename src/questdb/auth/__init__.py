@@ -72,9 +72,9 @@ from ._adapters import sqlalchemy_engine, psycopg_connect
 
 __all__ = [
     'FileTokenStore',
+    'OidcCancelledError',
     'OidcConfig',
     'OidcConfigError',
-    'OidcCancelledError',
     'OidcDeviceAuth',
     'OidcDeviceFlowError',
     'OidcError',
