@@ -25,6 +25,7 @@
 __all__ = [
     "ConnectionEvent",
     "ConnectionEventKind",
+    "OidcDeviceAuth",
     "PooledReader",
     "PooledSender",
     "Protocol",
@@ -53,11 +54,94 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from typing import (
+    Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union)
 
 import numpy as np
 import pandas as pd
 from decimal import Decimal
+
+from .auth._config import OidcConfig
+from .auth._render import Renderer
+from .auth._store import FileTokenStore
+
+
+#: One ``schema_overrides`` value: a QuestDB column kind to reclassify a
+#: column as. ``'uuid'`` and ``'long256'`` claim binary columns of exactly 16
+#: and 32 bytes respectively; ``('geohash', bits)`` takes 1-60 bits.
+SchemaOverride = Union[
+    Literal['symbol', 'ipv4', 'char', 'uuid', 'long256'],
+    Tuple[Literal['geohash'], int],
+]
+
+
+class OidcDeviceAuth:
+    """Native-backed OAuth 2.0 device-flow token provider."""
+
+    def __init__(
+        self,
+        client_id: str,
+        device_authorization_endpoint: str,
+        token_endpoint: str,
+        *,
+        scope: str = "openid",
+        groups_in_token: bool = False,
+        audience: Optional[str] = None,
+        issuer: Optional[str] = None,
+        insecure: bool = False,
+        ca_bundle: Optional[str] = None,
+        open_browser: Optional[bool] = None,
+        interactive: Optional[bool] = None,
+        qr: bool = False,
+        renderer: Optional[Renderer] = None,
+        default_interval: int = 5,
+        timeout: float = 30,
+        token_store: Optional[FileTokenStore] = None,
+    ) -> None: ...
+
+    @classmethod
+    def from_questdb(
+        cls,
+        url: str,
+        *,
+        client_id: Optional[str] = None,
+        scope: Optional[str] = None,
+        audience: Optional[str] = None,
+        groups_in_token: Optional[bool] = None,
+        issuer: Optional[str] = None,
+        token_endpoint: Optional[str] = None,
+        device_authorization_endpoint: Optional[str] = None,
+        insecure: bool = False,
+        ca_bundle: Optional[str] = None,
+        open_browser: Optional[bool] = None,
+        interactive: Optional[bool] = None,
+        qr: bool = False,
+        renderer: Optional[Renderer] = None,
+        default_interval: int = 5,
+        timeout: float = 30,
+        token_store: Optional[FileTokenStore] = None,
+    ) -> OidcDeviceAuth: ...
+
+    def sign_in(self) -> None:
+        """Run the interactive device flow when sign-in is required."""
+
+    def token(self) -> str:
+        """Return a cached or silently refreshed token; never prompt."""
+
+    def headers(self) -> Dict[str, str]: ...
+
+    def clear(self) -> None: ...
+
+    def close(self) -> None:
+        """Close the provider and cancel device-poll or token-store lock waits."""
+
+    def __enter__(self) -> OidcDeviceAuth: ...
+
+    def __exit__(self, exc_type: object, exc_value: object,
+                 traceback: object) -> Literal[False]: ...
+
+    @property
+    def config(self) -> OidcConfig: ...
 
 class QuestDBErrorCode(Enum):
     """Category of Error."""
@@ -1009,7 +1093,7 @@ class PooledSender:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[Dict[str, SchemaOverride]] = None,
     ) -> PooledSender:
         """
         Bulk-load a DataFrame over a direct columnar connection borrowed
@@ -1139,6 +1223,7 @@ class QuestDB:
     def from_conf(
         conf_str: str,
         *,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
         error_handler: Optional[Callable[[SenderError], None]] = None,
@@ -1197,7 +1282,7 @@ class QuestDB:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[Dict[str, SchemaOverride]] = None,
     ) -> QuestDB:
         """
         Ingest a dataframe through the pooled columnar QWP path.
@@ -1441,6 +1526,7 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,
@@ -1475,6 +1561,7 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,
@@ -1519,6 +1606,7 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,
@@ -1687,7 +1775,7 @@ class Sender:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[Dict[str, SchemaOverride]] = None,
     ) -> Sender:
         """
         Write a Pandas DataFrame to QuestDB.

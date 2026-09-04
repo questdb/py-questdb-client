@@ -472,10 +472,9 @@ cdef void_int _bind_query_params(qwp_reader_query* query, object binds) except -
     errors raised here are Python-side type rejections.
     """
     cdef bytes utf8
-    cdef bytes uuid_wire
+    cdef bytes uuid_bytes
     cdef line_sender_utf8 c_utf8
     cdef line_sender_error* utf8_err = NULL
-    cdef object u_int
     cdef Py_ssize_t idx = 0
     for value in binds:
         idx += 1
@@ -508,15 +507,19 @@ cdef void_int _bind_query_params(qwp_reader_query* query, object binds) except -
             qwp_reader_query_bind_timestamp_micros(
                 query, datetime_to_micros(value))
         elif isinstance(value, uuid.UUID):
-            # QuestDB's UUID wire layout: low 64 bits little-endian, then
-            # high 64 bits little-endian (matching the ingestion side and
-            # the Java client's (lo, hi) long-pair encoding).
-            u_int = value.int
-            uuid_wire = (
-                (u_int & 0xFFFFFFFFFFFFFFFF).to_bytes(8, 'little')
-                + (u_int >> 64).to_bytes(8, 'little'))
+            # The bind takes canonical RFC 4122 big-endian bytes, which is
+            # exactly `UUID.bytes`; the native client byte-swaps them into
+            # QWP wire order (lo half LE, then hi half LE).
+            uuid_bytes = value.bytes
+            # `UUID.bytes` is a property a subclass can override, and the
+            # bind reads exactly 16 bytes from the pointer, so the length
+            # is checked before the buffer is handed over.
+            if len(uuid_bytes) != 16:
+                raise ValueError(
+                    f'query bind ${idx}: uuid.UUID.bytes returned '
+                    f'{len(uuid_bytes)} bytes, expected 16.')
             qwp_reader_query_bind_uuid(
-                query, <const uint8_t*>PyBytes_AsString(uuid_wire))
+                query, <const uint8_t*>PyBytes_AsString(uuid_bytes))
         else:
             raise TypeError(
                 f'query bind ${idx}: unsupported type '
@@ -1429,8 +1432,15 @@ cdef object _numpy_uuid_chunk(
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
             continue
-        memcpy(&lo, values + r * stride, 8)
-        memcpy(&hi, values + r * stride + 8, 8)
+        # The reader hands out canonical RFC 4122 big-endian rows,
+        # having already reversed them out of QWP wire order: the first
+        # eight bytes are the high half and the second eight the low
+        # half, each most-significant byte first. Convert the halves to
+        # host order before constructing the UUID integer.
+        memcpy(&hi, values + r * stride, 8)
+        memcpy(&lo, values + r * stride + 8, 8)
+        hi = bswap64(hi)
+        lo = bswap64(lo)
         _obj_chunk_set(out, r, _uuid.UUID(int=((<object>hi) << 64) | (<object>lo)))
     return out
 
@@ -2341,6 +2351,20 @@ class QueryResult:
         Stream callbacks are serialised by the same cursor lock, but the
         Arrow C stream itself must still be consumed by only one thread at
         a time; concurrent ``get_next`` / ``release`` calls are unsupported.
+
+        Typed-``OidcError`` caveat (``oidc_auth`` transports only): a token
+        failure that happens *mid-stream* — a failover reconnect between
+        batches that needs a fresh token — reaches the consumer as a generic
+        Arrow / ``OSError``, **not** a typed
+        :class:`~questdb.auth.OidcError`, because the Arrow C-stream boundary
+        carries only an error string, not a Python exception type. A failure
+        acquiring the token *before* streaming begins still raises the typed
+        ``OidcError``, and the Python-driven readers (:meth:`iter_arrow`,
+        :meth:`to_pandas`, :meth:`to_arrow`, :meth:`to_polars`) surface it on
+        every path. Call :meth:`~questdb.auth.OidcDeviceAuth.sign_in` up front
+        so no mid-stream token acquisition is needed, or materialize with
+        :meth:`to_pandas` / :meth:`to_arrow`, when the typed error must be
+        caught.
         """
         if requested_schema is not None:
             raise NotImplementedError(

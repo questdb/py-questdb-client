@@ -109,11 +109,10 @@ cdef enum col_target_t:
     col_target_column_i32 = 13
     col_target_column_f32 = 14
     col_target_column_uuid = 15
-    col_target_column_long256 = 16
-    col_target_column_ipv4 = 17
-    col_target_column_binary = 18
+    col_target_column_ipv4 = 16
+    col_target_column_binary = 17
     # Generic Arrow field passthrough to the Rust importer; column-QWP only.
-    col_target_column_arrow = 19
+    col_target_column_arrow = 18
 
 
 cdef dict _TARGET_NAMES = {
@@ -133,7 +132,6 @@ cdef dict _TARGET_NAMES = {
     col_target_t.col_target_column_i32: "int",
     col_target_t.col_target_column_f32: "float32",
     col_target_t.col_target_column_uuid: "uuid",
-    col_target_t.col_target_column_long256: "long256",
     col_target_t.col_target_column_ipv4: "ipv4",
     col_target_t.col_target_column_binary: "binary",
     col_target_t.col_target_column_arrow: "arrow",
@@ -188,14 +186,12 @@ cdef enum col_source_t:
     col_source_decimal64_arrow =        803000
     col_source_decimal128_arrow =       804000
     col_source_decimal256_arrow =       805000
-    # FixedSizeBinary(16) — the canonical Arrow shape egress emits
-    # for UUID columns (with or without the `arrow.uuid` extension
-    # wrapper, which we strip on input). Column-QWP only; row-ILP
-    # has no serializer for this source.
+    # `arrow.uuid`-labeled FixedSizeBinary(16) — the canonical Arrow
+    # shape egress emits for UUID columns. The label is what claims the
+    # column as UUID: an unlabeled 16-byte column is opaque bytes and
+    # routes through `col_source_arrow_passthrough` to BINARY. Column-QWP
+    # only; row-ILP has no serializer for this source.
     col_source_fsb16_arrow =            901000
-    # FixedSizeBinary(32) — the canonical shape egress emits for
-    # LONG256 columns. Column-QWP only.
-    col_source_fsb32_arrow =            902000
     # PyObject sniff outputs for QuestDB-specific wire kinds.
     col_source_uuid_pyobj =             903100
     col_source_ipv4_pyobj =             904100
@@ -311,9 +307,6 @@ cdef dict _TARGET_TO_SOURCES = {
         col_source_t.col_source_fsb16_arrow,
         col_source_t.col_source_uuid_pyobj,
     },
-    col_target_t.col_target_column_long256: {
-        col_source_t.col_source_fsb32_arrow,
-    },
     col_target_t.col_target_column_binary: {
         col_source_t.col_source_bytes_pyobj,
     },
@@ -409,9 +402,11 @@ cdef tuple _FIELD_TARGETS_QWP = (
     col_target_t.col_target_column_arr_f64,
     col_target_t.col_target_column_decimal,
     # QuestDB-extension types whose Arrow source is unique
-    # (FixedSizeBinary widths).
+    # (`arrow.uuid`-labeled FixedSizeBinary(16)). There is no LONG256 target
+    # at all: its claim is field metadata, which pyarrow drops when it exports
+    # a single pandas column. Claiming it belongs to the Rust Arrow path via
+    # `schema_overrides`.
     col_target_t.col_target_column_uuid,
-    col_target_t.col_target_column_long256,
     col_target_t.col_target_column_binary,
     col_target_t.col_target_column_arrow)
 
@@ -572,8 +567,6 @@ cdef enum col_dispatch_code_t:
         col_target_t.col_target_column_uuid + col_source_t.col_source_fsb16_arrow
     col_dispatch_code_column_uuid__uuid_pyobj = \
         col_target_t.col_target_column_uuid + col_source_t.col_source_uuid_pyobj
-    col_dispatch_code_column_long256__fsb32_arrow = \
-        col_target_t.col_target_column_long256 + col_source_t.col_source_fsb32_arrow
     col_dispatch_code_column_ipv4__u32_arrow = \
         col_target_t.col_target_column_ipv4 + col_source_t.col_source_u32_arrow
     col_dispatch_code_column_ipv4__ipv4_pyobj = \
@@ -1330,6 +1323,12 @@ cdef void_int _dataframe_series_as_arrow(
         _dataframe_series_to_arrow_chunks(pandas_col), col)
     
 
+# Canonical Apache Arrow extension name that claims a
+# `FixedSizeBinary(16)` column as a UUID whose bytes are RFC 4122
+# big-endian.
+cdef str _ARROW_EXT_UUID = 'arrow.uuid'
+
+
 cdef const char* _ARROW_FMT_INT8 = "c"
 cdef const char* _ARROW_FMT_INT16 = "s"
 cdef const char* _ARROW_FMT_INT32 = "i"
@@ -1382,13 +1381,14 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
         return 0
 
     # Unwrap pyarrow extension types (e.g. `arrow.uuid` wrapping
-    # `FixedSizeBinary(16)`) to their storage type so dispatch picks
-    # the storage-shape source. The wire format is identical for both
-    # forms; pyarrow may or may not have the extension registered at
-    # runtime, so we accept either input and produce the same source.
+    # `FixedSizeBinary(16)`) to their storage type so dispatch picks the
+    # storage-shape source, but keep the extension name: it is what makes
+    # a 16-byte column a UUID rather than opaque BINARY.
     # pyarrow exposes no `Type_EXTENSION` constant in all versions we
     # support; check via `BaseExtensionType` instead.
+    cdef object ext_name = None
     if isinstance(arrowtype, _PYARROW.lib.BaseExtensionType):
+        ext_name = arrowtype.extension_name
         arrowtype = arrowtype.storage_type
 
     cdef object t_dec32 = getattr(_PYARROW.lib, 'Type_DECIMAL32', None)
@@ -1421,11 +1421,9 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
     elif arrowtype.id == _PYARROW.lib.Type_INT64:
         col.setup.source = col_source_t.col_source_i64_arrow
     elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
-            and arrowtype.byte_width == 16):
+            and arrowtype.byte_width == 16
+            and ext_name == _ARROW_EXT_UUID):
         col.setup.source = col_source_t.col_source_fsb16_arrow
-    elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
-            and arrowtype.byte_width == 32):
-        col.setup.source = col_source_t.col_source_fsb32_arrow
     elif arrowtype.id == _PYARROW.lib.Type_UINT32:
         col.setup.source = col_source_t.col_source_u32_arrow
     else:
@@ -3368,6 +3366,8 @@ cdef void_int _dataframe(
             else:
                 raise
     except Exception as e:
+        # OidcError is a QuestDBError subclass, so it takes the ``else: raise``
+        # branch and propagates un-wrapped -- no OIDC special-case needed.
         if not isinstance(e, QuestDBError):
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,

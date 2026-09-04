@@ -1,9 +1,49 @@
-===================
-5.0 Migration Guide
-===================
+================
+Migration Guide
+================
+
+5.0 to 5.1
+==========
+
+Both changes below affect UUID and fixed-size-binary data. Nothing else
+in 5.1 requires action.
+
+* **UUID bytes are canonical RFC 4122.** UUID values are read and written in
+  canonical big-endian order at every API boundary; the client byte-swaps to
+  QWP wire order internally. The wire format is unchanged and still matches the
+  Java client, so stored data and round-trips are unaffected — only the bytes
+  your application supplies or receives change. A ``uuid.UUID`` object column
+  needs no change; if you pre-reversed bytes to work around the old layout,
+  remove that workaround — on the **read** path too. The bytes a UUID column
+  yields changed in the same way and just as silently, on every Arrow-backed
+  reader: :meth:`~questdb.QueryResult.to_arrow`,
+  :meth:`~questdb.QueryResult.to_polars`,
+  :meth:`~questdb.QueryResult.iter_arrow`, ``__arrow_c_stream__`` and
+  :meth:`~questdb.QueryResult.to_pandas` with ``dtype_backend="pyarrow"``.
+  Plain :meth:`~questdb.QueryResult.to_pandas` builds ``uuid.UUID`` objects
+  and is unaffected.
+
+* **A 16-byte Arrow column needs the** ``arrow.uuid`` **label to be a UUID,
+  and** ``fixed_size_binary(32)`` **no longer maps to LONG256.** The width alone
+  no longer claims either type — pyarrow drops field metadata when it exports a
+  single pandas column. An unlabelled column now lands as ``BINARY``, which the
+  server rejects against an existing UUID or LONG256 column rather than storing
+  the wrong type silently. Claim it explicitly:
+
+  .. code-block:: python
+
+      sender.dataframe(df, table_name='trades', at='ts',
+                       schema_overrides={'id': 'uuid', 'hash': 'long256'})
+
+  ``schema_overrides`` accepts the new ``'uuid'`` and ``'long256'`` kinds for
+  this purpose. Wrapping the column in pyarrow's ``arrow.uuid`` extension type
+  also works for the 16-byte case.
+
+4.x to 5.0
+==========
 
 Connect once, then stream, load, or query
-=========================================
+-----------------------------------------
 
 The QWP/WebSocket API has one connection-owning root, the :class:`QuestDB
 <questdb.QuestDB>` handle returned by :func:`questdb.connect`:
@@ -56,7 +96,7 @@ rejections are never silent. To ingest concurrently, borrow one sender per
 thread.
 
 DataFrame bulk loads over QWP/WebSocket
-=======================================
+---------------------------------------
 
 Over ``ws::`` / ``wss::``, DataFrame bulk loads use the direct columnar
 path — a database operation, not stream serialization. The recommended
@@ -113,7 +153,7 @@ fully supported (over UDP it serializes row by row into fire-and-forget
 datagrams, with the same delivery caveats as ``row()``).
 
 Update imports from questdb.ingress
-===================================
+-----------------------------------
 
 The 4.x ``questdb.ingress`` module is now a deprecated compatibility shim.
 It keeps ILP/HTTP and ILP/TCP code running — including ``IngressError`` /
@@ -134,7 +174,7 @@ by senders. Where 4.x code built buffers on worker threads and flushed them
 through one sender, borrow one pooled sender per thread instead.
 
 Behavioural changes to watch for
-================================
+--------------------------------
 
 * **Removed QWP flight-window keys.** ``max_in_flight`` and
   ``in_flight_window`` are no longer accepted. Remove them from ws/wss

@@ -4,8 +4,159 @@
 Changelog
 =========
 
-5.0.1 (unreleased)
+5.1.0 (unreleased)
 ------------------
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+UUID and fixed-size-binary DataFrame columns
+********************************************
+
+UUID bytes are now **canonical RFC 4122 big-endian** at every API boundary, and
+a 16-byte Arrow column is only treated as a UUID when it carries the
+``arrow.uuid`` extension label. Three changes; the first affects **both
+ingestion and query results**, the other two ``dataframe()`` /
+``Sender.dataframe()`` over QWP:
+
+* **UUID byte order.** Values are read and written in canonical RFC 4122
+  order; the client byte-swaps to QWP wire order internally. If you previously
+  worked around the old layout by pre-reversing bytes yourself, remove that
+  workaround. The bytes on the wire are unchanged and still match the Java
+  client, so stored data and round-trips are unaffected — only the bytes your
+  application hands over or receives change. A ``uuid.UUID`` object column
+  needs no change at all.
+
+  This is **not confined to ingestion**: the raw bytes a UUID column yields on
+  the read path changed in the same way, and silently. Anything that
+  reconstructs a UUID from, hashes, or joins on those bytes must drop its
+  byte-reversing workaround, on every Arrow-backed reader —
+  :meth:`questdb.QueryResult.to_arrow`, :meth:`~questdb.QueryResult.to_polars`,
+  :meth:`~questdb.QueryResult.iter_arrow`, ``__arrow_c_stream__`` (so
+  ``polars.from_arrow(db.query(...))`` too), and
+  :meth:`~questdb.QueryResult.to_pandas` with ``dtype_backend="pyarrow"``. Plain
+  :meth:`~questdb.QueryResult.to_pandas`, which builds ``uuid.UUID`` objects directly,
+  is unaffected and needs no change.
+
+* **Unlabelled** ``pa.fixed_size_binary(16)`` **now lands as BINARY, not
+  UUID.** The ``arrow.uuid`` extension label is what claims a 16-byte column as
+  a UUID; without it the column is opaque bytes. If you were relying on the
+  width alone, either wrap the column in the ``arrow.uuid`` extension type or
+  claim it explicitly:
+
+  .. code-block:: python
+
+      sender.dataframe(df, table_name='t', at='ts',
+                       schema_overrides={'u': 'uuid'})
+
+* ``pa.fixed_size_binary(32)`` **no longer maps to LONG256.** pyarrow drops
+  field metadata when it exports a single pandas column, so the width alone can
+  no longer claim the type. Claim it explicitly:
+
+  .. code-block:: python
+
+      sender.dataframe(df, table_name='t', at='ts',
+                       schema_overrides={'h': 'long256'})
+
+``schema_overrides`` accepts the new ``'uuid'`` and ``'long256'`` kinds for
+exactly this purpose. Writing an unlabelled 16- or 32-byte column to an
+existing UUID or LONG256 table column without one of the above will be rejected
+by the server as a type mismatch, rather than silently storing the wrong type.
+
+Callback inbox capacities are capped
+************************************
+
+``connection_event_inbox_capacity`` and ``error_event_inbox_capacity`` now
+reject a value above **65536** at connect time, raising
+:class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+``QuestDBErrorCode.InvalidApiCall``. A larger value was previously accepted.
+These inboxes exist to bound memory when a listener cannot keep up, and both
+already drop the oldest event on overflow, so a very large capacity defers that
+policy rather than avoiding it. Lower any value above the cap; ``0`` still
+selects the default of 64.
+
+Features
+~~~~~~~~
+
+OIDC Authentication (:mod:`questdb.auth`)
+************************************************
+
+New :mod:`questdb.auth` module backed by the native QuestDB client. It runs the
+OAuth 2.0 Device Authorization Grant (RFC 8628), including from remote Jupyter
+kernels, and supplies rotating Bearer tokens directly to QuestDB transports.
+
+.. code-block:: python
+
+    import questdb
+    from questdb.auth import OidcDeviceAuth
+
+    auth = OidcDeviceAuth.from_questdb("https://questdb.example.com:9000")
+    auth.sign_in()
+    db = questdb.connect(
+        "wss::addr=questdb.example.com:9000;", oidc_auth=auth)
+
+Highlights:
+
+* :func:`questdb.connect`, :class:`questdb.Sender`,
+  :meth:`questdb.Sender.from_conf`, :meth:`questdb.Sender.from_env` and
+  :meth:`questdb.QuestDB.from_conf` accept ``oidc_auth=``. They retain the
+  shared native provider and pull a fresh token for each connect or reconnect.
+  It is mutually exclusive with a fixed ``token``, ``username`` or ``password``.
+* :meth:`~questdb.auth.OidcDeviceAuth.sign_in` is the only interactive
+  operation. :meth:`~questdb.auth.OidcDeviceAuth.token` and every transport
+  path remain non-interactive, silently refreshing when possible and otherwise
+  raising :class:`~questdb.auth.OidcInteractionRequired`.
+* Auth failures are typed :class:`~questdb.auth.OidcError` subclasses of
+  :class:`~questdb.QuestDBError`, whose ``code`` mirrors the client's own
+  classification (``AuthError`` when terminal, ``SocketError`` when the failure
+  is retryable, ``ConfigError`` for a misconfiguration), so retry logic keying
+  on ``code`` treats an auth failure like any other. A
+  transport attached with ``oidc_auth=`` can raise one from the same
+  ``flush`` / ``dataframe`` / ``row`` / ``query`` / :func:`questdb.connect`
+  call, so an existing ``except QuestDBError`` retry or dead-letter handler
+  keeps catching auth failures; catch :class:`~questdb.auth.OidcError` (or a
+  typed subclass such as :class:`~questdb.auth.OidcInteractionRequired`) for
+  auth-specific handling.
+* OIDC discovery, endpoint validation, token selection, caching, refresh, and
+  concurrency control use the same native implementation as the C/C++ clients.
+* OIDC scopes are preserved exactly in groups mode and refresh requests,
+  matching the Java client's token requests and persisted token-store identity.
+  Include ``openid`` explicitly when the identity provider requires it to issue
+  an ID token.
+* OIDC device-flow polling tolerates transient transport failures until the
+  device code expires, matching the Java client.
+* OIDC prompt callbacks expose the bounded device-code lifetime and polling
+  interval, matching the complete Java device challenge.
+* Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes owner-only
+  plaintext credentials atomically and coordinates refresh across processes.
+  Its ``questdb.client.oidc.token.store.dir`` override matches Java. Custom
+  Python token stores are not supported by the native provider.
+* Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
+  :func:`~questdb.auth.psycopg_connect`) that wire the token into PG-wire as the
+  ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
+  token on every new pooled connection, ``psycopg_connect`` captures it at
+  connect time.
+* :meth:`~questdb.auth.OidcDeviceAuth.close` permanently closes a provider and
+  cancels a device flow, silent-refresh coordination, or token-store lock wait
+  running on another thread; ``OidcDeviceAuth`` is also a context manager.
+  Operations on a closed provider raise the new
+  :class:`~questdb.auth.OidcCancelledError`, except
+  :meth:`~questdb.auth.OidcDeviceAuth.clear`, which stays available so the
+  persisted credential can still be removed, and ``config``, which remains
+  readable. ``Ctrl-C`` during ``sign_in()`` cancels the flow and raises
+  ``KeyboardInterrupt`` — note that cancelling closes the provider, and closing
+  is shared state, so every ``Sender``, pool and reader already attached with
+  ``oidc_auth=`` is closed with it and must be rebuilt alongside a new provider.
+* Renderer prompts receive the device code's bounded lifetime and polling
+  interval (``expires_in`` / ``interval``) plus ``browser_target``, the single
+  natively vetted URL that built-in renderers use for links and QR codes.
+* OIDC requires no additional Python dependency; ``sqlalchemy`` / ``psycopg`` /
+  ``qrcode`` / ``IPython`` are imported lazily for optional conveniences.
+
+See the :ref:`OIDC authentication guide <oidc_auth>` for details.
+
+Other changes
+~~~~~~~~~~~~~
 
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread

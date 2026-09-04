@@ -126,6 +126,23 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
             stats = server.snapshot()
         self.assertIn('cannot be replayed', str(raised.exception))
         self.assertFalse(raised.exception.in_doubt)
+        # The note is appended to the *original* exception, not rebuilt onto a
+        # fresh one. Rebuilding hardcoded the base class, which silently
+        # downgraded every QuestDBError subclass that can reach here: an OIDC
+        # token failure on an `oidc_auth=` transport arrives as
+        # OidcNetworkError / OidcDeviceFlowError / OidcTimeoutError (each
+        # carries a retryable code by design, so it passes the gates above),
+        # and flattening it stopped `except OidcError` matching and dropped
+        # .status / .retry_after / .error / .error_description.
+        #
+        # A no-cause re-raise is the observable proxy: `raise X from exc` set
+        # __cause__, re-raising the original leaves it None. The typed-subclass
+        # variant needs a *mid-stream* token failure (connect-time failures
+        # raise before the stream is marked consumed), which is not reachable
+        # deterministically here — this pins the mechanism on the one class
+        # this fixture can produce.
+        self.assertIs(type(raised.exception), qi.QuestDBError)
+        self.assertIsNone(raised.exception.__cause__)
         self.assertEqual(stats['accepted_connections'], 1)
         self.assertEqual(stats['binary_frames'], 10)
 

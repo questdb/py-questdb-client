@@ -77,12 +77,18 @@ def install_pandas3_and_numpy():
 def should_use_pandas3(py_version=None):
     if py_version is None:
         py_version = sys.version_info[:2]
-    return py_version >= (3, 11)
+    # Pandas 3 ships no 32-bit wheels, so only take the pandas 3 / numpy 2
+    # path on 64-bit interpreters. On 32-bit (e.g. win32) the pandas 3 install
+    # would be silently skipped, fastparquet would then drag in a numpy-1-built
+    # pandas 2.0.3 alongside numpy 2, and importing pandas would crash.
+    is_64bits = sys.maxsize > 2 ** 32
+    return is_64bits and py_version >= (3, 11)
 
 
 def install_default_pandas_and_numpy():
-    # Pandas 3 currently requires Python 3.11+, so keep 3.10 wheel tests on
-    # the pandas 2 / numpy 1.x-compatible path unless explicitly overridden.
+    # Pandas 3 requires Python 3.11+ and ships only 64-bit wheels, so keep
+    # 3.10 and all 32-bit wheel tests on the pandas 2 / numpy 1.x-compatible
+    # path unless explicitly overridden.
     if should_use_pandas3():
         install_pandas3_and_numpy()
     else:
@@ -103,6 +109,18 @@ def main(args):
     try_pip_install('pyarrow')
     try_pip_install('polars')
     try_pip_install('psutil')
+    # Optional OIDC extra. Without it `_qr_ascii` / `_qr_data_uri` return None,
+    # so every `qr=True` path in the renderers -- and every test that exercises
+    # one -- silently does nothing. Installing it here is what makes that
+    # coverage real rather than notional.
+    #
+    # The `[pil]` extra matters for the same reason: bare `qrcode` gives the
+    # terminal renderer's ASCII art, but `_qr_data_uri` needs Pillow to encode
+    # a PNG, so the JUPYTER renderer's QR path stayed notional on a plain
+    # `qrcode` install -- its test skipped rather than failed, which is the
+    # quiet way to have no coverage. try_pip_install tolerates a target with no
+    # Pillow wheel; those legs skip that one test as before.
+    try_pip_install('qrcode[pil]')
 
     on_linux_is_glibc = (
             (not platform.system() == 'Linux') or
