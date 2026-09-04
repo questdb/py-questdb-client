@@ -251,11 +251,12 @@ cdef inline void _oidc_validate_bool(
 cdef void _oidc_cancel_from_callback(OidcDeviceAuth provider) noexcept:
     """Publish the provider's close from inside its own event callback.
 
-    Native splits close into a lock-free signal and a drain, and skips only the
-    drain while a callback is running, so this neither blocks nor trips the
-    callback-reentry guard. Errors are swallowed deliberately: this runs on the
-    interrupt path, where the pending ``KeyboardInterrupt`` is the thing worth
-    surfacing.
+    Native splits close into a signal that does not wait for authentication work
+    and a drain, and skips only the drain while a callback is running. Publication
+    may briefly contend with wait registration, but cannot wait on this callback's
+    authentication critical section or trip the callback-reentry guard. Errors
+    are swallowed deliberately: this runs on the interrupt path, where the
+    pending ``KeyboardInterrupt`` is the thing worth surfacing.
     """
     cdef questdb_error* err = NULL
     if provider._raw == NULL:
