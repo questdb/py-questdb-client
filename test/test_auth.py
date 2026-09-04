@@ -109,6 +109,28 @@ def _live_weakref_count():
     return count
 
 
+def _settled_registry_size():
+    """``_debug_oidc_registry_size()`` once pending finalizers have drained.
+
+    Entries are dropped in ``OidcDeviceAuth.__dealloc__``. CPython runs that at
+    the last decref, so an immediate reading is already settled; PyPy does not
+    refcount and stages cpyext finalization across several collections, so a
+    bare reading still counts providers that are unreachable -- and counts them
+    in the *baseline* too, which is why this drifted in both directions on PyPy
+    (``3 != 4`` as well as ``5 != 10``). Collect until the count stops moving,
+    the way :func:`_live_weakref_count` does. A live provider is never
+    collected, so settling is equally correct for the readings that expect one.
+    """
+    prev = None
+    for _ in range(30):
+        gc.collect()
+        count = _debug_oidc_registry_size()
+        if count == prev:
+            break
+        prev = count
+    return prev
+
+
 class RecordingRenderer(Renderer):
     def __init__(self):
         self.prompts = []
@@ -518,13 +540,30 @@ class NativeOidcTest(unittest.TestCase):
             self.assertEqual(FileTokenStore.at(directory).directory, directory)
 
     def test_default_file_store_environment_override(self):
+        # A real temporary directory rather than a '/tmp/...' literal: the
+        # override is resolved like any other directory, and a leading '/' is
+        # drive-less on Windows, where abspath() resolves it against the
+        # current drive. The literal comparison then failed as
+        # 'C:\\tmp\\qdb-oidc-test' != '/tmp/qdb-oidc-test' -- a platform
+        # artefact of the expected value, nothing to do with the override.
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(
+                    os.environ,
+                    {'questdb.client.oidc.token.store.dir': directory}):
+                self.assertEqual(
+                    FileTokenStore.at_default_location().directory, directory)
+
+        # An already-absolute temporary directory would pass even if the
+        # override were handed over verbatim, so also pin that it goes through
+        # the same expansion: a '~' in the environment must not put the
+        # plaintext refresh token in a directory literally named '~'.
         with mock.patch.dict(
                 os.environ,
                 {'questdb.client.oidc.token.store.dir':
-                 '/tmp/qdb-oidc-test'}):
+                 os.path.join('~', 'qdb-oidc-test')}):
             self.assertEqual(
                 FileTokenStore.at_default_location().directory,
-                '/tmp/qdb-oidc-test')
+                os.path.join(os.path.expanduser('~'), 'qdb-oidc-test'))
 
     def test_renderer_must_implement_interface(self):
         with self.assertRaisesRegex(OidcConfigError, 'renderer'):
@@ -649,18 +688,16 @@ class NativeOidcTest(unittest.TestCase):
         # test passes with or without the unwind. Holding the half-built object
         # alive is what makes this discriminate.
         self._construct_and_fail_in_build()  # warm one-time module state
-        gc.collect()
-        baseline = _debug_oidc_registry_size()
+        baseline = _settled_registry_size()
         auth = OidcDeviceAuth.__new__(OidcDeviceAuth)
         self._construct_and_fail_in_build(target=auth)
         self.assertEqual(
-            _debug_oidc_registry_size(), baseline,
+            _settled_registry_size(), baseline,
             'a failed native build() left its `_OIDC_PROVIDERS` entry behind; '
             'the registry must not hold an entry for a provider that was '
             'never built')
         del auth
-        gc.collect()
-        self.assertEqual(_debug_oidc_registry_size(), baseline)
+        self.assertEqual(_settled_registry_size(), baseline)
 
     def test_registry_drains_when_init_is_retried_after_failed_build(self):
         # The leak that survives `__dealloc__`: a failed build leaves `_raw`
@@ -669,8 +706,7 @@ class NativeOidcTest(unittest.TestCase):
         # Without the unwind, the first key is stranded as a dead weakref in a
         # module-global dict for the life of the process -- once per retry, and
         # invisible to any weakref assertion.
-        gc.collect()
-        baseline = _debug_oidc_registry_size()
+        baseline = _settled_registry_size()
         for _ in range(self._LEAK_ITERS):
             auth = OidcDeviceAuth.__new__(OidcDeviceAuth)
             self._construct_and_fail_in_build(target=auth)
@@ -679,11 +715,10 @@ class NativeOidcTest(unittest.TestCase):
                 'questdb', 'https://idp.example/device',
                 'https://idp.example/token',
                 interactive=False, open_browser=False, renderer=Renderer())
-            self.assertEqual(_debug_oidc_registry_size(), baseline + 1)
+            self.assertEqual(_settled_registry_size(), baseline + 1)
             del auth
-            gc.collect()
         self.assertEqual(
-            _debug_oidc_registry_size(), baseline,
+            _settled_registry_size(), baseline,
             f'the provider registry grew over {self._LEAK_ITERS} '
             f'failed-then-retried initializations')
 
@@ -1511,6 +1546,7 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         # sender is given `oidc_auth=`.
         self.assertIsInstance(caught.exception, questdb.QuestDBError)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_dataframe_auto_flush_preserves_oidc_error(self):
         auth = make_auth()
         with questdb.Sender(
@@ -1541,27 +1577,28 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         # dropped in __dealloc__, which always runs on a managed thread -- and
         # nothing else drops it, so a stale entry would be a slow leak that no
         # weakref assertion catches.
-        baseline = _debug_oidc_registry_size()
+        baseline = _settled_registry_size()
         provider = make_auth()
-        self.assertEqual(_debug_oidc_registry_size(), baseline + 1)
+        self.assertEqual(_settled_registry_size(), baseline + 1)
         weak = weakref.ref(provider)
         del provider
-        gc.collect()
+        # Draining the finalizer that pops the entry is also what clears the
+        # weakref, so take the size first and assert on both afterwards.
+        size = _settled_registry_size()
         self.assertIsNone(weak(), 'the registry must not keep a provider alive')
         self.assertEqual(
-            _debug_oidc_registry_size(), baseline,
-            'the registry entry outlived its provider')
+            size, baseline, 'the registry entry outlived its provider')
 
     def test_provider_registry_does_not_grow_across_churn(self):
-        baseline = _debug_oidc_registry_size()
+        baseline = _settled_registry_size()
         refs = []
         for _ in range(200):
             provider = make_auth()
             refs.append(weakref.ref(provider))
             del provider
-        gc.collect()
+        size = _settled_registry_size()
         self.assertTrue(all(ref() is None for ref in refs))
-        self.assertEqual(_debug_oidc_registry_size(), baseline)
+        self.assertEqual(size, baseline)
 
     def test_token_provider_failure_is_narrated_to_the_listener(self):
         # Regression: the Bearer header is resolved ABOVE the endpoint loop, so
@@ -1582,7 +1619,13 @@ class NativeTransportAttachmentTest(unittest.TestCase):
             db.close()
         except OidcInteractionRequired:
             pass
-        deadline = time.monotonic() + 5
+        # The event crosses the connection-event inbox from a background
+        # thread, so it is inherently a wait rather than a check. 5s was enough
+        # on every developer machine and flaked on the arm64 wheel leg, which
+        # runs the whole suite once per Python version on a shared builder;
+        # the loop exits the moment the event lands, so a generous ceiling
+        # costs a healthy run nothing and only bounds a genuine regression.
+        deadline = time.monotonic() + 60
         while not events and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertTrue(events, 'the failed token pull was never narrated')

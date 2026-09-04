@@ -925,6 +925,7 @@ class TestSchemaOverrides(unittest.TestCase):
         self.assertIn(value.bytes[::-1], payload)
         self.assertNotIn(value.bytes, payload)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_object_dtype_uuid_column_reaches_the_wire_in_qwp_order(self):
         # The object-dtype `uuid.UUID` route (_dataframe_columnar_build_uuid_pyobj
         # -> qwp_numpy_s16) is a DIFFERENT native entry point from the Arrow
