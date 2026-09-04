@@ -81,6 +81,24 @@ class FileTokenStore:
     def at_default_location(cls) -> 'FileTokenStore':
         override = os.environ.get(TOKEN_STORE_DIR_ENV)
         if override:
+            # Reject a non-absolute override rather than normalizing it, which
+            # is what the constructor does for a path the caller passes
+            # directly. This setting is shared with the Java and native
+            # clients, and neither expands `~`: they would create a directory
+            # literally named `~` where expanding it here would land in
+            # `$HOME`, so the "shared" store would silently become two. A
+            # relative path is the same problem via the working directory.
+            # Native rejects these too; checking here names the setting in a
+            # typed error instead of surfacing an io error from build().
+            # `~/x` is not absolute either, so this one test covers both.
+            if not os.path.isabs(override):
+                raise OidcConfigError(
+                    f'{TOKEN_STORE_DIR_ENV} must be an absolute path, not '
+                    f'{override!r}. A relative path follows the working '
+                    'directory, and `~` is expanded by shells rather than by '
+                    'the QuestDB clients, so neither names one store shared '
+                    'with the Java and native clients. Use an absolute path, '
+                    'or pass FileTokenStore(dir) explicitly.')
             return cls(override)
         home = os.path.expanduser('~')
         if not os.path.isabs(home):

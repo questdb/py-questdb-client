@@ -564,17 +564,32 @@ class NativeOidcTest(unittest.TestCase):
                 self.assertEqual(
                     FileTokenStore.at_default_location().directory, directory)
 
-        # An already-absolute temporary directory would pass even if the
-        # override were handed over verbatim, so also pin that it goes through
-        # the same expansion: a '~' in the environment must not put the
-        # plaintext refresh token in a directory literally named '~'.
-        with mock.patch.dict(
-                os.environ,
-                {'questdb.client.oidc.token.store.dir':
-                 os.path.join('~', 'qdb-oidc-test')}):
-            self.assertEqual(
-                FileTokenStore.at_default_location().directory,
-                os.path.join(os.path.expanduser('~'), 'qdb-oidc-test'))
+        # A non-absolute override is refused rather than normalized. This used
+        # to expand '~' so the refresh token could not land in a directory
+        # literally named '~' -- a real hazard, but the cure was worse: this
+        # setting is shared with the Java and native clients, and NEITHER
+        # expands '~' (Java does Paths.get(override) verbatim). Expanding it
+        # here pointed Python at $HOME/x while they used ./~/x, so the one
+        # setting meant to share a store silently produced two, each with its
+        # own plaintext refresh token. Refusing names the problem instead.
+        for bad in (os.path.join('~', 'qdb-oidc-test'),
+                    os.path.join('rel', 'qdb-oidc-test')):
+            with self.subTest(override=bad):
+                with mock.patch.dict(
+                        os.environ,
+                        {'questdb.client.oidc.token.store.dir': bad}):
+                    with self.assertRaises(OidcConfigError) as ctx:
+                        FileTokenStore.at_default_location()
+                    message = str(ctx.exception)
+                    self.assertIn(
+                        'questdb.client.oidc.token.store.dir', message)
+                    self.assertIn('absolute', message)
+
+        # An explicit constructor path is a Python-supplied path, not the
+        # shared setting, so it keeps the expansion.
+        self.assertEqual(
+            FileTokenStore(os.path.join('~', 'qdb-oidc-test')).directory,
+            os.path.join(os.path.expanduser('~'), 'qdb-oidc-test'))
 
     def test_renderer_must_implement_interface(self):
         with self.assertRaisesRegex(OidcConfigError, 'renderer'):

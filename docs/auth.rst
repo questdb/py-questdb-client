@@ -172,7 +172,12 @@ configured:
 
 The default directory is ``~/.questdb/oidc-tokens/``, overridable with
 the ``questdb.client.oidc.token.store.dir`` environment variable shared with
-Java. The native client writes plaintext JSON using atomic replacement and
+Java. That override **must be an absolute path**: a relative one follows the
+working directory, and ``~`` is expanded by shells rather than by any QuestDB
+client, so neither names a single store the clients would actually share.
+Both are rejected rather than silently resolved. A path passed straight to
+``FileTokenStore(...)`` is a Python path, not the shared setting, and is
+expanded and absolutised as usual. The native client writes plaintext JSON using atomic replacement and
 cross-process coordination; on POSIX, directories are mode ``0700`` and files
 mode ``0600``. Enabling it stores a long-lived refresh token on disk, so use it
 only when that at-rest tradeoff is acceptable. Custom Python token stores are
