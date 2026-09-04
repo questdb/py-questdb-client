@@ -951,12 +951,13 @@ cdef class OidcDeviceAuth:
         is dropped. Cloned native handles retained by attached transports share
         the closed state. Idempotent.
 
-        The call waits for the running operation to leave the native
-        authentication critical section — except when called *from inside this
-        provider's own renderer callback*, which executes within that section:
-        there it publishes the close and returns without waiting, since waiting
-        would deadlock against itself. The credential is dropped either way; a
-        later ``close()`` from an ordinary thread performs the wait.
+        The call ordinarily waits for the running operation to leave the native
+        authentication critical section. While this provider's renderer callback
+        is active, however, it publishes the close, drops the in-memory credential,
+        and returns without waiting, regardless of which thread called it. A
+        callback may delegate ``close()`` to another thread and join that thread,
+        so waiting there could deadlock just as it would on the callback thread
+        itself. A later ``close()`` after the callback returns performs the wait.
 
         The persisted entry is deliberately left behind so :meth:`clear` can
         still remove it after closing.
@@ -968,14 +969,14 @@ cdef class OidcDeviceAuth:
             self._closed = True
             return
         # Deliberately NOT short-circuited on ``self._closed``. A close
-        # published from inside a renderer callback -- the Ctrl-C cancel path --
-        # marks the provider closed without draining, because the callback runs
-        # inside the very critical section the drain waits on. Skipping the
-        # native call here on that flag left the drain permanently unperformed:
-        # the later ``close()`` (or ``__exit__``) that could safely drain became
-        # a no-op. Native close is idempotent and cheap on an already-closed
-        # provider, so calling through unconditionally restores the documented
-        # behaviour at no meaningful cost.
+        # published while a renderer callback is active -- including the Ctrl-C
+        # cancel path -- marks the provider closed without draining, because the
+        # callback runs inside the very critical section the drain waits on.
+        # Skipping the native call here on that flag left the drain permanently
+        # unperformed: the later ``close()`` (or ``__exit__``) that could safely
+        # drain became a no-op. Native close is idempotent and cheap on an
+        # already-closed provider, so calling through unconditionally restores
+        # the documented behaviour at no meaningful cost.
         _ensure_doesnt_have_gil(&gs)
         ok = questdb_oidc_auth_close(self._raw, &err)
         _ensure_has_gil(&gs)
