@@ -471,8 +471,9 @@ cdef class OidcDeviceAuth:
           Its callbacks receive untrusted identity-provider text; see that
           class for the sanitisation and re-entrancy rules.
         * ``default_interval`` — seconds between device-code polls when the
-          identity provider does not specify one. A server-supplied interval,
-          and any ``Retry-After``, take precedence.
+          identity provider does not specify one (default 5, maximum 1800, the
+          longest a device code may live). A server-supplied interval, and any
+          ``Retry-After``, take precedence.
         * ``timeout`` — the per-HTTP-request timeout in seconds (default 30,
           maximum 120). This is **not** a deadline for the sign-in as a whole,
           which is bounded by the device code's own lifetime.
@@ -645,12 +646,21 @@ cdef class OidcDeviceAuth:
                 builder, interactive is True, &err):
             raise _oidc_err_to_py(err)
 
+        # Bounded at the device code's own maximum lifetime, which is the
+        # ceiling native clamps the interval to anyway. The old bound was the
+        # full uint64 range, and native casts the value to i64 before clamping
+        # -- so anything at or above 2**63 wrapped negative, floored to 0, and
+        # came back out as the 5s MINIMUM. The largest value the validator
+        # accepted therefore produced the fastest possible polling, which is
+        # the opposite of what it asked for.
         if (not isinstance(default_interval, int)
                 or isinstance(default_interval, bool)
                 or default_interval <= 0
-                or default_interval > 0xffffffffffffffff):
+                or default_interval > 1800):
             raise OidcConfigError(
-                'default_interval must be a positive integer number of seconds')
+                'default_interval must be a positive integer number of '
+                'seconds no greater than 1800 (the maximum device-code '
+                'lifetime)')
         if not questdb_oidc_builder_default_interval_seconds(
                 builder, <uint64_t>default_interval, &err):
             raise _oidc_err_to_py(err)
@@ -765,7 +775,14 @@ cdef class OidcDeviceAuth:
         cdef bint ok
         cdef PyThreadState* gs = NULL
         self._require_open()
-        self._interrupt = None
+        # Deliberately NOT cleared on entry. `_interrupt` is one field on a
+        # provider the class documents as shareable, so a second sign_in() --
+        # from another thread, or from a renderer callback that calls back into
+        # this provider -- used to wipe an interrupt the first call's callback
+        # had just parked, leaving that caller to raise OidcCancelledError and
+        # poll on rather than surfacing the Ctrl-C the user actually pressed.
+        # Take whatever is there afterwards instead: parking only ever happens
+        # while a native call is in flight, and every path below consumes it.
         _ensure_doesnt_have_gil(&gs)
         ok = questdb_oidc_auth_sign_in(self._raw, &err)
         _ensure_has_gil(&gs)
@@ -803,7 +820,13 @@ cdef class OidcDeviceAuth:
         try:
             data = questdb_oidc_token_data(token)
             length = questdb_oidc_token_len(token)
-            return PyUnicode_FromStringAndSize(data, <Py_ssize_t>length)
+            # Guard NULL like every other native span in this file does, via
+            # _oidc_text. The header promises non-NULL for a non-NULL token and
+            # native returns a Rust String's pointer, so this is unreachable
+            # today -- but PyUnicode_FromStringAndSize(NULL, n) returns an
+            # *uninitialized* str on CPython 3.10/3.11 rather than raising, and
+            # this is the one function that returns a credential.
+            return _oidc_text(data, length) or ''
         finally:
             questdb_oidc_token_free(token)
 
