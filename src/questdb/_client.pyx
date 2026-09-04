@@ -2240,7 +2240,19 @@ class ConnectionEventKind(TaggedEnum):
     EndpointAttemptFailed = ('endpoint_attempt_failed', 4)
     #: Every configured endpoint was attempted and none accepted.
     AllEndpointsUnreachable = ('all_endpoints_unreachable', 5)
-    #: Terminal: the server rejected credentials.
+    #: A credential was rejected or could not be obtained.
+    #:
+    #: Terminal **only when** :attr:`ConnectionEvent.host` **is set**: the
+    #: server rejected the credential it was offered, and the owning
+    #: sender/pool operation raises. When ``host`` and ``port`` are ``None``
+    #: the credential was never offered to anyone -- an ``oidc_auth=`` token
+    #: provider failed before any endpoint was dialled. That case is
+    #: **retryable**: the sender keeps reconnecting so queued rows survive
+    #: while a human signs in, and nothing is raised to the caller. A listener
+    #: that pages or tears down the pool on ``AuthFailed`` must gate on
+    #: ``event.host is not None``, or it fires on an ordinary silent-refresh
+    #: blip. :attr:`ConnectionEvent.cause_code` separates them too:
+    #: ``AuthError`` for a rejection, ``SocketError`` for a provider failure.
     AuthFailed = ('auth_failed', 6)
 
 

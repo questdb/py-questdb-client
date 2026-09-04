@@ -178,6 +178,8 @@ mode ``0600``. Enabling it stores a long-lived refresh token on disk, so use it
 only when that at-rest tradeoff is acceptable. Custom Python token stores are
 not supported by the native provider.
 
+.. _oidc_pgwire:
+
 PG-wire and manual token use
 ============================
 
@@ -195,6 +197,20 @@ before creating a pool:
 SQLAlchemy calls non-interactive ``token()`` for every new pooled connection,
 so it follows rotation and silent refresh. ``psycopg_connect`` captures one
 token for that connection. For other HTTP clients, use ``auth.headers()``.
+
+Because the token travels as the PG password, both adapters default to
+``sslmode="require"`` instead of inheriting libpq's ``prefer``, which silently
+accepts a plaintext connection whenever the server declines TLS. ``require``
+encrypts but does not authenticate the server, so prefer ``verify-full``
+wherever your certificates allow it::
+
+    engine = sqlalchemy_engine(
+        auth, "https://questdb.example.com:9000",
+        sslmode="verify-full",
+        connect_args={"sslrootcert": "/etc/ssl/questdb-ca.pem"})
+
+Pass ``sslmode=None`` to set nothing and manage TLS through the environment or
+a service file; an ``sslmode`` you supply yourself always wins.
 
 Rendering and non-interactive environments
 ==========================================
@@ -233,6 +249,16 @@ Security notes
   Custom renderers must sanitize callback fields for their terminal or
   HTML output sink and use ``browser_target`` for actionable URLs.
 * Avoid logging tokens, authorization headers, or PG connection parameters.
+* The PG-wire adapters send the token as the ``_sso`` password, so they default
+  to ``sslmode="require"``; see :ref:`the PG-wire section <oidc_pgwire>` for
+  raising that to ``verify-full``.
+* ``Ctrl-C`` during :meth:`~questdb.auth.OidcDeviceAuth.sign_in` closes the
+  provider permanently, and closing is shared: every ``Sender``,
+  :func:`questdb.connect` pool and reader attached with ``oidc_auth=`` is closed
+  with it and cannot be revived. Recovering means building a new provider *and*
+  rebuilding every transport that used the old one. Where a long-running
+  ingestion must survive a cancelled re-authentication, keep the interactive
+  provider separate from the one you attach.
 
 Optional dependencies
 =====================

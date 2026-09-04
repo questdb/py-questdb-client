@@ -15,8 +15,9 @@ UUID and fixed-size-binary DataFrame columns
 
 UUID bytes are now **canonical RFC 4122 big-endian** at every API boundary, and
 a 16-byte Arrow column is only treated as a UUID when it carries the
-``arrow.uuid`` extension label. Three changes, all affecting
-``dataframe()`` / ``Sender.dataframe()`` over QWP:
+``arrow.uuid`` extension label. Three changes; the first affects **both
+ingestion and query results**, the other two ``dataframe()`` /
+``Sender.dataframe()`` over QWP:
 
 * **UUID byte order.** Values are read and written in canonical RFC 4122
   order; the client byte-swaps to QWP wire order internally. If you previously
@@ -25,6 +26,17 @@ a 16-byte Arrow column is only treated as a UUID when it carries the
   client, so stored data and round-trips are unaffected — only the bytes your
   application hands over or receives change. A ``uuid.UUID`` object column
   needs no change at all.
+
+  This is **not confined to ingestion**: the raw bytes a UUID column yields on
+  the read path changed in the same way, and silently. Anything that
+  reconstructs a UUID from, hashes, or joins on those bytes must drop its
+  byte-reversing workaround, on every Arrow-backed reader —
+  :meth:`questdb.QueryResult.to_arrow`, :meth:`~questdb.QueryResult.to_polars`,
+  :meth:`~questdb.QueryResult.iter_arrow`, ``__arrow_c_stream__`` (so
+  ``polars.from_arrow(db.query(...))`` too), and
+  :meth:`~questdb.QueryResult.to_pandas` with ``dtype_backend="pyarrow"``. Plain
+  :meth:`~questdb.QueryResult.to_pandas`, which builds ``uuid.UUID`` objects directly,
+  is unaffected and needs no change.
 
 * **Unlabelled** ``pa.fixed_size_binary(16)`` **now lands as BINARY, not
   UUID.** The ``arrow.uuid`` extension label is what claims a 16-byte column as
@@ -132,7 +144,9 @@ Highlights:
   :meth:`~questdb.auth.OidcDeviceAuth.clear`, which stays available so the
   persisted credential can still be removed, and ``config``, which remains
   readable. ``Ctrl-C`` during ``sign_in()`` cancels the flow and raises
-  ``KeyboardInterrupt``.
+  ``KeyboardInterrupt`` — note that cancelling closes the provider, and closing
+  is shared state, so every ``Sender``, pool and reader already attached with
+  ``oidc_auth=`` is closed with it and must be rebuilt alongside a new provider.
 * Renderer prompts receive the device code's bounded lifetime and polling
   interval (``expires_in`` / ``interval``) plus ``browser_target``, the single
   natively vetted URL that built-in renderers use for links and QR codes.

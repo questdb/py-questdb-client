@@ -741,8 +741,25 @@ cdef class OidcDeviceAuth:
         """Run interactive sign-in if no cached or refreshable token exists.
 
         ``Ctrl-C`` during the wait cancels the flow and raises
-        ``KeyboardInterrupt``. Cancelling closes the provider, so build a new
-        one to try again.
+        ``KeyboardInterrupt``.
+
+        .. warning::
+
+           Cancelling **closes the provider permanently**, and closing is
+           shared state: every :class:`~questdb.Sender`, :func:`questdb.connect`
+           pool and reader already attached with ``oidc_auth=`` holds a handle
+           on the same provider and is closed with it. Their next token pull
+           fails terminally -- native classifies a closed provider as
+           non-retryable, so reconnect loops stop and queued store-and-forward
+           frames are abandoned -- and there is no way to attach a replacement
+           provider to an existing handle.
+
+           So a ``Ctrl-C`` at a re-authentication prompt does not just abandon
+           that sign-in: it ends every transport built from this provider. To
+           recover, build a new ``OidcDeviceAuth`` **and** rebuild each sender,
+           pool and reader that used the old one. Where that matters, sign in
+           on a provider before attaching it and keep re-authentication on a
+           separate, unattached provider.
         """
         cdef questdb_error* err = NULL
         cdef bint ok
