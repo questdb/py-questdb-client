@@ -431,14 +431,19 @@ cdef class OidcDeviceAuth:
     # registered.
     cdef size_t _provider_id
     # A KeyboardInterrupt/SystemExit delivered inside a renderer callback,
-    # parked for sign_in() to re-raise once the native call returns.
+    # parked for the sole active sign_in() to re-raise once native returns.
     cdef object _interrupt
+    # Native serializes acquisition, but a second native call can regain the
+    # GIL before the callback-owning call and steal `_interrupt`. Reject it
+    # before releasing the GIL so callback exceptions remain invocation-owned.
+    cdef object _sign_in_lock
 
     def __cinit__(self):
         self._raw = NULL
         self._renderer = None
         self._closed = False
         self._interrupt = None
+        self._sign_in_lock = threading.Lock()
         self._provider_id = 0
 
     cdef void _require_open(self) except *:
@@ -825,6 +830,10 @@ cdef class OidcDeviceAuth:
         ``Ctrl-C`` during the wait cancels the flow and raises
         ``KeyboardInterrupt``.
 
+        Only one ``sign_in()`` call may run on a provider at a time. A concurrent
+        call raises :class:`~questdb.auth.OidcError` instead of waiting behind
+        the interactive flow.
+
         .. warning::
 
            Cancelling **closes the provider permanently**, and closing is
@@ -847,27 +856,30 @@ cdef class OidcDeviceAuth:
         cdef bint ok
         cdef PyThreadState* gs = NULL
         self._require_open()
-        # Deliberately NOT cleared on entry. `_interrupt` is one field on a
-        # provider the class documents as shareable, so a second sign_in() --
-        # from another thread, or from a renderer callback that calls back into
-        # this provider -- used to wipe an interrupt the first call's callback
-        # had just parked, leaving that caller to raise OidcCancelledError and
-        # poll on rather than surfacing the Ctrl-C the user actually pressed.
-        # Take whatever is there afterwards instead: parking only ever happens
-        # while a native call is in flight, and every path below consumes it.
-        _ensure_doesnt_have_gil(&gs)
-        ok = questdb_oidc_auth_sign_in(self._raw, &err)
-        _ensure_has_gil(&gs)
-        interrupt = self._interrupt
-        self._interrupt = None
-        if interrupt is not None:
-            # The interrupt is what the user asked for; the native error is
-            # just the cancellation it caused.
-            if err != NULL:
-                questdb_error_free(err)
-            raise interrupt
-        if not ok:
-            raise _oidc_err_to_py(err)
+        if not self._sign_in_lock.acquire(False):
+            from questdb.auth._errors import OidcError
+            raise OidcError(
+                'OIDC sign_in() is already in progress on this provider.')
+        try:
+            # A callback may park an interrupt only for this invocation: the
+            # non-blocking lock above prevents another sign_in() from entering
+            # native and winning the race to consume the provider field.
+            self._interrupt = None
+            _ensure_doesnt_have_gil(&gs)
+            ok = questdb_oidc_auth_sign_in(self._raw, &err)
+            _ensure_has_gil(&gs)
+            interrupt = self._interrupt
+            self._interrupt = None
+            if interrupt is not None:
+                # The interrupt is what the user asked for; the native error is
+                # just the cancellation it caused.
+                if err != NULL:
+                    questdb_error_free(err)
+                raise interrupt
+            if not ok:
+                raise _oidc_err_to_py(err)
+        finally:
+            self._sign_in_lock.release()
 
     def token(self):
         """Return a cached or silently refreshed token; never prompt.

@@ -1092,6 +1092,57 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         with self.assertRaisesRegex(OidcCancelledError, 'closed'):
             auth.token()
 
+    def test_concurrent_sign_in_cannot_steal_callback_interrupt(self):
+        callback_entered = threading.Event()
+        release_callback = threading.Event()
+
+        class InterruptingRenderer(RecordingRenderer):
+            def on_waiting(self, seconds_left):
+                super().on_waiting(seconds_left)
+                callback_entered.set()
+                if not release_callback.wait(5):
+                    raise AssertionError('concurrent sign-in was never attempted')
+                raise KeyboardInterrupt
+
+        pending = (400, {'error': 'authorization_pending'}, None)
+        first_result = []
+        second_result = []
+        with OidcTestServer(
+                device_token_response=pending,
+                device_expires_in=20) as server:
+            auth = make_discovered_auth(
+                server, renderer=InterruptingRenderer())
+
+            def first_sign_in():
+                try:
+                    auth.sign_in()
+                except BaseException as exc:
+                    first_result.append(exc)
+
+            def second_sign_in():
+                try:
+                    auth.sign_in()
+                except BaseException as exc:
+                    second_result.append(exc)
+
+            first = threading.Thread(target=first_sign_in, daemon=True)
+            first.start()
+            self.assertTrue(
+                callback_entered.wait(5), 'first sign-in did not render')
+            second = threading.Thread(target=second_sign_in, daemon=True)
+            second.start()
+            second.join(2)
+            release_callback.set()
+            first.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(len(first_result), 1)
+        self.assertIsInstance(first_result[0], KeyboardInterrupt)
+        self.assertEqual(len(second_result), 1)
+        self.assertIsInstance(second_result[0], OidcError)
+        self.assertIn('already in progress', str(second_result[0]))
+
     def test_renderer_can_close_the_provider_from_its_callback(self):
         # close() is the only cancellation lever a renderer has -- a notebook
         # "Cancel" button in on_waiting has nothing else to call. The native
@@ -1795,24 +1846,26 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         # operator's first symptom was unrelated store backpressure.
         events = []
         auth = make_auth()  # never signed in
+        db = questdb.connect(
+            'ws::addr=127.0.0.1:19009;lazy_connect=true;',
+            oidc_auth=auth,
+            connection_listener=events.append,
+            connection_event_inbox_capacity=32)
         try:
-            db = questdb.connect(
-                'ws::addr=127.0.0.1:19009;',
-                oidc_auth=auth,
-                connection_listener=events.append,
-                connection_event_inbox_capacity=32)
+            # Keep the owning DB and its event dispatcher alive while the
+            # background connection attempt narrates the synchronous token
+            # failure. Eager construction used to unwind and close the
+            # dispatcher immediately after queuing AuthFailed, so shutdown was
+            # allowed to discard the backlog before the callback thread ran.
+            sender = db.sender()
+            try:
+                deadline = time.monotonic() + 5
+                while not events and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            finally:
+                sender.close(flush=False)
+        finally:
             db.close()
-        except OidcInteractionRequired:
-            pass
-        # The event crosses the connection-event inbox from a background
-        # thread, so it is inherently a wait rather than a check. 5s was enough
-        # on every developer machine and flaked on the arm64 wheel leg, which
-        # runs the whole suite once per Python version on a shared builder;
-        # the loop exits the moment the event lands, so a generous ceiling
-        # costs a healthy run nothing and only bounds a genuine regression.
-        deadline = time.monotonic() + 60
-        while not events and time.monotonic() < deadline:
-            time.sleep(0.05)
         self.assertTrue(events, 'the failed token pull was never narrated')
         event = events[0]
         self.assertIs(event.kind, questdb.ConnectionEventKind.AuthFailed)
