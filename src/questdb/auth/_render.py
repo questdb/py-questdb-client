@@ -741,8 +741,9 @@ class TerminalRenderer(Renderer):
                 import logging
                 logging.getLogger('questdb').warning(
                     'Could not write the OIDC sign-in prompt to %r. The device '
-                    'code cannot be displayed; pass a renderer= or a stream to '
-                    'TerminalRenderer, or call token()/headers() after signing '
+                    'code cannot be displayed; pass a custom renderer= that '
+                    'writes to a working output, redirect sys.stderr while '
+                    'calling sign_in(), or call token()/headers() after signing '
                     'in elsewhere.', stream, exc_info=True)
 
     def on_prompt(self, resp: Dict[str, Any]) -> None:

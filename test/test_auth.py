@@ -1131,8 +1131,9 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         # close() is the only cancellation lever a renderer has -- a notebook
         # "Cancel" button in on_waiting has nothing else to call. The native
         # callback-reentry guard used to reject it, so the affordance could not
-        # be built at all. Native now publishes the close lock-free and skips
-        # only the drain, so this must succeed.
+        # be built at all. Native now publishes the close without waiting for
+        # the authentication critical section and skips only the drain, so this
+        # must succeed.
         outcome = []
         holder = []
 
@@ -2407,6 +2408,7 @@ class RenderSanitizerTest(unittest.TestCase):
         # countdown tick.
         self.assertEqual(len(captured.records), 1, captured.output)
         self.assertIn('OIDC sign-in prompt', captured.output[0])
+        self.assertNotIn('TerminalRenderer', captured.output[0])
 
     def test_native_vetted_target_still_drives_the_link(self):
         # The refusal path must not disturb the ordinary case.
