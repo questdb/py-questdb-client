@@ -1447,6 +1447,50 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 'ws::addr=localhost:9000;lazy_connect=true;token=fixed;',
                 oidc_auth=self.auth)
 
+    def test_sender_rejects_basic_auth_and_rotating_token(self):
+        # username/password are in the same mutual-exclusion list as token, on
+        # both the kwarg and the conf-string path, but only token was ever
+        # tested: dropping either from the Sender tuple or from connect()'s key
+        # list left the suite green while the caller fell through to native's
+        # internal "..._token_provider" message.
+        for kwargs in (
+                {'username': 'u'},
+                {'password': 'p'},
+                {'username': 'u', 'password': 'p'}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(questdb.QuestDBError) as ctx:
+                    questdb.Sender(
+                        questdb.Protocol.Http, 'localhost', 9000,
+                        oidc_auth=self.auth, **kwargs)
+                message = str(ctx.exception)
+                self.assertIn('oidc_auth', message)
+                self.assertNotIn('token_provider', message)
+                for key in kwargs:
+                    self.assertIn(key, message)
+
+    def test_sender_from_conf_rejects_basic_auth_and_rotating_token(self):
+        with self.assertRaises(questdb.QuestDBError) as ctx:
+            questdb.Sender.from_conf(
+                'http::addr=localhost:9000;username=u;password=p;',
+                oidc_auth=self.auth)
+        message = str(ctx.exception)
+        self.assertIn('oidc_auth', message)
+        self.assertIn('username', message)
+        self.assertIn('password', message)
+        self.assertNotIn('token_provider', message)
+
+    def test_pool_rejects_basic_auth_and_rotating_token(self):
+        with self.assertRaises(questdb.QuestDBError) as ctx:
+            questdb.connect(
+                'ws::addr=localhost:9000;lazy_connect=true;'
+                'username=u;password=p;',
+                oidc_auth=self.auth)
+        message = str(ctx.exception)
+        self.assertIn('oidc_auth', message)
+        self.assertIn('username', message)
+        self.assertIn('password', message)
+        self.assertNotIn('token_provider', message)
+
     def test_token_conflict_names_the_parameters_the_caller_wrote(self):
         # Regression: only native enforced this, and it reports the internal
         # config key it knows -- "qwp_ws_token_provider" / "http_token_provider"
@@ -2080,6 +2124,49 @@ class RenderSanitizerTest(unittest.TestCase):
             any(glyph in vetted.getvalue() for glyph in self._QR_GLYPHS),
             'the fixture cannot detect a QR at all')
 
+    def test_default_terminal_renderer_follows_stderr(self):
+        # The renderer is built during OidcDeviceAuth construction, which can be
+        # a long way from the sign_in() that renders through it. Binding
+        # sys.stderr at construction sent the device code to whatever stream was
+        # installed back then -- a redirect_stderr buffer, pytest's capture, the
+        # pre-daemonize fd 2 -- and the bare `except Exception: pass` in _write
+        # meant a closed one lost the prompt with no error and no log, leaving
+        # sign_in() polling to the deadline with nothing on screen.
+        renderer = _render.TerminalRenderer()
+        late = io.StringIO()
+        real_stderr = sys.stderr
+        try:
+            sys.stderr = late
+            renderer.on_failure('after the swap')
+        finally:
+            sys.stderr = real_stderr
+        self.assertIn('after the swap', late.getvalue())
+
+        # An explicit stream is still honoured as given, not re-resolved.
+        explicit = io.StringIO()
+        pinned = _render.TerminalRenderer(stream=explicit)
+        other = io.StringIO()
+        try:
+            sys.stderr = other
+            pinned.on_failure('pinned')
+        finally:
+            sys.stderr = real_stderr
+        self.assertIn('pinned', explicit.getvalue())
+        self.assertEqual(other.getvalue(), '')
+
+    def test_terminal_renderer_warns_once_when_it_cannot_write(self):
+        closed = io.StringIO()
+        closed.close()
+        renderer = _render.TerminalRenderer(stream=closed)
+        with self.assertLogs('questdb', level='WARNING') as captured:
+            renderer.on_failure('first')
+            renderer.on_failure('second')
+        # Swallowing is still right -- a broken console must not abort a working
+        # sign-in -- but it must not be silent, and must not spam once per
+        # countdown tick.
+        self.assertEqual(len(captured.records), 1, captured.output)
+        self.assertIn('OIDC sign-in prompt', captured.output[0])
+
     def test_native_vetted_target_still_drives_the_link(self):
         # The refusal path must not disturb the ordinary case.
         resp = {
@@ -2181,7 +2268,37 @@ class AdapterTest(unittest.TestCase):
             port=8812,
             dbname='qdb',
             user='_sso',
-            password='TOKEN')
+            password='TOKEN',
+            # The token IS the password, so it must not reach the wire in the
+            # clear. libpq's own default is `prefer`, which silently falls back
+            # to plaintext when the server declines TLS.
+            sslmode='require')
+
+    def test_adapters_default_to_encrypted_pg_transport(self):
+        # An explicit sslmode wins, and None opts out entirely for a caller
+        # managing TLS through the environment or a service file.
+        for override, expected in (
+                ({}, 'require'),
+                ({'sslmode': 'verify-full'}, 'verify-full'),
+                ({'sslmode': 'disable'}, 'disable')):
+            with self.subTest(override=override):
+                auth = mock.Mock()
+                auth.token.return_value = 'TOKEN'
+                driver = mock.Mock()
+                with mock.patch.object(
+                        _adapters, '_pg_module', return_value=driver):
+                    _adapters.psycopg_connect(
+                        auth, 'https://questdb.example.com:9000', **override)
+                self.assertEqual(
+                    driver.connect.call_args.kwargs['sslmode'], expected)
+
+        auth = mock.Mock()
+        auth.token.return_value = 'TOKEN'
+        driver = mock.Mock()
+        with mock.patch.object(_adapters, '_pg_module', return_value=driver):
+            _adapters.psycopg_connect(
+                auth, 'https://questdb.example.com:9000', sslmode=None)
+        self.assertNotIn('sslmode', driver.connect.call_args.kwargs)
 
     def test_bad_adapter_url_is_typed(self):
         with self.assertRaises(OidcConfigError):
