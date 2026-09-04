@@ -86,6 +86,41 @@ def make_discovered_auth(server, **kwargs):
     return OidcDeviceAuth.from_questdb(server.url, **options)
 
 
+# How many CONSECUTIVE unchanged readings make a count trustworthy.
+#
+# One repeat is not enough. PyPy does not refcount and stages cpyext
+# finalization across several collections, so a count can plateau for a pass
+# and then drop again -- `_settled_registry_size` took such a plateau for a
+# settled value, over-counted the baseline by two, and failed
+# `test_registry_drains_when_init_is_retried_after_failed_build` with
+# `3 != 5` on the linux_x64_pypy wheel job. CPython settles on the first
+# repeat, so the extra passes there cost microseconds on an empty generation.
+_SETTLE_STABLE_PASSES = 4
+_SETTLE_MAX_PASSES = 60
+
+
+def _settle(measure):
+    """``measure()`` once collection has stopped changing it.
+
+    Returns the last reading, which is the settled one whenever the loop broke
+    early and the best available estimate if it did not.
+    """
+    prev = None
+    stable = 0
+    count = None
+    for _ in range(_SETTLE_MAX_PASSES):
+        gc.collect()
+        count = measure()
+        if count == prev:
+            stable += 1
+            if stable >= _SETTLE_STABLE_PASSES:
+                break
+        else:
+            stable = 0
+        prev = count
+    return count
+
+
 def _live_weakref_count():
     """Live ``weakref.ref`` objects, after draining pending finalizers.
 
@@ -98,15 +133,8 @@ def _live_weakref_count():
     while PyPy stages cpyext finalization across several, and a fixed count
     could undercount live-then-freed objects there.
     """
-    prev = None
-    for _ in range(30):
-        gc.collect()
-        count = sum(1 for obj in gc.get_objects()
-                    if isinstance(obj, weakref.ReferenceType))
-        if count == prev:
-            break
-        prev = count
-    return count
+    return _settle(lambda: sum(1 for obj in gc.get_objects()
+                               if isinstance(obj, weakref.ReferenceType)))
 
 
 def _settled_registry_size():
@@ -120,15 +148,14 @@ def _settled_registry_size():
     (``3 != 4`` as well as ``5 != 10``). Collect until the count stops moving,
     the way :func:`_live_weakref_count` does. A live provider is never
     collected, so settling is equally correct for the readings that expect one.
+
+    Settling requires several consecutive unchanged readings, not one repeat:
+    see :data:`_SETTLE_STABLE_PASSES` for the PyPy failure that taught us the
+    difference. This reading is compared for exact equality, so unlike
+    :func:`_live_weakref_count` -- which is compared against a threshold -- it
+    has no tolerance to absorb a premature settle.
     """
-    prev = None
-    for _ in range(30):
-        gc.collect()
-        count = _debug_oidc_registry_size()
-        if count == prev:
-            break
-        prev = count
-    return prev
+    return _settle(_debug_oidc_registry_size)
 
 
 class RecordingRenderer(Renderer):
