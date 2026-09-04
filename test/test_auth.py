@@ -89,9 +89,9 @@ def make_discovered_auth(server, **kwargs):
 # How many CONSECUTIVE unchanged readings make a count trustworthy.
 #
 # One repeat is not enough. PyPy does not refcount and stages cpyext
-# finalization across several collections, so a count can plateau for a pass
-# and then drop again -- `_settled_registry_size` took such a plateau for a
-# settled value, over-counted the baseline by two, and failed
+# finalization across several collections, so the registry size can plateau for
+# a pass and then drop again -- `_settled_registry_size` took such a plateau for
+# a settled value, over-counted the baseline by two, and failed
 # `test_registry_drains_when_init_is_retried_after_failed_build` with
 # `3 != 5` on the linux_x64_pypy wheel job. CPython settles on the first
 # repeat, so the extra passes there cost microseconds on an empty generation.
@@ -121,22 +121,6 @@ def _settle(measure):
     return count
 
 
-def _live_weakref_count():
-    """Live ``weakref.ref`` objects, after draining pending finalizers.
-
-    Each ``OidcDeviceAuth`` puts a weakref to itself in the module-global
-    ``_OIDC_PROVIDERS`` registry (oidc.pxi), keyed by the opaque integer native
-    holds as ``user_data``; ``__dealloc__`` is the only thing that pops it. A
-    stranded entry keeps its weakref alive and, since ``weakref.ref`` instances
-    are cyclic-GC tracked, shows up here. Collect until the count settles
-    rather than a fixed number of passes: CPython stabilises in one or two,
-    while PyPy stages cpyext finalization across several, and a fixed count
-    could undercount live-then-freed objects there.
-    """
-    return _settle(lambda: sum(1 for obj in gc.get_objects()
-                               if isinstance(obj, weakref.ReferenceType)))
-
-
 def _settled_registry_size():
     """``_debug_oidc_registry_size()`` once pending finalizers have drained.
 
@@ -145,15 +129,14 @@ def _settled_registry_size():
     refcount and stages cpyext finalization across several collections, so a
     bare reading still counts providers that are unreachable -- and counts them
     in the *baseline* too, which is why this drifted in both directions on PyPy
-    (``3 != 4`` as well as ``5 != 10``). Collect until the count stops moving,
-    the way :func:`_live_weakref_count` does. A live provider is never
-    collected, so settling is equally correct for the readings that expect one.
+    (``3 != 4`` as well as ``5 != 10``). Collect until the count stops moving. A
+    live provider is never collected, so settling is equally correct for the
+    readings that expect one.
 
     Settling requires several consecutive unchanged readings, not one repeat:
     see :data:`_SETTLE_STABLE_PASSES` for the PyPy failure that taught us the
-    difference. This reading is compared for exact equality, so unlike
-    :func:`_live_weakref_count` -- which is compared against a threshold -- it
-    has no tolerance to absorb a premature settle.
+    difference. This reading is compared for exact equality, so it has no
+    tolerance to absorb a premature settle.
     """
     return _settle(_debug_oidc_registry_size)
 
@@ -728,10 +711,7 @@ class NativeOidcTest(unittest.TestCase):
         self.assertIsNone(renderer_ref())
         self.assertIsNone(auth_ref())
 
-    # A missed pop strands one weakref deterministically per construction, so a
-    # small count cleanly separates 0 (correct) from N (leaking); native
-    # build() is ~100ms, so keep N modest. Threshold well below N, above any
-    # PyPy staged-collection transient.
+    # Native build() is ~100ms, so keep repeated construction tests modest.
     _LEAK_ITERS = 20
 
     def test_registry_weakref_released_on_success(self):
@@ -741,15 +721,19 @@ class NativeOidcTest(unittest.TestCase):
         # __dealloc__ pops the entry -- and a missed pop strands one weakref
         # object per construction in a module-global dict.
         make_auth(renderer=Renderer())  # warm one-time module state
-        before = _live_weakref_count()
+        baseline = _settled_registry_size()
+        refs = []
         for _ in range(self._LEAK_ITERS):
-            make_auth(renderer=Renderer())  # constructed and immediately dropped
-        after = _live_weakref_count()
-        self.assertLess(
-            after - before, 10,
-            f'live weakref objects grew by {after - before} over '
-            f'{self._LEAK_ITERS} constructions; the provider registry is '
-            f'stranding weakrefs')
+            auth = make_auth(renderer=Renderer())
+            refs.append(weakref.ref(auth))
+            del auth
+        size = _settled_registry_size()
+        self.assertTrue(
+            all(ref() is None for ref in refs),
+            'a provider remained alive after its strong references were dropped')
+        self.assertEqual(
+            size, baseline,
+            f'the provider registry grew over {self._LEAK_ITERS} constructions')
 
     # A path that reaches native build() rather than a Python pre-check: the
     # setter only stores it, and build() is what opens it. Anything rejected
@@ -1542,17 +1526,21 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         # would accumulate.
         with OidcTestServer() as server:
             make_discovered_auth(server).sign_in()  # warm
-            before = _live_weakref_count()
+            baseline = _settled_registry_size()
+            refs = []
             for _ in range(12):
                 auth = make_discovered_auth(server)
                 auth.sign_in()
                 self.assertEqual(auth.token(), 'AT-initial')
+                refs.append(weakref.ref(auth))
                 del auth
-            after = _live_weakref_count()
-        self.assertLess(
-            after - before, 10,
-            f'live weakref objects grew by {after - before} over 12 '
-            f'sign-in/token lifecycles; a registry weakref is leaking')
+            size = _settled_registry_size()
+        self.assertTrue(
+            all(ref() is None for ref in refs),
+            'a provider remained alive after a full sign-in/token lifecycle')
+        self.assertEqual(
+            size, baseline,
+            'the provider registry grew over 12 sign-in/token lifecycles')
 
 
 class NativeTransportAttachmentTest(unittest.TestCase):
