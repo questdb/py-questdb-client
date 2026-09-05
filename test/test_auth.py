@@ -124,9 +124,9 @@ def _settle(measure):
 def _settled_registry_size():
     """``_debug_oidc_registry_size()`` once pending finalizers have drained.
 
-    Entries are dropped in ``OidcDeviceAuth.__dealloc__``. CPython runs that at
-    the last decref, so an immediate reading is already settled; PyPy does not
-    refcount and stages cpyext finalization across several collections, so a
+    Entries are dropped by the leaf native-handle owner's finalizer. CPython
+    runs that at the last decref, so an immediate reading is already settled;
+    PyPy does not refcount and stages cpyext finalization across several collections, so a
     bare reading still counts providers that are unreachable -- and counts them
     in the *baseline* too, which is why this drifted in both directions on PyPy
     (``3 != 4`` as well as ``5 != 10``). Collect until the count stops moving. A
@@ -460,7 +460,7 @@ class NativeOidcTest(unittest.TestCase):
                 self.assertTrue(factory(in_doubt=True).in_doubt)
 
     def test_closed_provider_is_rejected(self):
-        # A provider built with __new__ but never __init__'d has _raw == NULL.
+        # A provider built with __new__ but never __init__'d has no native handle.
         # That is *not* the same state as closed, and the error says so: its own
         # token-flow ops raise RuntimeError, and attaching it to a transport
         # raises ValueError -- never a native NULL deref. clear() is a
@@ -485,7 +485,7 @@ class NativeOidcTest(unittest.TestCase):
     def test_explicitly_closed_provider_is_rejected(self):
         # The other closed state: a real provider that close() disabled. The
         # attach guards gained a `_closed` check that only this covers -- the
-        # uninitialized case above exercises `_raw == NULL` instead.
+        # uninitialized case above exercises the null native handle instead.
         auth = make_auth()
         auth.close()
         with self.assertRaisesRegex(ValueError, 'closed'):
@@ -680,16 +680,6 @@ class NativeOidcTest(unittest.TestCase):
         with self.assertRaises(OidcInteractionRequired):
             auth.token()
 
-    @unittest.skipIf(
-        platform.python_implementation() == 'PyPy',
-        'PyPy cpyext does not reliably collect a reference cycle that spans a '
-        'C extension object with a finalizer, no matter how many gc.collect() '
-        'passes run. The invariant this test checks -- the native side holds '
-        'only a weakref to the provider, so nothing keeps it alive once the '
-        'strong references are gone -- is still exercised on PyPy by '
-        'test_sender_keeps_renderer_alive_until_close (the provider is '
-        'collected after the sender drops it) and by the weakref-release leak '
-        'tests below.')
     def test_renderer_provider_cycle_is_collected(self):
         renderer = Renderer()
         auth = make_auth(renderer=renderer)
@@ -698,18 +688,27 @@ class NativeOidcTest(unittest.TestCase):
         auth_ref = weakref.ref(auth)
 
         del renderer, auth
-        # On CPython the provider<->renderer cycle is reclaimed by the cyclic
-        # collector -- its finalizer (OidcDeviceAuth.__dealloc__, which frees
-        # the native handle) runs under PEP 442 -- precisely because the native
-        # side holds only a weakref, so no C-level strong reference pins it. A
-        # couple of passes suffice; the break exits as soon as it is collected.
-        for _ in range(5):
+        # The provider has no finalizer; a separate leaf object owns the native
+        # handle. That lets both CPython and PyPy reclaim this cycle while still
+        # releasing the native handle and registry key deterministically.
+        for _ in range(_SETTLE_MAX_PASSES):
             gc.collect()
             if renderer_ref() is None and auth_ref() is None:
                 break
 
         self.assertIsNone(renderer_ref())
         self.assertIsNone(auth_ref())
+
+    def test_close_detaches_renderer(self):
+        renderer = Renderer()
+        auth = make_auth(renderer=renderer)
+        renderer_ref = weakref.ref(renderer)
+        del renderer
+        self.assertIsNotNone(renderer_ref())
+
+        auth.close()
+        _settle(lambda: renderer_ref() is not None)
+        self.assertIsNone(renderer_ref())
 
     # Native build() is ~100ms, so keep repeated construction tests modest.
     _LEAK_ITERS = 20
@@ -718,8 +717,8 @@ class NativeOidcTest(unittest.TestCase):
         # Each OidcDeviceAuth registers a weakref to itself in _OIDC_PROVIDERS
         # (oidc.pxi _finish_builder) under an integer key native keeps as
         # user_data. Native owns no Python reference, so nothing but
-        # __dealloc__ pops the entry -- and a missed pop strands one weakref
-        # object per construction in a module-global dict.
+        # the leaf owner finalizer pops the entry -- and a missed pop strands one
+        # weakref object per construction in a module-global dict.
         make_auth(renderer=Renderer())  # warm one-time module state
         baseline = _settled_registry_size()
         refs = []
@@ -800,9 +799,9 @@ class NativeOidcTest(unittest.TestCase):
         self.assertEqual(_settled_registry_size(), baseline)
 
     def test_registry_drains_when_init_is_retried_after_failed_build(self):
-        # The leak that survives `__dealloc__`: a failed build leaves `_raw`
-        # NULL, so the already-initialized guard does not fire on a retry, and
-        # a second `__init__` on the same object overwrites `_provider_id`.
+        # A failed build leaves the leaf owner's raw handle NULL, so the already-
+        # initialized guard does not fire on a retry, and a second `__init__` on
+        # the same object overwrites its provider_id.
         # Without the unwind, the first key is stranded as a dead weakref in a
         # module-global dict for the life of the process -- once per retry, and
         # invisible to any weakref assertion.
@@ -831,7 +830,7 @@ class NativeOidcTest(unittest.TestCase):
         # Directly observe the registry bookkeeping: _finish_builder stores
         # exactly one weakref to the provider in _OIDC_PROVIDERS (oidc.pxi).
         # Nothing else references the provider weakly, so getweakrefcount sees
-        # exactly that one -- the entry __dealloc__ must later pop.
+        # exactly that one -- the leaf owner finalizer must later pop the entry.
         auth = make_auth(renderer=Renderer())
         self.assertEqual(weakref.getweakrefcount(auth), 1)
         (registry_ref,) = weakref.getweakrefs(auth)  # exactly one; unpack asserts it
@@ -1800,7 +1799,7 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         #
         # Native now receives an opaque integer key instead, so the release
         # callback owns nothing and never enters Python. The registry entry is
-        # dropped in __dealloc__, which always runs on a managed thread -- and
+        # dropped by the leaf owner finalizer on a managed thread -- and
         # nothing else drops it, so a stale entry would be a slow leak that no
         # weakref assertion catches.
         baseline = _settled_registry_size()
