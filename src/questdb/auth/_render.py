@@ -33,6 +33,7 @@ falling back to plain text on a terminal. Not required for ``token()`` /
 from __future__ import annotations
 
 import html
+import ipaddress
 import math
 import re
 import sys
@@ -156,6 +157,17 @@ _SAFE_HOST_RE = re.compile(r'\A[a-z0-9._:-]+\Z')
 _MAX_ACTIONABLE_URL_CHARS = 256
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Whether ``host`` is the special-use localhost name or a loopback IP."""
+    bare = host[:-1] if host.endswith('.') else host
+    if bare.lower() == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(bare).is_loopback
+    except ValueError:
+        return False
+
+
 def _safe_link_url(url: Optional[str]) -> Optional[str]:
     """
     Return ``url`` only if it is safe to make clickable / auto-open, else
@@ -166,8 +178,9 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
     otherwise abuse to send the user somewhere other than the prompt suggests
     (``html.escape`` guards markup, not any of these):
 
-    * **scheme** — only ``http(s)``, so a ``javascript:`` / ``data:`` href can't
-      execute in the notebook DOM;
+    * **scheme** — HTTPS, or plaintext HTTP only for ``localhost`` / a loopback
+      IP, so a device code cannot be sent over plaintext to a remote host and a
+      ``javascript:`` / ``data:`` href cannot execute in the notebook DOM;
     * **no userinfo** — ``https://login.questdb.io@evil.example/`` connects to
       ``evil.example`` while *reading* as the trusted host; the device-flow
       verification URL never legitimately carries credentials;
@@ -229,6 +242,8 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
     if userinfo:
         return None
     if not host or not _SAFE_HOST_RE.match(host):
+        return None
+    if scheme == 'http' and not _is_loopback_host(host):
         return None
     return url
 

@@ -30,14 +30,14 @@ Feed an :class:`OidcDeviceAuth` token into SQLAlchemy / psycopg as the QuestDB
 senders and pools should attach the provider directly through ``oidc_auth=``.
 
 Because the credential travels as the PG password, both adapters default to
-``sslmode="require"`` rather than inheriting libpq's ``prefer``, which silently
-accepts a plaintext connection when the server declines TLS. ``require``
-encrypts but does not authenticate the server; use ``verify-full`` with an
-``sslrootcert`` where your deployment's certificates allow it.
+authenticated TLS (``sslmode="verify-full"``) for remote hosts. ``localhost``
+and loopback IPs deliberately use ``prefer`` so local QuestDB remains usable
+with or without TLS.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import urllib.parse
 from typing import TYPE_CHECKING, Any, Optional
@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_PG_PORT = 8812
 _DEFAULT_DATABASE = 'qdb'
+_AUTO_SSLMODE = 'auto'
 
 
 def _safe_urlparse(url: str) -> urllib.parse.ParseResult:
@@ -189,6 +190,24 @@ def _coerce_port(pg_port: Any) -> int:
     return port
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Whether ``host`` is the special-use localhost name or a loopback IP."""
+    bare = host[:-1] if host.endswith('.') else host
+    if bare.lower() == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(bare).is_loopback
+    except ValueError:
+        return False
+
+
+def _effective_sslmode(host: str, sslmode: Optional[str]) -> Optional[str]:
+    """Resolve the adapter-only ``auto`` mode before calling libpq."""
+    if sslmode != _AUTO_SSLMODE:
+        return sslmode
+    return 'prefer' if _is_loopback_host(host) else 'verify-full'
+
+
 def sqlalchemy_engine(
         auth: OidcDeviceAuth,
         url: str,
@@ -197,7 +216,7 @@ def sqlalchemy_engine(
         pg_port: int = _DEFAULT_PG_PORT,
         database: str = _DEFAULT_DATABASE,
         drivername: Optional[str] = None,
-        sslmode: Optional[str] = 'require',
+        sslmode: Optional[str] = _AUTO_SSLMODE,
         **engine_kwargs) -> 'sqlalchemy.engine.Engine':
     """
     Build a SQLAlchemy ``Engine`` for QuestDB's PG-wire endpoint, authenticated
@@ -224,21 +243,21 @@ def sqlalchemy_engine(
     :param database: Database name (default ``"qdb"``).
     :param drivername: SQLAlchemy driver; defaults to ``postgresql+psycopg``
         (v3) or ``postgresql+psycopg2`` depending on what is installed.
-    :param sslmode: libpq ``sslmode`` for the connection, default
-        ``"require"``. The token is sent as the PG password, so it must not
-        cross the network in the clear: libpq's own default is ``prefer``,
-        which silently falls back to plaintext whenever the server declines
-        TLS. ``"require"`` encrypts but does **not** authenticate the server —
-        prefer ``"verify-full"`` (with ``sslrootcert``) wherever your
-        deployment's certificates allow it. Pass ``None`` to set nothing and
-        manage TLS entirely through ``connect_args`` / the environment; an
-        ``sslmode`` you supply in ``connect_args`` always wins.
+    :param sslmode: libpq ``sslmode`` for the connection. The default ``"auto"``
+        resolves to ``"verify-full"`` for remote hosts, authenticating the
+        server before sending the token as the PG password. For ``localhost``
+        and loopback IPs it resolves to ``"prefer"`` so a local QuestDB without
+        TLS is always accepted. Pass another libpq mode explicitly to override
+        this policy, or ``None`` to manage TLS entirely through
+        ``connect_args`` / the environment. An ``sslmode`` in ``connect_args``
+        always wins.
     :param engine_kwargs: Forwarded to ``create_engine``.
     :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
         has no host; if the resolved host carries connection-string
         metacharacters; or if ``pg_port`` is not a valid TCP port.
     """
     resolved_host = _require_host(url, host)
+    sslmode = _effective_sslmode(resolved_host, sslmode)
     pg_port = _coerce_port(pg_port)
     try:
         from sqlalchemy import create_engine, event
@@ -273,7 +292,7 @@ def sqlalchemy_engine(
         # setdefault, so an sslmode the caller put in connect_args wins. Set
         # here rather than on the URL because that is where the password goes:
         # the two travel together, and the point is that this password is a
-        # bearer token that must not reach the wire unencrypted.
+        # bearer token that must not reach an unauthenticated remote server.
         if sslmode is not None:
             cparams.setdefault('sslmode', sslmode)
 
@@ -287,7 +306,7 @@ def psycopg_connect(
         host: Optional[str] = None,
         pg_port: int = _DEFAULT_PG_PORT,
         database: str = _DEFAULT_DATABASE,
-        sslmode: Optional[str] = 'require',
+        sslmode: Optional[str] = _AUTO_SSLMODE,
         **connect_kwargs) -> Any:
     """
     Open a raw psycopg (v3) or psycopg2 connection to QuestDB's PG-wire
@@ -304,21 +323,21 @@ def psycopg_connect(
     :param host: Override the PG-wire host (otherwise taken from ``url``).
     :param pg_port: PG-wire port (default ``8812``).
     :param database: Database name (default ``"qdb"``).
-    :param sslmode: libpq ``sslmode`` for the connection, default
-        ``"require"``. The token is sent as the PG password, so it must not
-        cross the network in the clear: libpq's own default is ``prefer``,
-        which silently falls back to plaintext whenever the server declines
-        TLS. ``"require"`` encrypts but does **not** authenticate the server —
-        prefer ``"verify-full"`` (with ``sslrootcert``) wherever your
-        deployment's certificates allow it. Pass ``None`` to set nothing and
-        manage TLS entirely through ``connect_kwargs`` / the environment; an
-        ``sslmode`` you supply in ``connect_kwargs`` always wins.
+    :param sslmode: libpq ``sslmode`` for the connection. The default ``"auto"``
+        resolves to ``"verify-full"`` for remote hosts, authenticating the
+        server before sending the token as the PG password. For ``localhost``
+        and loopback IPs it resolves to ``"prefer"`` so a local QuestDB without
+        TLS is always accepted. Pass another libpq mode explicitly to override
+        this policy, or ``None`` to manage TLS entirely through
+        ``connect_kwargs`` / the environment. An ``sslmode`` in
+        ``connect_kwargs`` always wins.
     :param connect_kwargs: Forwarded to the driver's ``connect()``.
     :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
         has no host; if the resolved host carries connection-string
         metacharacters; or if ``pg_port`` is not a valid TCP port.
     """
     resolved_host = _require_host(url, host)
+    sslmode = _effective_sslmode(resolved_host, sslmode)
     pg_port = _coerce_port(pg_port)
     mod = _pg_module()
     token = auth.token()

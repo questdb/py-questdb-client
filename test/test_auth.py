@@ -1448,6 +1448,7 @@ class NativeOidcIntegrationTest(unittest.TestCase):
 
         self.assertIs(returned, engine)
         self.assertEqual(params['password'], 'AT-refreshed')
+        self.assertEqual(params['sslmode'], 'prefer')
         self.assertEqual(len(token_requests), 2)
         self.assertEqual(
             token_requests[1]['form']['grant_type'], ['refresh_token'])
@@ -2091,11 +2092,29 @@ class RenderSanitizerTest(unittest.TestCase):
         self.assertIsNone(_render._safe_link_url('https://host\t/'))
         self.assertIsNone(_render._safe_link_url('https://ho\nst/'))
 
-    def test_safe_link_url_accepts_plain_https_and_punycode(self):
+    def test_safe_link_url_accepts_https_and_loopback_http(self):
         self.assertEqual(_render._safe_link_url('https://ok.example/verify'),
                          'https://ok.example/verify')
         self.assertEqual(_render._safe_link_url('https://xn--e1afmkfd.example/'),
                          'https://xn--e1afmkfd.example/')
+        for url in (
+                'http://localhost/verify',
+                'http://LOCALHOST:9000/verify',
+                'http://localhost./verify',
+                'http://127.0.0.1/verify',
+                'http://127.5.5.5/verify',
+                'http://[::1]/verify'):
+            with self.subTest(url=url):
+                self.assertEqual(_render._safe_link_url(url), url)
+
+    def test_safe_link_url_rejects_remote_plaintext(self):
+        for url in (
+                'http://idp.example.com/verify',
+                'http://10.0.0.1/verify',
+                'http://169.254.1.1/verify',
+                'http://[fe80::1]/verify'):
+            with self.subTest(url=url):
+                self.assertIsNone(_render._safe_link_url(url))
 
     def test_safe_target_strips_control_before_vetting(self):
         # One value feeds the href, webbrowser.open() and the QR, so a control
@@ -2212,6 +2231,17 @@ class RenderSanitizerTest(unittest.TestCase):
                 'verification_uri_complete': 'https://shown.example/c',
                 'browser_target': 'https://vetted.example/t'}),
             'https://vetted.example/t')
+
+    def test_verification_target_rejects_remote_plaintext_in_all_paths(self):
+        remote = 'http://idp.example.com/device'
+        self.assertIsNone(_render._verification_target({
+            'verification_uri': 'https://shown.example/v',
+            'browser_target': remote,
+        }))
+        self.assertIsNone(_render._verification_target({
+            'verification_uri': remote,
+            'verification_uri_complete': remote + '?code=ABCD',
+        }))
 
     def test_verification_target_drops_diverging_complete(self):
         # No native browser_target; a complete on a different host is not used.
@@ -2513,15 +2543,14 @@ class AdapterTest(unittest.TestCase):
             user='_sso',
             password='TOKEN',
             # The token IS the password, so it must not reach the wire in the
-            # clear. libpq's own default is `prefer`, which silently falls back
-            # to plaintext when the server declines TLS.
-            sslmode='require')
+            # clear or to an unauthenticated remote server.
+            sslmode='verify-full')
 
-    def test_adapters_default_to_encrypted_pg_transport(self):
+    def test_adapters_default_to_authenticated_remote_pg_transport(self):
         # An explicit sslmode wins, and None opts out entirely for a caller
         # managing TLS through the environment or a service file.
         for override, expected in (
-                ({}, 'require'),
+                ({}, 'verify-full'),
                 ({'sslmode': 'verify-full'}, 'verify-full'),
                 ({'sslmode': 'disable'}, 'disable')):
             with self.subTest(override=override):
@@ -2542,6 +2571,23 @@ class AdapterTest(unittest.TestCase):
             _adapters.psycopg_connect(
                 auth, 'https://questdb.example.com:9000', sslmode=None)
         self.assertNotIn('sslmode', driver.connect.call_args.kwargs)
+
+    def test_adapters_accept_loopback_with_or_without_tls(self):
+        for url in (
+                'http://localhost:9000',
+                'http://LOCALHOST.:9000',
+                'http://127.0.0.1:9000',
+                'http://127.5.5.5:9000',
+                'http://[::1]:9000'):
+            with self.subTest(url=url):
+                auth = mock.Mock()
+                auth.token.return_value = 'TOKEN'
+                driver = mock.Mock()
+                with mock.patch.object(
+                        _adapters, '_pg_module', return_value=driver):
+                    _adapters.psycopg_connect(auth, url)
+                self.assertEqual(
+                    driver.connect.call_args.kwargs['sslmode'], 'prefer')
 
     def test_bad_adapter_url_is_typed(self):
         with self.assertRaises(OidcConfigError):

@@ -204,14 +204,12 @@ so it follows rotation and silent refresh. ``psycopg_connect`` captures one
 token for that connection. For other HTTP clients, use ``auth.headers()``.
 
 Because the token travels as the PG password, both adapters default to
-``sslmode="require"`` instead of inheriting libpq's ``prefer``, which silently
-accepts a plaintext connection whenever the server declines TLS. ``require``
-encrypts but does not authenticate the server, so prefer ``verify-full``
-wherever your certificates allow it::
+``sslmode="verify-full"`` for remote hosts. This authenticates the server as
+well as encrypting the connection. ``localhost`` and loopback IPs instead use
+``prefer``, so local QuestDB is accepted with or without TLS::
 
     engine = sqlalchemy_engine(
         auth, "https://questdb.example.com:9000",
-        sslmode="verify-full",
         connect_args={"sslrootcert": "/etc/ssl/questdb-ca.pem"})
 
 Pass ``sslmode=None`` to set nothing and manage TLS through the environment or
@@ -257,9 +255,10 @@ Security notes
   Custom renderers must sanitize callback fields for their terminal or
   HTML output sink and use ``browser_target`` for actionable URLs.
 * Avoid logging tokens, authorization headers, or PG connection parameters.
-* The PG-wire adapters send the token as the ``_sso`` password, so they default
-  to ``sslmode="require"``; see :ref:`the PG-wire section <oidc_pgwire>` for
-  raising that to ``verify-full``.
+* The PG-wire adapters send the token as the ``_sso`` password, so remote hosts
+  default to ``sslmode="verify-full"``. ``localhost`` and loopback IPs use
+  ``prefer`` to support local servers without TLS. See
+  :ref:`the PG-wire section <oidc_pgwire>`.
 * ``Ctrl-C`` during :meth:`~questdb.auth.OidcDeviceAuth.sign_in` closes the
   provider permanently, and closing is shared: every ``Sender``,
   :func:`questdb.connect` pool and reader attached with ``oidc_auth=`` is closed
