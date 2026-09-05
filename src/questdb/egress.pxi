@@ -1413,8 +1413,6 @@ cdef object _numpy_uuid_chunk(
     cdef const uint8_t* values
     cdef size_t r
     cdef size_t stride
-    cdef uint64_t lo
-    cdef uint64_t hi
     cdef cnp.ndarray out
     _reader_check(
         qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
@@ -1432,16 +1430,12 @@ cdef object _numpy_uuid_chunk(
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
             continue
-        # The reader hands out canonical RFC 4122 big-endian rows,
-        # having already reversed them out of QWP wire order: the first
-        # eight bytes are the high half and the second eight the low
-        # half, each most-significant byte first. Convert the halves to
-        # host order before constructing the UUID integer.
-        memcpy(&hi, values + r * stride, 8)
-        memcpy(&lo, values + r * stride + 8, 8)
-        hi = bswap64(hi)
-        lo = bswap64(lo)
-        _obj_chunk_set(out, r, _uuid.UUID(int=((<object>hi) << 64) | (<object>lo)))
+        # The reader hands out canonical RFC 4122 network-order bytes, having
+        # already reversed them out of QWP wire order. Construct from that byte
+        # representation directly: loading native uint64 halves and
+        # unconditionally byte-swapping them only worked on little-endian hosts.
+        _obj_chunk_set(out, r, _uuid.UUID(bytes=PyBytes_FromStringAndSize(
+            <const char*>(values + r * stride), 16)))
     return out
 
 
