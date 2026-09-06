@@ -255,6 +255,11 @@ def sqlalchemy_engine(
     :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
         has no host; if the resolved host carries connection-string
         metacharacters; or if ``pg_port`` is not a valid TCP port.
+    :raises OidcError: if token acquisition fails while SQLAlchemy opens a
+        connection.
+    :raises ImportError: if SQLAlchemy or a PostgreSQL driver is unavailable.
+        SQLAlchemy and DBAPI construction/connection exceptions otherwise
+        propagate unchanged.
     """
     resolved_host = _require_host(url, host)
     sslmode = _effective_sslmode(resolved_host, sslmode)
@@ -335,6 +340,10 @@ def psycopg_connect(
     :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
         has no host; if the resolved host carries connection-string
         metacharacters; or if ``pg_port`` is not a valid TCP port.
+    :raises OidcError: if token acquisition fails.
+    :raises ImportError: if neither psycopg nor psycopg2 is installed.
+        Driver connection, TLS and server-authentication exceptions otherwise
+        propagate unchanged.
     """
     resolved_host = _require_host(url, host)
     sslmode = _effective_sslmode(resolved_host, sslmode)

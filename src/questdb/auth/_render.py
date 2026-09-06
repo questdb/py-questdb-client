@@ -572,11 +572,10 @@ def _strip_control(text: Optional[str]) -> str:
 def sanitize_display_text(text: Optional[str]) -> str:
     """Strip control, bidi and zero-width characters from untrusted text.
 
-    A custom :class:`Renderer` receives identity-provider fields verbatim --
-    the verification URL, the user code, error strings -- and is responsible
-    for sanitising them for its own output sink. This is the same routine the
-    built-in renderers use, exported so a custom one does not have to
-    reimplement it or reach for a private name.
+    Native :class:`Renderer` callbacks already receive display-normalised text;
+    this helper remains useful for raw values from other sources and as
+    defense-in-depth in custom renderers. Output sinks still need their own
+    encoding, such as :func:`html.escape` for notebook HTML.
 
     ``html.escape`` is not a substitute: it guards markup, not the ANSI escapes
     and bidi overrides that can spoof a prompt or hide the real sign-in URL.
@@ -647,14 +646,15 @@ class Renderer:
     optional — the base class no-ops each, so a subclass may override only the
     ones it cares about.
 
-    **The callbacks receive untrusted, MITM-tamperable IdP fields**
-    (``verification_uri``, ``user_code``, error strings, a JWT-derived
-    identity). A custom renderer that writes them to a terminal or a notebook
-    DOM must sanitise them itself (the built-ins strip control/bidi/zero-width
-    characters and vet the verification host); echoing them raw re-opens the
-    prompt-spoofing surface the built-in renderers close.
-    :func:`~questdb.auth.sanitize_display_text` is the routine they use, exported
-    for exactly this.
+    **Callbacks receive display-normalised but still untrusted IdP fields.**
+    Native code removes control/bidi/zero-width characters, bounds their length,
+    and visibly escapes non-ASCII prompt codes and URLs before dispatch. That is
+    presentation sanitisation, not authority or sink encoding: custom notebook
+    renderers must still HTML-escape text, and only ``browser_target`` may be
+    opened, linkified or encoded as a QR code. Identity and failure text may
+    retain ordinary Unicode and HTML metacharacters.
+    :func:`~questdb.auth.sanitize_display_text` is available for raw values from
+    other sources or optional defense-in-depth.
 
     **Concurrency.** The callbacks run while ``OidcDeviceAuth`` holds its
     (non-reentrant) acquisition lock, so a callback must not call back into the
@@ -696,7 +696,8 @@ class Renderer:
         polling loop. Native events also carry ``browser_target`` — the single
         URL the native side has vetted for opening / linkifying / QR-encoding;
         the built-in renderers prefer it, and a custom renderer should use it
-        (rather than the raw ``verification_uri``) as the actionable target.
+        (rather than the display-only ``verification_uri``) as the actionable
+        target.
         """
 
     def on_waiting(self, seconds_left: float) -> None:

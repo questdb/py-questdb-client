@@ -545,8 +545,9 @@ cdef class OidcDeviceAuth:
         * ``qr`` — also render the verification URL as a QR code, for signing in
           from a phone. Ignored when a custom ``renderer`` is supplied.
         * ``renderer`` — a :class:`~questdb.auth.Renderer` presenting the prompt.
-          Its callbacks receive untrusted identity-provider text; see that
-          class for the sanitisation and re-entrancy rules.
+          Its callbacks receive native display-normalised but still untrusted
+          identity-provider text; see that class for sink-encoding, actionable-
+          URL and re-entrancy rules.
         * ``default_interval`` — seconds between device-code polls when the
           identity provider does not specify one (default 5, maximum 1800, the
           longest a device code may live). A server-supplied interval, and any

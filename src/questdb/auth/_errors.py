@@ -41,7 +41,7 @@ from questdb._client import QuestDBError, QuestDBErrorCode
 
 
 class OidcError(QuestDBError):
-    """Base class for every error raised by :mod:`questdb.auth`.
+    """Base class for QuestDB OIDC authentication lifecycle errors.
 
     A subclass of :class:`~questdb.QuestDBError`, so a transport attached with
     ``oidc_auth=`` whose token acquisition fails is caught by an existing

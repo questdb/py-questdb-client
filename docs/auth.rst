@@ -71,8 +71,9 @@ thread from unexpectedly launching a browser flow. Applications should call
 Error handling
 ==============
 
-All :mod:`questdb.auth` failures are :class:`~questdb.auth.OidcError`
-subclasses — :class:`~questdb.auth.OidcConfigError`,
+Failures produced by QuestDB's OIDC authentication, configuration and token
+lifecycle are :class:`~questdb.auth.OidcError` subclasses —
+:class:`~questdb.auth.OidcConfigError`,
 :class:`~questdb.auth.OidcCancelledError`,
 :class:`~questdb.auth.OidcNetworkError`,
 :class:`~questdb.auth.OidcInteractionRequired`,
@@ -215,6 +216,11 @@ well as encrypting the connection. ``localhost`` and loopback IPs instead use
 Pass ``sslmode=None`` to set nothing and manage TLS through the environment or
 a service file; an ``sslmode`` you supply yourself always wins.
 
+Missing SQLAlchemy or PostgreSQL-driver dependencies raise ``ImportError``.
+Token acquisition failures from either adapter raise ``OidcError``; SQLAlchemy,
+psycopg and psycopg2 construction, connection, TLS and server-authentication
+exceptions otherwise propagate with their original third-party types.
+
 Rendering and non-interactive environments
 ==========================================
 
@@ -248,12 +254,13 @@ Security notes
   tokens only.
 * IdP credential endpoints require HTTPS, except loopback HTTP for local
   development. ``insecure=True`` applies only to QuestDB discovery transport.
-* Renderer callbacks receive raw, untrusted IdP text. The built-in renderers
-  sanitize it and use the separately vetted ``browser_target`` for links and QR
-  codes. :func:`~questdb.auth.sanitize_display_text` performs that stripping and
-  is exported for this purpose.
-  Custom renderers must sanitize callback fields for their terminal or
-  HTML output sink and use ``browser_target`` for actionable URLs.
+* Renderer callbacks receive bounded, native display-normalized but still
+  untrusted IdP text. Prompt fields are single-line and visibly ASCII-escaped;
+  identity/failure text may retain ordinary Unicode and HTML metacharacters.
+  Custom renderers must apply their output sink's encoding (for example HTML
+  escaping), and use only ``browser_target`` for links, browser opening or QR
+  codes. :func:`~questdb.auth.sanitize_display_text` remains available for raw
+  values from other sources or defense-in-depth; it does not HTML-escape.
 * Avoid logging tokens, authorization headers, or PG connection parameters.
 * The PG-wire adapters send the token as the ``_sso`` password, so remote hosts
   default to ``sslmode="verify-full"``. ``localhost`` and loopback IPs use
