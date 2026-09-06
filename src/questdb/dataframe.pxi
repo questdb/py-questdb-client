@@ -3221,8 +3221,10 @@ cdef void_int _dataframe_handle_auto_flush(
     flush_ok = line_sender_flush(af.sender, ls_buf, &flush_err)
     if flush_ok:
         af.last_flush_ms[0] = line_sender_now_micros() // 1000
-    else:
+    elif not _is_unsent_retryable_oidc_error(flush_err):
         # To avoid flush reattempt on Sender.__exit__.
+        # Keep a proven-unsent retryable OIDC batch: after sign-in or recovery,
+        # an explicit flush can publish the exact accumulated prefix once.
         line_sender_buffer_clear(ls_buf)
 
     # Flushing will have cleared the marker: We need to set it again

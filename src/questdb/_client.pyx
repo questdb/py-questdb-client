@@ -518,6 +518,26 @@ cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
         tup[0], fmt.format(tup[1]), tup[2], in_doubt=tup[3])
 
 
+cdef inline bint _is_unsent_retryable_oidc_error(
+        line_sender_error* err) noexcept nogil:
+    """Whether a failed transport operation is safe to retry with its buffer.
+
+    OIDC token providers run before the data request or QWP publication. Native
+    reclassifies their recoverable failures to ``SocketError`` and keeps the
+    OIDC cause attached. Requiring ``in_doubt == false`` makes the delivery
+    guarantee explicit and leaves every ordinary/ambiguous failure on the
+    historical clear-on-error path.
+    """
+    cdef questdb_oidc_error_view oidc_view
+    if (err == NULL
+            or questdb_error_in_doubt(err)
+            or line_sender_error_get_code(err) != line_sender_error_socket_error):
+        return False
+    memset(&oidc_view, 0, sizeof(questdb_oidc_error_view))
+    oidc_view.struct_size = sizeof(questdb_oidc_error_view)
+    return questdb_error_oidc_get_view(err, &oidc_view)
+
+
 cdef inline void_int reserve_buffer(
         line_sender_buffer* buffer,
         size_t additional) except -1:
@@ -8284,11 +8304,15 @@ cdef class Sender:
         if ok and c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
         if not ok:
-            if c_buf == self._buffer._impl:
+            if (c_buf == self._buffer._impl
+                    and not _is_unsent_retryable_oidc_error(err)):
                 # Prevent a follow-up call to `.close(flush=True)` (as is
                 # usually called from `__exit__`) to raise after the sender
                 # entered an error state following a failed call to `.flush()`.
-                # Note: In this case `clear` is always `True`.
+                # A retryable OIDC provider failure is the exception: native
+                # proves it happened before publication and deliberately keeps
+                # the buffer intact so a later sign_in()/refresh can retry it.
+                # Note: For the internal buffer `clear` is always `True`.
                 line_sender_buffer_clear(c_buf)
             if _is_tcp_protocol(self._c_protocol):
                 # Provide further context pointing to the logs.

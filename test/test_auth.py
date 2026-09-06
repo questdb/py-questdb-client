@@ -1764,11 +1764,11 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         # `.code` has to keep seeing SocketError, which is the whole reason
         # native re-classifies.
         auth = make_auth()
-        with questdb.Sender(
-                questdb.Protocol.Http, '127.0.0.1', 9000,
-                oidc_auth=auth, protocol_version=2) as sender:
-            sender.row('t', columns={'v': 1}, at=questdb.ServerTimestamp)
-            with self.assertRaises(OidcError) as caught:
+        with self.assertRaises(OidcError) as caught:
+            with questdb.Sender(
+                    questdb.Protocol.Http, '127.0.0.1', 9000,
+                    oidc_auth=auth, protocol_version=2) as sender:
+                sender.row('t', columns={'v': 1}, at=questdb.ServerTimestamp)
                 sender.flush()
         self.assertIsInstance(caught.exception, OidcInteractionRequired)
         self.assertIs(caught.exception.code,
@@ -1781,16 +1781,16 @@ class NativeTransportAttachmentTest(unittest.TestCase):
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_dataframe_auto_flush_preserves_oidc_error(self):
         auth = make_auth()
-        with questdb.Sender(
-                questdb.Protocol.Http,
-                '127.0.0.1',
-                9000,
-                oidc_auth=auth,
-                auto_flush_rows=1,
-                auto_flush_bytes=False,
-                auto_flush_interval=False,
-                protocol_version=2) as sender:
-            with self.assertRaises(OidcInteractionRequired):
+        with self.assertRaises(OidcInteractionRequired):
+            with questdb.Sender(
+                    questdb.Protocol.Http,
+                    '127.0.0.1',
+                    9000,
+                    oidc_auth=auth,
+                    auto_flush_rows=1,
+                    auto_flush_bytes=False,
+                    auto_flush_interval=False,
+                    protocol_version=2) as sender:
                 sender.dataframe(
                     pd.DataFrame({'value': [1]}),
                     table_name='oidc_auto_flush',
@@ -1912,19 +1912,96 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         # can react specifically. Complements
         # test_dataframe_auto_flush_preserves_oidc_error (the dataframe path).
         auth = make_auth()  # never signed in
-        with questdb.Sender(
-                questdb.Protocol.Http,
-                '127.0.0.1',
-                9000,
-                oidc_auth=auth,
-                auto_flush=False,
-                protocol_version=2) as sender:
-            sender.row(
-                'oidc_flush', columns={'value': 1},
-                at=questdb.ServerTimestamp)
-            with self.assertRaises(OidcInteractionRequired) as ctx:
+        with self.assertRaises(OidcInteractionRequired) as ctx:
+            with questdb.Sender(
+                    questdb.Protocol.Http,
+                    '127.0.0.1',
+                    9000,
+                    oidc_auth=auth,
+                    auto_flush=False,
+                    protocol_version=2) as sender:
+                sender.row(
+                    'oidc_flush', columns={'value': 1},
+                    at=questdb.ServerTimestamp)
                 sender.flush()
-            self.assertIsInstance(ctx.exception, questdb.QuestDBError)
+        self.assertIsInstance(ctx.exception, questdb.QuestDBError)
+
+    def test_retryable_oidc_flush_keeps_internal_buffer(self):
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(server)
+            with questdb.Sender(
+                    questdb.Protocol.Http,
+                    '127.0.0.1',
+                    server.port,
+                    oidc_auth=auth,
+                    auto_flush=False,
+                    protocol_version=2) as sender:
+                sender.row(
+                    'oidc_retry_flush', columns={'value': 1},
+                    at=questdb.ServerTimestamp)
+                with self.assertRaises(OidcInteractionRequired) as caught:
+                    sender.flush()
+                self.assertFalse(caught.exception.in_doubt)
+                self.assertEqual(server.requests('/write', 'POST'), [])
+
+                auth.sign_in()
+                sender.flush()
+                writes = server.requests('/write', 'POST')
+
+        self.assertEqual(len(writes), 1)
+        self.assertIn(b'oidc_retry_flush', writes[0]['body'])
+
+    def test_retryable_oidc_row_auto_flush_keeps_internal_buffer(self):
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(server)
+            with questdb.Sender(
+                    questdb.Protocol.Http,
+                    '127.0.0.1',
+                    server.port,
+                    oidc_auth=auth,
+                    auto_flush_rows=1,
+                    auto_flush_bytes=False,
+                    auto_flush_interval=False,
+                    protocol_version=2) as sender:
+                with self.assertRaises(OidcInteractionRequired):
+                    sender.row(
+                        'oidc_retry_row', columns={'value': 1},
+                        at=questdb.ServerTimestamp)
+                self.assertEqual(server.requests('/write', 'POST'), [])
+
+                auth.sign_in()
+                sender.flush()
+                writes = server.requests('/write', 'POST')
+
+        self.assertEqual(len(writes), 1)
+        self.assertIn(b'oidc_retry_row', writes[0]['body'])
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_retryable_oidc_dataframe_auto_flush_keeps_internal_buffer(self):
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(server)
+            with questdb.Sender(
+                    questdb.Protocol.Http,
+                    '127.0.0.1',
+                    server.port,
+                    oidc_auth=auth,
+                    auto_flush_rows=1,
+                    auto_flush_bytes=False,
+                    auto_flush_interval=False,
+                    protocol_version=2) as sender:
+                with self.assertRaises(OidcInteractionRequired):
+                    sender.dataframe(
+                        pd.DataFrame({'value': [1]}),
+                        table_name='oidc_retry_dataframe',
+                        at=questdb.ServerTimestamp)
+                self.assertEqual(server.requests('/write', 'POST'), [])
+
+                auth.sign_in()
+                sender.flush()
+                writes = server.requests('/write', 'POST')
+
+        self.assertEqual(len(writes), 1)
+        self.assertIn(b'oidc_retry_dataframe', writes[0]['body'])
 
     def test_oidc_error_carries_the_native_error_code(self):
         # The OIDC branch of c_err_to_py used to stamp AuthError on every native
@@ -1936,17 +2013,17 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         # package also disagreed: the reader path reads the code directly and
         # reported SocketError for the very same error.
         auth = make_auth()  # never signed in -> InteractionRequired
-        with questdb.Sender(
-                questdb.Protocol.Http,
-                '127.0.0.1',
-                9000,
-                oidc_auth=auth,
-                auto_flush=False,
-                protocol_version=2) as sender:
-            sender.row(
-                'oidc_code', columns={'value': 1},
-                at=questdb.ServerTimestamp)
-            with self.assertRaises(OidcInteractionRequired) as ctx:
+        with self.assertRaises(OidcInteractionRequired) as ctx:
+            with questdb.Sender(
+                    questdb.Protocol.Http,
+                    '127.0.0.1',
+                    9000,
+                    oidc_auth=auth,
+                    auto_flush=False,
+                    protocol_version=2) as sender:
+                sender.row(
+                    'oidc_code', columns={'value': 1},
+                    at=questdb.ServerTimestamp)
                 sender.flush()
         # Retryable, and recognised as such by the dataframe reconnect gate.
         self.assertIs(
