@@ -189,6 +189,20 @@ class NativeOidcTest(unittest.TestCase):
                     OidcDeviceAuth.from_questdb(
                         object(), **{name: 'false'})
 
+    def test_explicit_empty_identity_overrides_are_rejected(self):
+        for name in ('scope', 'audience', 'issuer'):
+            with self.subTest(constructor='direct', name=name):
+                with self.assertRaisesRegex(OidcConfigError, name):
+                    make_auth(**{name: ''})
+
+        # Override validation happens before discovery network I/O. An empty
+        # value means neither "inherit" nor a usable explicit setting.
+        for name in ('client_id', 'scope', 'audience', 'issuer'):
+            with self.subTest(constructor='from_questdb', name=name):
+                with self.assertRaisesRegex(OidcConfigError, name):
+                    OidcDeviceAuth.from_questdb(
+                        'http://127.0.0.1:1', **{name: ''})
+
     def test_explicit_open_browser_overrides_the_kernel_guess(self):
         # Regression: open_browser was `open_browser is True and not
         # in_ipython_kernel()`, so an explicit True was silently dropped in ANY

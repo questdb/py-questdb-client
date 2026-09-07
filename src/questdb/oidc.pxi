@@ -409,6 +409,10 @@ cdef void _oidc_builder_set_string(
     cdef bint ok = True
     if encoded is None:
         return
+    if setting in (0, 1, 2, 3) and PyBytes_GET_SIZE(encoded) == 0:
+        from questdb.auth._errors import OidcConfigError
+        raise OidcConfigError(
+            f'{name} must be a non-empty string or None')
     if setting == 0:
         ok = questdb_oidc_builder_client_id(
             builder, PyBytes_AsString(encoded), PyBytes_GET_SIZE(encoded), &err)
@@ -521,13 +525,14 @@ cdef class OidcDeviceAuth:
         reference cannot introspect the signature, so every parameter is
         documented here:
 
-        * ``scope`` — the OAuth scope string sent verbatim on the initial
-          request. Refresh requests omit it so the identity provider preserves
-          the scope originally granted, as required by RFC 6749 section 6.
-        * ``audience`` / ``issuer`` — optional. ``issuer`` additionally pins the
-          credential endpoints: one advertised by a QuestDB server must either
-          sit under the issuer's origin and path, or be confirmed by the IdP's
-          own discovery document.
+        * ``scope`` — the non-empty OAuth scope string sent verbatim on the
+          initial request. Refresh requests omit it so the identity provider
+          preserves the scope originally granted, as required by RFC 6749
+          section 6.
+        * ``audience`` / ``issuer`` — optional, but must be non-empty when
+          provided. ``issuer`` additionally pins the credential endpoints: one
+          advertised by a QuestDB server must either sit under the issuer's
+          origin and path, or be confirmed by the IdP's own discovery document.
         * ``insecure`` — permits plaintext HTTP for the **QuestDB discovery
           request only**. The identity provider is always held to HTTPS (or
           loopback); this flag never relaxes that.
@@ -644,8 +649,9 @@ cdef class OidcDeviceAuth:
         ``url`` is the QuestDB server to discover from; ``client_id``,
         ``scope``, ``audience``, ``issuer``, ``token_endpoint`` and
         ``device_authorization_endpoint`` default to ``None``, meaning "take
-        the server's value", and any you pass override it. The remaining
-        parameters — ``insecure``, ``ca_bundle``, ``open_browser``,
+        the server's value", and any you pass override it. ``client_id``,
+        ``scope``, ``audience`` and ``issuer`` must be non-empty when provided.
+        The remaining parameters — ``insecure``, ``ca_bundle``, ``open_browser``,
         ``interactive``, ``qr``, ``renderer``, ``default_interval``,
         ``timeout`` and ``token_store`` — are not discovered at all and behave
         exactly as documented on :meth:`__init__`; see there for each.
