@@ -1935,7 +1935,15 @@ class NativeTransportAttachmentTest(unittest.TestCase):
             db.close()
         self.assertTrue(events, 'the failed token pull was never narrated')
         event = events[0]
-        self.assertIs(event.kind, questdb.ConnectionEventKind.AuthFailed)
+        # CredentialUnavailable, not AuthFailed. AuthFailed is terminal and
+        # means the server rejected a credential we presented; this round never
+        # presented one. Overloading the two forced every listener to gate on
+        # `host is not None` and made a silent-refresh blip indistinguishable
+        # from a rejected credential. The Java client draws the same line with
+        # QwpCredentialUnavailableException vs QwpAuthFailedException.
+        self.assertIs(
+            event.kind, questdb.ConnectionEventKind.CredentialUnavailable)
+        self.assertIsNot(event.kind, questdb.ConnectionEventKind.AuthFailed)
         # No endpoint attribution: nothing was contacted, the credential failed.
         self.assertIsNone(event.host)
         self.assertIsNone(event.port)

@@ -2269,20 +2269,29 @@ class ConnectionEventKind(TaggedEnum):
     EndpointAttemptFailed = ('endpoint_attempt_failed', 4)
     #: Every configured endpoint was attempted and none accepted.
     AllEndpointsUnreachable = ('all_endpoints_unreachable', 5)
-    #: A credential was rejected or could not be obtained.
+    #: Terminal: the server rejected a credential the client presented.
     #:
-    #: Terminal **only when** :attr:`ConnectionEvent.host` **is set**: the
-    #: server rejected the credential it was offered, and the owning
-    #: sender/pool operation raises. When ``host`` and ``port`` are ``None``
-    #: the credential was never offered to anyone -- an ``oidc_auth=`` token
-    #: provider failed before any endpoint was dialled. That case is
-    #: **retryable**: the sender keeps reconnecting so queued rows survive
-    #: while a human signs in, and nothing is raised to the caller. A listener
-    #: that pages or tears down the pool on ``AuthFailed`` must gate on
-    #: ``event.host is not None``, or it fires on an ordinary silent-refresh
-    #: blip. :attr:`ConnectionEvent.cause_code` separates them too:
-    #: ``AuthError`` for a rejection, ``SocketError`` for a provider failure.
+    #: :attr:`ConnectionEvent.host` and :attr:`ConnectionEvent.port` are always
+    #: set, and the owning sender/pool operation raises. A listener may page,
+    #: tear down the pool or exit on this without further qualification.
+    #:
+    #: A credential the client could not *obtain* is
+    #: :attr:`CredentialUnavailable`, never this.
     AuthFailed = ('auth_failed', 6)
+    #: Retryable: an ``oidc_auth=`` token provider failed, so no credential was
+    #: ever offered and no endpoint was dialled.
+    #:
+    #: :attr:`ConnectionEvent.host` and :attr:`ConnectionEvent.port` are
+    #: ``None``; :attr:`ConnectionEvent.cause_code` is the provider's
+    #: classification, ordinarily ``SocketError``. The sender keeps
+    #: reconnecting so queued rows survive while the identity provider recovers
+    #: or a human signs in, and nothing is raised to the caller. Only a
+    #: foreground call such as :meth:`QuestDB.dataframe` fails fast, because a
+    #: credential problem there is the caller's to see.
+    #:
+    #: Counterpart of the Java client's ``QwpCredentialUnavailableException``,
+    #: which is likewise distinct from its terminal ``QwpAuthFailedException``.
+    CredentialUnavailable = ('credential_unavailable', 7)
 
 
 @dataclass(frozen=True)

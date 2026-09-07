@@ -224,6 +224,13 @@ class TestQwpWebSocketApi(unittest.TestCase):
                          qi.ConnectionEventKind.Connected)
         self.assertEqual(qi.ConnectionEventKind.Connected.c_value, 0)
         self.assertEqual(qi.ConnectionEventKind.AuthFailed.c_value, 6)
+        # Appended, so the existing ordinals stay put: the C callback maps by
+        # `c_value` and the constants are ABI.
+        self.assertEqual(
+            qi.ConnectionEventKind.parse('credential_unavailable'),
+            qi.ConnectionEventKind.CredentialUnavailable)
+        self.assertEqual(
+            qi.ConnectionEventKind.CredentialUnavailable.c_value, 7)
         event = qi.ConnectionEvent(
             kind=qi.ConnectionEventKind.FailedOver,
             host='b', port='2', previous_host='a', previous_port='1',
