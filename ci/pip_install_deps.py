@@ -114,13 +114,20 @@ def main(args):
     # one -- silently does nothing. Installing it here is what makes that
     # coverage real rather than notional.
     #
-    # The `[pil]` extra matters for the same reason: bare `qrcode` gives the
-    # terminal renderer's ASCII art, but `_qr_data_uri` needs Pillow to encode
-    # a PNG, so the JUPYTER renderer's QR path stayed notional on a plain
-    # `qrcode` install -- its test skipped rather than failed, which is the
-    # quiet way to have no coverage. try_pip_install tolerates a target with no
-    # Pillow wheel; those legs skip that one test as before.
-    try_pip_install('qrcode[pil]')
+    # Pillow matters for the same reason: bare `qrcode` gives the terminal
+    # renderer's ASCII art, but `_qr_data_uri` needs Pillow to encode a PNG, so
+    # the JUPYTER renderer's QR path stays notional without it.
+    #
+    # Two calls, deliberately. `qrcode[pil]` is ONE pip resolution: on a target
+    # with no Pillow wheel it fails as a unit, so `try_pip_install` swallowed it
+    # and `qrcode` itself was never installed -- losing BOTH QR tests, not the
+    # one the old comment claimed. Worse, a Pillow source build that fails any
+    # other way does not match `pip_install`'s "unsupported" patterns, so it
+    # calls `sys.exit()` and hard-fails the whole dependency step. Installing
+    # them separately degrades the way the comment always said it did: no
+    # Pillow costs the Jupyter QR test only.
+    try_pip_install('qrcode')
+    try_pip_install('pillow')
 
     on_linux_is_glibc = (
             (not platform.system() == 'Linux') or

@@ -190,6 +190,15 @@ class QuestDBErrorCode(Enum):
 class QuestDBError(Exception):
     """An error whilst using the QuestDB client."""
 
+    def __init__(
+        self,
+        code: QuestDBErrorCode,
+        msg: str,
+        sender_error: Optional["SenderError"] = None,
+        *,
+        in_doubt: bool = False,
+    ) -> None: ...
+
     @property
     def code(self) -> QuestDBErrorCode:
         """Return the error code."""

@@ -409,7 +409,13 @@ cdef void _oidc_builder_set_string(
     cdef bint ok = True
     if encoded is None:
         return
-    if setting in (0, 1, 2, 3) and PyBytes_GET_SIZE(encoded) == 0:
+    # All six, not just 0..3. `token_endpoint` (4) and
+    # `device_authorization_endpoint` (5) were omitted, so
+    # `from_questdb(url, token_endpoint='')` sailed past validation and only
+    # failed later at parse time -- and an empty override still counts as
+    # EXPLICIT on the native side, which suppresses the IdP-discovery fallback
+    # for that endpoint. An endpoint is a URL; empty is never meaningful.
+    if PyBytes_GET_SIZE(encoded) == 0:
         from questdb.auth._errors import OidcConfigError
         raise OidcConfigError(
             f'{name} must be a non-empty string or None')
