@@ -2022,7 +2022,21 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         self.assertEqual(len(writes), 1)
         self.assertIn(b'oidc_retry_flush', writes[0]['body'])
 
-    def test_retryable_oidc_row_auto_flush_keeps_internal_buffer(self):
+    def test_retryable_oidc_row_auto_flush_clears_and_never_accumulates(self):
+        """An auto-flush must clear, even for a retryable OIDC failure.
+
+        Retention is only sound where the caller owns the buffer and can
+        decide, i.e. an explicit ``flush()``. On the auto-flush path the caller
+        cannot see how much was retained, and ``last_flush_ms`` is not bumped on
+        a failure, so ``should_auto_flush`` stays true and every subsequent row
+        re-attempts the flush. The buffer then grew one row per raise until it
+        breached ``max_buf_size``, at which point the error became
+        ``InvalidApiCall``, the retention predicate went false, and the whole
+        accumulation was discarded at once -- silent data loss behind a message
+        that says nothing about authentication.
+
+        The single-row version of this test could not see any of that.
+        """
         with OidcTestServer() as server:
             auth = make_discovered_auth(server)
             with questdb.Sender(
@@ -2034,21 +2048,27 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                     auto_flush_bytes=False,
                     auto_flush_interval=False,
                     protocol_version=2) as sender:
-                with self.assertRaises(OidcInteractionRequired):
-                    sender.row(
-                        'oidc_retry_row', columns={'value': 1},
-                        at=questdb.ServerTimestamp)
+                for value in range(5):
+                    with self.assertRaises(OidcInteractionRequired):
+                        sender.row(
+                            'oidc_retry_row', columns={'value': value},
+                            at=questdb.ServerTimestamp)
+                    self.assertEqual(
+                        len(sender), 0,
+                        'a failed auto-flush must not retain the row; '
+                        'retaining it makes the buffer grow one row per raise')
                 self.assertEqual(server.requests('/write', 'POST'), [])
 
+                # Nothing was retained, so there is nothing to recover: each
+                # raise already told the caller its row did not land.
                 auth.sign_in()
                 sender.flush()
-                writes = server.requests('/write', 'POST')
 
-        self.assertEqual(len(writes), 1)
-        self.assertIn(b'oidc_retry_row', writes[0]['body'])
+        self.assertEqual(server.requests('/write', 'POST'), [])
 
     @unittest.skipIf(pd is None, 'pandas not installed')
-    def test_retryable_oidc_dataframe_auto_flush_keeps_internal_buffer(self):
+    def test_retryable_oidc_dataframe_auto_flush_clears_and_never_accumulates(self):
+        """As the row case above, for the DataFrame auto-flush path."""
         with OidcTestServer() as server:
             auth = make_discovered_auth(server)
             with questdb.Sender(
@@ -2060,19 +2080,19 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                     auto_flush_bytes=False,
                     auto_flush_interval=False,
                     protocol_version=2) as sender:
-                with self.assertRaises(OidcInteractionRequired):
-                    sender.dataframe(
-                        pd.DataFrame({'value': [1]}),
-                        table_name='oidc_retry_dataframe',
-                        at=questdb.ServerTimestamp)
+                for value in range(3):
+                    with self.assertRaises(OidcInteractionRequired):
+                        sender.dataframe(
+                            pd.DataFrame({'value': [value]}),
+                            table_name='oidc_retry_dataframe',
+                            at=questdb.ServerTimestamp)
+                    self.assertEqual(len(sender), 0)
                 self.assertEqual(server.requests('/write', 'POST'), [])
 
                 auth.sign_in()
                 sender.flush()
-                writes = server.requests('/write', 'POST')
 
-        self.assertEqual(len(writes), 1)
-        self.assertIn(b'oidc_retry_dataframe', writes[0]['body'])
+        self.assertEqual(server.requests('/write', 'POST'), [])
 
     def test_oidc_error_carries_the_native_error_code(self):
         # The OIDC branch of c_err_to_py used to stamp AuthError on every native

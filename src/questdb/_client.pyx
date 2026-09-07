@@ -965,7 +965,11 @@ cdef void_int may_flush_on_row_complete(Buffer buffer, Sender sender) except -1:
             &sender._auto_flush_mode,
             buffer._impl,
             sender._last_flush_ms[0]):
-        sender.flush(buffer)
+        sender._in_auto_flush = True
+        try:
+            sender.flush(buffer)
+        finally:
+            sender._in_auto_flush = False
 
 
 cdef bint _is_tcp_protocol(line_sender_protocol protocol):
@@ -7041,6 +7045,12 @@ cdef class Sender:
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
     cdef bint _in_txn
+    # True only while `may_flush_on_row_complete` is driving `flush()`.
+    # An auto-flush is not a caller-controlled retry point, so it must
+    # never take the buffer-retention branch: the caller cannot see how
+    # many rows were retained, and `should_auto_flush` stays true on a
+    # retained buffer, so every subsequent row re-attempts the flush.
+    cdef bint _in_auto_flush
     cdef int64_t _slot_id
     # A clone of the fully-configured opts for QWP/WebSocket senders, retained
     # so dataframe() can open a poolless direct columnar connection per call
@@ -7452,6 +7462,7 @@ cdef class Sender:
         self._last_flush_ms = NULL
         self._init_buf_size = 0
         self._in_txn = False
+        self._in_auto_flush = False
         self._slot_id = -1
         self._qwp_ws_opts = NULL
 
@@ -8305,13 +8316,30 @@ cdef class Sender:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
         if not ok:
             if (c_buf == self._buffer._impl
-                    and not _is_unsent_retryable_oidc_error(err)):
+                    and (self._in_auto_flush
+                         or not _is_unsent_retryable_oidc_error(err))):
                 # Prevent a follow-up call to `.close(flush=True)` (as is
                 # usually called from `__exit__`) to raise after the sender
                 # entered an error state following a failed call to `.flush()`.
-                # A retryable OIDC provider failure is the exception: native
-                # proves it happened before publication and deliberately keeps
-                # the buffer intact so a later sign_in()/refresh can retry it.
+                #
+                # A retryable, proven-unsent OIDC provider failure on an
+                # EXPLICIT flush is the one exception: the buffer is kept so a
+                # later sign_in()/refresh can publish the same prefix once.
+                # Two conditions make that safe, and both had to be fixed:
+                #  * `in_doubt` now actually means something on ILP/HTTP.
+                #    `rotated_auth_after_401` runs after the buffer has already
+                #    been POSTed, so it marks its provider errors in-doubt;
+                #    before that, nothing on the HTTP path ever set the flag and
+                #    the predicate's `!in_doubt` half was vacuous, so a retained
+                #    buffer could be re-sent on top of rows the server had
+                #    already stored.
+                #  * an AUTO-flush never takes this branch. There the caller
+                #    cannot see what was retained, and `should_auto_flush` stays
+                #    true on a retained buffer, so every later row re-attempted
+                #    the flush and the buffer grew one row per raise until it
+                #    breached `max_buf_size` -- at which point the error became
+                #    InvalidApiCall, this predicate went false, and everything
+                #    accumulated was discarded at once.
                 # Note: For the internal buffer `clear` is always `True`.
                 line_sender_buffer_clear(c_buf)
             if _is_tcp_protocol(self._c_protocol):
