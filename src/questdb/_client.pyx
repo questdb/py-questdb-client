@@ -6378,7 +6378,7 @@ cdef class QuestDB:
                     '"oidc_auth" must be an OidcDeviceAuth or None, '
                     f'not {_fqn(type(oidc_auth))}')
             if oidc_auth is not None and (
-                    (<OidcDeviceAuth>oidc_auth)._native.raw == NULL
+                    (<OidcDeviceAuth>oidc_auth)._raw == NULL
                     or (<OidcDeviceAuth>oidc_auth)._closed):
                 raise ValueError('"oidc_auth" is closed')
             if oidc_auth is not None:
@@ -6421,7 +6421,7 @@ cdef class QuestDB:
             questdb_db_connect_options_init(
                 &connect_options, sizeof(questdb_db_connect_options))
             connect_options.oidc_auth = (
-                (<OidcDeviceAuth>oidc_auth)._native.raw
+                (<OidcDeviceAuth>oidc_auth)._raw
                 if oidc_auth is not None else NULL)
             connect_options.event_callback = connection_event_cb
             connect_options.event_user_data = connection_listener_data
@@ -7238,7 +7238,7 @@ cdef class Sender:
                 raise TypeError(
                     '"oidc_auth" must be an OidcDeviceAuth or None, '
                     f'not {_fqn(type(oidc_auth))}')
-            if ((<OidcDeviceAuth>oidc_auth)._native.raw == NULL
+            if ((<OidcDeviceAuth>oidc_auth)._raw == NULL
                     or (<OidcDeviceAuth>oidc_auth)._closed):
                 raise ValueError('"oidc_auth" is closed')
             # Reject the conflict here, in terms of the parameters the caller
@@ -7262,7 +7262,7 @@ cdef class Sender:
                     'remove the fixed credential, or drop "oidc_auth" to keep '
                     'using it.')
             if not line_sender_opts_oidc_auth(
-                    self._opts, (<OidcDeviceAuth>oidc_auth)._native.raw, &err):
+                    self._opts, (<OidcDeviceAuth>oidc_auth)._raw, &err):
                 raise c_err_to_py(err)
             self._oidc_auth = oidc_auth
 

@@ -33,9 +33,9 @@
 # -- which can run on an abandoned acquisition worker long after the owning
 # handles are gone, potentially past the start of interpreter finalization --
 # owns no Python reference and never needs the GIL. Entries are added when the
-# handler is installed under the GIL and removed by the leaf native-handle
-# owner's `__dealloc__`, which runs on a managed thread holding the GIL, so the
-# dict needs no lock of its own.
+# handler is installed under the GIL and removed by the provider weakref
+# callback, which also releases the independently-owned native handle on a
+# managed thread holding the GIL. The dict needs no lock of its own.
 #
 # The value is a weakref: the registry must not keep a provider alive, or a
 # `with` block's exit would never collect one.
@@ -44,17 +44,28 @@
 # dict, so `_PyModule_Clear` never swaps it for None at interpreter shutdown:
 # readers need no None guard.
 cdef object _OIDC_PROVIDERS = {}
+cdef object _OIDC_NATIVE_HANDLES = {}
 cdef size_t _oidc_last_provider_id = 0
 
 
 def _debug_oidc_registry_size():
     """Internal test hook: live entries in the provider registry.
 
-    Native no longer owns a Python reference, so nothing but the leaf native-
-    handle owner's finalizer removes an entry; a stale one would be a slow leak
-    that no weakref assertion catches.
+    Native owns no Python reference. A provider weakref callback removes both
+    registry entries; either one left behind would retain bookkeeping or the
+    native auth handle for the life of the process.
     """
+    if len(_OIDC_PROVIDERS) != len(_OIDC_NATIVE_HANDLES):
+        raise AssertionError('OIDC provider/native registries are out of sync')
     return len(_OIDC_PROVIDERS)
+
+
+def _oidc_provider_collected(size_t provider_id, object provider_ref):
+    """Release registry state after cyclic GC collects a provider."""
+    if _OIDC_PROVIDERS.get(provider_id) is not provider_ref:
+        return
+    _OIDC_PROVIDERS.pop(provider_id, None)
+    _OIDC_NATIVE_HANDLES.pop(provider_id, None)
 
 
 cdef inline object _oidc_text(const char* buf, size_t length):
@@ -260,9 +271,9 @@ cdef void _oidc_cancel_from_callback(OidcDeviceAuth provider) noexcept:
     pending ``KeyboardInterrupt`` is the thing worth surfacing.
     """
     cdef questdb_error* err = NULL
-    if provider._native.raw == NULL:
+    if provider._raw == NULL:
         return
-    if not questdb_oidc_auth_close(provider._native.raw, &err):
+    if not questdb_oidc_auth_close(provider._raw, &err):
         if err != NULL:
             questdb_error_free(err)
         return
@@ -382,8 +393,8 @@ cdef void _oidc_user_data_release_trampoline(
     rather than narrowing its window.
 
     The provider is instead reached through ``_OIDC_PROVIDERS`` under the GIL,
-    and its entry is dropped by the leaf native-handle owner's finalizer, which
-    always runs on a managed thread.
+    and its weakref callback drops both registry entries and the native-handle
+    owner on a managed thread.
     """
     pass
 
@@ -424,24 +435,14 @@ cdef void _oidc_builder_set_string(
 
 
 cdef class _OidcNativeHandle:
-    """Finalizer-free-cycle leaf owning one native auth handle and registry key.
-
-    Keeping ``__dealloc__`` off ``OidcDeviceAuth`` lets PyPy's cyclic collector
-    reclaim a provider <-> renderer cycle. This leaf has no Python-object
-    back-reference into that cycle, so its native cleanup remains deterministic.
-    """
+    """Registry-owned leaf that releases one native auth handle."""
 
     cdef questdb_oidc_auth* raw
-    cdef size_t provider_id
 
     def __cinit__(self):
         self.raw = NULL
-        self.provider_id = 0
 
     def __dealloc__(self):
-        if self.provider_id != 0:
-            _OIDC_PROVIDERS.pop(self.provider_id, None)
-            self.provider_id = 0
         if self.raw != NULL:
             questdb_oidc_auth_free(self.raw)
             self.raw = NULL
@@ -451,7 +452,11 @@ cdef class OidcDeviceAuth:
     """Native-backed OAuth 2.0 device-flow token provider for QuestDB."""
 
     cdef object __weakref__
-    cdef _OidcNativeHandle _native
+    # Borrowed from the registry-owned `_OidcNativeHandle`. Keeping the finalized
+    # extension leaf out of this object's outgoing graph lets PyPy collect a
+    # provider <-> renderer cycle; the provider weakref callback releases it.
+    cdef questdb_oidc_auth* _raw
+    cdef size_t _provider_id
     cdef object _renderer
     cdef bint _closed
     # A KeyboardInterrupt/SystemExit delivered inside a renderer callback,
@@ -463,14 +468,15 @@ cdef class OidcDeviceAuth:
     cdef object _sign_in_lock
 
     def __cinit__(self):
-        self._native = _OidcNativeHandle()
+        self._raw = NULL
+        self._provider_id = 0
         self._renderer = None
         self._closed = False
         self._interrupt = None
         self._sign_in_lock = threading.Lock()
 
     cdef void _require_open(self) except *:
-        if self._native.raw == NULL:
+        if self._raw == NULL:
             # Never __init__'d (e.g. cls.__new__ without construction) -- not
             # the same state as closed, which is reported below.
             raise RuntimeError('OidcDeviceAuth is not initialized')
@@ -715,12 +721,14 @@ cdef class OidcDeviceAuth:
         cdef bytes encoded
         cdef uint64_t timeout_ms
         cdef PyThreadState* gs = NULL
+        cdef _OidcNativeHandle native
+        cdef size_t provider_id
         from questdb.auth._errors import OidcConfigError
         from questdb.auth._render import (
             detect_interactive, in_ipython_kernel, make_renderer)
         from questdb.auth._store import FileTokenStore
 
-        if self._native.raw != NULL:
+        if self._raw != NULL:
             raise OidcConfigError('OidcDeviceAuth is already initialized')
         if groups_in_token is not None and not questdb_oidc_builder_groups_in_token(
                 builder, groups_in_token is True, &err):
@@ -816,37 +824,42 @@ cdef class OidcDeviceAuth:
         # `_oidc_user_data_release_trampoline`.
         global _oidc_last_provider_id
         _oidc_last_provider_id += 1
-        self._native.provider_id = _oidc_last_provider_id
+        provider_id = _oidc_last_provider_id
+        self._provider_id = provider_id
+        native = _OidcNativeHandle()
         # A weakref, so the registry never keeps a provider alive. The provider
         # owns the renderer, keeping provider/renderer cycles fully visible to
-        # Python's cyclic GC. Attached transports retain the provider.
-        _OIDC_PROVIDERS[self._native.provider_id] = PyWeakref_NewRef(self, None)
-        # Registered <=> built. Every failure after the insert above must drop
-        # the entry, not just the event-handler one: the native-handle owner pops
-        # only its *current* provider_id, and the already-initialized guard at the
-        # top of this function keys on `raw != NULL`, which a failed build leaves
-        # NULL. So a caller that retries `__init__` on the same object -- a
-        # subclass catching OidcConfigError and calling `super().__init__()`
-        # again with a corrected endpoint, say -- would overwrite
-        # provider_id and strand the previous key as a dead weakref in a
-        # module-global dict for the life of the process, once per retry.
-        # `_debug_oidc_registry_size` exists to catch exactly this.
+        # Python's cyclic GC. Its callback drops the independently registry-owned
+        # native handle, so the finalized leaf is not an outgoing edge of the
+        # provider cycle. Attached transports retain the provider separately.
         try:
+            from functools import partial
+            provider_ref = PyWeakref_NewRef(
+                self, partial(_oidc_provider_collected, provider_id))
+            _OIDC_PROVIDERS[provider_id] = provider_ref
+            _OIDC_NATIVE_HANDLES[provider_id] = native
+            # Registered <=> built. Every failure after registration must drop
+            # both entries immediately, rather than waiting for the half-built
+            # provider to be collected. That also lets a subclass retry
+            # `__init__` without stranding a dead weakref or native-handle owner.
             if not questdb_oidc_builder_event_handler(
                     builder,
                     _oidc_event_trampoline,
-                    <void*>self._native.provider_id,
+                    <void*>provider_id,
                     _oidc_user_data_release_trampoline,
                     &err):
                 raise _oidc_err_to_py(err)
             _ensure_doesnt_have_gil(&gs)
-            self._native.raw = questdb_oidc_builder_build(builder, &err)
+            native.raw = questdb_oidc_builder_build(builder, &err)
             _ensure_has_gil(&gs)
-            if self._native.raw == NULL:
+            if native.raw == NULL:
                 raise _oidc_err_to_py(err)
+            self._raw = native.raw
         except:
-            _OIDC_PROVIDERS.pop(self._native.provider_id, None)
-            self._native.provider_id = 0
+            self._raw = NULL
+            self._provider_id = 0
+            _OIDC_PROVIDERS.pop(provider_id, None)
+            _OIDC_NATIVE_HANDLES.pop(provider_id, None)
             raise
 
     def sign_in(self):
@@ -891,7 +904,7 @@ cdef class OidcDeviceAuth:
             # native and winning the race to consume the provider field.
             self._interrupt = None
             _ensure_doesnt_have_gil(&gs)
-            ok = questdb_oidc_auth_sign_in(self._native.raw, &err)
+            ok = questdb_oidc_auth_sign_in(self._raw, &err)
             _ensure_has_gil(&gs)
             interrupt = self._interrupt
             self._interrupt = None
@@ -922,7 +935,7 @@ cdef class OidcDeviceAuth:
         cdef PyThreadState* gs = NULL
         self._require_open()
         _ensure_doesnt_have_gil(&gs)
-        token = questdb_oidc_auth_token(self._native.raw, &err)
+        token = questdb_oidc_auth_token(self._raw, &err)
         _ensure_has_gil(&gs)
         if token == NULL:
             raise _oidc_err_to_py(err)
@@ -960,10 +973,10 @@ cdef class OidcDeviceAuth:
         cdef questdb_error* err = NULL
         cdef bint ok
         cdef PyThreadState* gs = NULL
-        if self._native.raw == NULL:
+        if self._raw == NULL:
             return
         _ensure_doesnt_have_gil(&gs)
-        ok = questdb_oidc_auth_clear(self._native.raw, &err)
+        ok = questdb_oidc_auth_clear(self._raw, &err)
         _ensure_has_gil(&gs)
         if not ok:
             raise _oidc_err_to_py(err)
@@ -990,7 +1003,7 @@ cdef class OidcDeviceAuth:
         cdef questdb_error* err = NULL
         cdef bint ok
         cdef PyThreadState* gs = NULL
-        if self._native.raw == NULL:
+        if self._raw == NULL:
             self._closed = True
             self._renderer = None
             return
@@ -1004,7 +1017,7 @@ cdef class OidcDeviceAuth:
         # already-closed provider, so calling through unconditionally restores
         # the documented behaviour at no meaningful cost.
         _ensure_doesnt_have_gil(&gs)
-        ok = questdb_oidc_auth_close(self._native.raw, &err)
+        ok = questdb_oidc_auth_close(self._raw, &err)
         _ensure_has_gil(&gs)
         if not ok:
             raise _oidc_err_to_py(err)
@@ -1036,11 +1049,11 @@ cdef class OidcDeviceAuth:
         """
         cdef questdb_oidc_config_view view
         from questdb.auth._config import OidcConfig
-        if self._native.raw == NULL:
+        if self._raw == NULL:
             raise RuntimeError('OidcDeviceAuth is not initialized')
         memset(&view, 0, sizeof(questdb_oidc_config_view))
         view.struct_size = sizeof(questdb_oidc_config_view)
-        if not questdb_oidc_auth_get_config(self._native.raw, &view):
+        if not questdb_oidc_auth_get_config(self._raw, &view):
             raise RuntimeError('native OIDC config view is unavailable')
         client_id = _oidc_text(view.client_id, view.client_id_len)
         token_endpoint = _oidc_text(
