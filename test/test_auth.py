@@ -24,6 +24,7 @@
 
 """Python binding tests for the native OIDC implementation."""
 
+import dataclasses
 import gc
 import io
 import os
@@ -41,6 +42,7 @@ import questdb
 from questdb.auth import (
     FileTokenStore,
     OidcCancelledError,
+    OidcConfig,
     OidcConfigError,
     OidcDeviceAuth,
     OidcDeviceFlowError,
@@ -249,6 +251,50 @@ class NativeOidcTest(unittest.TestCase):
             OidcDeviceAuth.from_questdb(
                 object(), groups_in_token=None, interactive=None,
                 open_browser=None)
+
+    def test_config_sanitizes_direct_construction(self):
+        # OidcConfig documents that every string field is display-sanitized,
+        # and it is exported with a public generated constructor -- so the
+        # invariant has to hold for an instance nobody routed through
+        # OidcDeviceAuth.config: a test double, or a copy rebuilt with
+        # dataclasses.replace. Its repr reaches the same terminal / notebook /
+        # logged-traceback sink either way. See
+        # test_discovery_config_view_strips_control_chars for the native
+        # boundary's half of the guarantee.
+        # ESC + BEL (C0 control), U+202E RIGHT-TO-LEFT OVERRIDE (bidi),
+        # U+200B ZERO WIDTH SPACE (zero-width), NUL.
+        cfg = OidcConfig(
+            client_id='cl\x1bient',
+            token_endpoint='https://idp/to\x07ken',
+            device_authorization_endpoint='https://idp/de‮vice',
+            scope='open​id',
+            audience='aud\x1bience',
+            issuer='iss\x00uer')
+        self.assertEqual(cfg.client_id, 'client')
+        self.assertEqual(cfg.token_endpoint, 'https://idp/token')
+        self.assertEqual(
+            cfg.device_authorization_endpoint, 'https://idp/device')
+        self.assertEqual(cfg.scope, 'openid')
+        self.assertEqual(cfg.audience, 'audience')
+        self.assertEqual(cfg.issuer, 'issuer')
+        for ch in ('\x1b', '\x07', '\x00', '‮', '​'):
+            self.assertNotIn(ch, repr(cfg))
+        # An unset optional stays None: _strip_control maps None to '', and
+        # collapsing absent into present-but-empty would misreport the config.
+        bare = OidcConfig(
+            client_id='c', token_endpoint='t',
+            device_authorization_endpoint='d')
+        self.assertIsNone(bare.audience)
+        self.assertIsNone(bare.issuer)
+        self.assertEqual(bare.scope, 'openid')
+        self.assertFalse(bare.groups_in_token)
+        # Sanitizing through object.__setattr__ must not unfreeze the instance.
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            cfg.client_id = 'other'
+        # A replace()-built copy is sanitized too -- that is the path a plain
+        # __init__-only guarantee would miss.
+        self.assertEqual(
+            dataclasses.replace(cfg, client_id='ne\x1bw').client_id, 'new')
 
     def test_terminal_ipython_uses_terminal_renderer(self):
         ipython = types.ModuleType('IPython')

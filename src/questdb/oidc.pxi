@@ -1085,6 +1085,11 @@ cdef class OidcDeviceAuth:
         # every-sink posture of the renderers and OidcError. _render is stdlib-
         # only, so this lazy import introduces no cycle. Optional fields keep
         # None (absent) distinct from '' (present-but-empty).
+        #
+        # OidcConfig.__post_init__ enforces the same strip for every instance,
+        # so this is belt-and-braces: it keeps the sanitization visible at the
+        # native boundary, where the untrusted input actually enters, and
+        # _strip_control is idempotent.
         from questdb.auth._render import _strip_control
         return OidcConfig(
             client_id=_strip_control(client_id),
