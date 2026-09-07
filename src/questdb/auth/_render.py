@@ -368,6 +368,28 @@ def _ascii_visible(text: str) -> str:
     return text.encode('ascii', 'backslashreplace').decode('ascii')
 
 
+def _display_host(url: Optional[str]) -> Optional[str]:
+    """
+    The ``host[:port]`` of an already-vetted actionable URL, for a link label.
+
+    **Precondition**: ``url`` has passed :func:`_safe_link_url`, which rejects a
+    non-ASCII host, userinfo, and any non-``http(s)`` scheme. So the netloc here
+    is plain ASCII and carries no ``user@`` prefix, and needs no further
+    normalization — unlike :func:`_display_url`, which has to cope with raw,
+    unvetted identity-provider text.
+
+    Returns ``None`` when there is nothing host-like to show, so the caller can
+    fall back to a label without one rather than render an empty gap.
+    """
+    if not url:
+        return None
+    try:
+        netloc = urllib.parse.urlparse(url).netloc
+    except ValueError:
+        return None
+    return netloc or None
+
+
 def _display_url(url: Optional[str]) -> str:
     """
     A verification URL rendered safe to *show* as text.
@@ -860,16 +882,25 @@ class JupyterRenderer(Renderer):
             f'letter-spacing:2px;margin:6px 0">{code}</div>',
         ]
         # Offer the one-click "authorize directly" link only when the pre-filled
-        # complete shares the shown link's origin (see _matched_complete): its
-        # label is fixed text, so its host is never shown, and a complete on a
-        # different host would silently send the click to the attacker while the
-        # primary link above still reads as the trusted host.
+        # complete shares the shown link's origin (see _matched_complete): a
+        # complete on a different host would silently send the click to the
+        # attacker while the primary link above still reads as the trusted host.
+        #
+        # Name the host in the label rather than using fixed text. Both URLs
+        # come from the same identity-provider response, so an origin match
+        # between them proves only that they agree -- not that either is the
+        # IdP the user configured. A reader who can see where the click goes can
+        # notice a host that does not belong; one shown only "Click here to
+        # authorize directly" cannot.
         matched = None if native_refused else _matched_complete(resp)
         if matched:
+            matched_host = _display_host(matched)
+            label = (
+                f'Click here to authorize directly on {matched_host} →'
+                if matched_host
+                else 'Click here to authorize directly →')
             body.append(
-                '<div>' + _render_link(
-                    matched, text='Click here to authorize directly →')
-                + '</div>')
+                '<div>' + _render_link(matched, text=label) + '</div>')
         if self._qr:
             qr_html = self._qr_img(_verification_target(resp))
             if qr_html:
