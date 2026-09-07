@@ -515,8 +515,9 @@ cdef class OidcDeviceAuth:
         reference cannot introspect the signature, so every parameter is
         documented here:
 
-        * ``scope`` — the OAuth scope string, sent verbatim on both the initial
-          request and every refresh.
+        * ``scope`` — the OAuth scope string sent verbatim on the initial
+          request. Refresh requests omit it so the identity provider preserves
+          the scope originally granted, as required by RFC 6749 section 6.
         * ``audience`` / ``issuer`` — optional. ``issuer`` additionally pins the
           credential endpoints: one advertised by a QuestDB server must either
           sit under the issuer's origin and path, or be confirmed by the IdP's

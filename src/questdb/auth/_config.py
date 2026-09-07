@@ -47,8 +47,9 @@ class OidcConfig:
     :param token_endpoint: The IdP endpoint tokens are requested from.
     :param device_authorization_endpoint: The IdP endpoint the device flow
         starts at.
-    :param scope: The scope string sent verbatim on the initial request and on
-        every refresh.
+    :param scope: The scope string sent verbatim on the initial request.
+        Refresh requests omit it so the identity provider preserves the scope
+        originally granted.
     :param groups_in_token: Which token
         :meth:`~questdb.auth.OidcDeviceAuth.token` returns — ``True`` selects
         the ID token, ``False`` the access token.
