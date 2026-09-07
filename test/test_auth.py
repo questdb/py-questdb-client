@@ -1324,8 +1324,15 @@ class NativeOidcIntegrationTest(unittest.TestCase):
 
                 # __exit__ closed it; clearing must still work.
                 auth.clear()
+                # Lock release leaves zero-length, immediately reclaimable
+                # marker files so a stale owner can never unlink a successor's
+                # lock. They contain no credential; clear() must remove the
+                # JSON token entry itself.
+                credential_files = [
+                    name for name in os.listdir(directory)
+                    if name.endswith('.json')]
                 self.assertEqual(
-                    os.listdir(directory), [],
+                    credential_files, [],
                     'the persisted credential survived clear() after close()')
 
                 # And the credential is really gone: a fresh provider has to
