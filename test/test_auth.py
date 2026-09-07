@@ -2655,10 +2655,22 @@ class AdapterTest(unittest.TestCase):
                 auth, 'https://questdb.example.com:9000', sslmode=None)
         self.assertNotIn('sslmode', driver.connect.call_args.kwargs)
 
-    def test_adapters_accept_loopback_with_or_without_tls(self):
+    def test_adapters_require_tls_for_localhost_names(self):
         for url in (
                 'http://localhost:9000',
-                'http://LOCALHOST.:9000',
+                'http://LOCALHOST.:9000'):
+            with self.subTest(url=url):
+                auth = mock.Mock()
+                auth.token.return_value = 'TOKEN'
+                driver = mock.Mock()
+                with mock.patch.object(
+                        _adapters, '_pg_module', return_value=driver):
+                    _adapters.psycopg_connect(auth, url)
+                self.assertEqual(
+                    driver.connect.call_args.kwargs['sslmode'], 'verify-full')
+
+    def test_adapters_accept_numeric_loopback_without_tls(self):
+        for url in (
                 'http://127.0.0.1:9000',
                 'http://127.5.5.5:9000',
                 'http://[::1]:9000'):

@@ -30,9 +30,11 @@ Feed an :class:`OidcDeviceAuth` token into SQLAlchemy / psycopg as the QuestDB
 senders and pools should attach the provider directly through ``oidc_auth=``.
 
 Because the credential travels as the PG password, both adapters default to
-authenticated TLS (``sslmode="verify-full"``) for remote hosts. ``localhost``
-and loopback IPs deliberately use ``prefer`` so local QuestDB remains usable
-with or without TLS.
+authenticated TLS (``sslmode="verify-full"``) unless the host is a numeric
+loopback IP. Numeric loopback addresses deliberately use ``prefer`` so a local
+QuestDB remains usable with or without TLS. A hostname such as ``localhost``
+still requires TLS because its resolved addresses are outside this function's
+control.
 """
 
 from __future__ import annotations
@@ -190,11 +192,9 @@ def _coerce_port(pg_port: Any) -> int:
     return port
 
 
-def _is_loopback_host(host: str) -> bool:
-    """Whether ``host`` is the special-use localhost name or a loopback IP."""
+def _is_numeric_loopback_host(host: str) -> bool:
+    """Whether ``host`` is a numeric loopback IP literal."""
     bare = host[:-1] if host.endswith('.') else host
-    if bare.lower() == 'localhost':
-        return True
     try:
         return ipaddress.ip_address(bare).is_loopback
     except ValueError:
@@ -205,7 +205,7 @@ def _effective_sslmode(host: str, sslmode: Optional[str]) -> Optional[str]:
     """Resolve the adapter-only ``auto`` mode before calling libpq."""
     if sslmode != _AUTO_SSLMODE:
         return sslmode
-    return 'prefer' if _is_loopback_host(host) else 'verify-full'
+    return 'prefer' if _is_numeric_loopback_host(host) else 'verify-full'
 
 
 def sqlalchemy_engine(
@@ -245,10 +245,11 @@ def sqlalchemy_engine(
         (v3) or ``postgresql+psycopg2`` depending on what is installed.
     :param sslmode: libpq ``sslmode`` for the connection. The default ``"auto"``
         resolves to ``"verify-full"`` for remote hosts, authenticating the
-        server before sending the token as the PG password. For ``localhost``
-        and loopback IPs it resolves to ``"prefer"`` so a local QuestDB without
-        TLS is always accepted. Pass another libpq mode explicitly to override
-        this policy, or ``None`` to manage TLS entirely through
+        server before sending the token as the PG password. Numeric loopback
+        IPs resolve to ``"prefer"`` so a local QuestDB without TLS is accepted;
+        hostnames such as ``localhost`` retain ``"verify-full"`` because their
+        resolved addresses are not pinned. Pass another libpq mode explicitly
+        to override this policy, or ``None`` to manage TLS entirely through
         ``connect_args`` / the environment. An ``sslmode`` in ``connect_args``
         always wins.
     :param engine_kwargs: Forwarded to ``create_engine``.
@@ -330,10 +331,11 @@ def psycopg_connect(
     :param database: Database name (default ``"qdb"``).
     :param sslmode: libpq ``sslmode`` for the connection. The default ``"auto"``
         resolves to ``"verify-full"`` for remote hosts, authenticating the
-        server before sending the token as the PG password. For ``localhost``
-        and loopback IPs it resolves to ``"prefer"`` so a local QuestDB without
-        TLS is always accepted. Pass another libpq mode explicitly to override
-        this policy, or ``None`` to manage TLS entirely through
+        server before sending the token as the PG password. Numeric loopback
+        IPs resolve to ``"prefer"`` so a local QuestDB without TLS is accepted;
+        hostnames such as ``localhost`` retain ``"verify-full"`` because their
+        resolved addresses are not pinned. Pass another libpq mode explicitly
+        to override this policy, or ``None`` to manage TLS entirely through
         ``connect_kwargs`` / the environment. An ``sslmode`` in
         ``connect_kwargs`` always wins.
     :param connect_kwargs: Forwarded to the driver's ``connect()``.

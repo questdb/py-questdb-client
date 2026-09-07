@@ -206,8 +206,10 @@ token for that connection. For other HTTP clients, use ``auth.headers()``.
 
 Because the token travels as the PG password, both adapters default to
 ``sslmode="verify-full"`` for remote hosts. This authenticates the server as
-well as encrypting the connection. ``localhost`` and loopback IPs instead use
-``prefer``, so local QuestDB is accepted with or without TLS::
+well as encrypting the connection. Numeric loopback IPs instead use ``prefer``,
+so local QuestDB is accepted with or without TLS. ``localhost`` retains
+``verify-full`` because its resolved addresses are not pinned; use
+``127.0.0.1`` or ``::1`` for automatic local plaintext fallback::
 
     engine = sqlalchemy_engine(
         auth, "https://questdb.example.com:9000",
@@ -263,8 +265,8 @@ Security notes
   values from other sources or defense-in-depth; it does not HTML-escape.
 * Avoid logging tokens, authorization headers, or PG connection parameters.
 * The PG-wire adapters send the token as the ``_sso`` password, so remote hosts
-  default to ``sslmode="verify-full"``. ``localhost`` and loopback IPs use
-  ``prefer`` to support local servers without TLS. See
+  and hostnames such as ``localhost`` default to ``sslmode="verify-full"``.
+  Numeric loopback IPs use ``prefer`` to support local servers without TLS. See
   :ref:`the PG-wire section <oidc_pgwire>`.
 * ``Ctrl-C`` during :meth:`~questdb.auth.OidcDeviceAuth.sign_in` closes the
   provider permanently, and closing is shared: every ``Sender``,
