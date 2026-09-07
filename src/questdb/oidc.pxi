@@ -456,9 +456,13 @@ cdef class OidcDeviceAuth:
     """Native-backed OAuth 2.0 device-flow token provider for QuestDB."""
 
     cdef object __weakref__
-    # Borrowed from the registry-owned `_OidcNativeHandle`. Keeping the finalized
-    # extension leaf out of this object's outgoing graph lets PyPy collect a
-    # provider <-> renderer cycle; the provider weakref callback releases it.
+    # Borrowed from the registry-owned `_OidcNativeHandle`, which the provider's
+    # weakref callback releases. Keeping the finalized extension leaf out of this
+    # object's outgoing graph leaves a provider <-> renderer cycle free of
+    # finalized C-extension edges, so CPython's cyclic GC reclaims it and the
+    # native handle with it. PyPy cannot: cpyext leaks any cycle passing through
+    # a C-extension object, so a renderer holding its own provider keeps both --
+    # and the native handle -- alive there until `close()`.
     cdef questdb_oidc_auth* _raw
     cdef size_t _provider_id
     cdef object _renderer

@@ -741,6 +741,16 @@ class NativeOidcTest(unittest.TestCase):
         with self.assertRaises(OidcInteractionRequired):
             auth.token()
 
+    @unittest.skipIf(
+        platform.python_implementation() == 'PyPy',
+        'PyPy leaks any reference cycle that passes through a C-extension '
+        'object (PyPy issue #3848): cpyext pins the renderer through the '
+        "provider's struct field, and PyPy's collector cannot see that the pin "
+        'is itself only reachable from the dying cycle. Observed on the '
+        'linux_x64_pypy wheel job, where the renderer survived every one of '
+        'the collections below. What PyPy *can* do is covered there by '
+        'test_close_detaches_renderer (deterministic release) and '
+        'test_registry_weakref_released_on_success (acyclic collection).')
     def test_renderer_provider_cycle_is_collected(self):
         baseline = _settled_registry_size()
         renderer = Renderer()
@@ -752,7 +762,8 @@ class NativeOidcTest(unittest.TestCase):
         del renderer, auth
         # The provider has no finalizer-bearing child: the native handle lives in
         # a separate registry entry removed by the provider's weakref callback.
-        # Both CPython and PyPy can therefore reclaim this cycle.
+        # That keeps the cycle free of finalized C-extension edges, so CPython's
+        # cyclic GC reclaims it and the native handle with it.
         for _ in range(_SETTLE_MAX_PASSES):
             gc.collect()
             if renderer_ref() is None and auth_ref() is None:
