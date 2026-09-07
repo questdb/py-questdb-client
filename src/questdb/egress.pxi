@@ -147,26 +147,51 @@ cdef class _CursorHandle:
         with self._lock:
             return self._reset_seq
 
-    cdef bint _abandonment_needs_warning(self):
-        with self._lock:
-            return (
-                self._cursor != NULL
-                and (
-                    self._reader_ref is None
-                    or self._reader_ref._must_close))
+    cdef void _free_locked(self) noexcept:
+        """The body of `_free`. Caller must hold `_lock`."""
+        cdef PyThreadState* gs = NULL
+        if self._cursor != NULL:
+            _ensure_doesnt_have_gil(&gs)
+            qwp_reader_cursor_free(self._cursor)
+            _ensure_has_gil(&gs)
+            self._cursor = NULL
+        if self._reader_ref is not None:
+            if self._owns_reader:
+                self._reader_ref._close()
+            self._reader_ref = None
 
     cdef void _free(self) noexcept:
-        cdef PyThreadState* gs = NULL
         with self._lock:
-            if self._cursor != NULL:
-                _ensure_doesnt_have_gil(&gs)
-                qwp_reader_cursor_free(self._cursor)
-                _ensure_has_gil(&gs)
-                self._cursor = NULL
-            if self._reader_ref is not None:
-                if self._owns_reader:
-                    self._reader_ref._close()
-                self._reader_ref = None
+            self._free_locked()
+
+    cdef int _try_reclaim(self):
+        """Free from a finalizer without ever blocking.
+
+        `_free` holds `_lock` across `qwp_reader_cursor_free` and
+        `_ReaderHandle._close`, both of which release the GIL. A worker parked
+        in one of those at interpreter finalization is frozen there holding the
+        lock, and a blocking acquire from the shutdown GC -- which runs
+        `__del__` with the GIL held -- would then never return, hanging the
+        interpreter. Before the lock was introduced `__del__` read `_cursor`
+        raw and returned; it must stay non-blocking now that the same diff
+        documents handing a `QueryResult` to another thread.
+
+        Returns 1 when it freed an un-drained cursor (the caller should warn),
+        0 when it freed a drained one or there was nothing to free, and -1 when
+        the lock was busy and it did nothing -- whoever holds it will free it.
+        """
+        cdef bint undrained
+        if not self._lock.acquire(False):
+            return -1
+        try:
+            if self._cursor == NULL:
+                return 0
+            undrained = (
+                self._reader_ref is None or self._reader_ref._must_close)
+            self._free_locked()
+        finally:
+            self._lock.release()
+        return 1 if undrained else 0
 
     def __dealloc__(self):
         self._free()
@@ -2262,10 +2287,6 @@ def _debug_egress_pool_stats(client):
         c._end_db_use()
 
 
-cdef bint _cursor_handle_is_live(_CursorHandle h):
-    return h is not None and h._is_live()
-
-
 class QueryResult:
     """Result of ``QuestDB.query(sql)``.
 
@@ -2596,11 +2617,29 @@ class QueryResult:
 
     def __del__(self):
         cdef _CursorHandle handle
+        cdef int outcome = 0
         try:
             handle = self._cursor_handle
-            if not _cursor_handle_is_live(handle):
+            if handle is None:
                 return
-            if handle._abandonment_needs_warning():
+            # Reclaim FIRST, warn after. The warning used to come first inside
+            # this same `except Exception: pass`, so under `-W error` (or
+            # `simplefilter('error')`) the ResourceWarning raised, was
+            # swallowed, and `close()` never ran -- the deterministic release
+            # silently degraded to `_CursorHandle.__dealloc__`. Ordering the
+            # free ahead of the warning makes that structurally impossible.
+            outcome = handle._try_reclaim()
+            if outcome < 0:
+                # Another thread owns the lock; it frees the cursor. Do not
+                # block here -- see `_try_reclaim`.
+                return
+            self._cursor_handle = None
+            self._cancel_handle = None
+            self._consumed = True
+        except Exception:
+            return
+        if outcome > 0:
+            try:
                 warnings.warn(
                     'QueryResult was neither drained nor closed; its '
                     'pooled connection is being released by the garbage '
@@ -2608,6 +2647,5 @@ class QueryResult:
                     '`close()`.',
                     ResourceWarning,
                     stacklevel=2)
-            self.close()
-        except Exception:
-            pass
+            except Exception:
+                pass

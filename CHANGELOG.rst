@@ -162,7 +162,11 @@ Highlights:
   ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
   token on every new pooled connection, ``psycopg_connect`` captures it at
   connect time. They authenticate remote PG servers with ``verify-full`` by
-  default, while ``localhost`` and loopback IPs remain usable without TLS.
+  default. Numeric loopback literals (``127.0.0.1``, ``::1``) resolve to
+  ``prefer`` instead, so a local QuestDB without TLS still works; the name
+  ``localhost`` does **not** — it keeps ``verify-full``, because its resolved
+  addresses are not pinned. Use a numeric literal for local development, or
+  pass an explicit ``sslmode``.
 * :meth:`~questdb.auth.OidcDeviceAuth.close` permanently closes a provider and
   cancels a device flow, silent-refresh coordination, or token-store lock wait
   running on another thread; ``OidcDeviceAuth`` is also a context manager.
