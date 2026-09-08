@@ -531,15 +531,28 @@ cdef inline void_int reserve_buffer(
         raise c_err_to_py(err)
 
 
-cdef inline bint _is_oidc_terminal_for_foreground(object exc):
+cdef inline bint _is_oidc_terminal_for_foreground(object exc, object oidc_auth):
     """Whether ``exc`` is an OIDC failure that a foreground retry cannot clear.
 
-    ``OidcInteractionRequired`` alone needs this gate. It carries a *retryable*
-    native code on purpose: an attached transport's background drainer keeps
-    queued store-and-forward frames alive while a human signs in, rather than
-    abandoning them. A foreground ``dataframe()`` call has nothing to wait for
-    -- the token path is documented never to prompt -- so retrying only burns
-    the reconnect budget before raising the same error.
+    ``OidcInteractionRequired`` alone needs this gate, and it covers three
+    native conditions that are indistinguishable by class *and* by code:
+    ``classify_provider_error`` reclassifies every OIDC ``InteractionRequired``
+    to a retryable ``SocketError``, so ``exc.code`` cannot separate them.
+
+    * Nobody has signed in, and nothing is in flight. Retrying re-polls a
+      provider documented never to prompt, so the call would burn the whole
+      reconnect budget (300s by default) only to raise the same error. Fail
+      fast and let the caller run ``sign_in()``.
+    * A peer ``sign_in()`` holds the acquisition lock, or a renderer callback
+      is mid-paint. Both clear on their own -- the second in milliseconds --
+      and ``oidc.h`` states normatively that a transport "must retry rather
+      than terminalize" for the callback case. Retrying here is what the
+      native side classified the error for.
+
+    Only the provider knows which it is, so ``oidc_auth`` (the one the sender
+    or pool was built with, or ``None``) is consulted: a sign-in in flight on
+    it means the condition is transient and the existing budget loop should
+    ride it out.
 
     Every other OIDC failure is already handled by the caller's code check:
     ``classify_provider_error`` exempts ``OidcErrorKind::Config`` from the
@@ -555,7 +568,15 @@ cdef inline bint _is_oidc_terminal_for_foreground(object exc):
     cdef object mod = sys.modules.get('questdb.auth._errors')
     if mod is None:
         return False
-    return isinstance(exc, mod.OidcInteractionRequired)
+    if not isinstance(exc, mod.OidcInteractionRequired):
+        return False
+    # Plain attribute access, not a `<OidcDeviceAuth>` cast: this runs inside
+    # an `except` handler, where an unchecked cast on an unexpected object
+    # would be undefined behaviour and a checked one would raise over the error
+    # being reported. `oidc_auth` is type-validated at construction anyway.
+    if oidc_auth is not None and oidc_auth._sign_in_in_progress:
+        return False
+    return True
 
 
 cdef object _utf8_decode_error(
@@ -5973,7 +5994,8 @@ cdef void_int _direct_dataframe_run(
         object symbols,
         object at,
         size_t max_rows_per_batch,
-        object schema_overrides) except -1:
+        object schema_overrides,
+        object oidc_auth) except -1:
     cdef uint64_t budget_ms = 0
     cdef double deadline = 0.0
     cdef double remaining = 0.0
@@ -6054,7 +6076,7 @@ cdef void_int _direct_dataframe_run(
             # documented never to prompt, so the call would stall for the whole
             # reconnect budget (300s by default) only to raise the same error.
             # Fail fast and let the caller run sign_in().
-            if _is_oidc_terminal_for_foreground(exc):
+            if _is_oidc_terminal_for_foreground(exc, oidc_auth):
                 raise
             # FailoverRetry = transient flush/sync; SocketError = a
             # re-borrow that has not reached a live primary yet.
@@ -6712,7 +6734,8 @@ cdef class QuestDB:
                 symbols,
                 at,
                 max_rows_per_batch,
-                schema_overrides)
+                schema_overrides,
+                self._oidc_auth)
             return self
         finally:
             qdb_pystr_buf_free(b)
@@ -8211,7 +8234,8 @@ cdef class Sender:
                     symbols,
                     at,
                     max_rows_per_batch,
-                    schema_overrides)
+                    schema_overrides,
+                    self._oidc_auth)
                 return self
             finally:
                 qdb_pystr_buf_free(ws_b)

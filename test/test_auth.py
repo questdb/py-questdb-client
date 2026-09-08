@@ -653,7 +653,11 @@ class NativeOidcTest(unittest.TestCase):
         self.assertTrue(issubclass(OidcError, questdb.QuestDBError))
         for exc_type, expected in (
                 (OidcConfigError, questdb.QuestDBErrorCode.ConfigError),
-                (OidcNetworkError, questdb.QuestDBErrorCode.AuthError),
+                # Retryable, matching native's OidcErrorKind::Network ->
+                # SocketError: a transient IdP/QuestDB network failure must not
+                # look like a terminal auth failure to `.code`-keyed retry
+                # logic.
+                (OidcNetworkError, questdb.QuestDBErrorCode.SocketError),
                 (OidcInteractionRequired, questdb.QuestDBErrorCode.AuthError),
                 (OidcDeviceFlowError, questdb.QuestDBErrorCode.AuthError),
                 (OidcTimeoutError, questdb.QuestDBErrorCode.AuthError)):
@@ -1269,6 +1273,50 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         # The flow still completed: SUCCESS fired, FAILURE did not.
         self.assertEqual(len(renderer.successes), 1)
         self.assertEqual(renderer.failures, [])
+
+    def test_sign_in_in_flight_is_visible_to_the_retry_gate(self):
+        # Regression: `_is_oidc_terminal_for_foreground` failed a foreground
+        # `dataframe()` fast for EVERY `OidcInteractionRequired`. Three native
+        # conditions share that class, and `classify_provider_error` gives them
+        # all the same retryable `SocketError`, so neither the class nor the
+        # code separates "nobody has signed in" -- where failing fast is right
+        # -- from "a peer sign-in or a renderer paint is in flight", which
+        # `oidc.h` says a transport must retry. Only the provider knows, and
+        # this is what it is asked.
+        waiting = threading.Event()
+
+        class WaitingRenderer(RecordingRenderer):
+            def on_waiting(self, seconds_left):
+                super().on_waiting(seconds_left)
+                waiting.set()
+
+        pending = (400, {'error': 'authorization_pending'}, None)
+        with OidcTestServer(
+                device_token_response=pending, device_expires_in=20) as server:
+            auth = make_discovered_auth(server, renderer=WaitingRenderer())
+            self.assertFalse(auth._sign_in_in_progress)
+
+            def sign_in():
+                try:
+                    auth.sign_in()
+                except BaseException:
+                    pass
+
+            thread = threading.Thread(target=sign_in)
+            thread.start()
+            try:
+                self.assertTrue(
+                    waiting.wait(20), 'device flow never reached a poll')
+                self.assertTrue(
+                    auth._sign_in_in_progress,
+                    'a sign_in() in flight must be visible to the gate')
+            finally:
+                auth.close()
+                thread.join(20)
+            self.assertFalse(thread.is_alive())
+            # And it clears, so a later failure fails fast again rather than
+            # burning the whole reconnect budget.
+            self.assertFalse(auth._sign_in_in_progress)
 
     def test_close_cancels_device_polling_and_is_permanent(self):
         waiting = threading.Event()

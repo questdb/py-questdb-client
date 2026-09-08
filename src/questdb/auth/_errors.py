@@ -131,6 +131,12 @@ class OidcConfigError(OidcError):
 class OidcNetworkError(OidcError):
     """A network-level failure while talking to QuestDB or the IdP."""
 
+    #: Native maps ``OidcErrorKind::Network`` to ``SocketError`` (retryable),
+    #: so a directly constructed one must too -- it is the class the base
+    #: docstring names as *the* retryable kind, and it was the only subclass of
+    #: six whose two construction routes disagreed.
+    _DEFAULT_CODE = QuestDBErrorCode.SocketError
+
 
 class OidcInteractionRequired(OidcError):
     """

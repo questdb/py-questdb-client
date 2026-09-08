@@ -984,6 +984,21 @@ cdef class OidcDeviceAuth:
         finally:
             self._sign_in_lock.release()
 
+    @property
+    def _sign_in_in_progress(self):
+        """Whether a :meth:`sign_in` is running on this provider, any thread.
+
+        Internal. This is what tells a *transient*
+        :class:`~questdb.auth.OidcInteractionRequired` -- one raised because a
+        peer sign-in holds the acquisition lock, or because a renderer callback
+        is being painted -- from the ordinary "nobody has signed in" one. Both
+        reach Python as the same class with the same ``code``, because
+        ``classify_provider_error`` reclassifies every OIDC
+        ``InteractionRequired`` to a retryable ``SocketError``; only the
+        provider knows whether anything is actually in flight.
+        """
+        return self._sign_in_lock.locked()
+
     def token(self):
         """Return a cached or silently refreshed token; never prompt.
 
