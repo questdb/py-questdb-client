@@ -32,11 +32,15 @@ ingestion and query results**, the other two ``dataframe()`` /
   reconstructs a UUID from, hashes, or joins on those bytes must drop its
   byte-reversing workaround, on every Arrow-backed reader —
   :meth:`questdb.QueryResult.to_arrow`, :meth:`~questdb.QueryResult.to_polars`,
-  :meth:`~questdb.QueryResult.iter_arrow`, ``__arrow_c_stream__`` (so
-  ``polars.from_arrow(db.query(...))`` too), and
-  :meth:`~questdb.QueryResult.to_pandas` with ``dtype_backend="pyarrow"``. Plain
-  :meth:`~questdb.QueryResult.to_pandas`, which builds ``uuid.UUID`` objects directly,
-  is unaffected and needs no change.
+  :meth:`~questdb.QueryResult.iter_arrow`, :meth:`~questdb.QueryResult.iter_polars`,
+  ``__arrow_c_stream__`` (so ``polars.from_arrow(db.query(...))`` too), and
+  :meth:`~questdb.QueryResult.to_pandas` / :meth:`~questdb.QueryResult.iter_pandas`
+  whenever ``dtype_backend`` or ``types_mapper`` is passed — including
+  ``dtype_backend="numpy_nullable"``, which leaves a UUID column as raw
+  ``bytes``. Only the argument-free
+  :meth:`~questdb.QueryResult.to_pandas` / :meth:`~questdb.QueryResult.iter_pandas`,
+  which build ``uuid.UUID`` objects directly, are unaffected and need no
+  change.
 
 * **Unlabelled** ``pa.fixed_size_binary(16)`` **now lands as BINARY, not
   UUID.** The ``arrow.uuid`` extension label is what claims a 16-byte column as
@@ -94,10 +98,19 @@ appended as ``7``.
 Callback inbox capacities are capped
 ************************************
 
-``connection_event_inbox_capacity`` and ``error_event_inbox_capacity`` now
-reject a value above **65536** at connect time, raising
-:class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+The keyword arguments ``connection_event_inbox_capacity`` and
+``error_event_inbox_capacity`` now reject a value above **65536** at connect
+time, raising :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
 ``QuestDBErrorCode.InvalidApiCall``. A larger value was previously accepted.
+
+The same cap now applies to the ``error_inbox_capacity`` **config-string key**,
+in a connection string, in :meth:`Sender.from_conf <questdb.Sender.from_conf>`,
+or in ``QDB_CLIENT_CONF``. That path raises ``QuestDBErrorCode.ConfigError``
+rather than ``InvalidApiCall``, because it is reported by config parsing before
+any handles exist::
+
+    error_inbox_capacity must be <= 65536: 200000
+
 These inboxes exist to bound memory when a listener cannot keep up, and both
 already drop the oldest event on overflow, so a very large capacity defers that
 policy rather than avoiding it. Lower any value above the cap; ``0`` still

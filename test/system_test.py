@@ -2416,6 +2416,34 @@ class TestEgressWithDatabase(unittest.TestCase):
                         _uuid_bytes(pdf_pl['uu'][0]),
                         expect_uuid.bytes,
                         'to_polars disagrees on UUID byte order')
+
+                    for frame in client.query(sql).iter_polars():
+                        self.assertEqual(
+                            _uuid_bytes(frame['uu'][0]),
+                            expect_uuid.bytes,
+                            'iter_polars disagrees on UUID byte order')
+
+                # The streaming twins share `_build_record_batch_reader` with
+                # the readers above, so they carry the same byte order and the
+                # same break. They were missing from the changelog's list until
+                # this was pinned.
+                for chunk in client.query(sql).iter_pandas(
+                        dtype_backend='pyarrow'):
+                    self.assertEqual(
+                        _uuid_bytes(chunk['uu'][0]),
+                        expect_uuid.bytes,
+                        "iter_pandas(dtype_backend='pyarrow') disagrees on "
+                        'UUID byte order')
+
+                # `numpy_nullable` has no fixed_size_binary mapping, so a UUID
+                # column arrives as raw bytes here too -- also unlisted.
+                nullable = client.query(sql).to_pandas(
+                    dtype_backend='numpy_nullable')
+                self.assertEqual(
+                    _uuid_bytes(nullable['uu'][0]),
+                    expect_uuid.bytes,
+                    "to_pandas(dtype_backend='numpy_nullable') disagrees on "
+                    'UUID byte order')
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')

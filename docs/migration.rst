@@ -18,10 +18,14 @@ in 5.1 requires action.
   yields changed in the same way and just as silently, on every Arrow-backed
   reader: :meth:`~questdb.QueryResult.to_arrow`,
   :meth:`~questdb.QueryResult.to_polars`,
-  :meth:`~questdb.QueryResult.iter_arrow`, ``__arrow_c_stream__`` and
-  :meth:`~questdb.QueryResult.to_pandas` with ``dtype_backend="pyarrow"``.
-  Plain :meth:`~questdb.QueryResult.to_pandas` builds ``uuid.UUID`` objects
-  and is unaffected.
+  :meth:`~questdb.QueryResult.iter_arrow`,
+  :meth:`~questdb.QueryResult.iter_polars`, ``__arrow_c_stream__`` and
+  :meth:`~questdb.QueryResult.to_pandas` /
+  :meth:`~questdb.QueryResult.iter_pandas` with either ``dtype_backend`` (both
+  ``"pyarrow"`` and ``"numpy_nullable"``) or ``types_mapper``. Only the
+  argument-free :meth:`~questdb.QueryResult.to_pandas` /
+  :meth:`~questdb.QueryResult.iter_pandas` build ``uuid.UUID`` objects and are
+  unaffected.
 
 * **A 16-byte Arrow column needs the** ``arrow.uuid`` **label to be a UUID,
   and** ``fixed_size_binary(32)`` **no longer maps to LONG256.** The width alone
