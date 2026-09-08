@@ -1023,38 +1023,38 @@ class ProviderCycleSafetyTest(unittest.TestCase):
     """
 
     def _run(self, body):
-        # `settle()` is `_settle` from this module, injected into the child.
+        # `settle()` collects until the child reaches the state the test is
+        # about, rather than until the count stops moving.
+        #
         # A single `gc.collect()` is enough on CPython, where the last decref
         # runs the finalizer and the weakref callback back to back, but not on
         # PyPy: it does not refcount and stages cpyext finalization across
-        # several collections, so one pass observed neither the `__del__` nor
-        # the registry drop and both cycle tests failed the linux_x64_pypy
-        # wheel job -- one on `'closed' not found in 'registry 1'`, the other
-        # on `'registry 0' not found in 'closed\nregistry 1'`, which is the
-        # same staging seen from one collection later. Collect until the count
-        # stops moving, then report it; a cycle that genuinely cannot be
-        # collected still settles at a non-zero count and still fails.
+        # several collections. Waiting for a plateau does not survive that,
+        # because an uncollected cycle IS a plateau -- the registry sits at 1,
+        # four consecutive readings agree, and the loop returns after five
+        # passes having observed nothing. That is exactly how
+        # `test_renderer_cycle_close_from_del_is_safe` failed the
+        # linux_x64_pypy wheel job on `'closed' not found in 'registry 1'`,
+        # with `_SETTLE_MAX_PASSES` at 60 and only five of them spent.
+        #
+        # So the caller says what it is waiting for: the registry reaching
+        # `expect`, and `done()` -- which the cycle tests use to require that
+        # the `__del__` actually ran, since the collector runs weakref
+        # callbacks BEFORE finalizers and the registry can drain a pass early.
+        # A cycle that genuinely cannot be collected exhausts every pass and
+        # still returns a non-zero count, so a real regression still fails.
         script = (
             'import gc, sys\n'
             'from questdb._client import OidcDeviceAuth\n'
             'from questdb._client import _debug_oidc_registry_size as sz\n'
-            'def settle():\n'
-            '    prev = None\n'
-            '    stable = 0\n'
+            'def settle(done=None, expect=0):\n'
             '    count = None\n'
             '    for _ in range({max_passes}):\n'
             '        gc.collect()\n'
             '        count = sz()\n'
-            '        if count == prev:\n'
-            '            stable += 1\n'
-            '            if stable >= {stable_passes}:\n'
-            '                break\n'
-            '        else:\n'
-            '            stable = 0\n'
-            '        prev = count\n'
-            '    return count\n'.format(
-                max_passes=_SETTLE_MAX_PASSES,
-                stable_passes=_SETTLE_STABLE_PASSES)
+            '        if count == expect and (done is None or done()):\n'
+            '            break\n'
+            '    return count\n'.format(max_passes=_SETTLE_MAX_PASSES)
         ) + body
         # Resolve `questdb` the way this process did instead of assuming the
         # in-place `src/` build. Under cibuildwheel the package is installed
@@ -1081,6 +1081,7 @@ class ProviderCycleSafetyTest(unittest.TestCase):
 
     def test_renderer_cycle_close_from_del_is_safe(self):
         out = self._run(
+            'closed = []\n'
             'class R:\n'
             '    def __init__(self): self.provider = None\n'
             '    def on_prompt(self, d): pass\n'
@@ -1090,12 +1091,13 @@ class ProviderCycleSafetyTest(unittest.TestCase):
             '    def __del__(self):\n'
             '        if self.provider is not None:\n'
             '            self.provider.close()\n'
+            '            closed.append(1)\n'
             '            print("closed")\n'
             'r = R()\n'
             'a = OidcDeviceAuth("cid", "https://i/d", "https://i/t", renderer=r)\n'
             'r.provider = a\n'
             'del a, r\n'
-            'print("registry", settle())\n')
+            'print("registry", settle(lambda: closed))\n')
         self.assertIn('closed', out, 'the finalizer never ran')
         self.assertIn(
             'registry 0', out,
@@ -1104,14 +1106,16 @@ class ProviderCycleSafetyTest(unittest.TestCase):
 
     def test_subclass_self_cycle_close_from_del_is_safe(self):
         out = self._run(
+            'closed = []\n'
             'class Sub(OidcDeviceAuth):\n'
             '    def __del__(self):\n'
             '        self.close()\n'
+            '        closed.append(1)\n'
             '        print("closed")\n'
             'a = Sub("cid", "https://i/d", "https://i/t")\n'
             'a.self_ref = a\n'
             'del a\n'
-            'print("registry", settle())\n')
+            'print("registry", settle(lambda: closed))\n')
         self.assertIn('closed', out, 'the finalizer never ran')
         self.assertIn('registry 0', out)
 
