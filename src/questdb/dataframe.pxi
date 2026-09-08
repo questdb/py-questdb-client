@@ -3222,16 +3222,14 @@ cdef void_int _dataframe_handle_auto_flush(
     if flush_ok:
         af.last_flush_ms[0] = line_sender_now_micros() // 1000
     else:
-        # Cleared UNCONDITIONALLY, including for a retryable OIDC provider
-        # failure. This is an auto-flush, not a caller-controlled retry point:
-        # `af.last_flush_ms` is not bumped on a failure, so `should_auto_flush`
-        # stays true on a retained buffer and every subsequent row or frame
-        # re-attempts the flush; the buffer then grows one row per raise, with
-        # the caller unable to see how much is held, until it breaches
-        # `max_buf_size` -- at which point the error becomes InvalidApiCall and
-        # the whole accumulation is discarded behind a message that says
-        # nothing about authentication. Retention is only safe where the caller
-        # owns the buffer and can decide, i.e. an explicit `Sender.flush()`.
+        # Cleared for every failure, including a retryable OIDC provider
+        # failure. `af.last_flush_ms` is not bumped on a failure, so
+        # `should_auto_flush` stays true on a retained buffer and every
+        # subsequent row or frame re-attempts the flush; the buffer then grows
+        # one row per raise, with the caller unable to see how much is held,
+        # until it breaches `max_buf_size` -- at which point the error becomes
+        # InvalidApiCall and the whole accumulation is discarded behind a
+        # message that says nothing about authentication.
         # To avoid flush reattempt on Sender.__exit__.
         line_sender_buffer_clear(ls_buf)
 

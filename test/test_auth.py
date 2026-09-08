@@ -2005,7 +2005,19 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 sender.flush()
         self.assertIsInstance(ctx.exception, questdb.QuestDBError)
 
-    def test_retryable_oidc_flush_keeps_internal_buffer(self):
+    def test_failed_flush_clears_the_internal_buffer(self):
+        """A failed explicit flush clears the internal buffer, with no carve-out.
+
+        The internal buffer is shared state: `may_flush_on_row_complete`,
+        `SenderTransaction.__enter__` / `.commit()` and `close(flush=True)` all
+        read a non-empty buffer as "unflushed rows, publish at the next
+        opportunity". Retaining a failed batch there does not hand it back to
+        the caller -- it hands it to whichever of those runs next. Leaving the
+        `with` block must therefore stay silent rather than re-raising the
+        error the caller already handled. See
+        `test_caller_owned_buffer_survives_a_failed_flush_for_retry` for the
+        supported way to republish a failed batch.
+        """
         with OidcTestServer() as server:
             auth = make_discovered_auth(server)
             with questdb.Sender(
@@ -2021,27 +2033,155 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 with self.assertRaises(OidcInteractionRequired) as caught:
                     sender.flush()
                 self.assertFalse(caught.exception.in_doubt)
+                self.assertEqual(
+                    len(sender), 0,
+                    'a failed flush must not leave rows in the internal '
+                    'buffer; they would be published by the next auto-flush, '
+                    'transaction or close() rather than by the caller')
+                self.assertEqual(server.requests('/write', 'POST'), [])
+                # The caller handled the error and gave up. Exiting the block
+                # calls close(flush=True); with the buffer clear it finds
+                # nothing to send and must not raise a second time.
+            self.assertEqual(server.requests('/write', 'POST'), [])
+
+    def test_caller_owned_buffer_survives_a_failed_flush_for_retry(self):
+        """`flush(buf, clear=False)` is how a failed batch is republished.
+
+        A caller-owned buffer is never touched by the flush error path, so it
+        survives ANY failure -- not just a retryable OIDC one -- and it is
+        invisible to auto-flush, `transaction()` and `close(flush=True)`,
+        which only ever consult the sender's internal buffer. After
+        `sign_in()` the same prefix publishes exactly once.
+        """
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(server)
+            with questdb.Sender(
+                    questdb.Protocol.Http,
+                    '127.0.0.1',
+                    server.port,
+                    oidc_auth=auth,
+                    auto_flush=False,
+                    protocol_version=2) as sender:
+                buf = sender.new_buffer()
+                buf.row(
+                    'oidc_retry_flush', columns={'value': 1},
+                    at=questdb.ServerTimestamp)
+                pending = len(buf)
+                with self.assertRaises(OidcInteractionRequired):
+                    sender.flush(buf, clear=False)
+                self.assertEqual(
+                    len(buf), pending,
+                    'a caller-owned buffer must survive a failed flush')
                 self.assertEqual(server.requests('/write', 'POST'), [])
 
                 auth.sign_in()
-                sender.flush()
+                sender.flush(buf)
+                self.assertEqual(
+                    len(buf), 0, 'a successful flush clears the buffer')
+                writes = server.requests('/write', 'POST')
+
+        self.assertEqual(len(writes), 1, 'the prefix must publish exactly once')
+        self.assertIn(b'oidc_retry_flush', writes[0]['body'])
+
+    def test_failed_commit_discards_its_rows_and_completes(self):
+        """A commit whose flush fails leaves nothing behind.
+
+        `commit()` marks the transaction complete before flushing, so
+        `__exit__` will not roll it back afterwards. The rows must therefore be
+        discarded by `commit()` itself: left in the internal buffer they would
+        be published by the next auto-flush, transaction or `close(flush=True)`
+        -- without transactional framing, and after the caller was told the
+        commit failed. The transaction is also over, so neither `commit()` nor
+        `rollback()` may run again.
+        """
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(server)
+            with questdb.Sender(
+                    questdb.Protocol.Http,
+                    '127.0.0.1',
+                    server.port,
+                    oidc_auth=auth,
+                    auto_flush=False,
+                    protocol_version=2) as sender:
+                with self.assertRaises(OidcInteractionRequired):
+                    with sender.transaction('oidc_txn_fail') as txn:
+                        txn.row(
+                            columns={'value': 1}, at=questdb.ServerTimestamp)
+                self.assertEqual(
+                    len(sender), 0,
+                    'a failed commit must discard its rows rather than leave '
+                    'them for the next flush to publish untransactionally')
+                self.assertEqual(server.requests('/write', 'POST'), [])
+
+                for method in (txn.commit, txn.rollback):
+                    with self.assertRaises(questdb.QuestDBError) as ctx:
+                        method()
+                    self.assertEqual(
+                        ctx.exception.code,
+                        questdb.QuestDBErrorCode.InvalidApiCall)
+                    self.assertIn(
+                        'already completed', str(ctx.exception))
+
+                # The sender is still usable, and the discarded rows do not
+                # reappear in the next transaction.
+                auth.sign_in()
+                with sender.transaction('oidc_txn_ok') as txn2:
+                    txn2.row(columns={'value': 2}, at=questdb.ServerTimestamp)
                 writes = server.requests('/write', 'POST')
 
         self.assertEqual(len(writes), 1)
-        self.assertIn(b'oidc_retry_flush', writes[0]['body'])
+        self.assertIn(b'oidc_txn_ok', writes[0]['body'])
+        self.assertNotIn(b'oidc_txn_fail', writes[0]['body'])
+
+    def test_transaction_after_a_failed_flush_is_not_contaminated(self):
+        """A transaction must publish only its own rows.
+
+        `commit()` marks the transaction complete before its flush, so a
+        failure there skips `__exit__`'s rollback. If a previously failed
+        flush had left rows in the internal buffer, the next transaction's
+        `__enter__` would publish them -- without the transactional framing
+        the caller asked for, and after the caller was told they did not land.
+        """
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(server)
+            with questdb.Sender(
+                    questdb.Protocol.Http,
+                    '127.0.0.1',
+                    server.port,
+                    oidc_auth=auth,
+                    auto_flush=False,
+                    protocol_version=2) as sender:
+                sender.row(
+                    'oidc_dropped', columns={'value': 1},
+                    at=questdb.ServerTimestamp)
+                with self.assertRaises(OidcInteractionRequired):
+                    sender.flush()
+
+                auth.sign_in()
+                with sender.transaction('oidc_txn') as txn:
+                    txn.row(
+                        columns={'value': 2}, at=questdb.ServerTimestamp)
+                writes = server.requests('/write', 'POST')
+
+        self.assertEqual(len(writes), 1)
+        body = writes[0]['body']
+        self.assertIn(b'oidc_txn', body)
+        self.assertNotIn(
+            b'oidc_dropped', body,
+            'the discarded row must not ride along in a later transaction')
 
     def test_retryable_oidc_row_auto_flush_clears_and_never_accumulates(self):
         """An auto-flush must clear, even for a retryable OIDC failure.
 
-        Retention is only sound where the caller owns the buffer and can
-        decide, i.e. an explicit ``flush()``. On the auto-flush path the caller
-        cannot see how much was retained, and ``last_flush_ms`` is not bumped on
-        a failure, so ``should_auto_flush`` stays true and every subsequent row
-        re-attempts the flush. The buffer then grew one row per raise until it
-        breached ``max_buf_size``, at which point the error became
-        ``InvalidApiCall``, the retention predicate went false, and the whole
-        accumulation was discarded at once -- silent data loss behind a message
-        that says nothing about authentication.
+        ``last_flush_ms`` is not bumped on a failure, so ``should_auto_flush``
+        stays true on a retained buffer and every subsequent row re-attempts
+        the flush. A buffer left populated here therefore grows one row per
+        raise until it breaches ``max_buf_size``, at which point the error
+        becomes ``InvalidApiCall`` and the whole accumulation is discarded at
+        once -- silent data loss behind a message that says nothing about
+        authentication. A caller who needs to republish a failed batch owns
+        the buffer instead; see
+        ``test_caller_owned_buffer_survives_a_failed_flush_for_retry``.
 
         The single-row version of this test could not see any of that.
         """

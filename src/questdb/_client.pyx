@@ -518,26 +518,6 @@ cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
         tup[0], fmt.format(tup[1]), tup[2], in_doubt=tup[3])
 
 
-cdef inline bint _is_unsent_retryable_oidc_error(
-        line_sender_error* err) noexcept nogil:
-    """Whether a failed transport operation is safe to retry with its buffer.
-
-    OIDC token providers run before the data request or QWP publication. Native
-    reclassifies their recoverable failures to ``SocketError`` and keeps the
-    OIDC cause attached. Requiring ``in_doubt == false`` makes the delivery
-    guarantee explicit and leaves every ordinary/ambiguous failure on the
-    historical clear-on-error path.
-    """
-    cdef questdb_oidc_error_view oidc_view
-    if (err == NULL
-            or questdb_error_in_doubt(err)
-            or line_sender_error_get_code(err) != line_sender_error_socket_error):
-        return False
-    memset(&oidc_view, 0, sizeof(questdb_oidc_error_view))
-    oidc_view.struct_size = sizeof(questdb_oidc_error_view)
-    return questdb_error_oidc_get_view(err, &oidc_view)
-
-
 cdef inline void_int reserve_buffer(
         line_sender_buffer* buffer,
         size_t additional) except -1:
@@ -965,11 +945,7 @@ cdef void_int may_flush_on_row_complete(Buffer buffer, Sender sender) except -1:
             &sender._auto_flush_mode,
             buffer._impl,
             sender._last_flush_ms[0]):
-        sender._in_auto_flush = True
-        try:
-            sender.flush(buffer)
-        finally:
-            sender._in_auto_flush = False
+        sender.flush(buffer)
 
 
 cdef bint _is_tcp_protocol(line_sender_protocol protocol):
@@ -1124,15 +1100,37 @@ cdef class SenderTransaction:
         A commit is also automatic at the end of a successful `with` block.
 
         This will flush the buffer.
+
+        A failed commit still completes the transaction: its rows are
+        discarded, and neither :meth:`commit` nor :meth:`rollback` may be
+        called again.
         """
         if self._complete:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'Transaction already completed, can\'t commit')
         self._sender._in_txn = False
+        # Set before the flush, deliberately: a failed commit is still a
+        # completed transaction. Leaving this False would let a second
+        # commit() -- or `__exit__` on the success path -- find the emptied
+        # buffer and report success for a transaction that never landed.
         self._complete = True
         if len(self._sender._buffer):
-            self._sender.flush(transactional=True)
+            try:
+                self._sender.flush(transactional=True)
+            except:
+                # Discard the rows here rather than relying on `Sender.flush`
+                # to clear the internal buffer on error. Because the
+                # transaction is already complete, `__exit__` will not roll it
+                # back, so anything left behind would be published by the next
+                # auto-flush, transaction or `close(flush=True)` -- without the
+                # transactional framing this call asked for, and after the
+                # caller was told the commit failed. Keeping the guarantee
+                # local means a future change to flush's error path cannot
+                # silently reintroduce that.
+                if self._sender._buffer is not None:
+                    self._sender._buffer.clear()
+                raise
 
     def rollback(self):
         """
@@ -7054,12 +7052,6 @@ cdef class Sender:
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
     cdef bint _in_txn
-    # True only while `may_flush_on_row_complete` is driving `flush()`.
-    # An auto-flush is not a caller-controlled retry point, so it must
-    # never take the buffer-retention branch: the caller cannot see how
-    # many rows were retained, and `should_auto_flush` stays true on a
-    # retained buffer, so every subsequent row re-attempts the flush.
-    cdef bint _in_auto_flush
     cdef int64_t _slot_id
     # A clone of the fully-configured opts for QWP/WebSocket senders, retained
     # so dataframe() can open a poolless direct columnar connection per call
@@ -7471,7 +7463,6 @@ cdef class Sender:
         self._last_flush_ms = NULL
         self._init_buf_size = 0
         self._in_txn = False
-        self._in_auto_flush = False
         self._slot_id = -1
         self._qwp_ws_opts = NULL
 
@@ -8324,31 +8315,23 @@ cdef class Sender:
         if ok and c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
         if not ok:
-            if (c_buf == self._buffer._impl
-                    and (self._in_auto_flush
-                         or not _is_unsent_retryable_oidc_error(err))):
+            if c_buf == self._buffer._impl:
                 # Prevent a follow-up call to `.close(flush=True)` (as is
                 # usually called from `__exit__`) to raise after the sender
                 # entered an error state following a failed call to `.flush()`.
                 #
-                # A retryable, proven-unsent OIDC provider failure on an
-                # EXPLICIT flush is the one exception: the buffer is kept so a
-                # later sign_in()/refresh can publish the same prefix once.
-                # Two conditions make that safe, and both had to be fixed:
-                #  * `in_doubt` now actually means something on ILP/HTTP.
-                #    `rotated_auth_after_401` runs after the buffer has already
-                #    been POSTed, so it marks its provider errors in-doubt;
-                #    before that, nothing on the HTTP path ever set the flag and
-                #    the predicate's `!in_doubt` half was vacuous, so a retained
-                #    buffer could be re-sent on top of rows the server had
-                #    already stored.
-                #  * an AUTO-flush never takes this branch. There the caller
-                #    cannot see what was retained, and `should_auto_flush` stays
-                #    true on a retained buffer, so every later row re-attempted
-                #    the flush and the buffer grew one row per raise until it
-                #    breached `max_buf_size` -- at which point the error became
-                #    InvalidApiCall, this predicate went false, and everything
-                #    accumulated was discarded at once.
+                # Cleared for every failure, with no carve-out. The internal
+                # buffer is shared state that `may_flush_on_row_complete`,
+                # `SenderTransaction.__enter__` / `.commit()` and
+                # `close(flush=True)` all read as "unflushed rows, publish at
+                # the next opportunity", so rows left here do not wait for the
+                # caller: an auto-flush discards them, a transaction publishes
+                # them without its own transactional framing, and `__exit__`
+                # re-raises. A caller who wants to republish a failed batch
+                # after recovering owns the buffer instead --
+                # `buf = sender.new_buffer()` then `sender.flush(buf,
+                # clear=False)`, which keeps `buf` intact on ANY error and is
+                # invisible to all of the above.
                 # Note: For the internal buffer `clear` is always `True`.
                 line_sender_buffer_clear(c_buf)
             if _is_tcp_protocol(self._c_protocol):
