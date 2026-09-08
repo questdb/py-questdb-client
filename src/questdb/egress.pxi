@@ -1426,18 +1426,37 @@ cdef object _numpy_geohash_chunk(
     return wide.view(dtype).reshape(<Py_ssize_t>row_count)
 
 
+cdef inline uint64_t _be64(const uint8_t* p) noexcept nogil:
+    """Load 8 canonical (big-endian) bytes as a uint64, on any host.
+
+    Assembled byte by byte rather than `memcpy`-ed into a native integer: the
+    reader hands out RFC 4122 network order, so a native load is only correct
+    on a big-endian host and an unconditional byte-swap only on a little-endian
+    one. Compilers recognise this shift/or pattern and emit the single
+    byte-reverse load anyway.
+    """
+    return (((<uint64_t>p[0]) << 56) | ((<uint64_t>p[1]) << 48)
+            | ((<uint64_t>p[2]) << 40) | ((<uint64_t>p[3]) << 32)
+            | ((<uint64_t>p[4]) << 24) | ((<uint64_t>p[5]) << 16)
+            | ((<uint64_t>p[6]) << 8) | (<uint64_t>p[7]))
+
+
 cdef object _numpy_uuid_chunk(
         const qwp_reader_batch* batch,
         size_t col_idx,
         size_t row_count,
         object np):
-    cdef object _uuid = _uuid_module()
+    # Hoisted: `.UUID` was an attribute lookup on the module for every row,
+    # which the ingestion side already avoids (`_dataframe_columnar_build_uuid_
+    # pyobj`).
+    cdef object uuid_cls = _uuid_module().UUID
     cdef qwp_reader_column_data cd
     cdef questdb_error* err = NULL
     cdef const uint8_t* validity
     cdef const uint8_t* values
     cdef size_t r
     cdef size_t stride
+    cdef const uint8_t* row
     cdef cnp.ndarray out
     _reader_check(
         qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
@@ -1456,11 +1475,18 @@ cdef object _numpy_uuid_chunk(
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
             continue
         # The reader hands out canonical RFC 4122 network-order bytes, having
-        # already reversed them out of QWP wire order. Construct from that byte
-        # representation directly: loading native uint64 halves and
-        # unconditionally byte-swapping them only worked on little-endian hosts.
-        _obj_chunk_set(out, r, _uuid.UUID(bytes=PyBytes_FromStringAndSize(
-            <const char*>(values + r * stride), 16)))
+        # already reversed them out of QWP wire order.
+        #
+        # Built through `int=` rather than `bytes=`: the latter allocates a
+        # `bytes` per row and then re-does the work inside `UUID.__init__`
+        # (a `len`, an `isinstance` assert and an `int.from_bytes`) that the
+        # `int=` branch skips, which measured ~20% slower per row on the
+        # default `to_pandas()` read path. `_be64` keeps that portable, which
+        # the pre-existing native-load-plus-swap version was not.
+        row = values + r * stride
+        _obj_chunk_set(
+            out, r,
+            uuid_cls(int=((<object>_be64(row)) << 64) | (<object>_be64(row + 8))))
     return out
 
 
