@@ -67,6 +67,21 @@ exactly this purpose. Writing an unlabelled 16- or 32-byte column to an
 existing UUID or LONG256 table column without one of the above will be rejected
 by the server as a type mismatch, rather than silently storing the wrong type.
 
+``schema_overrides`` requires **fully Arrow-backed input** — pyarrow, polars,
+or a pandas frame where *every* column uses ``ArrowDtype`` — and no
+``table_name_col``. A frame with even one NumPy-dtype column (a plain
+``datetime64`` ``at=`` column is enough) takes the NumPy planner, which does
+not apply overrides and raises
+:class:`~questdb.UnsupportedDataFrameShapeError` instead. That is the shape
+that previously wrote LONG256 with no override at all, so convert the frame
+first::
+
+    df = df.convert_dtypes(dtype_backend='pyarrow')
+
+For the 16-byte case the ``arrow.uuid`` extension type works on either path
+and needs no conversion; LONG256 has no such label, so ``schema_overrides``
+on an Arrow-backed frame is the only route.
+
 ``ConnectionEventKind.CredentialUnavailable`` splits off ``AuthFailed``
 ***********************************************************************
 
@@ -80,12 +95,24 @@ instead of
 ``AuthFailed`` is once again unconditionally **terminal**: it means the
 server rejected a credential the client presented, and ``host`` / ``port``
 are always set. A listener that pages, tears down the pool, or exits on it
-needs no further qualification. ``CredentialUnavailable`` is **retryable**:
-``host`` and ``port`` are ``None``, ``cause_code`` is ordinarily
-``SocketError``, the sender keeps reconnecting so queued rows survive while
-the identity provider recovers or a human signs in, and nothing is raised
-to the caller. Only a foreground call such as :meth:`questdb.QuestDB.dataframe`
-fails fast.
+needs no further qualification. ``CredentialUnavailable`` sets ``host`` and
+``port`` to ``None`` and reports the provider's classification in
+``cause_code``, which is what says whether the sender will carry on:
+
+* ``SocketError`` — retryable, and the ordinary case. The sender keeps
+  reconnecting so queued rows survive while the identity provider recovers or
+  a human signs in, and nothing is raised to the caller. Only a foreground
+  call such as :meth:`questdb.QuestDB.dataframe` fails fast.
+* ``AuthError`` / ``ConfigError`` — the provider cannot recover in this
+  process, so the reconnect is **terminal** and the sender stops. Reached by a
+  permanently closed provider (``close()`` is one-way, and ``Ctrl-C`` during
+  ``sign_in()`` takes that path) and by a scope that cannot yield the required
+  token kind. Queued rows are not deleted — a disk-backed store-and-forward
+  slot stays drainable by a later process — but this process will not send
+  them.
+
+A listener that pages on a permanent stop must qualify on ``cause_code``, not
+on the kind alone.
 
 This matches the Java client, whose ``QwpCredentialUnavailableException`` is
 likewise distinct from its terminal ``QwpAuthFailedException``.

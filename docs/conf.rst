@@ -207,10 +207,12 @@ walking the ``addr`` server list.
 
   Default: 200.
 
-* ``error_inbox_capacity`` - ``int >= 16``: Per-connection capacity of the
-  server-rejection diagnostic ring (oldest entries are dropped on
-  overflow, counted by
+* ``error_inbox_capacity`` - ``int``, ``16`` to ``65536``: Per-connection
+  capacity of the server-rejection diagnostic ring (oldest entries are
+  dropped on overflow, counted by
   :func:`Sender.error_events_dropped <questdb.Sender.error_events_dropped>`).
+  The ring bounds memory when a handler cannot keep up, so a value above the
+  cap is rejected rather than reserved.
 
   Default: 256.
 

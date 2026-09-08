@@ -2281,16 +2281,31 @@ class ConnectionEventKind(TaggedEnum):
     #: A credential the client could not *obtain* is
     #: :attr:`CredentialUnavailable`, never this.
     AuthFailed = ('auth_failed', 6)
-    #: Retryable: an ``oidc_auth=`` token provider failed, so no credential was
-    #: ever offered and no endpoint was dialled.
+    #: An ``oidc_auth=`` token provider failed, so no credential was ever
+    #: offered and no endpoint was dialled.
     #:
     #: :attr:`ConnectionEvent.host` and :attr:`ConnectionEvent.port` are
-    #: ``None``; :attr:`ConnectionEvent.cause_code` is the provider's
-    #: classification, ordinarily ``SocketError``. The sender keeps
-    #: reconnecting so queued rows survive while the identity provider recovers
-    #: or a human signs in, and nothing is raised to the caller. Only a
-    #: foreground call such as :meth:`QuestDB.dataframe` fails fast, because a
-    #: credential problem there is the caller's to see.
+    #: ``None``. Read :attr:`ConnectionEvent.cause_code` to tell a retry from
+    #: a stop:
+    #:
+    #: * ``SocketError`` — the ordinary case, and retryable. The sender keeps
+    #:   reconnecting so queued rows survive while the identity provider
+    #:   recovers or a human signs in, and nothing is raised to the caller.
+    #:   Only a foreground call such as :meth:`QuestDB.dataframe` fails fast,
+    #:   because a credential problem there is the caller's to see.
+    #: * ``AuthError`` or ``ConfigError`` — the provider cannot recover in
+    #:   this process, so the reconnect is **terminal** and the sender stops.
+    #:   Reached by a permanently closed provider (:meth:`~questdb.auth.OidcDeviceAuth.close`
+    #:   is one-way, and ``Ctrl-C`` during
+    #:   :meth:`~questdb.auth.OidcDeviceAuth.sign_in` takes that path) and by a
+    #:   scope that cannot yield the required token kind, such as
+    #:   ``groups_in_token=True`` against an identity provider that returns no
+    #:   ID token. Queued rows are not deleted — a disk-backed
+    #:   store-and-forward slot stays drainable by a later process — but this
+    #:   process will not send them.
+    #:
+    #: A listener that pages on a permanent stop must therefore qualify on
+    #: ``cause_code``, not on the kind alone.
     #:
     #: Counterpart of the Java client's ``QwpCredentialUnavailableException``,
     #: which is likewise distinct from its terminal ``QwpAuthFailedException``.

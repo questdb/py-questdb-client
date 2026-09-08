@@ -5,8 +5,10 @@ Migration Guide
 5.0 to 5.1
 ==========
 
-Both changes below affect UUID and fixed-size-binary data. Nothing else
-in 5.1 requires action.
+Three changes need action: the two UUID / fixed-size-binary items below, and
+a new cap on callback inbox capacities. The
+``ConnectionEventKind.CredentialUnavailable`` split needs none — it is
+additive, and an existing listener keeps working.
 
 * **UUID bytes are canonical RFC 4122.** UUID values are read and written in
   canonical big-endian order at every API boundary; the client byte-swaps to
@@ -40,8 +42,28 @@ in 5.1 requires action.
                        schema_overrides={'id': 'uuid', 'hash': 'long256'})
 
   ``schema_overrides`` accepts the new ``'uuid'`` and ``'long256'`` kinds for
-  this purpose. Wrapping the column in pyarrow's ``arrow.uuid`` extension type
-  also works for the 16-byte case.
+  this purpose, but it **requires fully Arrow-backed input** — pyarrow,
+  polars, or a pandas frame where *every* column uses ``ArrowDtype`` — and no
+  ``table_name_col``. One NumPy-dtype column is enough to take the NumPy
+  planner instead, which does not apply overrides and raises
+  :class:`~questdb.UnsupportedDataFrameShapeError`; a plain ``datetime64``
+  ``at=`` column does it. That is exactly the shape that used to write
+  LONG256 with no override, so convert the frame first::
+
+      df = df.convert_dtypes(dtype_backend='pyarrow')
+
+  Wrapping the column in pyarrow's ``arrow.uuid`` extension type also works
+  for the 16-byte case, on either path and with no conversion. LONG256 has no
+  equivalent label, so an Arrow-backed frame plus ``schema_overrides`` is the
+  only route for it.
+
+* **Callback inbox capacities are capped at 65536.**
+  ``connection_event_inbox_capacity`` and ``error_event_inbox_capacity``, and
+  the ``error_inbox_capacity`` config-string key, now reject a larger value
+  where one was previously accepted. Lower any value above the cap; these
+  inboxes bound memory when a listener cannot keep up, and a capacity that
+  large is an allocation failure waiting to happen rather than useful
+  buffering.
 
 4.x to 5.0
 ==========
