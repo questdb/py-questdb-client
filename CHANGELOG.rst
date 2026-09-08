@@ -64,12 +64,14 @@ existing UUID or LONG256 table column without one of the above will be rejected
 by the server as a type mismatch, rather than silently storing the wrong type.
 
 ``ConnectionEventKind.CredentialUnavailable`` splits off ``AuthFailed``
-**********************************************************************
+***********************************************************************
 
 A token provider that fails before any endpoint is dialled — an
 ``oidc_auth=`` provider with no cached or refreshable credential — now
-reports the new :attr:`ConnectionEventKind.CredentialUnavailable` instead
-of :attr:`ConnectionEventKind.AuthFailed`.
+reports the new
+:attr:`ConnectionEventKind.CredentialUnavailable <questdb.ConnectionEventKind.CredentialUnavailable>`
+instead of
+:attr:`ConnectionEventKind.AuthFailed <questdb.ConnectionEventKind.AuthFailed>`.
 
 ``AuthFailed`` is once again unconditionally **terminal**: it means the
 server rejected a credential the client presented, and ``host`` / ``port``
