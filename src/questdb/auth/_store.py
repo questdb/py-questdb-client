@@ -70,8 +70,20 @@ class FileTokenStore:
         # the whole device flow and left a second copy of the credential
         # somewhere else. Resolve once, at construction, so the location is
         # fixed and inspectable via `.directory`.
-        self._directory = os.path.abspath(
-            os.path.expanduser(os.fsdecode(path)))
+        expanded = os.path.expanduser(os.fsdecode(path))
+        # `expanduser` returns the path UNCHANGED when it cannot resolve the
+        # user -- `$HOME` unset and no `pwd` entry for the uid, which is the
+        # normal state in a container run under an arbitrary uid. `abspath`
+        # would then resolve the leading `~` against the working directory and
+        # quietly write a long-lived plaintext refresh token into a directory
+        # literally named `~`. Refuse instead, exactly as
+        # `at_default_location()` already does for the same condition.
+        if expanded.startswith('~'):
+            raise OidcConfigError(
+                f'could not resolve the home directory in {os.fsdecode(path)!r} '
+                'for the OIDC token store; pass an absolute path, or set '
+                f'{TOKEN_STORE_DIR_ENV}')
+        self._directory = os.path.abspath(expanded)
 
     @classmethod
     def at(cls, directory: Any) -> 'FileTokenStore':

@@ -56,6 +56,12 @@ class OidcError(QuestDBError):
     therefore treats an OIDC failure exactly as it treats any other.
     """
 
+    #: Code reported when a raise site does not supply one. Native-built
+    #: errors always pass `code=` explicitly (see `_oidc_err_to_py_unowned`);
+    #: this is what a directly constructed error gets, and subclasses override
+    #: it so both routes agree.
+    _DEFAULT_CODE = QuestDBErrorCode.AuthError
+
     def __init__(self, *args, status: Optional[int] = None,
                  retry_after: Optional[int] = None,
                  in_doubt: bool = False,
@@ -81,14 +87,19 @@ class OidcError(QuestDBError):
         # delivery uncertainty consistently with the non-OIDC QuestDBError path;
         # an ``except QuestDBError`` retry/dead-letter handler reads it.
         # `code` mirrors the native classification when the binding builds this
-        # from a native error, and defaults to AuthError for a directly
-        # constructed one. Hardcoding AuthError discarded the code the native
-        # side had deliberately chosen -- notably the retryable SocketError that
-        # `classify_provider_error` assigns to a recoverable token-provider
-        # failure -- so callers keying on `.code` mis-classified it.
+        # from a native error. Hardcoding AuthError discarded the code the
+        # native side had deliberately chosen -- notably the retryable
+        # SocketError that `classify_provider_error` assigns to a recoverable
+        # token-provider failure -- so callers keying on `.code` mis-classified
+        # it. For a directly constructed error the class supplies the default
+        # via `_DEFAULT_CODE`, so a Python-raised error reports the same code
+        # as the native-built error of the same type: every raise site in this
+        # package builds an `OidcConfigError` without passing `code`, and those
+        # used to report AuthError while `oidc.pxi` gave the native ones
+        # ConfigError, contradicting this class's own documented contract.
         QuestDBError.__init__(
             self,
-            QuestDBErrorCode.AuthError if code is None else code,
+            self._DEFAULT_CODE if code is None else code,
             args[0] if args else '',
             in_doubt=in_doubt)
         self.args = args
@@ -107,7 +118,14 @@ class OidcConfigError(OidcError):
     The OIDC configuration could not be resolved or is inconsistent (e.g.
     QuestDB does not advertise OIDC, the IdP device-authorization endpoint
     cannot be discovered, or a required argument is missing).
+
+    ``code`` is :attr:`~questdb.QuestDBErrorCode.ConfigError`, matching what
+    native reports for the same failure and what this package documents: a
+    misconfiguration is terminal, and retry logic keying on ``code`` must not
+    see it as an auth failure that signing in again could clear.
     """
+
+    _DEFAULT_CODE = QuestDBErrorCode.ConfigError
 
 
 class OidcNetworkError(OidcError):

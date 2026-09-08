@@ -608,9 +608,11 @@ cdef class OidcDeviceAuth:
           identity-provider text; see that class for sink-encoding, actionable-
           URL and re-entrancy rules.
         * ``default_interval`` — seconds between device-code polls when the
-          identity provider does not specify one (default 5, maximum 1800, the
-          longest a device code may live). A server-supplied interval, and any
-          ``Retry-After``, take precedence.
+          identity provider does not specify one (default 5, minimum 5,
+          maximum 1800, the longest a device code may live). Native clamps the
+          value to that range, so a smaller number would be accepted here and
+          silently become 5; it is rejected instead. A server-supplied
+          interval, and any ``Retry-After``, take precedence.
         * ``timeout`` — the per-HTTP-request timeout in seconds (default 30,
           maximum 120). This is **not** a deadline for the sign-in as a whole,
           which is bounded by the device code's own lifetime.
@@ -818,12 +820,11 @@ cdef class OidcDeviceAuth:
         # the opposite of what it asked for.
         if (not isinstance(default_interval, int)
                 or isinstance(default_interval, bool)
-                or default_interval <= 0
+                or default_interval < 5
                 or default_interval > 1800):
             raise OidcConfigError(
-                'default_interval must be a positive integer number of '
-                'seconds no greater than 1800 (the maximum device-code '
-                'lifetime)')
+                'default_interval must be an integer number of seconds '
+                'between 5 and 1800 (the maximum device-code lifetime)')
         if not questdb_oidc_builder_default_interval_seconds(
                 builder, <uint64_t>default_interval, &err):
             raise _oidc_err_to_py(err)

@@ -39,6 +39,11 @@ import unittest
 import weakref
 from unittest import mock
 
+try:  # POSIX only; the home-resolution guard it exercises is POSIX-shaped.
+    import pwd
+except ImportError:  # pragma: no cover - Windows
+    pwd = None
+
 import questdb
 from questdb.auth import (
     FileTokenStore,
@@ -485,6 +490,15 @@ class NativeOidcTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(OidcConfigError):
                 make_auth(default_interval=value)
 
+    def test_default_interval_is_bounded_at_the_native_floor(self):
+        # Native clamps the value to [5, 1800] (`questdb/oidc.h`), so 1..4 were
+        # accepted here and silently became 5 -- the caller had no way to learn
+        # their setting was ignored. Reject them instead, and keep the boundary.
+        for value in (1, 2, 4):
+            with self.subTest(value=value), self.assertRaises(OidcConfigError):
+                make_auth(default_interval=value)
+        make_auth(default_interval=5)
+
     def test_default_interval_is_bounded_at_the_native_ceiling(self):
         # The old bound was the full uint64 range, but native casts to i64
         # before clamping: 2**63 wrapped negative, floored to 0, and came back
@@ -495,6 +509,41 @@ class NativeOidcTest(unittest.TestCase):
                 make_auth(default_interval=value)
         # The boundary itself is still accepted.
         make_auth(default_interval=1800)
+
+    def test_config_errors_report_config_error_code(self):
+        """A Python-raised OidcConfigError carries the same code as a native one.
+
+        `OidcError` defaulted every directly constructed error to `AuthError`,
+        and no raise site in `questdb.auth` passes `code=`, so a validation
+        failure reported an auth failure -- something signing in again could
+        clear -- while `oidc.pxi` gave the native error for the same condition
+        `ConfigError`. The documented contract is that retry logic can key on
+        `.code`, so the two routes have to agree.
+        """
+        for label, build in (
+                ('empty client_id',
+                 lambda: questdb.auth.OidcDeviceAuth(
+                     '', 'https://idp.example/device',
+                     'https://idp.example/token')),
+                ('bad renderer', lambda: make_auth(renderer=object())),
+                ('bad interval', lambda: make_auth(default_interval=0)),
+                ('empty store dir', lambda: FileTokenStore('')),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(OidcConfigError) as ctx:
+                    build()
+                self.assertEqual(
+                    ctx.exception.code, questdb.QuestDBErrorCode.ConfigError)
+        # Only the config type changes default; the rest stay terminal-auth.
+        self.assertEqual(
+            OidcInteractionRequired('x').code,
+            questdb.QuestDBErrorCode.AuthError)
+        # An explicit code still wins, so a native error keeps its own
+        # classification (notably the retryable SocketError).
+        self.assertEqual(
+            OidcConfigError(
+                'x', code=questdb.QuestDBErrorCode.SocketError).code,
+            questdb.QuestDBErrorCode.SocketError)
 
     def test_oidc_error_propagates_in_doubt(self):
         # The OIDC error path (_oidc_err_to_py) must carry the native in-doubt
@@ -593,17 +642,26 @@ class NativeOidcTest(unittest.TestCase):
         # OidcError subclasses QuestDBError so an existing `except QuestDBError`
         # ingestion / retry / dead-letter handler keeps catching auth failures
         # routed through c_err_to_py, while the typed subclasses stay catchable
-        # specifically. Pin the hierarchy and the AuthError code directly (the
+        # specifically. Pin the hierarchy and the default code directly (the
         # transport-path behaviour is covered by the attachment tests).
+        #
+        # A misconfiguration defaults to ConfigError rather than AuthError:
+        # native classifies it that way, and the package documents that retry
+        # logic may key on `.code`, so a config failure must not look like an
+        # auth failure that signing in again could clear. See
+        # test_config_errors_report_config_error_code.
         self.assertTrue(issubclass(OidcError, questdb.QuestDBError))
-        for exc_type in (
-                OidcConfigError, OidcNetworkError, OidcInteractionRequired,
-                OidcDeviceFlowError, OidcTimeoutError):
+        for exc_type, expected in (
+                (OidcConfigError, questdb.QuestDBErrorCode.ConfigError),
+                (OidcNetworkError, questdb.QuestDBErrorCode.AuthError),
+                (OidcInteractionRequired, questdb.QuestDBErrorCode.AuthError),
+                (OidcDeviceFlowError, questdb.QuestDBErrorCode.AuthError),
+                (OidcTimeoutError, questdb.QuestDBErrorCode.AuthError)):
             with self.subTest(exc_type=exc_type.__name__):
                 self.assertTrue(issubclass(exc_type, OidcError))
                 err = exc_type('x')
                 self.assertIsInstance(err, questdb.QuestDBError)
-                self.assertIs(err.code, questdb.QuestDBErrorCode.AuthError)
+                self.assertIs(err.code, expected)
 
     def test_custom_store_is_rejected(self):
         with self.assertRaisesRegex(OidcConfigError, 'FileTokenStore'):
@@ -663,6 +721,42 @@ class NativeOidcTest(unittest.TestCase):
         # An absolute path is already resolved and passes through untouched.
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(FileTokenStore.at(directory).directory, directory)
+
+    def test_unresolvable_home_is_refused_not_resolved_against_cwd(self):
+        """`~` that cannot be expanded must not become a literal directory.
+
+        `os.path.expanduser` returns the path UNCHANGED when `$HOME` is unset
+        and the uid has no `pwd` entry -- the normal state in a container run
+        under an arbitrary uid. `abspath` then resolved the leading `~` against
+        the working directory, so `FileTokenStore('~/qdb-tokens')` wrote a
+        long-lived plaintext refresh token into a directory literally named
+        `~`, usually inside whatever the process happened to be started in.
+        `at_default_location()` already refused this; the constructor did not.
+        """
+        if pwd is None:
+            self.skipTest('no pwd module (Windows)')
+
+        def no_passwd_entry(_uid):
+            raise KeyError('no passwd entry for uid')
+
+        with mock.patch.dict(os.environ, clear=False) as _env:
+            os.environ.pop('HOME', None)
+            os.environ.pop('USERPROFILE', None)
+            with mock.patch.object(pwd, 'getpwuid', no_passwd_entry):
+                # Precondition: expansion really does fail in this environment,
+                # so the assertion below is testing the guard and not a
+                # coincidentally-resolvable path.
+                if not os.path.expanduser('~/qdb-tokens').startswith('~'):
+                    self.skipTest('platform still resolves ~ without $HOME')
+                with self.assertRaises(OidcConfigError) as ctx:
+                    FileTokenStore('~/qdb-tokens')
+                self.assertIn('home directory', str(ctx.exception))
+                self.assertEqual(
+                    ctx.exception.code, questdb.QuestDBErrorCode.ConfigError)
+                # A path with no `~` is unaffected by the guard.
+                with tempfile.TemporaryDirectory() as directory:
+                    self.assertEqual(
+                        FileTokenStore(directory).directory, directory)
 
     def test_default_file_store_environment_override(self):
         # A real temporary directory rather than a '/tmp/...' literal: the
