@@ -2673,5 +2673,18 @@ class QueryResult:
                     '`close()`.',
                     ResourceWarning,
                     stacklevel=2)
+            except Warning:
+                # `-W error`, `simplefilter('error')` or pytest's
+                # `filterwarnings = error` turns this into an exception. The
+                # reclaim above has already run, so letting it out of `__del__`
+                # costs nothing and CPython routes it to `sys.unraisablehook` --
+                # which is where someone who asked for warnings-as-errors
+                # expects a leak diagnostic to appear. Swallowing it here made
+                # the release silent in exactly the configuration that asked to
+                # be told loudly.
+                raise
             except Exception:
+                # Anything else -- most plausibly `warnings` already torn down
+                # during interpreter shutdown -- must not become unraisable
+                # noise on a path that has nothing left to report.
                 pass
