@@ -1079,6 +1079,23 @@ cdef class OidcDeviceAuth:
 
         The persisted entry is deliberately left behind so :meth:`clear` can
         still remove it after closing.
+
+        .. warning::
+
+           Closing is **terminal for every attached transport**, not merely a
+           state they observe. Closing is monotonic, so every
+           :class:`~questdb.Sender`, :func:`questdb.connect` pool and reader
+           built from this provider fails its next token pull non-retryably:
+           reconnect loops stop, a QWP/WebSocket publication store is
+           terminalized with accepted frames still queued, and there is no way
+           to attach a replacement provider to an existing handle. Disk-backed
+           store-and-forward slots are not deleted and stay drainable by a
+           later process, but this one will not send them.
+
+           To recover, build a new provider **and** rebuild each sender, pool
+           and reader that used the old one. Where that matters, sign in on a
+           provider before attaching it and keep re-authentication on a
+           separate, unattached provider.
         """
         cdef questdb_error* err = NULL
         cdef bint ok

@@ -61,8 +61,15 @@ The lifecycle is deliberately split:
   persisted entry. It does not revoke the credential at the identity provider.
 * :meth:`~questdb.auth.OidcDeviceAuth.close` permanently closes the shared
   provider. Call it from another thread to cancel device polling or a bundled
-  file-token-store lock wait; attached transports observe the same closed
-  state. ``OidcDeviceAuth`` is also a context manager.
+  file-token-store lock wait. Closing is **terminal for every attached
+  transport**, not merely a state they observe: each ``Sender``,
+  :func:`questdb.connect` pool and reader built from the provider fails its
+  next token pull non-retryably, so reconnect loops stop and a QWP/WebSocket
+  publication store is terminalized with accepted frames still queued.
+  Disk-backed store-and-forward slots stay drainable by a later process.
+  Recovering means building a new provider *and* rebuilding every transport
+  that used the old one. ``OidcDeviceAuth`` is also a context manager, so a
+  ``with`` block has the same effect at exit.
 
 This prevents a reconnect, SQLAlchemy pool worker, or ingestion background
 thread from unexpectedly launching a browser flow. Applications should call
