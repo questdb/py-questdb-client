@@ -2371,6 +2371,51 @@ class TestEgressWithDatabase(unittest.TestCase):
                 pdf = client.query(
                     f'SELECT uu FROM {table_name}').to_pandas()
             self.assertEqual(pdf['uu'][0], expect_uuid)
+
+            # Every remaining reader must agree on the byte order. UUID bytes
+            # are canonical RFC 4122 big-endian at the API boundary, and that
+            # changed on the READ path as silently as on the write path -- the
+            # readers below are exactly the ones the changelog names, and only
+            # `to_arrow` and the numpy `to_pandas` above were covered. A reader
+            # that reverted to the old lo/hi-LE layout would round-trip against
+            # itself and be caught only here, against a fixed expected value.
+            sql = f'SELECT uu FROM {table_name}'
+
+            def _uuid_bytes(value):
+                return value if isinstance(value, bytes) else value.bytes
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                batches = list(client.query(sql).iter_arrow())
+                self.assertEqual(
+                    _uuid_bytes(
+                        pa.Table.from_batches(batches).to_pylist()[0]['uu']),
+                    expect_uuid.bytes,
+                    'iter_arrow disagrees on UUID byte order')
+
+                streamed = pa.table(client.query(sql))
+                self.assertEqual(
+                    _uuid_bytes(streamed.to_pylist()[0]['uu']),
+                    expect_uuid.bytes,
+                    '__arrow_c_stream__ disagrees on UUID byte order')
+
+                arrow_backed = client.query(sql).to_pandas(
+                    dtype_backend='pyarrow')
+                self.assertEqual(
+                    _uuid_bytes(arrow_backed['uu'][0]),
+                    expect_uuid.bytes,
+                    "to_pandas(dtype_backend='pyarrow') disagrees on UUID "
+                    'byte order')
+
+                try:
+                    import polars  # noqa: F401
+                except ImportError:
+                    pass
+                else:
+                    pdf_pl = client.query(sql).to_polars()
+                    self.assertEqual(
+                        _uuid_bytes(pdf_pl['uu'][0]),
+                        expect_uuid.bytes,
+                        'to_polars disagrees on UUID byte order')
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -3646,6 +3691,48 @@ class TestEgressPool(unittest.TestCase):
             after = client.query(
                 f'SELECT count() FROM {table}').to_arrow()
             self.assertEqual(after.column(0).to_pylist(), [64])
+
+    def test_abandoned_result_releases_under_warnings_as_errors(self):
+        """`-W error` must not stop the finalizer releasing the reader.
+
+        `QueryResult.__del__` used to warn first and reclaim second, both
+        inside one `except Exception: pass`. Under `warnings.simplefilter
+        ('error')` -- or `python -W error`, or pytest's `filterwarnings =
+        error` -- the `ResourceWarning` was raised as an exception, swallowed
+        by that handler, and `close()` never ran: the deterministic release
+        silently degraded to `_CursorHandle.__dealloc__`, and the pooled
+        connection stayed checked out until then. Reclaiming before warning is
+        what makes that structurally impossible, and nothing pinned it.
+        """
+        import gc
+        import warnings
+        table = self._seed_table(n_rows=8)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            result = client.query(f'SELECT x FROM {table} ORDER BY x')
+            in_use, _ = qi._debug_egress_pool_stats(client)
+            self.assertEqual(in_use, 1)
+            unraisable = []
+            original_hook = sys.unraisablehook
+            sys.unraisablehook = lambda args: unraisable.append(args)
+            try:
+                with warnings.catch_warnings():
+                    # The condition the finalizer is being tested under.
+                    warnings.simplefilter('error')
+                    del result
+                    gc.collect()
+            finally:
+                sys.unraisablehook = original_hook
+            in_use, _ = qi._debug_egress_pool_stats(client)
+            self.assertEqual(
+                in_use, 0,
+                'the reader must be released even when the ResourceWarning '
+                'is raised as an error')
+            # The warning still surfaces -- as an unraisable, since it is
+            # raised inside __del__ -- rather than being lost entirely.
+            self.assertTrue(
+                any(issubclass(u.exc_type, ResourceWarning)
+                    for u in unraisable),
+                f'expected the ResourceWarning to surface; got {unraisable!r}')
 
     def test_gc_abandoned_result_warns_and_releases(self):
         """A never-consumed ``QueryResult`` abandoned inside a
