@@ -82,46 +82,6 @@ For the 16-byte case the ``arrow.uuid`` extension type works on either path
 and needs no conversion; LONG256 has no such label, so ``schema_overrides``
 on an Arrow-backed frame is the only route.
 
-``ConnectionEventKind.CredentialUnavailable`` splits off ``AuthFailed``
-***********************************************************************
-
-A token provider that fails before any endpoint is dialled — an
-``oidc_auth=`` provider with no cached or refreshable credential — now
-reports the new
-:attr:`ConnectionEventKind.CredentialUnavailable <questdb.ConnectionEventKind.CredentialUnavailable>`
-instead of
-:attr:`ConnectionEventKind.AuthFailed <questdb.ConnectionEventKind.AuthFailed>`.
-
-``AuthFailed`` is once again unconditionally **terminal**: it means the
-server rejected a credential the client presented, and ``host`` / ``port``
-are always set. A listener that pages, tears down the pool, or exits on it
-needs no further qualification. ``CredentialUnavailable`` sets ``host`` and
-``port`` to ``None`` and reports the provider's classification in
-``cause_code``, which is what says whether the sender will carry on:
-
-* ``SocketError`` — retryable, and the ordinary case. The sender keeps
-  reconnecting so queued rows survive while the identity provider recovers or
-  a human signs in, and nothing is raised to the caller. Only a foreground
-  call such as :meth:`questdb.QuestDB.dataframe` fails fast.
-* ``AuthError`` / ``ConfigError`` — the provider cannot recover in this
-  process, so the reconnect is **terminal** and the sender stops. Reached by a
-  permanently closed provider (``close()`` is one-way, and ``Ctrl-C`` during
-  ``sign_in()`` takes that path) and by a scope that cannot yield the required
-  token kind. Queued rows are not deleted — a disk-backed store-and-forward
-  slot stays drainable by a later process — but this process will not send
-  them.
-
-A listener that pages on a permanent stop must qualify on ``cause_code``, not
-on the kind alone.
-
-This matches the Java client, whose ``QwpCredentialUnavailableException`` is
-likewise distinct from its terminal ``QwpAuthFailedException``.
-
-Existing listeners keep working, but one that treats every ``AuthFailed``
-as fatal will now be correct where before it fired on an ordinary
-silent-refresh blip. Existing enum ordinals are unchanged; the new kind is
-appended as ``7``.
-
 Callback inbox capacities are capped
 ************************************
 
@@ -227,6 +187,46 @@ Highlights:
   ``qrcode`` / ``IPython`` are imported lazily for optional conveniences.
 
 See the :ref:`OIDC authentication guide <oidc_auth>` for details.
+
+New ``ConnectionEventKind.CredentialUnavailable``
+*************************************************
+
+:attr:`ConnectionEventKind.CredentialUnavailable <questdb.ConnectionEventKind.CredentialUnavailable>`
+is a new event kind reporting a token provider that failed before any
+endpoint was dialled — an ``oidc_auth=`` provider with no cached or
+refreshable credential. It has no counterpart before 5.1, because token
+providers did not exist: a listener written against 5.0 cannot have seen it.
+
+``AuthFailed`` keeps the meaning it has always had, now stated explicitly: it
+is unconditionally **terminal**, and means the
+server rejected a credential the client presented, and ``host`` / ``port``
+are always set. A listener that pages, tears down the pool, or exits on it
+needs no further qualification. ``CredentialUnavailable`` sets ``host`` and
+``port`` to ``None`` and reports the provider's classification in
+``cause_code``, which is what says whether the sender will carry on:
+
+* ``SocketError`` — retryable, and the ordinary case. The sender keeps
+  reconnecting so queued rows survive while the identity provider recovers or
+  a human signs in, and nothing is raised to the caller. Only a foreground
+  call such as :meth:`questdb.QuestDB.dataframe` fails fast.
+* ``AuthError`` / ``ConfigError`` — the provider cannot recover in this
+  process, so the reconnect is **terminal** and the sender stops. Reached by a
+  permanently closed provider (``close()`` is one-way, and ``Ctrl-C`` during
+  ``sign_in()`` takes that path) and by a scope that cannot yield the required
+  token kind. Queued rows are not deleted — a disk-backed store-and-forward
+  slot stays drainable by a later process — but this process will not send
+  them.
+
+A listener that pages on a permanent stop must qualify on ``cause_code``, not
+on the kind alone.
+
+This matches the Java client, whose ``QwpCredentialUnavailableException`` is
+likewise distinct from its terminal ``QwpAuthFailedException``.
+
+This is additive and needs no migration: existing enum ordinals are
+unchanged, the new kind is appended as ``7``, and a 5.0 listener keeps
+working untouched. A listener that wants to distinguish the two conditions
+opts in by handling the new kind.
 
 Other changes
 ~~~~~~~~~~~~~

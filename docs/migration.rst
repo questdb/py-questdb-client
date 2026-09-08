@@ -7,8 +7,8 @@ Migration Guide
 
 Three changes need action: the two UUID / fixed-size-binary items below, and
 a new cap on callback inbox capacities. The
-``ConnectionEventKind.CredentialUnavailable`` split needs none — it is
-additive, and an existing listener keeps working.
+new ``ConnectionEventKind.CredentialUnavailable`` event kind needs none — it
+is additive, and an existing listener keeps working.
 
 * **UUID bytes are canonical RFC 4122.** UUID values are read and written in
   canonical big-endian order at every API boundary; the client byte-swaps to
