@@ -95,6 +95,12 @@ from ._client_helper cimport *
 ctypedef int void_int
 
 import cython
+
+# Imported before the includes: `oidc.pxi` builds its registry lock at module
+# scope, and an `include` is a text splice, so anything it evaluates at import
+# time must already be bound here.
+import threading
+
 include "dataframe.pxi"
 include "oidc.pxi"
 include "egress.pxi"
@@ -108,7 +114,6 @@ from cpython.bytes cimport (PyBytes_FromStringAndSize,
 import datetime
 import os
 import sys
-import threading
 import time
 import uuid
 import warnings

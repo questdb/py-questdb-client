@@ -59,6 +59,7 @@ from test_auth import (
     NativeOidcIntegrationTest,
     NativeOidcTest,
     NativeTransportAttachmentTest,
+    ProviderCycleSafetyTest,
     RenderSanitizerTest,
 )
 

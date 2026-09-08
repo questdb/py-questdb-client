@@ -29,6 +29,7 @@ import gc
 import io
 import os
 import platform
+import subprocess
 import sys
 import tempfile
 import threading
@@ -910,6 +911,103 @@ class NativeOidcTest(unittest.TestCase):
         other = make_auth(renderer=Renderer())
         self.assertEqual(weakref.getweakrefcount(other), 1)
         self.assertIsNot(weakref.getweakrefs(other)[0], registry_ref)
+
+
+class ProviderCycleSafetyTest(unittest.TestCase):
+    """A provider reclaimed as part of a reference cycle stays usable.
+
+    The cyclic collector runs weakref callbacks BEFORE finalizers, so while
+    `_OIDC_NATIVE_HANDLES` was the sole owner of the native handle the registry
+    callback freed it and any `__del__` in the same cycle then dereferenced a
+    dangling pointer. Both shapes below segfaulted the interpreter with no
+    traceback, so they run out-of-process and assert on the exit status: an
+    in-process regression would take the whole test run down with it.
+    """
+
+    def _run(self, body):
+        script = (
+            'import gc, sys\n'
+            'sys.path.insert(0, %r)\n'
+            'from questdb._client import OidcDeviceAuth\n'
+            'from questdb._client import _debug_oidc_registry_size as sz\n'
+            % (os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+               + os.sep + 'src',)
+        ) + body
+        proc = subprocess.run(
+            [sys.executable, '-c', script],
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(
+            proc.returncode, 0,
+            'provider cycle collection crashed the interpreter '
+            '(exit {}): {}{}'.format(
+                proc.returncode, proc.stdout, proc.stderr))
+        return proc.stdout
+
+    def test_renderer_cycle_close_from_del_is_safe(self):
+        out = self._run(
+            'class R:\n'
+            '    def __init__(self): self.provider = None\n'
+            '    def on_prompt(self, d): pass\n'
+            '    def on_waiting(self, s): pass\n'
+            '    def on_success(self, i, e): pass\n'
+            '    def on_failure(self, m): pass\n'
+            '    def __del__(self):\n'
+            '        if self.provider is not None:\n'
+            '            self.provider.close()\n'
+            '            print("closed")\n'
+            'r = R()\n'
+            'a = OidcDeviceAuth("cid", "https://i/d", "https://i/t", renderer=r)\n'
+            'r.provider = a\n'
+            'del a, r\n'
+            'gc.collect()\n'
+            'print("registry", sz())\n')
+        self.assertIn('closed', out, 'the finalizer never ran')
+        self.assertIn(
+            'registry 0', out,
+            'the cycle must still be collectable: owning the handle from the '
+            'provider must not keep the cycle alive')
+
+    def test_subclass_self_cycle_close_from_del_is_safe(self):
+        out = self._run(
+            'class Sub(OidcDeviceAuth):\n'
+            '    def __del__(self):\n'
+            '        self.close()\n'
+            '        print("closed")\n'
+            'a = Sub("cid", "https://i/d", "https://i/t")\n'
+            'a.self_ref = a\n'
+            'del a\n'
+            'gc.collect()\n'
+            'print("registry", sz())\n')
+        self.assertIn('closed', out, 'the finalizer never ran')
+        self.assertIn('registry 0', out)
+
+    def test_registry_bookkeeping_never_owns_the_native_handle(self):
+        """Losing a registry entry must not free a live provider's handle.
+
+        `_oidc_provider_collected` is a module-level `def`, and the weakref it
+        is called with is reachable through `weakref.getweakrefs(provider)`, so
+        a caller can drive it against a live provider. That used to release the
+        native handle out from under it; now it is bookkeeping only.
+        """
+        # Out-of-process for the same reason as its siblings, and because the
+        # id counter is module-global: in the aggregated run it has already
+        # advanced past anything this test could sweep.
+        out = self._run(
+            'import weakref\n'
+            'import questdb._client as c\n'
+            'a = OidcDeviceAuth("cid", "https://i/d", "https://i/t")\n'
+            'client_id = a.config.client_id\n'
+            '(ref,) = weakref.getweakrefs(a)\n'
+            'for pid in range(1, 8):\n'
+            '    c._oidc_provider_collected(pid, ref)\n'
+            'print("registry", sz())\n'
+            'assert a.config.client_id == client_id\n'
+            'a.close()\n'
+            'print("usable")\n')
+        # Bookkeeping is gone, the provider is not: reading the native config
+        # view and closing both dereference the handle the registry used to own.
+        self.assertIn('registry 0', out)
+        self.assertIn('usable', out)
 
 
 class NativeOidcIntegrationTest(unittest.TestCase):

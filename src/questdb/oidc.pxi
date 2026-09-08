@@ -32,19 +32,34 @@
 # Native is given a key rather than a `PyObject*` so that the release callback
 # -- which can run on an abandoned acquisition worker long after the owning
 # handles are gone, potentially past the start of interpreter finalization --
-# owns no Python reference and never needs the GIL. Entries are added when the
-# handler is installed under the GIL and removed by the provider weakref
-# callback, which also releases the independently-owned native handle on a
-# managed thread holding the GIL. The dict needs no lock of its own.
+# owns no Python reference and never needs the GIL.
 #
 # The value is a weakref: the registry must not keep a provider alive, or a
 # `with` block's exit would never collect one.
+#
+# This is BOOKKEEPING ONLY. The native handle is owned by the provider itself
+# (`OidcDeviceAuth._native`), not by `_OIDC_NATIVE_HANDLES`, so evicting or
+# losing an entry here cannot free a handle a live provider still points at.
+# It used to be the sole owner, and that was a use-after-free: the cyclic
+# collector runs weakref callbacks BEFORE finalizers, so a provider in a cycle
+# had its handle freed by this callback and was then handed to a `__del__` in
+# the same cycle that called `close()` on the dangling pointer.
+#
+# `_OIDC_REGISTRY_LOCK` guards the id counter and the paired dict writes. Under
+# the GIL those are already atomic and the lock is nearly free -- it is taken
+# once per provider construction, never on a hot path. It is here so the
+# invariant does not silently depend on the GIL: `_oidc_last_provider_id += 1`
+# is a read-modify-write, and on a free-threaded build two providers could take
+# the same id and evict each other's entries. The weakref callback deliberately
+# does NOT take it: it can run from inside a collection, and a non-reentrant
+# lock held by the same thread would deadlock there.
 #
 # A module-level `cdef object` is a C static rather than an entry in the module
 # dict, so `_PyModule_Clear` never swaps it for None at interpreter shutdown:
 # readers need no None guard.
 cdef object _OIDC_PROVIDERS = {}
 cdef object _OIDC_NATIVE_HANDLES = {}
+cdef object _OIDC_REGISTRY_LOCK = threading.Lock()
 cdef size_t _oidc_last_provider_id = 0
 
 
@@ -61,9 +76,19 @@ def _debug_oidc_registry_size():
 
 
 def _oidc_provider_collected(size_t provider_id, object provider_ref):
-    """Release registry state after cyclic GC collects a provider."""
-    if _OIDC_PROVIDERS.get(provider_id) is not provider_ref:
-        return
+    """Drop the registry bookkeeping for a collected provider.
+
+    Ids come from a monotonic counter and are never reused, so both entries
+    belong to this provider alone and are dropped unconditionally. The previous
+    identity guard returned early when the `_OIDC_PROVIDERS` entry was already
+    gone, without touching `_OIDC_NATIVE_HANDLES` -- so anything that removed
+    one and not the other left the two permanently out of sync, retaining the
+    stale entry for the life of the process.
+
+    Frees nothing: the provider owns its native handle (`OidcDeviceAuth.
+    _native`), so neither this callback nor a caller invoking it with a forged
+    id can release a handle that is still in use.
+    """
     _OIDC_PROVIDERS.pop(provider_id, None)
     _OIDC_NATIVE_HANDLES.pop(provider_id, None)
 
@@ -462,13 +487,24 @@ cdef class OidcDeviceAuth:
     """Native-backed OAuth 2.0 device-flow token provider for QuestDB."""
 
     cdef object __weakref__
-    # Borrowed from the registry-owned `_OidcNativeHandle`, which the provider's
-    # weakref callback releases. Keeping the finalized extension leaf out of this
-    # object's outgoing graph leaves a provider <-> renderer cycle free of
-    # finalized C-extension edges, so CPython's cyclic GC reclaims it and the
-    # native handle with it. PyPy cannot: cpyext leaks any cycle passing through
-    # a C-extension object, so a renderer holding its own provider keeps both --
-    # and the native handle -- alive there until `close()`.
+    # The owner of the native handle. Holding it here -- rather than letting
+    # `_OIDC_NATIVE_HANDLES` be the sole owner -- is what makes `_raw` safe:
+    # `_raw` cannot outlive `self`, because the handle is released only when
+    # this reference goes. That matters for a provider caught in a cycle, which
+    # is the documented shape (a renderer holding its own provider, or a
+    # subclass instance): the cyclic collector runs weakref callbacks BEFORE
+    # finalizers, so a registry-owned handle was freed by the callback and then
+    # dereferenced by a `__del__` in the same cycle -- a use-after-free that
+    # segfaulted the interpreter with no traceback.
+    #
+    # Cycle collection is unaffected. `_OidcNativeHandle` has no object fields,
+    # so Cython gives it no `tp_traverse` and CPython does not track it: it can
+    # be referenced by a cycle but never part of one, and it is released by this
+    # class's `tp_clear`, which runs after every finalizer. `OidcDeviceAuth`
+    # deliberately carries no `@cython.no_gc_clear` for the same reason.
+    cdef _OidcNativeHandle _native
+    # Cached from `_native.raw` so the hot calls need no attribute lookup; the
+    # reference above is the ownership.
     cdef questdb_oidc_auth* _raw
     cdef size_t _provider_id
     cdef object _renderer
@@ -482,6 +518,7 @@ cdef class OidcDeviceAuth:
     cdef object _sign_in_lock
 
     def __cinit__(self):
+        self._native = None
         self._raw = NULL
         self._provider_id = 0
         self._renderer = None
@@ -839,25 +876,32 @@ cdef class OidcDeviceAuth:
         # begun finalizing -- never needs the GIL. See
         # `_oidc_user_data_release_trampoline`.
         global _oidc_last_provider_id
-        _oidc_last_provider_id += 1
-        provider_id = _oidc_last_provider_id
+        with _OIDC_REGISTRY_LOCK:
+            _oidc_last_provider_id += 1
+            provider_id = _oidc_last_provider_id
         self._provider_id = provider_id
         native = _OidcNativeHandle()
-        # A weakref, so the registry never keeps a provider alive. The provider
-        # owns the renderer, keeping provider/renderer cycles fully visible to
-        # Python's cyclic GC. Its callback drops the independently registry-owned
-        # native handle, so the finalized leaf is not an outgoing edge of the
-        # provider cycle. Attached transports retain the provider separately.
+        # The provider owns the handle; take that reference before anything can
+        # fail, so no path can build a handle the provider does not hold.
+        self._native = native
+        # The registry keeps only a weakref, so it never keeps a provider alive
+        # and a `with` block's exit still collects one. The provider owns the
+        # renderer, so provider/renderer cycles stay fully visible to Python's
+        # cyclic GC. Attached transports retain the provider separately, and
+        # native holds its own cloned handle on top of that.
         try:
             from functools import partial
             provider_ref = PyWeakref_NewRef(
                 self, partial(_oidc_provider_collected, provider_id))
-            _OIDC_PROVIDERS[provider_id] = provider_ref
-            _OIDC_NATIVE_HANDLES[provider_id] = native
+            # The lock is released before the blocking native build below: it
+            # guards the registry, not the construction.
+            with _OIDC_REGISTRY_LOCK:
+                _OIDC_PROVIDERS[provider_id] = provider_ref
+                _OIDC_NATIVE_HANDLES[provider_id] = native
             # Registered <=> built. Every failure after registration must drop
             # both entries immediately, rather than waiting for the half-built
             # provider to be collected. That also lets a subclass retry
-            # `__init__` without stranding a dead weakref or native-handle owner.
+            # `__init__` without stranding a dead weakref or a registry entry.
             if not questdb_oidc_builder_event_handler(
                     builder,
                     _oidc_event_trampoline,
@@ -872,10 +916,14 @@ cdef class OidcDeviceAuth:
                 raise _oidc_err_to_py(err)
             self._raw = native.raw
         except:
+            # Dropping `_native` releases the handle if the build got that far;
+            # `_OidcNativeHandle.__dealloc__` is NULL-safe when it did not.
             self._raw = NULL
+            self._native = None
             self._provider_id = 0
-            _OIDC_PROVIDERS.pop(provider_id, None)
-            _OIDC_NATIVE_HANDLES.pop(provider_id, None)
+            with _OIDC_REGISTRY_LOCK:
+                _OIDC_PROVIDERS.pop(provider_id, None)
+                _OIDC_NATIVE_HANDLES.pop(provider_id, None)
             raise
 
     def sign_in(self):
