@@ -1021,15 +1021,25 @@ class ProviderCycleSafetyTest(unittest.TestCase):
     def _run(self, body):
         script = (
             'import gc, sys\n'
-            'sys.path.insert(0, %r)\n'
             'from questdb._client import OidcDeviceAuth\n'
             'from questdb._client import _debug_oidc_registry_size as sz\n'
-            % (os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-               + os.sep + 'src',)
         ) + body
+        # Resolve `questdb` the way this process did instead of assuming the
+        # in-place `src/` build. Under cibuildwheel the package is installed
+        # from the wheel and `src/questdb/` holds no compiled `_client`, so
+        # putting `src` first shadowed the installed package with a source tree
+        # that cannot import itself -- every child died in
+        # `src/questdb/__init__.py` on `from questdb import _client` with a
+        # partially-initialized-module ImportError, long before reaching the
+        # cycle these tests are about. Same idiom as
+        # `test_dataframe.TestNoPyarrow`.
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [os.path.dirname(os.path.dirname(os.path.abspath(questdb.__file__)))]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
         proc = subprocess.run(
             [sys.executable, '-c', script],
-            capture_output=True, text=True, timeout=120)
+            capture_output=True, text=True, timeout=120, env=env)
         self.assertEqual(
             proc.returncode, 0,
             'provider cycle collection crashed the interpreter '
