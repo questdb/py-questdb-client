@@ -1318,8 +1318,11 @@ replayable DataFrame only if no batch from the call was successfully published
 and the failed native operation is not ``in_doubt``. Once any batch may have
 committed, it raises rather than replaying from row zero and exposes
 ``in_doubt=True`` for the whole DataFrame call, even if the final native write
-alone was provably not delivered. The exception still means the load did not
-finish: an already committed prefix remains in the table, and an
+alone was provably not delivered. This includes local validation and Arrow
+stream errors after publication, even after an internal checkpoint succeeded.
+This aggregation belongs to ``dataframe()``; a low-level sender flush's flag
+does not describe earlier independent flushes. The exception still means the
+load did not finish: an already committed prefix remains in the table, and an
 application-level retry of the entire DataFrame can duplicate it unless the
 table uses suitable ``DEDUP UPSERT KEYS``. A consumed one-shot Arrow stream is
 also not replayable; when no batch could have landed that separate condition

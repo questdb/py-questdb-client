@@ -101,8 +101,10 @@ After a transient failure, the client replays the original source only if no
 batch was successfully published and the failed operation is not ``in_doubt``.
 Otherwise it raises. When any batch from the call may have committed, the
 public exception has ``in_doubt=True`` even if the final native write itself
-was provably not delivered. The load may then have an already committed
-prefix, and an application-level retry of the entire DataFrame can duplicate
+was provably not delivered. This includes local validation and Arrow stream
+errors after publication. Internal checkpoints do not reset this call-level
+status. The load may then have an already committed prefix, and an
+application-level retry of the entire DataFrame can duplicate
 it unless the table uses suitable ``DEDUP UPSERT KEYS``. A consumed one-shot
 stream can be non-replayable with ``in_doubt=False`` when no rows could have
 landed; its error asks the caller to supply a fresh reader.

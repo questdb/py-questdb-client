@@ -245,9 +245,11 @@ class QuestDBError(Exception):
     @property
     def in_doubt(self) -> bool:
         """
-        Whether replaying the input supplied to this call may duplicate rows.
-        The failed native write may be ambiguous, or an earlier direct QWP
-        publication in the same higher-level call may already have committed.
+        Whether the failed ingestion operation may already have delivered
+        its input. For QWP ``dataframe()``, this covers the entire DataFrame,
+        including earlier batches from the same call, even when a later batch
+        fails local validation. For a sender flush, it describes that flush;
+        it does not summarize earlier independent calls on the sender.
 
         Retrying that input when this is true requires an appropriate
         application- or table-level deduplication guarantee. A false value says
@@ -7749,17 +7751,10 @@ cdef void_int _direct_dataframe_run(
                 &may_have_committed_prefix)
             return 0
         except QuestDBError as exc:
-            # FailoverRetry = transient flush/sync; SocketError = a
-            # re-borrow that has not reached a live primary yet.
-            if exc.code not in (
-                    QuestDBErrorCode.FailoverRetry,
-                    QuestDBErrorCode.SocketError):
-                raise
-            # Normalize native delivery state to the public DataFrame-call
-            # boundary. Native `in_doubt` covers the failed operation and
-            # native commits since its last successful sync; the sticky flag
-            # also covers successful publications before that boundary in this
-            # same call.
+            # Aggregate at the DataFrame boundary, including validation and
+            # stream errors after earlier successful batches. The native flag
+            # describes the failed flush; only this driver knows the source's
+            # publication history across checkpoints and connections.
             call_in_doubt = exc.in_doubt or may_have_committed_prefix
 
             # Select the one-shot guidance before the delivery-risk gate so a
@@ -7799,6 +7794,12 @@ cdef void_int _direct_dataframe_run(
                     f'zero may duplicate rows.',
                     exc.sender_error,
                     in_doubt=True) from exc
+            # Delivery status and retryability are independent. A local
+            # validation error still requires the caller to correct its input.
+            if exc.code not in (
+                    QuestDBErrorCode.FailoverRetry,
+                    QuestDBErrorCode.SocketError):
+                raise
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 raise
@@ -8302,7 +8303,9 @@ cdef class QuestDB:
         the failed operation is not ``in_doubt``. Otherwise it raises rather
         than replaying from row zero. If a batch from this call may have
         committed, the raised error has ``in_doubt=True`` even when the final
-        native write alone was provably not delivered. The load did not
+        native write alone was provably not delivered. This includes local
+        validation and Arrow stream errors after publication. Internal
+        checkpoints do not reset the call's delivery status. The load did not
         finish, but any already committed prefix remains; an application-level
         retry of the whole DataFrame can duplicate it unless the destination
         table uses suitable ``DEDUP UPSERT KEYS``. A consumed one-shot stream

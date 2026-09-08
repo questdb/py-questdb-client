@@ -121,9 +121,11 @@ class QuestDBError(Exception):
     @property
     def in_doubt(self) -> bool:
         """
-        Whether replaying the input supplied to this call may duplicate rows.
-        The failed native write may be ambiguous, or an earlier direct QWP
-        publication in the same higher-level call may already have committed.
+        Whether the failed ingestion operation may already have delivered
+        its input. For QWP ``dataframe()``, this covers the entire DataFrame,
+        including earlier batches from the same call, even when a later batch
+        fails local validation. For a sender flush, it describes that flush;
+        it does not summarize earlier independent calls on the sender.
 
         Retrying that input when this is true requires an appropriate
         application- or table-level deduplication guarantee. A false value says
@@ -1368,7 +1370,9 @@ class QuestDB:
         the failed operation is not ``in_doubt``. Otherwise it raises rather
         than replaying from row zero. If a batch from this call may have
         committed, the raised error has ``in_doubt=True`` even when the final
-        native write alone was provably not delivered. The load did not
+        native write alone was provably not delivered. This includes local
+        validation and Arrow stream errors after publication. Internal
+        checkpoints do not reset the call's delivery status. The load did not
         finish, but any already committed prefix remains; an application-level
         retry of the whole DataFrame can duplicate it unless the destination
         table uses suitable ``DEDUP UPSERT KEYS``. A consumed one-shot stream

@@ -254,7 +254,7 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
             raised.exception.code, qi.QuestDBErrorCode.FailoverRetry)
         self.assertTrue(
             raised.exception.in_doubt,
-            'native in_doubt must include an earlier eager commit')
+            'the DataFrame error must include an earlier eager commit')
         self.assertEqual(
             stats['accepted_connections'], 1,
             'the Python driver must not reconnect and replay row zero')
@@ -284,8 +284,8 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
 
     def test_python_sticky_prefix_widens_native_safe_error(self):
         # After 100 successful one-row flushes, the next slice triggers the
-        # periodic sync (frame 101), which ACKs the prefix and clears native
-        # commit_since_sync. Its data flush is deferred (frame 102). Wait for
+        # periodic sync (frame 101), which ACKs the prefix. Its data flush
+        # is deferred (frame 102). Wait for
         # the server to close before exposing row 102: that row's native
         # failure is provably not delivered and has in_doubt=False, but the
         # Python call has a committed prefix and must widen its public error.
@@ -311,6 +311,60 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         self.assertIn('earlier batch', str(raised.exception))
         self.assertEqual(stats['accepted_connections'], 1)
         self.assertEqual(stats['binary_frames'], 102)
+
+    def test_local_validation_failure_covers_whole_dataframe(self):
+        # Like the August 22 late GEOHASH refusal, a checked UInt64 overflow
+        # fails locally after a prefix was sent. Cover the first batch, the
+        # eager publication, and the checkpoint after 100 batches.
+        for prefix in (0, 1, 101):
+            with self.subTest(prefix=prefix):
+                frame = pa.table({
+                    'ts': pa.array(range(prefix + 1), type=pa.timestamp('us')),
+                    'v': pa.array([1] * prefix + [2**64 - 1], type=pa.uint64()),
+                })
+                with QwpAckServer(defer_aware_acks=True) as server:
+                    with qi.QuestDB.from_conf(_conf(server.port)) as client:
+                        with self.assertRaises(qi.QuestDBError) as raised:
+                            client.dataframe(
+                                frame, table_name='t_validation_prefix',
+                                at='ts', max_rows_per_batch=1)
+                        err = raised.exception
+                        self.assertEqual(err.code, qi.QuestDBErrorCode.ArrowIngest)
+                        self.assertEqual(err.in_doubt, prefix != 0)
+                        if prefix:
+                            self.assertIsInstance(err.__cause__, qi.QuestDBError)
+                            self.assertFalse(err.__cause__.in_doubt)
+                        # A later independent call does not inherit this flag.
+                        with self.assertRaises(qi.QuestDBError) as fresh:
+                            client.dataframe(
+                                frame.slice(prefix), table_name='t_validation_prefix',
+                                at='ts', max_rows_per_batch=1)
+                        self.assertFalse(fresh.exception.in_doubt)
+                    stats = server.snapshot()
+                self.assertEqual(stats['binary_frames'], prefix + (prefix // 100))
+
+    def test_stream_error_after_checkpoint_covers_whole_dataframe(self):
+        schema = pa.schema([('ts', pa.timestamp('us')), ('v', pa.int64())])
+
+        def batches():
+            for i in range(101):
+                yield pa.record_batch([
+                    pa.array([i], type=schema[0].type), pa.array([i])], schema=schema)
+            raise ValueError('source failed after checkpoint')
+
+        with QwpAckServer(defer_aware_acks=True) as server:
+            with qi.QuestDB.from_conf(_conf(server.port)) as client:
+                reader = pa.RecordBatchReader.from_batches(schema, batches())
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    client.dataframe(reader, table_name='t_stream_error', at='ts')
+            stats = server.snapshot()
+        self.assertEqual(raised.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+        self.assertTrue(raised.exception.in_doubt)
+        self.assertIn('source failed after checkpoint', str(raised.exception))
+        self.assertIn('fresh reader', str(raised.exception))
+        self.assertFalse(raised.exception.__cause__.in_doubt)
+        self.assertEqual(stats['binary_frames'], 102)
+        self.assertEqual(stats['accepted_connections'], 1)
 
     def test_capacity_exhaustion_drains_and_completes(self):
         # The 1024-byte advertised cap splits every 16-row batch into
