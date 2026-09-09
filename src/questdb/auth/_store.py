@@ -32,7 +32,16 @@ from typing import Any
 from ._errors import OidcConfigError
 
 
-TOKEN_STORE_DIR_ENV = 'questdb.client.oidc.token.store.dir'
+#: Environment variable overriding the default token-store directory.
+#:
+#: Spelled so a shell can set it: ``export QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR=/path``.
+#: Java spells the same setting ``questdb.client.oidc.token.store.dir``, but that
+#: is a JVM *system property* (``-D...``), which never reaches this process's
+#: environment -- so borrowing that spelling shared nothing with Java, while
+#: ``sh``/``bash``/``zsh`` reject a name containing ``.`` from ``export``. This
+#: binding and the native client read this variable, so it still names one store
+#: across both. Keep the two spellings in step.
+TOKEN_STORE_DIR_ENV = 'QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR'
 
 
 class FileTokenStore:
@@ -95,10 +104,10 @@ class FileTokenStore:
         if override:
             # Reject a non-absolute override rather than normalizing it, which
             # is what the constructor does for a path the caller passes
-            # directly. This setting is shared with the Java and native
-            # clients, and neither expands `~`: they would create a directory
-            # literally named `~` where expanding it here would land in
-            # `$HOME`, so the "shared" store would silently become two. A
+            # directly. This setting is shared with the native client, which
+            # does not expand `~`: it would create a directory literally named
+            # `~` where expanding it here would land in `$HOME`, so the
+            # "shared" store would silently become two. A
             # relative path is the same problem via the working directory.
             # Native rejects these too; checking here names the setting in a
             # typed error instead of surfacing an io error from build().
@@ -109,8 +118,8 @@ class FileTokenStore:
                     f'{override!r}. A relative path follows the working '
                     'directory, and `~` is expanded by shells rather than by '
                     'the QuestDB clients, so neither names one store shared '
-                    'with the Java and native clients. Use an absolute path, '
-                    'or pass FileTokenStore(dir) explicitly.')
+                    'with the native client. Use an absolute path, or pass '
+                    'FileTokenStore(dir) explicitly.')
             return cls(override)
         home = os.path.expanduser('~')
         if not os.path.isabs(home):

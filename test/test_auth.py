@@ -772,29 +772,29 @@ class NativeOidcTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.dict(
                     os.environ,
-                    {'questdb.client.oidc.token.store.dir': directory}):
+                    {'QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR': directory}):
                 self.assertEqual(
                     FileTokenStore.at_default_location().directory, directory)
 
         # A non-absolute override is refused rather than normalized. This used
         # to expand '~' so the refresh token could not land in a directory
         # literally named '~' -- a real hazard, but the cure was worse: this
-        # setting is shared with the Java and native clients, and NEITHER
-        # expands '~' (Java does Paths.get(override) verbatim). Expanding it
-        # here pointed Python at $HOME/x while they used ./~/x, so the one
-        # setting meant to share a store silently produced two, each with its
-        # own plaintext refresh token. Refusing names the problem instead.
+        # setting is shared with the native client, which does NOT expand '~'.
+        # Expanding it here pointed Python at $HOME/x while native used ./~/x,
+        # so the one setting meant to share a store silently produced two, each
+        # with its own plaintext refresh token. Refusing names the problem
+        # instead.
         for bad in (os.path.join('~', 'qdb-oidc-test'),
                     os.path.join('rel', 'qdb-oidc-test')):
             with self.subTest(override=bad):
                 with mock.patch.dict(
                         os.environ,
-                        {'questdb.client.oidc.token.store.dir': bad}):
+                        {'QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR': bad}):
                     with self.assertRaises(OidcConfigError) as ctx:
                         FileTokenStore.at_default_location()
                     message = str(ctx.exception)
                     self.assertIn(
-                        'questdb.client.oidc.token.store.dir', message)
+                        'QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR', message)
                     self.assertIn('absolute', message)
 
         # An explicit constructor path is a Python-supplied path, not the

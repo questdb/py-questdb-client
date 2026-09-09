@@ -180,9 +180,13 @@ configured:
         token_store=FileTokenStore.at_default_location())
     auth.sign_in()
 
-The default directory is ``~/.questdb/oidc-tokens/``, overridable with
-the ``questdb.client.oidc.token.store.dir`` environment variable shared with
-Java. That override **must be an absolute path**: a relative one follows the
+The default directory is ``~/.questdb/oidc-tokens/``, overridable with the
+``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` environment variable, which the Python
+and native clients share. (Java spells the same setting
+``questdb.client.oidc.token.store.dir``, but as a JVM system property
+``-Dquestdb.client.oidc.token.store.dir=...``, which does not reach this
+process's environment; set both if you need one store across all three.)
+That override **must be an absolute path**: a relative one follows the
 working directory, and ``~`` is expanded by shells rather than by any QuestDB
 client, so neither names a single store the clients would actually share.
 Both are rejected rather than silently resolved. A path passed straight to
