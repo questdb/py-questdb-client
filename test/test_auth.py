@@ -29,6 +29,7 @@ import gc
 import io
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -610,6 +611,21 @@ class NativeOidcTest(unittest.TestCase):
         # config stays readable: it is immutable native state that close does
         # not invalidate.
         self.assertEqual(auth.config.client_id, 'questdb')
+
+    def test_connect_preserves_oidc_error_that_looks_like_duplicate_key(self):
+        err = OidcNetworkError(
+            'identity provider said duplicate key "query_pool_min"',
+            status=503,
+            retry_after=7)
+        fake_db = mock.Mock()
+        fake_db.from_conf.side_effect = err
+        with mock.patch.dict(questdb.connect.__globals__, {'QuestDB': fake_db}):
+            with self.assertRaises(OidcNetworkError) as raised:
+                questdb.connect(
+                    'ws::addr=127.0.0.1:9000;', query_pool_min=1)
+        self.assertIs(raised.exception, err)
+        self.assertEqual(raised.exception.status, 503)
+        self.assertEqual(raised.exception.retry_after, 7)
 
     def test_invalid_unicode_is_typed(self):
         with self.assertRaises(OidcConfigError):
@@ -1679,6 +1695,37 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 self.assertEqual(len(server.requests('/device', 'POST')), 1)
                 self.assertEqual(len(server.requests('/token', 'POST')), 1)
                 restored.clear()
+
+    def test_persistence_failure_logs_warning_and_keeps_token(self):
+        class SabotageRenderer(RecordingRenderer):
+            def __init__(self, directory):
+                super().__init__()
+                self.directory = directory
+
+            def on_prompt(self, challenge):
+                super().on_prompt(challenge)
+                # Preflight has already accepted/created the empty directory.
+                # Replace it with a regular file so the later durable save
+                # deterministically fails on every platform (including root CI).
+                shutil.rmtree(self.directory)
+                with open(self.directory, 'w', encoding='utf-8') as sink:
+                    sink.write('not a directory')
+
+        with tempfile.TemporaryDirectory() as parent:
+            directory = os.path.join(parent, 'store')
+            with OidcTestServer() as server:
+                renderer = SabotageRenderer(directory)
+                auth = make_discovered_auth(
+                    server,
+                    token_store=FileTokenStore.at(directory),
+                    renderer=renderer)
+                with self.assertLogs('questdb', level='WARNING') as captured:
+                    auth.sign_in()
+                self.assertEqual(auth.token(), 'AT-initial')
+                self.assertEqual(renderer.failures, [])
+                self.assertEqual(len(captured.records), 1)
+                self.assertIn('token store save failed', captured.output[0])
+                self.assertNotIn('AT-initial', captured.output[0])
 
     def test_clear_removes_persisted_token(self):
         # clear() must delete the persisted store entry, not only the in-memory
@@ -2996,16 +3043,18 @@ class RenderSanitizerTest(unittest.TestCase):
         real, resp = self._refused_prompt()
         rendered = _render.format_prompt(resp)
         self.assertNotIn('open directly', rendered)
-        # The primary line still shows the URL: there is no other way to sign
-        # in, and it is rendered inert and IDNA-escaped.
-        self.assertIn('xn--80ak6aa92e.com', rendered)
+        # The primary line still shows the URL for transcription, but its
+        # scheme is visibly defanged so terminal emulators do not auto-link it.
+        self.assertIn('https[:]//xn--80ak6aa92e.com', rendered)
+        self.assertNotIn('https://', rendered)
         # Control: with the verdict removed the same response DOES offer it, so
         # the assertion above is not passing because the fixture simply has no
         # origin-matched complete.
         without_verdict = {
             k: v for k, v in resp.items() if k != 'browser_target'}
-        self.assertIn(
-            'open directly', _render.format_prompt(without_verdict))
+        without_verdict_rendered = _render.format_prompt(without_verdict)
+        self.assertIn('open directly', without_verdict_rendered)
+        self.assertIn('https://', without_verdict_rendered)
         # And a vetted target keeps the line.
         self.assertIn(
             'open directly',

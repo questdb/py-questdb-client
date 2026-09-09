@@ -179,7 +179,8 @@ Highlights:
   sign-in succeeded, wrote nothing, and the whole device flow ran again on
   every start. The check runs before any device code is shown, and a provider
   with no token store is unaffected. Transient write failures (a full disk, an
-  NFS blip) still warn and keep the in-process credential working.
+  NFS blip) warn through the ``questdb`` logger and keep the in-process
+  credential working.
 * A ``FileTokenStore`` directory beginning with ``~`` is refused rather than
   creating a directory literally named ``~`` under the working directory and
   leaving a plaintext refresh token in it.

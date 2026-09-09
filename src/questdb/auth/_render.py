@@ -606,11 +606,23 @@ def sanitize_display_text(text: Optional[str]) -> str:
 
 
 
+def _defang_terminal_url(url: str) -> str:
+    """Keep a refused URL readable without leaving an auto-linkable scheme."""
+    if url.startswith('https://'):
+        return 'https[:]//' + url[len('https://'):]
+    if url.startswith('http://'):
+        return 'http[:]//' + url[len('http://'):]
+    return url
+
+
 def format_prompt(resp: Dict[str, Any]) -> str:
     """Plain-text sign-in prompt (also used as the notebook fallback)."""
     # _display_url shows the IDNA/punycode host (and drops userinfo) so a
     # homoglyph / user@host can't spoof the host in the plain-text prompt either.
     uri = _display_url(_verification_uri(resp))
+    if (_native_adjudicated(resp)
+            and _verification_target(resp) is None):
+        uri = _defang_terminal_url(uri)
     code = _strip_control(str(resp.get('user_code') or ''))
     # Only offer the pre-filled "open directly" URL when it shares the shown
     # link's origin (see _matched_complete); a complete on a different host is

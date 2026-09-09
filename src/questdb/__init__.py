@@ -207,15 +207,22 @@ def connect(
             error_handler=error_handler,
             error_event_inbox_capacity=error_event_inbox_capacity)
     except QuestDBError as e:
+        # Preserve structured OIDC failures even if untrusted IdP text happens
+        # to resemble the native config parser's duplicate-key diagnostic.
+        from questdb.auth._errors import OidcError
+        if isinstance(e, OidcError):
+            raise
         # The native parser reports a keyword/string conflict as a
         # duplicate key at a position in the merged string the caller
-        # never wrote; rephrase it like Sender.from_conf does.
-        msg = str(e)
-        for key in params:
-            if f'duplicate key "{key}"' in msg:
-                raise ValueError(
-                    f'"{key}" is already present in the conf_str '
-                    'and cannot be overridden.') from None
+        # never wrote; rephrase it like Sender.from_conf does. Restrict the
+        # text match to parser-classified configuration errors.
+        if e.code == QuestDBErrorCode.ConfigError:
+            msg = str(e)
+            for key in params:
+                if f'duplicate key "{key}"' in msg:
+                    raise ValueError(
+                        f'"{key}" is already present in the conf_str '
+                        'and cannot be overridden.') from None
         raise
 
 

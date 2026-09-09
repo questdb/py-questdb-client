@@ -6009,6 +6009,7 @@ cdef void_int _direct_dataframe_run(
     cdef double remaining = 0.0
     cdef bint committed_prefix = False
     cdef bint nonreplayable_consumed = False
+    cdef bint oidc_terminal_probe_used = False
     cdef object validated_overrides = _validate_schema_overrides(
         schema_overrides)
     if max_rows_per_batch <= 0:
@@ -6083,9 +6084,18 @@ cdef void_int _direct_dataframe_run(
             # no such reason to wait -- retrying re-polls a provider that is
             # documented never to prompt, so the call would stall for the whole
             # reconnect budget (300s by default) only to raise the same error.
-            # Fail fast and let the caller run sign_in().
+            # Usually fail fast and let the caller run sign_in(). One immediate
+            # probe closes the race where the error was produced while a peer
+            # sign-in held the lock but Python observes that lock only after it
+            # has completed. If nobody signed in, the second identical failure
+            # is terminal instead of burning the reconnect budget.
             if _is_oidc_terminal_for_foreground(exc, oidc_auth):
-                raise
+                if (oidc_terminal_probe_used or exc.in_doubt
+                        or committed_prefix or nonreplayable_consumed):
+                    raise
+                oidc_terminal_probe_used = True
+                budget_ms = 0
+                continue
             # FailoverRetry = transient flush/sync; SocketError = a
             # re-borrow that has not reached a live primary yet.
             if exc.code not in (

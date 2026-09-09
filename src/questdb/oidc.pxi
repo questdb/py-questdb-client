@@ -416,6 +416,31 @@ cdef void _oidc_event_dispatch(
         logging.getLogger('questdb').exception('OIDC renderer callback failed')
 
 
+cdef void _oidc_diagnostic_dispatch(
+        const questdb_oidc_diagnostic* diagnostic) noexcept with gil:
+    try:
+        if diagnostic.kind == QUESTDB_OIDC_DIAGNOSTIC_PERSISTENCE_WARNING:
+            logging.getLogger('questdb').warning(
+                'OIDC %s',
+                _oidc_text(diagnostic.message, diagnostic.message_len) or
+                'token-store persistence operation failed')
+    except BaseException:
+        # Logging handlers are user code. Diagnostics are best-effort and must
+        # never unwind through C/Rust or turn a usable token into a failure.
+        pass
+
+
+cdef void _oidc_diagnostic_trampoline(
+        void* user_data,
+        const questdb_oidc_diagnostic* diagnostic) noexcept nogil:
+    # This dedicated callback, unlike renderer events, may originate on an
+    # attached transport's provider thread. It invokes no user renderer and
+    # drops diagnostics once interpreter finalization has begun.
+    if qdb_py_is_finalizing():
+        return
+    _oidc_diagnostic_dispatch(diagnostic)
+
+
 cdef void _oidc_event_trampoline(
         void* user_data,
         const questdb_oidc_event* event) noexcept nogil:
@@ -960,6 +985,16 @@ cdef class OidcDeviceAuth:
                     _oidc_event_trampoline,
                     <void*>provider_id,
                     _oidc_user_data_release_trampoline,
+                    &err):
+                raise _oidc_err_to_py(err)
+            # Persistence warnings use a separate stateless callback because
+            # they can originate on background provider threads. They never
+            # enter the user renderer or retain this Python object.
+            if not questdb_oidc_builder_diagnostic_handler(
+                    builder,
+                    _oidc_diagnostic_trampoline,
+                    NULL,
+                    NULL,
                     &err):
                 raise _oidc_err_to_py(err)
             _ensure_doesnt_have_gil(&gs)

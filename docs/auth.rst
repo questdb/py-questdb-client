@@ -193,7 +193,9 @@ Both are rejected rather than silently resolved. A path passed straight to
 ``FileTokenStore(...)`` is a Python path, not the shared setting, and is
 expanded and absolutised as usual. The native client writes plaintext JSON using atomic replacement and
 cross-process coordination; on POSIX, directories are mode ``0700`` and files
-mode ``0600``. Enabling it stores a long-lived refresh token on disk, so use it
+mode ``0600``. A best-effort save or automatic-clear failure is logged at
+``WARNING`` on the ``questdb`` logger while the usable in-memory credential is
+preserved. Enabling persistence stores a long-lived refresh token on disk, so use it
 only when that at-rest tradeoff is acceptable. Custom Python token stores are
 not supported by the native provider.
 

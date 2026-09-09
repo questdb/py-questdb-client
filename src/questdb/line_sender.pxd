@@ -943,6 +943,20 @@ cdef extern from "questdb/oidc.h":
         void* user_data
         ) noexcept nogil
 
+    cdef enum questdb_oidc_diagnostic_kind:
+        QUESTDB_OIDC_DIAGNOSTIC_PERSISTENCE_WARNING
+
+    cdef struct questdb_oidc_diagnostic:
+        size_t struct_size
+        questdb_oidc_diagnostic_kind kind
+        const char* message
+        size_t message_len
+
+    ctypedef void (*questdb_oidc_diagnostic_cb)(
+        void* user_data,
+        const questdb_oidc_diagnostic* diagnostic
+        ) noexcept nogil
+
     questdb_oidc_builder* questdb_oidc_builder_new() noexcept nogil
 
     questdb_oidc_builder* questdb_oidc_builder_from_questdb(
@@ -1055,6 +1069,14 @@ cdef extern from "questdb/oidc.h":
     bint questdb_oidc_builder_event_handler(
         questdb_oidc_builder* builder,
         questdb_oidc_event_cb callback,
+        void* user_data,
+        questdb_oidc_user_data_release_cb release,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    bint questdb_oidc_builder_diagnostic_handler(
+        questdb_oidc_builder* builder,
+        questdb_oidc_diagnostic_cb callback,
         void* user_data,
         questdb_oidc_user_data_release_cb release,
         questdb_error** err_out
