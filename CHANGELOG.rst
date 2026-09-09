@@ -147,10 +147,11 @@ Highlights:
   auth-specific handling.
 * OIDC discovery, endpoint validation, token selection, caching, refresh, and
   concurrency control use the same native implementation as the C/C++ clients.
-* OIDC scopes are preserved exactly in groups mode and refresh requests,
-  matching the Java client's token requests and persisted token-store identity.
-  Include ``openid`` explicitly when the identity provider requires it to issue
-  an ID token.
+* OIDC scopes are preserved exactly for groups-mode token selection and the
+  persisted token-store identity. Refresh requests intentionally omit ``scope``,
+  matching the Java client, so the identity provider preserves the scope that
+  was originally granted. Include ``openid`` explicitly when the identity
+  provider requires it to issue an ID token.
 * OIDC device-flow polling tolerates transient transport failures until the
   device code expires, matching the Java client. When no poll ever reached the
   token endpoint, the expiry reports that transport failure instead of

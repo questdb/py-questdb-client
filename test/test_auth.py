@@ -1910,14 +1910,22 @@ class NativeOidcIntegrationTest(unittest.TestCase):
 
     def test_expired_device_code_maps_to_timeout_with_idp_error(self):
         # `expired_token` maps to OidcTimeoutError (a OidcDeviceFlowError), and
-        # the native-attached IdP error must be carried through, not dropped.
-        with OidcTestServer(device_token_response=(
-                400, {'error': 'expired_token'}, None)) as server:
+        # every native-attached IdP diagnostic must be carried through. This
+        # special timeout branch used to drop description and HTTP status even
+        # though the general device-flow error branch preserved both.
+        with OidcTestServer(device_token_response=(400, {
+                'error': 'expired_token',
+                'error_description': 'The device code is no longer valid.'},
+                None)) as server:
             auth = make_discovered_auth(server)
             with self.assertRaises(OidcTimeoutError) as ctx:
                 auth.sign_in()
         self.assertIsInstance(ctx.exception, OidcDeviceFlowError)
         self.assertEqual(ctx.exception.error, 'expired_token')
+        self.assertEqual(
+            ctx.exception.error_description,
+            'The device code is no longer valid.')
+        self.assertEqual(ctx.exception.status, 400)
 
     def test_transient_refresh_error_maps_to_network_with_retry_after(self):
         # A transient status on the refresh call maps to OidcNetworkError with
