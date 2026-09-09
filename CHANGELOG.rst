@@ -152,7 +152,16 @@ Highlights:
   Include ``openid`` explicitly when the identity provider requires it to issue
   an ID token.
 * OIDC device-flow polling tolerates transient transport failures until the
-  device code expires, matching the Java client.
+  device code expires, matching the Java client. When no poll ever reached the
+  token endpoint, the expiry reports that transport failure instead of
+  ``expired_token``'s "you did not authorize in time", so a misconfigured or
+  firewalled ``token_endpoint`` is named rather than blamed on the user. The
+  error class and the ``expired_token`` tag are unchanged.
+* A refresh token that is not printable ASCII is rejected when the identity
+  provider returns it, rather than being cached, persisted, and then silently
+  dropped by the stricter check applied when the store is read back — which
+  left the credential unusable after a restart while the plaintext file stayed
+  on disk.
 * OIDC prompt callbacks expose the bounded device-code lifetime and polling
   interval, matching the complete Java device challenge.
 * Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes owner-only
@@ -161,6 +170,18 @@ Highlights:
   ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` environment variable, shared with the
   native client. Custom Python token stores are not supported by the native
   provider.
+* :meth:`~questdb.auth.OidcDeviceAuth.sign_in` fails up front when the
+  configured token store cannot hold a credential — a directory whose
+  owner-only permissions cannot be enforced, as on WSL ``drvfs`` without
+  ``metadata``, CIFS/SMB with a fixed ``file_mode``, or vfat/exFAT. Persistence
+  is opt-in, so this is reported rather than silently skipped; previously the
+  sign-in succeeded, wrote nothing, and the whole device flow ran again on
+  every start. The check runs before any device code is shown, and a provider
+  with no token store is unaffected. Transient write failures (a full disk, an
+  NFS blip) still warn and keep the in-process credential working.
+* A ``FileTokenStore`` directory beginning with ``~`` is refused rather than
+  creating a directory literally named ``~`` under the working directory and
+  leaving a plaintext refresh token in it.
 * Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
   :func:`~questdb.auth.psycopg_connect`) that wire the token into PG-wire as the
   ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
