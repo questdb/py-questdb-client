@@ -937,9 +937,11 @@ cdef class OidcDeviceAuth:
         self._native = native
         # The registry keeps only a weakref, so it never keeps a provider alive
         # and a `with` block's exit still collects one. The provider owns the
-        # renderer, so provider/renderer cycles stay fully visible to Python's
-        # cyclic GC. Attached transports retain the provider separately, and
-        # native holds its own cloned handle on top of that.
+        # renderer. Cython exposes that edge to CPython's cyclic GC; PyPy's
+        # cpyext cannot reclaim a cycle crossing the extension-object boundary
+        # (PyPy issue #3848), so callers there should explicitly close or use a
+        # weak renderer back-reference. Attached transports retain the provider
+        # separately, and native holds its own cloned handle on top of that.
         try:
             from functools import partial
             provider_ref = PyWeakref_NewRef(
