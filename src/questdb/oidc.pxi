@@ -436,6 +436,19 @@ cdef void _oidc_diagnostic_trampoline(
     # This dedicated callback, unlike renderer events, may originate on an
     # attached transport's provider thread. It invokes no user renderer and
     # drops diagnostics once interpreter finalization has begun.
+    #
+    # Being background-dispatched, it cannot borrow the foreground-only
+    # argument that makes `_oidc_event_trampoline` safe. It is instead the
+    # same shape `_connection_event_trampoline` and `_sender_error_trampoline`
+    # in `_client.pyx` already use for genuinely background dispatch, and it
+    # inherits their residual window: finalization can begin between this
+    # check and the GIL acquisition below, and no check can close that.
+    # Ordering the two needs a native call that disables diagnostics under the
+    # FFI's own invocation mutex, driven from an atexit hook over the provider
+    # registry -- which would close the same window for those two as well.
+    #
+    # It is narrower than both in one respect: `user_data` is NULL, so nothing
+    # here dereferences a Python object from a native thread.
     if qdb_py_is_finalizing():
         return
     _oidc_diagnostic_dispatch(diagnostic)
@@ -990,13 +1003,22 @@ cdef class OidcDeviceAuth:
             # Persistence warnings use a separate stateless callback because
             # they can originate on background provider threads. They never
             # enter the user renderer or retain this Python object.
-            if not questdb_oidc_builder_diagnostic_handler(
-                    builder,
-                    _oidc_diagnostic_trampoline,
-                    NULL,
-                    NULL,
-                    &err):
-                raise _oidc_err_to_py(err)
+            #
+            # Installed only alongside a token store. Every native
+            # `warn_persistence` site sits behind a store gate, so a provider
+            # without one emits no diagnostic and the handler would be nothing
+            # but added interpreter-shutdown surface -- see the trampoline's
+            # note on the finalization window it inherits. Native's default
+            # stderr handler stays registered in that case and is equally
+            # unreachable, so nothing escapes the `questdb` logger.
+            if token_store is not None:
+                if not questdb_oidc_builder_diagnostic_handler(
+                        builder,
+                        _oidc_diagnostic_trampoline,
+                        NULL,
+                        NULL,
+                        &err):
+                    raise _oidc_err_to_py(err)
             _ensure_doesnt_have_gil(&gs)
             native.raw = questdb_oidc_builder_build(builder, &err)
             _ensure_has_gil(&gs)
