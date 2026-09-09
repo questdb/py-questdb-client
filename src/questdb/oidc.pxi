@@ -338,25 +338,22 @@ cdef inline void _oidc_validate_bool(
     raise OidcConfigError(f'{name} must be a bool')
 
 
-cdef void _oidc_cancel_from_callback(OidcDeviceAuth provider) noexcept:
-    """Publish the provider's close from inside its own event callback.
+cdef void _oidc_cancel_sign_in_from_callback(
+        OidcDeviceAuth provider) noexcept:
+    """Cancel only this device flow from inside its event callback.
 
-    Native splits close into a signal that does not wait for authentication work
-    and a drain, and skips only the drain while a callback is running. Publication
-    may briefly contend with wait registration, but cannot wait on this callback's
-    authentication critical section or trip the callback-reentry guard. Errors
-    are swallowed deliberately: this runs on the interrupt path, where the
-    pending ``KeyboardInterrupt`` is the thing worth surfacing.
+    Native's attempt-scoped signal wakes the poll wait without taking the
+    authentication lock held around this callback. It does not close the shared
+    provider, discard credentials, or disable attached transports. Errors are
+    swallowed deliberately: this runs on the interrupt path, where the pending
+    ``KeyboardInterrupt`` or ``SystemExit`` is the thing worth surfacing.
     """
     cdef questdb_error* err = NULL
     if provider._raw == NULL:
         return
-    if not questdb_oidc_auth_close(provider._raw, &err):
+    if not questdb_oidc_auth_cancel_sign_in(provider._raw, &err):
         if err != NULL:
             questdb_error_free(err)
-        return
-    provider._closed = True
-    provider._renderer = None
 
 
 cdef void _oidc_event_dispatch(
@@ -412,9 +409,9 @@ cdef void _oidc_event_dispatch(
         if event.kind in (
                 QUESTDB_OIDC_EVENT_PROMPT, QUESTDB_OIDC_EVENT_WAITING):
             # Only the waiting phase needs cancelling. On SUCCESS/FAILURE the
-            # flow is already ending, and closing there would discard a token
-            # that was just acquired.
-            _oidc_cancel_from_callback(<OidcDeviceAuth>provider)
+            # flow is already ending; in particular, SUCCESS has already
+            # committed the token that the interrupt must not discard.
+            _oidc_cancel_sign_in_from_callback(<OidcDeviceAuth>provider)
     except BaseException:
         logging.getLogger('questdb').exception('OIDC renderer callback failed')
 
@@ -983,30 +980,13 @@ cdef class OidcDeviceAuth:
     def sign_in(self):
         """Run interactive sign-in if no cached or refreshable token exists.
 
-        ``Ctrl-C`` during the wait cancels the flow and raises
-        ``KeyboardInterrupt``.
+        ``Ctrl-C`` during the wait cancels only this sign-in attempt and raises
+        ``KeyboardInterrupt``. The provider remains open, attached transports
+        remain usable, and a later ``sign_in()`` on the same provider can retry.
 
         Only one ``sign_in()`` call may run on a provider at a time. A concurrent
         call raises :class:`~questdb.auth.OidcError` instead of waiting behind
         the interactive flow.
-
-        .. warning::
-
-           Cancelling **closes the provider permanently**, and closing is
-           shared state: every :class:`~questdb.Sender`, :func:`questdb.connect`
-           pool and reader already attached with ``oidc_auth=`` holds a handle
-           on the same provider and is closed with it. Their next token pull
-           fails terminally -- native classifies a closed provider as
-           non-retryable, so reconnect loops stop and queued store-and-forward
-           frames are abandoned -- and there is no way to attach a replacement
-           provider to an existing handle.
-
-           So a ``Ctrl-C`` at a re-authentication prompt does not just abandon
-           that sign-in: it ends every transport built from this provider. To
-           recover, build a new ``OidcDeviceAuth`` **and** rebuild each sender,
-           pool and reader that used the old one. Where that matters, sign in
-           on a provider before attaching it and keep re-authentication on a
-           separate, unattached provider.
         """
         cdef questdb_error* err = NULL
         cdef bint ok
@@ -1036,6 +1016,30 @@ cdef class OidcDeviceAuth:
                 raise _oidc_err_to_py(err)
         finally:
             self._sign_in_lock.release()
+
+    def cancel_sign_in(self):
+        """Cancel the current interactive sign-in without closing the provider.
+
+        The active :meth:`sign_in` raises
+        :class:`~questdb.auth.OidcCancelledError`. Cached credentials are not
+        discarded, attached senders, pools and readers remain usable, and a
+        later ``sign_in()`` on this provider can succeed. If no device flow is
+        running, this is an idempotent no-op that does not affect the next one.
+
+        Safe from any thread, including a renderer callback. Use :meth:`close`
+        instead only when the provider and every attached transport should be
+        disabled permanently.
+        """
+        cdef questdb_error* err = NULL
+        cdef bint ok
+        cdef PyThreadState* gs = NULL
+        if self._raw == NULL:
+            return
+        _ensure_doesnt_have_gil(&gs)
+        ok = questdb_oidc_auth_cancel_sign_in(self._raw, &err)
+        _ensure_has_gil(&gs)
+        if not ok:
+            raise _oidc_err_to_py(err)
 
     @property
     def _sign_in_in_progress(self):
@@ -1158,9 +1162,9 @@ cdef class OidcDeviceAuth:
             self._renderer = None
             return
         # Deliberately NOT short-circuited on ``self._closed``. A close
-        # published while a renderer callback is active -- including the Ctrl-C
-        # cancel path -- marks the provider closed without draining, because the
-        # callback runs inside the very critical section the drain waits on.
+        # published while a renderer callback is active marks the provider
+        # closed without draining, because the callback runs inside the very
+        # critical section the drain waits on.
         # Skipping the native call here on that flag left the drain permanently
         # unperformed: the later ``close()`` (or ``__exit__``) that could safely
         # drain became a no-op. Native close is idempotent and cheap on an

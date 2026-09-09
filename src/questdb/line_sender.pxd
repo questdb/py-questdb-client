@@ -1074,6 +1074,11 @@ cdef extern from "questdb/oidc.h":
         questdb_oidc_auth* auth
         ) noexcept nogil
 
+    bint questdb_oidc_auth_cancel_sign_in(
+        const questdb_oidc_auth* auth,
+        questdb_error** err_out
+        ) noexcept nogil
+
     bint questdb_oidc_auth_close(
         const questdb_oidc_auth* auth,
         questdb_error** err_out

@@ -199,10 +199,11 @@ Highlights:
   :class:`~questdb.auth.OidcCancelledError`, except
   :meth:`~questdb.auth.OidcDeviceAuth.clear`, which stays available so the
   persisted credential can still be removed, and ``config``, which remains
-  readable. ``Ctrl-C`` during ``sign_in()`` cancels the flow and raises
-  ``KeyboardInterrupt`` — note that cancelling closes the provider, and closing
-  is shared state, so every ``Sender``, pool and reader already attached with
-  ``oidc_auth=`` is closed with it and must be rebuilt alongside a new provider.
+  readable. ``Ctrl-C`` during ``sign_in()`` cancels only the current attempt and
+  raises ``KeyboardInterrupt``; the provider remains open, already-attached
+  ``Sender``/pool/reader instances remain usable, and a later ``sign_in()`` can
+  retry on the same provider. Custom UIs can invoke the new attempt-scoped
+  ``cancel_sign_in()`` method directly. Only ``close()`` is permanent.
 * Renderer prompts receive the device code's bounded lifetime and polling
   interval (``expires_in`` / ``interval``) plus ``browser_target``, the single
   natively vetted URL that built-in renderers use for links and QR codes.
@@ -234,9 +235,9 @@ needs no further qualification. ``CredentialUnavailable`` sets ``host`` and
   call such as :meth:`questdb.QuestDB.dataframe` fails fast.
 * ``AuthError`` / ``ConfigError`` — the provider cannot recover in this
   process, so the reconnect is **terminal** and the sender stops. Reached by a
-  permanently closed provider (``close()`` is one-way, and ``Ctrl-C`` during
-  ``sign_in()`` takes that path) and by a scope that cannot yield the required
-  token kind. Queued rows are not deleted — a disk-backed store-and-forward
+  permanently closed provider (``close()`` is one-way; cancelling one
+  ``sign_in()`` attempt does not close it) and by a scope that cannot yield the
+  required token kind. Queued rows are not deleted — a disk-backed store-and-forward
   slot stays drainable by a later process — but this process will not send
   them.
 

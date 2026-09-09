@@ -147,7 +147,7 @@ class OidcInteractionRequired(OidcError):
 
 
 class OidcCancelledError(OidcError):
-    """An OIDC operation was cancelled because its provider was closed."""
+    """A sign-in attempt was cancelled, or its provider was closed permanently."""
 
 
 class OidcDeviceFlowError(OidcError):

@@ -281,13 +281,13 @@ Security notes
   and hostnames such as ``localhost`` default to ``sslmode="verify-full"``.
   Numeric loopback IPs use ``prefer`` to support local servers without TLS. See
   :ref:`the PG-wire section <oidc_pgwire>`.
-* ``Ctrl-C`` during :meth:`~questdb.auth.OidcDeviceAuth.sign_in` closes the
-  provider permanently, and closing is shared: every ``Sender``,
-  :func:`questdb.connect` pool and reader attached with ``oidc_auth=`` is closed
-  with it and cannot be revived. Recovering means building a new provider *and*
-  rebuilding every transport that used the old one. Where a long-running
-  ingestion must survive a cancelled re-authentication, keep the interactive
-  provider separate from the one you attach.
+* ``Ctrl-C`` during :meth:`~questdb.auth.OidcDeviceAuth.sign_in` cancels only
+  the current attempt and raises ``KeyboardInterrupt``. The provider remains
+  open, every attached ``Sender``, :func:`questdb.connect` pool and reader stays
+  usable, and a later ``sign_in()`` on the same provider can retry. A custom UI
+  can provide the same non-destructive behaviour through
+  :meth:`~questdb.auth.OidcDeviceAuth.cancel_sign_in`. Use
+  :meth:`~questdb.auth.OidcDeviceAuth.close` only for permanent shutdown.
 
 Optional dependencies
 =====================

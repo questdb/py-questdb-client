@@ -125,6 +125,9 @@ class OidcDeviceAuth:
     def sign_in(self) -> None:
         """Run the interactive device flow when sign-in is required."""
 
+    def cancel_sign_in(self) -> None:
+        """Cancel the current sign-in attempt without closing the provider."""
+
     def token(self) -> str:
         """Return a cached or silently refreshed token; never prompt."""
 

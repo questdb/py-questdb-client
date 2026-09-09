@@ -2324,10 +2324,10 @@ class ConnectionEventKind(TaggedEnum):
     #:   because a credential problem there is the caller's to see.
     #: * ``AuthError`` or ``ConfigError`` — the provider cannot recover in
     #:   this process, so the reconnect is **terminal** and the sender stops.
-    #:   Reached by a permanently closed provider (:meth:`~questdb.auth.OidcDeviceAuth.close`
-    #:   is one-way, and ``Ctrl-C`` during
-    #:   :meth:`~questdb.auth.OidcDeviceAuth.sign_in` takes that path) and by a
-    #:   scope that cannot yield the required token kind, such as
+    #:   Reached by a permanently closed provider
+    #:   (:meth:`~questdb.auth.OidcDeviceAuth.close` is one-way; cancelling one
+    #:   :meth:`~questdb.auth.OidcDeviceAuth.sign_in` attempt does not close it)
+    #:   and by a scope that cannot yield the required token kind, such as
     #:   ``groups_in_token=True`` against an identity provider that returns no
     #:   ID token. Queued rows are not deleted — a disk-backed
     #:   store-and-forward slot stays drainable by a later process — but this

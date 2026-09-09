@@ -683,12 +683,12 @@ class Renderer:
     same instance's :meth:`~questdb.auth.OidcDeviceAuth.sign_in`,
     :meth:`~questdb.auth.OidcDeviceAuth.token` or
     :meth:`~questdb.auth.OidcDeviceAuth.clear` — each raises rather than
-    deadlocking. :meth:`~questdb.auth.OidcDeviceAuth.close` is the exception and
-    is safe here: it is how a renderer offers a "cancel" affordance, and how
-    another thread aborts a running device flow. Called from inside a callback
-    it publishes the close and drops the in-memory credential, but returns
-    without waiting for the flow to leave the critical section — waiting there
-    would deadlock against the callback itself.
+    deadlocking. :meth:`~questdb.auth.OidcDeviceAuth.cancel_sign_in` is the
+    exception intended for a renderer's "cancel" affordance: it aborts only the
+    current device flow and leaves the provider and attached transports usable.
+    :meth:`~questdb.auth.OidcDeviceAuth.close` is also callback-safe, but is the
+    permanent lifecycle operation: it disables the shared provider and every
+    attached transport.
 
     The rejection applies to any thread, not only the callback's own, because a
     callback may hand work to another thread and wait for it — so a blocking
@@ -701,9 +701,10 @@ class Renderer:
 
     Callbacks are best-effort: an exception raised by one is logged and never
     aborts an otherwise-successful sign-in. ``KeyboardInterrupt`` and
-    ``SystemExit`` are the exceptions to *that* — they cancel the flow and are
-    re-raised from :meth:`~questdb.auth.OidcDeviceAuth.sign_in`, so Ctrl-C
-    works.
+    ``SystemExit`` are the exceptions to *that* — they cancel only the current
+    flow and are re-raised from
+    :meth:`~questdb.auth.OidcDeviceAuth.sign_in`, so Ctrl-C works without
+    closing the provider.
     """
 
     def on_prompt(self, resp: Dict[str, Any]) -> None:

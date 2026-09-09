@@ -1393,14 +1393,35 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 device_token_response=pending, device_expires_in=20) as server:
             auth = make_discovered_auth(
                 server, renderer=InterruptingRenderer())
-            started = time.monotonic()
-            with self.assertRaises(KeyboardInterrupt):
+            # Attach before the interruption: the regression was specifically
+            # that cancelling a re-auth killed every pre-existing transport.
+            sender = questdb.Sender.from_conf(
+                f'http::addr=127.0.0.1:{server.port};',
+                oidc_auth=auth, auto_flush=False)
+            try:
+                started = time.monotonic()
+                with self.assertRaises(KeyboardInterrupt):
+                    auth.sign_in()
+                # Promptly, not after the device code expires.
+                self.assertLess(time.monotonic() - started, 10)
+                # The attempt ended, not the provider. With no token yet an
+                # attached consumer sees the ordinary recoverable condition.
+                with self.assertRaises(OidcInteractionRequired):
+                    auth.token()
+
+                # Authorize a retry on the SAME provider. It succeeds, and the
+                # sender attached before Ctrl-C can still authenticate and send.
+                server.device_token_response = None
                 auth.sign_in()
-            # Promptly, not after the device code expires.
-            self.assertLess(time.monotonic() - started, 10)
-        # The interrupt cancels the flow, which closes the provider.
-        with self.assertRaisesRegex(OidcCancelledError, 'closed'):
-            auth.token()
+                self.assertEqual(auth.token(), server.initial_access_token)
+                sender.establish()
+                sender.row(
+                    'after_cancel', columns={'value': 1},
+                    at=questdb.ServerTimestamp)
+                sender.flush()
+            finally:
+                sender.close(flush=False)
+        self.assertEqual(len(server.requests('/write', 'POST')), 1)
 
     def test_system_exit_in_renderer_aborts_sign_in(self):
         # The dispatch parks `(KeyboardInterrupt, SystemExit)`, but only the
@@ -1424,7 +1445,9 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             # The original exception is re-raised, not a fresh one.
             self.assertEqual(ctx.exception.code, 3)
             self.assertLess(time.monotonic() - started, 10)
-        with self.assertRaisesRegex(OidcCancelledError, 'closed'):
+        # SystemExit cancels only this attempt, just like KeyboardInterrupt.
+        # The provider remains open and reports the recoverable no-token state.
+        with self.assertRaises(OidcInteractionRequired):
             auth.token()
 
     def test_concurrent_sign_in_cannot_steal_callback_interrupt(self):
@@ -1478,13 +1501,43 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertIsInstance(second_result[0], OidcError)
         self.assertIn('already in progress', str(second_result[0]))
 
+    def test_renderer_can_cancel_sign_in_without_closing_provider(self):
+        outcome = []
+        holder = []
+
+        class CancellingRenderer(RecordingRenderer):
+            def on_waiting(self, seconds_left):
+                super().on_waiting(seconds_left)
+                try:
+                    holder[0].cancel_sign_in()
+                    outcome.append('cancelled')
+                except BaseException as exc:  # noqa: BLE001
+                    outcome.append(exc)
+
+        pending = (400, {'error': 'authorization_pending'}, None)
+        with OidcTestServer(
+                device_token_response=pending, device_expires_in=20) as server:
+            auth = make_discovered_auth(server, renderer=CancellingRenderer())
+            holder.append(auth)
+            started = time.monotonic()
+            with self.assertRaises(OidcCancelledError):
+                auth.sign_in()
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertEqual(outcome[:1], ['cancelled'])
+            with self.assertRaises(OidcInteractionRequired):
+                auth.token()
+
+            # Calling cancel while idle must not poison the next attempt.
+            auth.cancel_sign_in()
+            server.device_token_response = None
+            auth.sign_in()
+            self.assertEqual(auth.token(), server.initial_access_token)
+
     def test_renderer_can_close_the_provider_from_its_callback(self):
-        # close() is the only cancellation lever a renderer has -- a notebook
-        # "Cancel" button in on_waiting has nothing else to call. The native
-        # callback-reentry guard used to reject it, so the affordance could not
-        # be built at all. Native now publishes the close without waiting for
-        # the authentication critical section and skips only the drain, so this
-        # must succeed.
+        # Permanent close remains callback-safe for renderers that explicitly
+        # want to disable this provider and all attached transports. Native
+        # publishes the close without waiting for the authentication critical
+        # section and skips only the drain, so this must not deadlock.
         outcome = []
         holder = []
 
