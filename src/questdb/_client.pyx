@@ -560,12 +560,20 @@ cdef inline bint _is_oidc_terminal_for_foreground(object exc, object oidc_auth):
     ``ConfigError`` (or ``AuthError`` when raised on the Python side) and is
     terminal there.
 
-    Resolved through ``sys.modules`` instead of an import: if ``questdb.auth``
-    was never imported then no OIDC error can exist, so this costs one dict
-    lookup on the ordinary error path, and it cannot re-enter the import of the
-    very module that imports this extension.
+    Resolved without importing: if ``questdb.auth`` was never imported then no
+    OIDC error can exist, so this costs one dict lookup on the ordinary error
+    path, and it cannot re-enter the import of the very module that imports
+    this extension.
+
+    It goes through ``_oidc_errors_module_if_ready`` rather than reading
+    ``sys.modules`` directly so that the class this tests against is the same
+    object the exception was built from. Two independent lookups can disagree
+    after any ``sys.modules`` swap -- leaving ``isinstance`` permanently False
+    and this gate silently disabled -- and a direct read can also observe the
+    module mid-import, where ``OidcInteractionRequired`` does not exist yet and
+    the attribute access would raise over the error being reported.
     """
-    cdef object mod = sys.modules.get('questdb.auth._errors')
+    cdef object mod = _oidc_errors_module_if_ready()
     if mod is None:
         return False
     if not isinstance(exc, mod.OidcInteractionRequired):

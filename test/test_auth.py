@@ -58,6 +58,7 @@ from questdb.auth import (
     OidcTimeoutError,
     Renderer,
 )
+from questdb import _client
 from questdb._client import _debug_oidc_registry_size
 from questdb.auth import _adapters
 from questdb.auth import _render
@@ -3287,6 +3288,53 @@ class AdapterTest(unittest.TestCase):
                     _adapters.sqlalchemy_engine(auth, url)
             auth.token.assert_not_called()
             sqlalchemy.create_engine.assert_not_called()
+
+
+
+class OidcReviewFixTest(unittest.TestCase):
+    def test_half_built_errors_module_is_treated_as_absent(self):
+        # CPython publishes a module in `sys.modules` before running its body,
+        # and `questdb/auth/_errors.py` imports `._render` and
+        # `questdb._client` before defining a single class. Reading
+        # `mod.OidcError` off a module observed in that window raises
+        # AttributeError *over* the failure being reported, defeating every
+        # `except QuestDBError` handler -- the exact substitution the untyped
+        # fallback exists to prevent. A half-built module must count as absent
+        # and must not be cached.
+        half_built = types.ModuleType('questdb.auth._errors')
+        self.assertFalse(hasattr(half_built, 'OidcError'))
+        try:
+            _client._debug_oidc_reset_errors_module()
+            with mock.patch.dict(
+                    sys.modules,
+                    {'questdb.auth._errors': half_built}):
+                self.assertFalse(_client._debug_oidc_errors_module_ready())
+                # The importing resolver must not "fix" it by re-importing:
+                # that returns the same partial object out of `sys.modules`.
+                self.assertFalse(_client._debug_oidc_errors_module_resolved())
+            # Nothing was cached, so the finished module is picked up now.
+            self.assertTrue(_client._debug_oidc_errors_module_resolved())
+            self.assertTrue(_client._debug_oidc_errors_module_ready())
+        finally:
+            _client._debug_oidc_reset_errors_module()
+
+    def test_foreground_gate_shares_the_error_class_identity(self):
+        # The gate used to resolve `OidcInteractionRequired` through its own
+        # `sys.modules` lookup while the exception was built from the cached
+        # module. Two independent lookups disagree after any `sys.modules`
+        # swap, leaving `isinstance` permanently False and the gate silently
+        # disabled. Both now go through one resolver, so a swapped-in module
+        # missing the classes is reported as absent rather than mismatched.
+        _client._debug_oidc_reset_errors_module()
+        try:
+            self.assertTrue(_client._debug_oidc_errors_module_resolved())
+            import questdb.auth._errors as errors
+            exc = errors.OidcInteractionRequired('needs sign-in')
+            # Sanity: the resolver hands back the module the class came from.
+            self.assertIs(sys.modules['questdb.auth._errors'], errors)
+            self.assertIsInstance(exc, errors.OidcInteractionRequired)
+        finally:
+            _client._debug_oidc_reset_errors_module()
 
 
 if __name__ == '__main__':

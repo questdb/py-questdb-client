@@ -75,6 +75,22 @@ def _debug_oidc_registry_size():
     return len(_OIDC_PROVIDERS)
 
 
+def _debug_oidc_reset_errors_module():
+    """Internal test hook: drop the cached ``questdb.auth._errors`` module."""
+    global _OIDC_ERRORS_MOD
+    _OIDC_ERRORS_MOD = None
+
+
+def _debug_oidc_errors_module_ready():
+    """Internal test hook: does the non-importing resolver find a usable module?"""
+    return _oidc_errors_module_if_ready() is not None
+
+
+def _debug_oidc_errors_module_resolved():
+    """Internal test hook: does the importing resolver find a usable module?"""
+    return _oidc_errors_module() is not None
+
+
 def _oidc_provider_collected(size_t provider_id, object provider_ref):
     """Drop the registry bookkeeping for a collected provider.
 
@@ -103,6 +119,37 @@ cdef inline object _oidc_text(const char* buf, size_t length):
 cdef object _OIDC_ERRORS_MOD = None
 
 
+cdef object _oidc_errors_module_if_ready():
+    """``questdb.auth._errors`` if it is already imported and usable, else None.
+
+    Never imports, so a caller on the ordinary (non-OIDC) error path pays one
+    dict lookup and nothing else.
+
+    A module is published in ``sys.modules`` *before* its body runs, and
+    ``_errors.py`` imports ``._render`` and ``questdb._client`` before defining
+    a single class. A concurrent first import -- or a re-entrant one reached
+    from this very error path -- therefore hands back a module object with none
+    of the ``Oidc*`` attributes on it, and reading one raises ``AttributeError``
+    *over* the failure being reported, defeating every ``except QuestDBError``
+    handler. That is precisely the substitution the untyped fallback exists to
+    prevent, so a half-built module counts as absent and is deliberately not
+    cached: a later call gets the finished one.
+
+    This is also the single source of class identity for the whole extension.
+    Resolving the classes here but testing ``isinstance`` against a separate
+    ``sys.modules`` lookup elsewhere would let the two disagree after any
+    ``sys.modules`` swap, silently disabling the check that used the other.
+    """
+    global _OIDC_ERRORS_MOD
+    if _OIDC_ERRORS_MOD is not None:
+        return _OIDC_ERRORS_MOD
+    mod = sys.modules.get('questdb.auth._errors')
+    if mod is None or getattr(mod, 'OidcError', None) is None:
+        return None
+    _OIDC_ERRORS_MOD = mod
+    return mod
+
+
 cdef object _oidc_errors_module():
     """The ``questdb.auth._errors`` module, or None if it cannot be reached.
 
@@ -122,16 +169,22 @@ cdef object _oidc_errors_module():
     ``_oidc_err_to_py_unowned`` falls back to a plain ``QuestDBError`` carrying
     the same native message and code, which is strictly better than that.
     """
-    global _OIDC_ERRORS_MOD
-    if _OIDC_ERRORS_MOD is None:
-        mod = sys.modules.get('questdb.auth._errors')
-        if mod is None:
-            try:
-                import questdb.auth._errors as mod
-            except BaseException:
-                return None
-        _OIDC_ERRORS_MOD = mod
-    return _OIDC_ERRORS_MOD
+    mod = _oidc_errors_module_if_ready()
+    if mod is not None:
+        return mod
+    if 'questdb.auth._errors' in sys.modules:
+        # Present but half-built (see `_oidc_errors_module_if_ready`). Importing
+        # again just returns the same partial object out of `sys.modules`, so
+        # there is nothing to gain and a re-entrant import to risk.
+        return None
+    try:
+        import questdb.auth._errors as mod
+    except BaseException:
+        return None
+    if getattr(mod, 'OidcError', None) is None:
+        return None
+    _OIDC_ERRORS_MOD = mod
+    return mod
 
 
 cdef object _oidc_err_to_py_unowned(questdb_error* err):
