@@ -3290,8 +3290,30 @@ class AdapterTest(unittest.TestCase):
             sqlalchemy.create_engine.assert_not_called()
 
 
+# A JWT (unsigned; native does not verify) whose payload carries only `sub`.
+# `{}` header, `{"sub":"alice@example.com"}` payload.
+ACCESS_TOKEN_WITH_SUB = 'e30.eyJzdWIiOiJhbGljZUBleGFtcGxlLmNvbSJ9.'
+
 
 class OidcReviewFixTest(unittest.TestCase):
+    def test_success_event_carries_the_jwt_subject_as_identity(self):
+        # `on_success`'s first argument is `event.identity`, which native fills
+        # from the served token's `sub` claim. Every other test serves the
+        # opaque 'AT-initial', so `sub` is absent and `identity` is NULL --
+        # which left `assertIsNone` as the only assertion this field ever got,
+        # and a regression reading `event.message` (also NULL on SUCCESS) in
+        # its place would have passed unchanged.
+        renderer = RecordingRenderer()
+        with OidcTestServer(
+                initial_access_token=ACCESS_TOKEN_WITH_SUB) as server:
+            auth = make_discovered_auth(server, renderer=renderer)
+            auth.sign_in()
+            self.assertEqual(auth.token(), ACCESS_TOKEN_WITH_SUB)
+        self.assertEqual(len(renderer.successes), 1)
+        self.assertEqual(renderer.successes[0][0], 'alice@example.com')
+        self.assertGreater(renderer.successes[0][1], 0)
+        self.assertEqual(renderer.failures, [])
+
     def test_half_built_errors_module_is_treated_as_absent(self):
         # CPython publishes a module in `sys.modules` before running its body,
         # and `questdb/auth/_errors.py` imports `._render` and
