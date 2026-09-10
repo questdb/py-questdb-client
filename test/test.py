@@ -59,6 +59,7 @@ from test_auth import (
     NativeOidcIntegrationTest,
     NativeOidcTest,
     NativeTransportAttachmentTest,
+    OidcReviewFixTest,
     ProviderCycleSafetyTest,
     RenderSanitizerTest,
 )
@@ -4087,6 +4088,47 @@ class TestReinitRejected(unittest.TestCase):
             sender.__init__('tcp', '127.0.0.1', 9009)
         self.assertEqual(
             cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+
+
+class TestSuiteWiring(unittest.TestCase):
+    """Guard: every aggregated test case must actually be collected.
+
+    ``unittest.main()`` collects from this module's namespace, so a test class
+    that exists but is not imported here never runs anywhere.
+    ``test_auth.OidcReviewFixTest`` sat in exactly that state: three regression
+    tests that passed when run directly and were absent from every CI leg,
+    which is silent -- nothing fails, the count just does not include them.
+    """
+
+    # Modules whose cases this file imports unconditionally. `test_dataframe`
+    # is deliberately absent: it is imported only when pandas and pyarrow are
+    # both present, and a legitimate no-pandas run must not fail here.
+    _AGGREGATED = (
+        'test_auth',
+        'test_client_capsule_path',
+        'test_client_dataframe_failures',
+        'test_client_dataframe_fuzz',
+        'test_client_polars_fuzz',
+        'test_dataframe_leaks',
+    )
+
+    def test_every_aggregated_test_case_is_imported(self):
+        import importlib
+        collected = {
+            name
+            for name, obj in globals().items()
+            if isinstance(obj, type) and issubclass(obj, unittest.TestCase)}
+        for mod_name in self._AGGREGATED:
+            mod = importlib.import_module(mod_name)
+            for name, obj in vars(mod).items():
+                # `__module__` filters out cases merely re-exported by `mod`.
+                if (isinstance(obj, type)
+                        and issubclass(obj, unittest.TestCase)
+                        and obj.__module__ == mod_name):
+                    self.assertIn(
+                        name, collected,
+                        f'{mod_name}.{name} is not imported into test.py, so '
+                        f'unittest.main() never collects it')
 
 
 if __name__ == '__main__':
