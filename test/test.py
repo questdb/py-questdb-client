@@ -6569,13 +6569,14 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         one-way: from the `close()` that proceeds on, the handle
         refuses new work, the lease keeps working so its holder can
         finish and return it, and a second `close()` completes the
-        teardown."""
+        teardown, delivering rows queued before and after the timeout."""
         original = qi._debug_close_lease_wait_limit_s()
         qi._debug_set_close_lease_wait_limit_s(0.5)
         try:
-            with QwpAckServer() as server:
+            with QwpAckServer(
+                    record_payloads=True, defer_aware_acks=True) as server:
                 conf = (f'ws::addr=127.0.0.1:{server.port};'
-                        'lazy_connect=true;'
+                        'lazy_connect=true;auto_flush=off;'
                         'sender_pool_min=1;sender_pool_max=2;')
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
@@ -6598,6 +6599,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     # so its holder can finish and return it.
                     lease.row('t', columns={'v': 2},
                               at=qi.TimestampNanos(2))
+                    self.assertEqual(server.snapshot()['binary_frames'], 0)
                     lease.close()
                     # With nothing outstanding, close() finishes the
                     # teardown.
@@ -6605,6 +6607,29 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     with self.assertRaises(qi.QuestDBError) as closed:
                         db.sender()
                     self.assertIn('closed', str(closed.exception))
+                server.wait_binary_frames_settled()
+                stats = server.snapshot()
+
+            self.assertEqual(stats['errors'], [])
+            data_frames = [
+                payload for payload in stats['binary_payloads']
+                if (payload[:4] == b'QWP1'
+                    and int.from_bytes(payload[6:8], 'little') > 0)]
+            self.assertEqual(len(data_frames), 1)
+            payload = data_frames[0]
+            self.assertEqual(_first_qwp_table_row_count(payload), 2)
+            self.assertEqual(
+                _first_qwp_table_column_types(payload),
+                [('v', 0x05), ('', 0x10)])
+            # Both the pre-timeout and while-closing rows must reach the
+            # wire in order, not merely disappear when the lease returns.
+            self.assertEqual(payload[12:], (
+                b'\x00\x00'  # empty delta symbol dictionary
+                b'\x01t\x02\x02'  # table "t", two rows, two columns
+                b'\x01v\x05'  # LONG column "v"
+                b'\x00\x10'  # designated TIMESTAMP_NS
+                b'\x00' + struct.pack('<qq', 1, 2)  # dense values
+                + b'\x00' + struct.pack('<qq', 1, 2)))  # dense timestamps
         finally:
             qi._debug_set_close_lease_wait_limit_s(original)
 
