@@ -2695,8 +2695,8 @@ class QueryResult:
         an Arrow-backed column, a NumPy ``uint32`` / ``uint16`` / integer
         column, or an object column of Python ints or ``bytes``. Map one
         of those five columns to a float or a string dtype and the claim
-        goes unread — the column lands as that dtype implies, with
-        nothing said.
+        is ignored — the column lands as that dtype implies, and
+        re-ingestion logs a ``questdb`` warning about the dropped claim.
 
         ``df.attrs['questdb']`` reads as an ordinary mapping but cannot
         be edited in place: pandas deep-copies the whole of ``attrs``
