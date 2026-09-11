@@ -11,9 +11,8 @@ Azure Pipelines (``ci/cibuildwheel.yaml``):
 * Linux x86_64 and aarch64: CPython 3.10 through 3.14 (including the
   free-threaded 3.14t), for both manylinux and musllinux.
 * PyPy on Linux x86_64.
-* Windows win32 and win_amd64: CPython 3.10 through 3.14 (the
-  free-threaded 3.14t is skipped on Windows — pandas dependencies are
-  missing there; see ``skip`` in ``pyproject.toml``).
+* Windows win32 and win_amd64: CPython 3.10 through 3.14, including
+  the free-threaded 3.14t.
 * macOS x86_64: the Azure Pipelines hosted macOS agents run on Intel
   hardware, so this is where the Intel wheels come from.
 
@@ -142,8 +141,8 @@ Sanity-check the contents of ``dist/`` before uploading. You should see:
 * ``manylinux`` and ``musllinux`` wheels for both ``x86_64`` and
   ``aarch64``, CPython 3.10 through 3.14 plus ``cp314t``;
 * PyPy (``pp3*``) wheels for Linux x86_64;
-* ``win32`` and ``win_amd64`` wheels, CPython 3.10 through 3.14
-  (no ``cp314t``);
+* ``win32`` and ``win_amd64`` wheels, CPython 3.10 through 3.14 plus
+  ``cp314t``;
 * ``macosx`` wheels for both ``x86_64`` (from Azure) and ``arm64``
   (from GitHub Actions), CPython 3.10 through 3.14 plus ``cp314t``;
 * exactly one ``.tar.gz`` source distribution.

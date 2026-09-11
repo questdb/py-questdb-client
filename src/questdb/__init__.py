@@ -8,6 +8,7 @@ from questdb import _client
 from questdb._client import (
     ConnectionEvent,
     ConnectionEventKind,
+    OidcDeviceAuth as _OidcDeviceAuth,
     PooledReader,
     PooledSender,
     Protocol,
@@ -78,6 +79,7 @@ def connect(
         host: _Optional[str] = None,
         port: _Union[int, str, None] = None,
         tls: _Optional[bool] = None,
+        oidc_auth: _Optional[_OidcDeviceAuth] = None,
         connection_listener: _Optional[
             _Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
@@ -110,6 +112,10 @@ def connect(
     :meth:`Sender.from_conf`. One configuration addresses the whole
     deployment; list every cluster node in a single ``addr`` server
     list.
+
+    ``oidc_auth`` accepts :class:`questdb.auth.OidcDeviceAuth`. Call
+    ``oidc_auth.sign_in()`` before ``connect``; pooled connections and
+    reconnects only load or silently refresh tokens and never prompt.
 
     By default ``connect()`` opens the warm minimums up front and fails
     fast when the server is unreachable or rejects the credentials. Set
@@ -195,20 +201,28 @@ def connect(
     try:
         return QuestDB.from_conf(
             conf_str,
+            oidc_auth=oidc_auth,
             connection_listener=connection_listener,
             connection_event_inbox_capacity=connection_event_inbox_capacity,
             error_handler=error_handler,
             error_event_inbox_capacity=error_event_inbox_capacity)
     except QuestDBError as e:
+        # Preserve structured OIDC failures even if untrusted IdP text happens
+        # to resemble the native config parser's duplicate-key diagnostic.
+        from questdb.auth._errors import OidcError
+        if isinstance(e, OidcError):
+            raise
         # The native parser reports a keyword/string conflict as a
         # duplicate key at a position in the merged string the caller
-        # never wrote; rephrase it like Sender.from_conf does.
-        msg = str(e)
-        for key in params:
-            if f'duplicate key "{key}"' in msg:
-                raise ValueError(
-                    f'"{key}" is already present in the conf_str '
-                    'and cannot be overridden.') from None
+        # never wrote; rephrase it like Sender.from_conf does. Restrict the
+        # text match to parser-classified configuration errors.
+        if e.code == QuestDBErrorCode.ConfigError:
+            msg = str(e)
+            for key in params:
+                if f'duplicate key "{key}"' in msg:
+                    raise ValueError(
+                        f'"{key}" is already present in the conf_str '
+                        'and cannot be overridden.') from None
         raise
 
 

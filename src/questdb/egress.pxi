@@ -147,26 +147,51 @@ cdef class _CursorHandle:
         with self._lock:
             return self._reset_seq
 
-    cdef bint _abandonment_needs_warning(self):
-        with self._lock:
-            return (
-                self._cursor != NULL
-                and (
-                    self._reader_ref is None
-                    or self._reader_ref._must_close))
+    cdef void _free_locked(self) noexcept:
+        """The body of `_free`. Caller must hold `_lock`."""
+        cdef PyThreadState* gs = NULL
+        if self._cursor != NULL:
+            _ensure_doesnt_have_gil(&gs)
+            qwp_reader_cursor_free(self._cursor)
+            _ensure_has_gil(&gs)
+            self._cursor = NULL
+        if self._reader_ref is not None:
+            if self._owns_reader:
+                self._reader_ref._close()
+            self._reader_ref = None
 
     cdef void _free(self) noexcept:
-        cdef PyThreadState* gs = NULL
         with self._lock:
-            if self._cursor != NULL:
-                _ensure_doesnt_have_gil(&gs)
-                qwp_reader_cursor_free(self._cursor)
-                _ensure_has_gil(&gs)
-                self._cursor = NULL
-            if self._reader_ref is not None:
-                if self._owns_reader:
-                    self._reader_ref._close()
-                self._reader_ref = None
+            self._free_locked()
+
+    cdef int _try_reclaim(self):
+        """Free from a finalizer without ever blocking.
+
+        `_free` holds `_lock` across `qwp_reader_cursor_free` and
+        `_ReaderHandle._close`, both of which release the GIL. A worker parked
+        in one of those at interpreter finalization is frozen there holding the
+        lock, and a blocking acquire from the shutdown GC -- which runs
+        `__del__` with the GIL held -- would then never return, hanging the
+        interpreter. Before the lock was introduced `__del__` read `_cursor`
+        raw and returned; it must stay non-blocking now that the same diff
+        documents handing a `QueryResult` to another thread.
+
+        Returns 1 when it freed an un-drained cursor (the caller should warn),
+        0 when it freed a drained one or there was nothing to free, and -1 when
+        the lock was busy and it did nothing -- whoever holds it will free it.
+        """
+        cdef bint undrained
+        if not self._lock.acquire(False):
+            return -1
+        try:
+            if self._cursor == NULL:
+                return 0
+            undrained = (
+                self._reader_ref is None or self._reader_ref._must_close)
+            self._free_locked()
+        finally:
+            self._lock.release()
+        return 1 if undrained else 0
 
     def __dealloc__(self):
         self._free()
@@ -472,10 +497,9 @@ cdef void_int _bind_query_params(qwp_reader_query* query, object binds) except -
     errors raised here are Python-side type rejections.
     """
     cdef bytes utf8
-    cdef bytes uuid_wire
+    cdef bytes uuid_bytes
     cdef line_sender_utf8 c_utf8
     cdef line_sender_error* utf8_err = NULL
-    cdef object u_int
     cdef Py_ssize_t idx = 0
     for value in binds:
         idx += 1
@@ -508,15 +532,19 @@ cdef void_int _bind_query_params(qwp_reader_query* query, object binds) except -
             qwp_reader_query_bind_timestamp_micros(
                 query, datetime_to_micros(value))
         elif isinstance(value, uuid.UUID):
-            # QuestDB's UUID wire layout: low 64 bits little-endian, then
-            # high 64 bits little-endian (matching the ingestion side and
-            # the Java client's (lo, hi) long-pair encoding).
-            u_int = value.int
-            uuid_wire = (
-                (u_int & 0xFFFFFFFFFFFFFFFF).to_bytes(8, 'little')
-                + (u_int >> 64).to_bytes(8, 'little'))
+            # The bind takes canonical RFC 4122 big-endian bytes, which is
+            # exactly `UUID.bytes`; the native client byte-swaps them into
+            # QWP wire order (lo half LE, then hi half LE).
+            uuid_bytes = value.bytes
+            # `UUID.bytes` is a property a subclass can override, and the
+            # bind reads exactly 16 bytes from the pointer, so the length
+            # is checked before the buffer is handed over.
+            if len(uuid_bytes) != 16:
+                raise ValueError(
+                    f'query bind ${idx}: uuid.UUID.bytes returned '
+                    f'{len(uuid_bytes)} bytes, expected 16.')
             qwp_reader_query_bind_uuid(
-                query, <const uint8_t*>PyBytes_AsString(uuid_wire))
+                query, <const uint8_t*>PyBytes_AsString(uuid_bytes))
         else:
             raise TypeError(
                 f'query bind ${idx}: unsupported type '
@@ -1398,20 +1426,37 @@ cdef object _numpy_geohash_chunk(
     return wide.view(dtype).reshape(<Py_ssize_t>row_count)
 
 
+cdef inline uint64_t _be64(const uint8_t* p) noexcept nogil:
+    """Load 8 canonical (big-endian) bytes as a uint64, on any host.
+
+    Assembled byte by byte rather than `memcpy`-ed into a native integer: the
+    reader hands out RFC 4122 network order, so a native load is only correct
+    on a big-endian host and an unconditional byte-swap only on a little-endian
+    one. Compilers recognise this shift/or pattern and emit the single
+    byte-reverse load anyway.
+    """
+    return (((<uint64_t>p[0]) << 56) | ((<uint64_t>p[1]) << 48)
+            | ((<uint64_t>p[2]) << 40) | ((<uint64_t>p[3]) << 32)
+            | ((<uint64_t>p[4]) << 24) | ((<uint64_t>p[5]) << 16)
+            | ((<uint64_t>p[6]) << 8) | (<uint64_t>p[7]))
+
+
 cdef object _numpy_uuid_chunk(
         const qwp_reader_batch* batch,
         size_t col_idx,
         size_t row_count,
         object np):
-    cdef object _uuid = _uuid_module()
+    # Hoisted: `.UUID` was an attribute lookup on the module for every row,
+    # which the ingestion side already avoids (`_dataframe_columnar_build_uuid_
+    # pyobj`).
+    cdef object uuid_cls = _uuid_module().UUID
     cdef qwp_reader_column_data cd
     cdef questdb_error* err = NULL
     cdef const uint8_t* validity
     cdef const uint8_t* values
     cdef size_t r
     cdef size_t stride
-    cdef uint64_t lo
-    cdef uint64_t hi
+    cdef const uint8_t* row
     cdef cnp.ndarray out
     _reader_check(
         qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
@@ -1429,9 +1474,19 @@ cdef object _numpy_uuid_chunk(
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
             continue
-        memcpy(&lo, values + r * stride, 8)
-        memcpy(&hi, values + r * stride + 8, 8)
-        _obj_chunk_set(out, r, _uuid.UUID(int=((<object>hi) << 64) | (<object>lo)))
+        # The reader hands out canonical RFC 4122 network-order bytes, having
+        # already reversed them out of QWP wire order.
+        #
+        # Built through `int=` rather than `bytes=`: the latter allocates a
+        # `bytes` per row and then re-does the work inside `UUID.__init__`
+        # (a `len`, an `isinstance` assert and an `int.from_bytes`) that the
+        # `int=` branch skips, which measured ~20% slower per row on the
+        # default `to_pandas()` read path. `_be64` keeps that portable, which
+        # the pre-existing native-load-plus-swap version was not.
+        row = values + r * stride
+        _obj_chunk_set(
+            out, r,
+            uuid_cls(int=((<object>_be64(row)) << 64) | (<object>_be64(row + 8))))
     return out
 
 
@@ -2258,10 +2313,6 @@ def _debug_egress_pool_stats(client):
         c._end_db_use()
 
 
-cdef bint _cursor_handle_is_live(_CursorHandle h):
-    return h is not None and h._is_live()
-
-
 class QueryResult:
     """Result of ``QuestDB.query(sql)``.
 
@@ -2341,6 +2392,20 @@ class QueryResult:
         Stream callbacks are serialised by the same cursor lock, but the
         Arrow C stream itself must still be consumed by only one thread at
         a time; concurrent ``get_next`` / ``release`` calls are unsupported.
+
+        Typed-``OidcError`` caveat (``oidc_auth`` transports only): a token
+        failure that happens *mid-stream* — a failover reconnect between
+        batches that needs a fresh token — reaches the consumer as a generic
+        Arrow / ``OSError``, **not** a typed
+        :class:`~questdb.auth.OidcError`, because the Arrow C-stream boundary
+        carries only an error string, not a Python exception type. A failure
+        acquiring the token *before* streaming begins still raises the typed
+        ``OidcError``, and the Python-driven readers (:meth:`iter_arrow`,
+        :meth:`to_pandas`, :meth:`to_arrow`, :meth:`to_polars`) surface it on
+        every path. Call :meth:`~questdb.auth.OidcDeviceAuth.sign_in` up front
+        so no mid-stream token acquisition is needed, or materialize with
+        :meth:`to_pandas` / :meth:`to_arrow`, when the typed error must be
+        caught.
         """
         if requested_schema is not None:
             raise NotImplementedError(
@@ -2578,11 +2643,29 @@ class QueryResult:
 
     def __del__(self):
         cdef _CursorHandle handle
+        cdef int outcome = 0
         try:
             handle = self._cursor_handle
-            if not _cursor_handle_is_live(handle):
+            if handle is None:
                 return
-            if handle._abandonment_needs_warning():
+            # Reclaim FIRST, warn after. The warning used to come first inside
+            # this same `except Exception: pass`, so under `-W error` (or
+            # `simplefilter('error')`) the ResourceWarning raised, was
+            # swallowed, and `close()` never ran -- the deterministic release
+            # silently degraded to `_CursorHandle.__dealloc__`. Ordering the
+            # free ahead of the warning makes that structurally impossible.
+            outcome = handle._try_reclaim()
+            if outcome < 0:
+                # Another thread owns the lock; it frees the cursor. Do not
+                # block here -- see `_try_reclaim`.
+                return
+            self._cursor_handle = None
+            self._cancel_handle = None
+            self._consumed = True
+        except Exception:
+            return
+        if outcome > 0:
+            try:
                 warnings.warn(
                     'QueryResult was neither drained nor closed; its '
                     'pooled connection is being released by the garbage '
@@ -2590,6 +2673,18 @@ class QueryResult:
                     '`close()`.',
                     ResourceWarning,
                     stacklevel=2)
-            self.close()
-        except Exception:
-            pass
+            except Warning:
+                # `-W error`, `simplefilter('error')` or pytest's
+                # `filterwarnings = error` turns this into an exception. The
+                # reclaim above has already run, so letting it out of `__del__`
+                # costs nothing and CPython routes it to `sys.unraisablehook` --
+                # which is where someone who asked for warnings-as-errors
+                # expects a leak diagnostic to appear. Swallowing it here made
+                # the release silent in exactly the configuration that asked to
+                # be told loudly.
+                raise
+            except Exception:
+                # Anything else -- most plausibly `warnings` already torn down
+                # during interpreter shutdown -- must not become unraisable
+                # noise on a path that has nothing left to report.
+                pass

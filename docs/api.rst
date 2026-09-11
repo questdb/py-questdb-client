@@ -145,3 +145,57 @@ The deprecated 4.x compatibility shim. New code imports from ``questdb``.
 .. autoclass:: questdb.ingress.Buffer
    :members:
    :undoc-members:
+   :show-inheritance:
+
+questdb.auth
+============
+
+.. py:module:: questdb.auth
+
+See the :ref:`oidc_auth` guide for an overview.
+
+.. autoclass:: questdb.auth.OidcDeviceAuth
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autofunction:: questdb.auth.sqlalchemy_engine
+
+.. autofunction:: questdb.auth.psycopg_connect
+
+.. autoclass:: questdb.auth.OidcConfig
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.auth.FileTokenStore
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.auth.Renderer
+   :members:
+   :show-inheritance:
+
+.. autofunction:: questdb.auth.sanitize_display_text
+
+.. autoexception:: questdb.auth.OidcError
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcConfigError
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcCancelledError
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcNetworkError
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcInteractionRequired
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcDeviceFlowError
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.OidcTimeoutError
+   :show-inheritance:

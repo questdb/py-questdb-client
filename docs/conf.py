@@ -88,6 +88,11 @@ nitpick_ignore = [
     ("py:class", "datetime"),
     ("py:class", "np.ndarray"),
     ("py:class", "pd.DataFrame"),
+    # `questdb.auth.sqlalchemy_engine`'s return annotation. SQLAlchemy is an
+    # optional, lazily imported integration, so an intersphinx mapping for it
+    # would make every docs build fetch the inventory of a dependency the
+    # package does not require -- and fail when that host is unreachable.
+    ("py:class", "sqlalchemy.engine.Engine"),
 ]
 
 # def do_not_skip_dunder_members(_app, _what, name, _obj, would_skip, _options):
