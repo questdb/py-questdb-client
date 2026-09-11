@@ -574,4 +574,3 @@ Candidates from discovery that were dismissed after source code verification. Fo
 - State the `c-questdb-client` submodule provenance verdict from Step 2.4
 - State how many candidates were admitted vs omitted as false positives (e.g., "8 findings admitted, 4 false positives removed")
 - State the in-diff vs out-of-diff split (e.g., "5 findings in-diff, 3 findings out-of-diff"). Agent 9 runs at level 3 only. When it was launched and completed, a non-trivial diff with zero out-of-diff findings means the cross-context pass likely underran — re-invoke Agent 9 with a wider grep before finalizing. At levels 0-2 Agent 9 is skipped, so state that the cross-context caller pass did not run at this level and draw no under-run conclusion from the zero count.
-
