@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import subprocess
 import unittest
 from unittest import mock
 
@@ -32,6 +33,42 @@ class TestProjCibuildwheelRouting(unittest.TestCase):
             '--output-dir', 'dist',
             '--archs', 'x86_64',
             '--only', 'cp312-manylinux_x86_64')
+
+
+class TestCibuildwheelArrowLockGuard(unittest.TestCase):
+
+    def setUp(self):
+        self.wrapper = _load_module(
+            'questdb_test_run_cibuildwheel',
+            PROJ_ROOT / 'ci' / 'run_cibuildwheel.py')
+        self.guard_command = [
+            self.wrapper.sys.executable,
+            str(PROJ_ROOT / 'c-questdb-client' / 'ci' /
+                'check_arrow_ffi_lock.py'),
+        ]
+
+    def test_arrow_lock_guard_runs_before_cibuildwheel(self):
+        args = ['--only', 'cp312-manylinux_x86_64']
+        with mock.patch.object(self.wrapper.subprocess, 'check_call') as run, \
+                mock.patch.object(self.wrapper.sys, 'argv', ['wrapper', *args]):
+            self.wrapper.main()
+
+        self.assertEqual(run.call_args_list, [
+            mock.call(self.guard_command),
+            mock.call([
+                self.wrapper.sys.executable, '-m', 'cibuildwheel', *args,
+            ], cwd=PROJ_ROOT),
+        ])
+
+    def test_arrow_lock_failure_prevents_cibuildwheel(self):
+        error = subprocess.CalledProcessError(1, self.guard_command)
+        with mock.patch.object(
+                self.wrapper.subprocess, 'check_call', side_effect=error) as run, \
+                self.assertRaises(subprocess.CalledProcessError) as raised:
+            self.wrapper.main()
+
+        self.assertIs(raised.exception, error)
+        run.assert_called_once_with(self.guard_command)
 
 
 class TestPinnedCiDependencies(unittest.TestCase):

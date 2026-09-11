@@ -122,7 +122,11 @@ from test_client_polars_fuzz import (
     TestClientPolarsDataframeFuzz,
     TestClientPolarsDataframeRoundTrip,
 )
-from test_ci_wiring import TestPinnedCiDependencies, TestProjCibuildwheelRouting
+from test_ci_wiring import (
+    TestCibuildwheelArrowLockGuard,
+    TestPinnedCiDependencies,
+    TestProjCibuildwheelRouting,
+)
 from test_dataframe_leaks import (
     TestCategoricalArrowLeak,
     TestPyobjColumnarLeak,
