@@ -10,7 +10,7 @@ Review the target in `$ARGUMENTS`. Parse exactly one PR number/URL or
 including uncommitted changes. Ask for a target when none is supplied and reject
 ambiguous invocations containing both forms. Use Bash for read-only Git/GitHub
 queries and test execution (`python3 proj.py build`, `python3 proj.py test`,
-`python3 proj.py test all`, `python3 proj.py valgrind_test`); do not edit files,
+`python3 proj.py test 1`, `python3 proj.py valgrind_test`); do not edit files,
 commit, or push. Reproducing at the base revision happens in a throwaway
 worktree, never by checking the review tree out (Step 3b).
 
@@ -259,7 +259,7 @@ public API compatibility break, or unbounded resource loss. Keep covered,
 accepted, and exempt rows private unless asked.
 
 Where the change is testable locally, name the command that would exercise it
-(`python3 proj.py build` then `python3 proj.py test`, `python3 proj.py test all`
+(`python3 proj.py build` then `python3 proj.py test`, `python3 proj.py test 1`
 for integration, `python3 proj.py valgrind_test`, `python3 proj.py test_fuzzing`)
 and record whether it was actually run.
 
@@ -380,7 +380,7 @@ leaks and refcount imbalance, interpreter crashes, filesystem state, version
 compatibility, and protocol state. These are exactly the classes where static
 reasoning about this codebase is least reliable, and they are runnable here:
 build with `python3 proj.py build` and reproduce with `python3 proj.py test`,
-`python3 proj.py test all`, the leak tests, or `python3 proj.py valgrind_test`.
+`python3 proj.py test 1`, the leak tests, or `python3 proj.py valgrind_test`.
 Static declaration mismatches (`.pxd` vs header, `.pyi` vs implementation,
 `except` clause vs body) may cite complete source proof instead.
 
