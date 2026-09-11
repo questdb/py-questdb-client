@@ -24,7 +24,7 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install cibuildwheel
       - name: Build wheels
-        run: cibuildwheel --output-dir wheelhouse .
+        run: python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
         env:
           CIBW_ARCHS_MACOS: arm64
           MACOSX_DEPLOYMENT_TARGET: "11.0"

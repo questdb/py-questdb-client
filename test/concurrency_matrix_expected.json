@@ -1,0 +1,3117 @@
+{
+ "PooledSender.dataframe/in-flight | Buffer.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Buffer.__len__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Buffer.capacity": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Buffer.clear": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Buffer.dataframe": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Buffer.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Buffer.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Buffer.reserve": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Buffer.row": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.__exit__": {
+  "result": "refused",
+  "reason": "close() can't be called from inside a call on this sender lease. It would return the sender to the pool while that call is still using it. C",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.close": {
+  "result": "refused",
+  "reason": "close() can't be called from inside a call on this sender lease. It would return the sender to the pool while that call is still using it. C",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.flush": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.flush_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.row": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | PooledSender.wait": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.__arrow_c_stream__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.__enter__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.__exit__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.cancel": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.close": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.iter_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.iter_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.to_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.to_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.to_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.__exit__": {
+  "result": "refused",
+  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.close": {
+  "result": "refused",
+  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.error_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.execute": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.query": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.reader": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.reap_idle": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.sender": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QuestDB.server_info": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.__enter__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.__exit__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.__len__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.auto_flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.auto_flush_bytes": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.auto_flush_interval": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.auto_flush_rows": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.close": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.close_drain": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.dataframe": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.drive_once": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.establish": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.new_buffer": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.poll_error": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.protocol_version": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.row": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | Sender.transaction": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Buffer.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Buffer.__len__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Buffer.capacity": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Buffer.clear": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Buffer.dataframe": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Buffer.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Buffer.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Buffer.reserve": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Buffer.row": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.__exit__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.close": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.flush": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.flush_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.row": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | PooledSender.wait": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.__arrow_c_stream__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.__enter__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.__exit__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.cancel": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.close": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.iter_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.iter_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.to_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.to_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.to_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.__exit__": {
+  "result": "refused",
+  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 0 call(s) in progress on this handle. The handle stays closin",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.close": {
+  "result": "refused",
+  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 0 call(s) in progress on this handle. The handle stays closin",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.error_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.execute": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.query": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.reader": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.reap_idle": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.sender": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QuestDB.server_info": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.__enter__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.__exit__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.__len__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.auto_flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.auto_flush_bytes": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.auto_flush_interval": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.auto_flush_rows": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.close": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.close_drain": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.dataframe": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.drive_once": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.establish": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.new_buffer": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.poll_error": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.protocol_version": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.row": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | Sender.transaction": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/call-wait | Buffer.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Buffer.__len__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Buffer.capacity": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Buffer.clear": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Buffer.dataframe": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Buffer.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Buffer.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Buffer.reserve": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Buffer.row": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.__arrow_c_stream__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.__enter__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.__exit__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.cancel": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.close": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.iter_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.iter_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.to_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.to_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.to_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.__enter__": {
+  "result": "refused",
+  "reason": "__enter__() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outst",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.__exit__": {
+  "result": "refused",
+  "reason": "close() stopped waiting after 5s: 0 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.close": {
+  "result": "refused",
+  "reason": "close() stopped waiting after 5s: 0 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.connection_events_delivered": {
+  "result": "refused",
+  "reason": "connection_events_delivered() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in ",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.connection_events_dropped": {
+  "result": "refused",
+  "reason": "connection_events_dropped() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in pr",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outst",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.error_events_delivered": {
+  "result": "refused",
+  "reason": "error_events_delivered() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progr",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.error_events_dropped": {
+  "result": "refused",
+  "reason": "error_events_dropped() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progres",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.execute": {
+  "result": "refused",
+  "reason": "execute() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outstan",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.query": {
+  "result": "refused",
+  "reason": "query() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outstandi",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.reader": {
+  "result": "refused",
+  "reason": "reader() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outstand",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.reap_idle": {
+  "result": "refused",
+  "reason": "reap_idle() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outst",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.sender": {
+  "result": "refused",
+  "reason": "sender() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outstand",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QuestDB.server_info": {
+  "result": "refused",
+  "reason": "server_info() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and out",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.__enter__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.__exit__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.__len__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.auto_flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.auto_flush_bytes": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.auto_flush_interval": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.auto_flush_rows": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.close": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.close_drain": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.dataframe": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.drive_once": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.establish": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.new_buffer": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.poll_error": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.protocol_version": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.row": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | Sender.transaction": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/done | Buffer.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Buffer.__len__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Buffer.capacity": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Buffer.clear": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Buffer.dataframe": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Buffer.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Buffer.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Buffer.reserve": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Buffer.row": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.__arrow_c_stream__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.__enter__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.__exit__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.cancel": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.close": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.iter_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.iter_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.to_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.to_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.to_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.__enter__": {
+  "result": "refused",
+  "reason": "__enter__() can't be called: QuestDB is closed.",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.__exit__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.close": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.connection_events_delivered": {
+  "result": "refused",
+  "reason": "connection_events_delivered() can't be called: QuestDB is closed.",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.connection_events_dropped": {
+  "result": "refused",
+  "reason": "connection_events_dropped() can't be called: QuestDB is closed.",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called: QuestDB is closed.",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.error_events_delivered": {
+  "result": "refused",
+  "reason": "error_events_delivered() can't be called: QuestDB is closed.",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.error_events_dropped": {
+  "result": "refused",
+  "reason": "error_events_dropped() can't be called: QuestDB is closed.",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.execute": {
+  "result": "refused",
+  "reason": "execute() can't be called: QuestDB is closed.",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.query": {
+  "result": "refused",
+  "reason": "query() can't be called: QuestDB is closed.",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.reader": {
+  "result": "refused",
+  "reason": "reader() can't be called: QuestDB is closed.",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.reap_idle": {
+  "result": "refused",
+  "reason": "reap_idle() can't be called: QuestDB is closed.",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.sender": {
+  "result": "refused",
+  "reason": "sender() can't be called: QuestDB is closed.",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QuestDB.server_info": {
+  "result": "refused",
+  "reason": "server_info() can't be called: QuestDB is closed.",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.__enter__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.__exit__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.__len__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.auto_flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.auto_flush_bytes": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.auto_flush_interval": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.auto_flush_rows": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.close": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.close_drain": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.dataframe": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.drive_once": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.establish": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.new_buffer": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.poll_error": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.protocol_version": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.row": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | Sender.transaction": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Buffer.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Buffer.__len__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Buffer.capacity": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Buffer.clear": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Buffer.dataframe": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Buffer.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Buffer.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Buffer.reserve": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Buffer.row": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.__exit__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.__len__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.await_acked_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.close": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outst",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.flush": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.flush_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.poll_error": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.published_fsn": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.row": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | PooledSender.wait": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.__arrow_c_stream__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.__enter__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.__exit__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.cancel": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.close": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.iter_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.iter_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.to_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.to_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.to_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.__enter__": {
+  "result": "refused",
+  "reason": "__enter__() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outst",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.__exit__": {
+  "result": "refused",
+  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 0 call(s) in progress on this handle. The handle stays closin",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.close": {
+  "result": "refused",
+  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 0 call(s) in progress on this handle. The handle stays closin",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.connection_events_delivered": {
+  "result": "refused",
+  "reason": "connection_events_delivered() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in ",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.connection_events_dropped": {
+  "result": "refused",
+  "reason": "connection_events_dropped() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in pr",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.dataframe": {
+  "result": "refused",
+  "reason": "dataframe() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outst",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.error_events_delivered": {
+  "result": "refused",
+  "reason": "error_events_delivered() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progr",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.error_events_dropped": {
+  "result": "refused",
+  "reason": "error_events_dropped() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progres",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.execute": {
+  "result": "refused",
+  "reason": "execute() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outstan",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.query": {
+  "result": "refused",
+  "reason": "query() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outstandi",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.reader": {
+  "result": "refused",
+  "reason": "reader() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outstand",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.reap_idle": {
+  "result": "refused",
+  "reason": "reap_idle() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outst",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.sender": {
+  "result": "refused",
+  "reason": "sender() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and outstand",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QuestDB.server_info": {
+  "result": "refused",
+  "reason": "server_info() can't be called: QuestDB is closing. close() has been called, and the handle takes no new work while calls in progress and out",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.__enter__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.__exit__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.__len__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.auto_flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.auto_flush_bytes": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.auto_flush_interval": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.auto_flush_rows": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.close": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.close_drain": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.dataframe": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.drive_once": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.establish": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.new_buffer": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.poll_error": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.protocol_version": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.row": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | Sender.transaction": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Buffer.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Buffer.__len__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Buffer.capacity": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Buffer.clear": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Buffer.dataframe": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Buffer.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Buffer.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Buffer.reserve": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Buffer.row": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.__arrow_c_stream__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.__enter__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.__exit__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.cancel": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.close": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.iter_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.iter_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.to_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.to_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.to_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.__exit__": {
+  "result": "refused",
+  "reason": "close() stopped waiting after 5s: 0 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.close": {
+  "result": "refused",
+  "reason": "close() stopped waiting after 5s: 0 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.error_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.execute": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.query": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.reader": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.reap_idle": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.sender": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QuestDB.server_info": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.__enter__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.__exit__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.__len__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.auto_flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.auto_flush_bytes": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.auto_flush_interval": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.auto_flush_rows": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.close": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.close_drain": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.dataframe": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.drive_once": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.establish": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.new_buffer": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.poll_error": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.protocol_version": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.row": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | Sender.transaction": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Buffer.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Buffer.__len__": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Buffer.capacity": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Buffer.clear": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Buffer.dataframe": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Buffer.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Buffer.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Buffer.reserve": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Buffer.row": {
+  "result": "unreachable",
+  "reason": "no Buffer in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledReader.__enter__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledReader.__exit__": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledReader.close": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledReader.execute": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledReader.query": {
+  "result": "unreachable",
+  "reason": "a reader lease needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.__enter__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.__exit__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.__len__": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.close": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.dataframe": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.flush": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.poll_error": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.row": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | PooledSender.wait": {
+  "result": "unreachable",
+  "reason": "no PooledSender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.__arrow_c_stream__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.__enter__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.__exit__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.cancel": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.close": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.iter_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.iter_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.to_arrow": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.to_pandas": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.to_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.__enter__": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.__exit__": {
+  "result": "refused",
+  "reason": "close() stopped waiting after 5s: 0 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.close": {
+  "result": "refused",
+  "reason": "close() stopped waiting after 5s: 0 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.connection_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.connection_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.dataframe": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.error_events_delivered": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.error_events_dropped": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.execute": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.query": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.reader": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.reap_idle": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.sender": {
+  "result": "clean",
+  "reason": "",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QuestDB.server_info": {
+  "result": "refused",
+  "reason": "Resource temporarily unavailable (os error 35)",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.__bytes__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.__enter__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.__exit__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.__len__": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.auto_flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.auto_flush_bytes": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.auto_flush_interval": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.auto_flush_rows": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.await_acked_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.close": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.close_drain": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.connection_events_delivered": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.connection_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.dataframe": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.drive_once": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.error_events_dropped": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.establish": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.flush": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.flush_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.flush_and_keep_and_get_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.init_buf_size": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.max_name_len": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.new_buffer": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.poll_error": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.protocol_version": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.published_fsn": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.row": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | Sender.transaction": {
+  "result": "unreachable",
+  "reason": "no Sender in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | SenderTransaction.__enter__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | SenderTransaction.__exit__": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | SenderTransaction.commit": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | SenderTransaction.dataframe": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | SenderTransaction.rollback": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | SenderTransaction.row": {
+  "result": "unreachable",
+  "reason": "no SenderTransaction in this scenario",
+  "holder_outcome": "completed"
+ }
+}

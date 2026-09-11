@@ -7,6 +7,7 @@ DataFrame inputs to `QuestDB.dataframe()`.
 import sys
 sys.dont_write_bytecode = True
 import datetime
+import decimal
 import os
 import struct
 import unittest
@@ -47,6 +48,127 @@ def _ts_us(year, month, day, hour=0, minute=0, second=0):
     return int(datetime.datetime(
         year, month, day, hour, minute, second,
         tzinfo=datetime.timezone.utc).timestamp() * 1_000_000)
+
+
+# Physical layouts each pinned producer is expected to exercise. An explicit
+# "not emitted" is intentional: absence must be reviewed rather than silently
+# disappearing when a producer changes its export behavior.
+ARROW_PRODUCER_LAYOUT_MATRIX = {
+    'pyarrow': {
+        'fixed-width': 'emitted',
+        'variable-width': 'emitted',
+        'view': 'emitted by pyarrow 25',
+        'fixed-size-binary': 'emitted',
+        'list/large-list/fixed-size-list': 'emitted',
+        'dictionary': 'emitted',
+        'decimal': 'emitted',
+    },
+    'pandas': {
+        'fixed-width': 'emitted',
+        'variable-width': 'emitted',
+        'view': 'not emitted by the pinned pandas export',
+        'fixed-size-binary': 'not emitted by standard pandas dtypes',
+        'list/large-list/fixed-size-list': 'not emitted by stable pandas dtypes',
+        'dictionary': 'emitted by Categorical',
+        'decimal': 'not emitted by stable pandas dtypes',
+    },
+    'polars': {
+        'fixed-width': 'emitted',
+        'variable-width': 'emitted as Arrow view layouts',
+        'view': 'emitted',
+        'fixed-size-binary': 'not emitted; Polars Binary is variable-width',
+        'list/large-list/fixed-size-list': 'List and fixed Array emitted; LargeList not emitted',
+        'dictionary': 'not part of this pinned producer fixture',
+        'decimal': 'not part of this pinned producer fixture',
+    },
+}
+
+
+class TestArrowFfiProducerLayoutMatrix(unittest.TestCase):
+    def _assert_writes(self, frame, name):
+        with QwpAckServer(record_payloads=True) as server:
+            with qi.QuestDB.from_conf(_client_conf(server.port)) as client:
+                client.dataframe(
+                    frame, table_name=name, at=qi.ServerTimestamp,
+                    symbols=False)
+            self.assertGreaterEqual(server.wait_binary_frames_settled(), 1)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertGreaterEqual(stats['accepted_connections'], 1)
+        self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    def test_matrix_has_no_implicit_omissions(self):
+        expected = {
+            'fixed-width', 'variable-width', 'view', 'fixed-size-binary',
+            'list/large-list/fixed-size-list', 'dictionary', 'decimal'}
+        self.assertEqual(set(ARROW_PRODUCER_LAYOUT_MATRIX), {
+            'pyarrow', 'pandas', 'polars'})
+        for producer, layouts in ARROW_PRODUCER_LAYOUT_MATRIX.items():
+            with self.subTest(producer=producer):
+                self.assertEqual(set(layouts), expected)
+                self.assertNotIn(None, layouts.values())
+
+    def test_ci_producer_versions_match_declared_pins(self):
+        pins = os.environ.get('TEST_QUESTDB_ARROW_PRODUCER_PINS')
+        if not pins:
+            self.skipTest('exact producer versions are asserted on the pinned CI leg')
+        installed = {
+            'pandas': pd.__version__,
+            'pyarrow': pa.__version__,
+            'polars': pl.__version__,
+        }
+        expected = dict(item.split('=', 1) for item in pins.split(','))
+        self.assertEqual(installed, expected)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_pyarrow_emitted_layouts_pass_preflight(self):
+        columns = {
+            'i64': pa.array([1, 2], type=pa.int64()),
+            'flag': pa.array([True, False], type=pa.bool_()),
+            'stamp': pa.array([1, 2], type=pa.timestamp('us', tz='UTC')),
+            'text': pa.array(['alpha', 'beta'], type=pa.string()),
+            'large_text': pa.array(['alpha', 'beta'], type=pa.large_string()),
+            'blob': pa.array([b'a', b'b'], type=pa.binary()),
+            'fixed_blob': pa.array([b'abcd', b'efgh'], type=pa.binary(4)),
+            'list': pa.array([[1.0], [2.0, 3.0]], type=pa.list_(pa.float64())),
+            'large_list': pa.array(
+                [[1.0], [2.0, 3.0]], type=pa.large_list(pa.float64())),
+            'fixed_list': pa.array(
+                [[1.0, 2.0], [3.0, 4.0]], type=pa.list_(pa.float64(), 2)),
+            'category': pa.array(['a', 'b']).dictionary_encode(),
+            'decimal': pa.array(
+                [decimal.Decimal('1.25'), decimal.Decimal('2.50')],
+                type=pa.decimal128(12, 2)),
+        }
+        if hasattr(pa, 'string_view'):
+            columns['text_view'] = pa.array(['alpha', 'beta'], type=pa.string_view())
+            columns['binary_view'] = pa.array([b'a', b'b'], type=pa.binary_view())
+        self._assert_writes(pa.table(columns), 'arrow_layouts_pyarrow')
+
+    @unittest.skipIf(pd is None or pa is None, 'pandas/pyarrow not installed')
+    def test_pandas_categorical_dictionary_and_emitted_layouts_pass(self):
+        frame = pd.DataFrame({
+            'i64': pd.Series([1, 2], dtype='int64'),
+            'text': pd.Series(['alpha', 'beta'], dtype='string[pyarrow]'),
+            'category': pd.Categorical(['a', 'b']),
+        })
+        exported = pa.Table.from_pandas(frame, preserve_index=False)
+        self.assertTrue(pa.types.is_dictionary(exported.schema.field('category').type))
+        self._assert_writes(frame, 'arrow_layouts_pandas')
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_emitted_view_and_array_layouts_pass(self):
+        frame = pl.DataFrame({
+            'i64': pl.Series('i64', [1, 2], dtype=pl.Int64),
+            'text': pl.Series('text', ['alpha', 'beta'], dtype=pl.String),
+            'blob': pl.Series('blob', [b'a', b'b'], dtype=pl.Binary),
+            'list': pl.Series(
+                'list', [[1.0], [2.0, 3.0]], dtype=pl.List(pl.Float64)),
+            'fixed_list': pl.Series(
+                'fixed_list', [[1.0, 2.0], [3.0, 4.0]],
+                dtype=pl.Array(pl.Float64, 2)),
+        })
+        self._assert_writes(frame, 'arrow_layouts_polars')
 
 
 class TestCapsulePathPyArrow(unittest.TestCase):
@@ -207,6 +329,35 @@ class TestCapsulePathPolars(unittest.TestCase):
                 client.close()
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_object_column_rejected(self):
+        """polars exports ``Object`` as ``fixed_size_binary(8)`` of
+        in-process handles. Without a check those addresses would land
+        on the server as BINARY, so the column is rejected up front and
+        nothing reaches the wire."""
+        class Opaque:
+            pass
+
+        df = pl.DataFrame({
+            'o': pl.Series('o', [Opaque(), Opaque()], dtype=pl.Object),
+            'ts': [
+                datetime.datetime(2025, 1, 1),
+                datetime.datetime(2025, 1, 2),
+            ],
+        })
+        self.assertEqual(df.schema['o'], pl.Object)
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, 'polars Object dtype'):
+                    client.dataframe(df, table_name='obj_t', at='ts')
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_payloads'], [])
 
 
 class TestServerTimestampAt(unittest.TestCase):
@@ -895,6 +1046,150 @@ class TestSchemaOverrides(unittest.TestCase):
                 client.close()
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_schema_overrides_uuid_on_binary(self):
+        """polars has no fixed-size binary dtype — its ``Binary``
+        columns export as Arrow ``BinaryView`` — so the ``'uuid'``
+        claim is the only way a polars frame reaches a UUID column.
+        The 16 bytes are canonical RFC 4122 and go out reversed."""
+        import uuid as uuid_mod
+        value = uuid_mod.UUID('123e4567-e89b-12d3-a456-426614174000')
+        df = pl.DataFrame({
+            'u':  pl.Series('u', [value.bytes], dtype=pl.Binary),
+            'ts': pl.Series('ts', [
+                datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc),
+            ], dtype=pl.Datetime('us', time_zone='UTC')),
+        })
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df,
+                    table_name='polars_uuid',
+                    at='ts',
+                    schema_overrides={'u': 'uuid'})
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(value.bytes[::-1], payload)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_schema_overrides_uuid_swaps_to_wire_order(self):
+        """A ``'uuid'`` claim reads the column as canonical RFC 4122
+        big-endian and byte-swaps it into QWP wire order (lo half LE,
+        then hi half LE). Forwarding the bytes unchanged would corrupt
+        every value, so pin the swap on the wire."""
+        import uuid as uuid_mod
+        value = uuid_mod.UUID('123e4567-e89b-12d3-a456-426614174000')
+        schema = pa.schema([
+            pa.field('u', pa.binary(16)),
+            pa.field('ts', pa.timestamp('us')),
+        ])
+        table = pa.Table.from_pydict({
+            'u': [value.bytes], 'ts': [_ts_us(2025, 1, 1)],
+        }, schema=schema)
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    table,
+                    table_name='uuids',
+                    at='ts',
+                    schema_overrides={'u': 'uuid'})
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(value.bytes[::-1], payload)
+        self.assertNotIn(value.bytes, payload)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_schema_overrides_long256_forwards_verbatim(self):
+        """A ``'long256'`` claim forwards the 32 bytes unchanged —
+        they are already little-endian limbs, low limb first."""
+        value = bytes(range(32))
+        schema = pa.schema([
+            pa.field('l', pa.binary(32)),
+            pa.field('ts', pa.timestamp('us')),
+        ])
+        table = pa.Table.from_pydict({
+            'l': [value], 'ts': [_ts_us(2025, 1, 1)],
+        }, schema=schema)
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    table,
+                    table_name='long256s',
+                    at='ts',
+                    schema_overrides={'l': 'long256'})
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(value, payload)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_schema_overrides_uuid_rejects_wrong_width(self):
+        """A UUID claim requires 16-byte values; an 8-byte column is
+        rejected rather than sending malformed rows."""
+        schema = pa.schema([
+            pa.field('u', pa.binary(8)),
+            pa.field('ts', pa.timestamp('us')),
+        ])
+        table = pa.Table.from_pydict({
+            'u': [b'\x00' * 8], 'ts': [_ts_us(2025, 1, 1)],
+        }, schema=schema)
+        with QwpAckServer() as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaises(qi.QuestDBError):
+                    client.dataframe(
+                        table,
+                        table_name='t',
+                        at='ts',
+                        schema_overrides={'u': 'uuid'})
+            finally:
+                client.close()
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_unclaimed_fsb16_is_binary_on_the_wire(self):
+        """A 16-byte width claims nothing: without a UUID label or
+        override the column is opaque bytes and goes out as BINARY
+        (`0x17`), with its bytes verbatim rather than reversed."""
+        import uuid as uuid_mod
+        value = uuid_mod.UUID('123e4567-e89b-12d3-a456-426614174000')
+        schema = pa.schema([
+            pa.field('u', pa.binary(16)),
+            pa.field('ts', pa.timestamp('us')),
+        ])
+        table = pa.Table.from_pydict({
+            'u': [value.bytes], 'ts': [_ts_us(2025, 1, 1)],
+        }, schema=schema)
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(table, table_name='opaque', at='ts')
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(b'u\x17', payload)  # column name, then BINARY tag
+        self.assertIn(value.bytes, payload)
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_schema_overrides_rejects_unknown_kind(self):
