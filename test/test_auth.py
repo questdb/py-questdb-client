@@ -574,10 +574,12 @@ class NativeOidcTest(unittest.TestCase):
 
     def test_closed_provider_is_rejected(self):
         # A provider built with __new__ but never __init__'d has no native handle.
-        # That is *not* the same state as closed, and the error says so: its own
-        # token-flow ops raise RuntimeError, and attaching it to a transport
-        # raises ValueError -- never a native NULL deref. clear() is a
-        # documented no-op on it.
+        # That is *not* the same state as closed, and every error says so: its
+        # own token-flow ops raise RuntimeError, and attaching it to a transport
+        # raises ValueError -- never a native NULL deref. Both name the
+        # uninitialized state rather than reporting it as "closed", which would
+        # send the reader looking for a lifecycle call they never made. clear()
+        # is a documented no-op on it.
         closed = OidcDeviceAuth.__new__(OidcDeviceAuth)
         for op in ('sign_in', 'token', 'headers'):
             with self.subTest(op=op), self.assertRaisesRegex(
@@ -586,11 +588,11 @@ class NativeOidcTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'not initialized'):
             closed.config
         closed.clear()  # idempotent no-op on an uninitialized provider
-        with self.assertRaisesRegex(ValueError, 'closed'):
+        with self.assertRaisesRegex(ValueError, 'not initialized'):
             questdb.Sender(
                 questdb.Protocol.Http, '127.0.0.1', 9000,
                 oidc_auth=closed, auto_flush=False)
-        with self.assertRaisesRegex(ValueError, 'closed'):
+        with self.assertRaisesRegex(ValueError, 'not initialized'):
             questdb.connect(
                 'ws::addr=127.0.0.1:9000;lazy_connect=true;',
                 oidc_auth=closed)

@@ -6581,7 +6581,15 @@ cdef class QuestDB:
             # two keyword arguments the docstring, CHANGELOG and migration
             # guide describe identically behaving differently. Enforce the
             # documented cap here so it holds either way.
-            if not 0 <= connection_event_inbox_capacity <= 65536:
+            #
+            # Only the upper bound: a negative or non-integral value is left to
+            # the `c_event_inbox_capacity` conversion below, which rejects it
+            # exactly as it already does for `error_event_inbox_capacity`.
+            # Intercepting those here too would make the two keywords raise
+            # different types for the same bad input, which is the asymmetry
+            # this check exists to remove.
+            if (isinstance(connection_event_inbox_capacity, int)
+                    and connection_event_inbox_capacity > 65536):
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
                     '"connection_event_inbox_capacity" must be between 0 and '

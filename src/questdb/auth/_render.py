@@ -193,14 +193,23 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
 
     This is the *fallback* vetter, used when a response dict carries no
     ``browser_target`` verdict from native (a custom renderer building its own
-    dict). It is deliberately not claimed to be equivalent to native's
-    ``safe_target``, and one divergence remains: native narrows the plaintext
-    ``http`` loopback exemption to the case where the *configured* IdP endpoint
-    is itself loopback, so a remote HTTPS IdP cannot aim a browser, a link or a
-    QR at whatever else is listening on the user's machine. This function has
-    no access to the configured endpoint and does not invent one, so it
-    exempts any loopback host. Prefer the native ``browser_target`` verdict
-    wherever one is available.
+    dict). It is deliberately not equivalent to native's ``safe_target``, and
+    two divergences are worth naming:
+
+    * Native refuses an IDNA A-label (``xn--``) outright, because it reaches an
+      address bar as a confusable. This function accepts one: ``_display_url``
+      renders hosts in punycode precisely so the homoglyph is *visible* rather
+      than blocked, which is the defence chosen at this layer.
+    * Native narrows the plaintext ``http`` loopback exemption to the case
+      where the *configured* IdP endpoint is itself loopback, so a remote
+      HTTPS IdP cannot aim a browser, a link or a QR at whatever else is
+      listening on the user's machine. This function has no access to the
+      configured endpoint and does not invent one, so it exempts any loopback
+      host.
+
+    Both gaps close in the ordinary flow, where every native-emitted event
+    carries a ``browser_target`` verdict that takes precedence over this
+    function. Prefer that verdict wherever one is available.
     """
     if not url or not isinstance(url, str):
         # A non-string has no scheme to vet and would make urlparse raise.
@@ -253,14 +262,6 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
     if userinfo:
         return None
     if not host or not _SAFE_HOST_RE.match(host):
-        return None
-    # An IDNA A-label is plain ASCII by construction, so the allow-list above
-    # cannot see the confusable it renders as: `xn--80ak6aa92e.com` reaches an
-    # address bar as `аррӏе.com`. Native's `safe_target` refuses these for the
-    # same reason, and this value can reach a browser opener or a QR encoder —
-    # a QR is never read by a human before it is followed. A device-flow
-    # verification URI has no business being an IDN.
-    if any(label[:4].lower() == 'xn--' for label in host.split('.')):
         return None
     if scheme == 'http' and not _is_loopback_host(host):
         return None
