@@ -18,6 +18,7 @@ from questdb._client import (
     QuestDBErrorCode,
     QuestDBServerRejectionError,
     QwpWsProgress,
+    SchemaOverride,
     Sender,
     SenderError,
     SenderErrorCategory,
@@ -45,6 +46,7 @@ __all__ = [
     'QuestDBErrorCode',
     'QuestDBServerRejectionError',
     'QwpWsProgress',
+    'SchemaOverride',
     'Sender',
     'SenderError',
     'SenderErrorCategory',
@@ -209,9 +211,21 @@ def connect(
     except QuestDBError as e:
         # Preserve structured OIDC failures even if untrusted IdP text happens
         # to resemble the native config parser's duplicate-key diagnostic.
-        from questdb.auth._errors import OidcError
-        if isinstance(e, OidcError):
-            raise
+        #
+        # An OidcError cannot exist unless `questdb.auth._errors` is already
+        # imported, so resolve the class from `sys.modules` rather than
+        # importing it here. This runs while a failure is already being
+        # reported, and an import that raises -- during interpreter
+        # finalization, through a blocked or poisoned `sys.modules` entry, or
+        # via a shadowed stdlib name on the `questdb.auth` import chain --
+        # would replace the connect error the caller actually needs. It also
+        # keeps `questdb.auth`, and the `unicodedata` / `re` / `ipaddress` /
+        # `urllib.parse` behind it, out of every failed connect.
+        _errs = _sys.modules.get('questdb.auth._errors')
+        if _errs is not None:
+            _oidc_error_cls = getattr(_errs, 'OidcError', None)
+            if _oidc_error_cls is not None and isinstance(e, _oidc_error_cls):
+                raise
         # The native parser reports a keyword/string conflict as a
         # duplicate key at a position in the merged string the caller
         # never wrote; rephrase it like Sender.from_conf does. Restrict the

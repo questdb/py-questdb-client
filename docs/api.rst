@@ -130,6 +130,9 @@ questdb
     :annotation:
     :no-value:
 
+.. autodata:: questdb.SchemaOverride
+    :annotation:
+
 .. autoclass:: questdb._client.TaggedEnum
    :members:
    :show-inheritance:

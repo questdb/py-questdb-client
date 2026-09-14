@@ -262,6 +262,14 @@ Other changes
   synchronization and never use it from two threads at once. If it came from a
   ``PooledReader``, keep that reader on its original thread until processing
   finishes.
+- A ``QueryResult`` left to the garbage collector now reports the
+  ``ResourceWarning`` about its unreleased cursor instead of swallowing it: the
+  finalizer routes it through ``sys.unraisablehook``. Suites running with
+  warnings-as-errors will see a new failure, and because it is raised whenever
+  collection happens to run, pytest attributes it to the test that was
+  executing rather than to the one that abandoned the result. Close results
+  deterministically (``with db.query(...) as result:``) or filter
+  ``ResourceWarning``.
 - WebSocket connections keep a dictionary of ``SYMBOL`` values to avoid sending
   repeated text in full. Repeated values do not grow it, but a long-lived
   connection fills it after 2,000,000 distinct values or 256 MiB of symbol

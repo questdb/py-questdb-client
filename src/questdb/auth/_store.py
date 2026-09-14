@@ -121,11 +121,21 @@ class FileTokenStore:
                     'with the native client. Use an absolute path, or pass '
                     'FileTokenStore(dir) explicitly.')
             return cls(override)
-        home = os.path.expanduser('~')
-        if not os.path.isabs(home):
+        # Mirror native's `home_dir()` exactly: `HOME` on POSIX,
+        # `USERPROFILE` on Windows, and absolute only. `os.path.expanduser`
+        # is deliberately NOT used here -- its `pwd.getpwuid()` fallback on
+        # POSIX (and `HOMEDRIVE` + `HOMEPATH` on Windows) resolves a path in
+        # precisely the environment where native refuses, the distroless /
+        # arbitrary-uid container with no `HOME`. The two clients would then
+        # name different stores, so this client would write a long-lived
+        # plaintext refresh token where the native and Java clients never look
+        # -- and a credential cleared through one would survive in the other.
+        home = os.environ.get('USERPROFILE' if os.name == 'nt' else 'HOME')
+        if not home or not os.path.isabs(home):
             raise OidcConfigError(
                 'could not resolve the home directory for the default OIDC '
-                f'token-store location; set {TOKEN_STORE_DIR_ENV}')
+                f'token-store location; set {TOKEN_STORE_DIR_ENV} to an '
+                'absolute path')
         return cls(os.path.join(home, '.questdb', 'oidc-tokens'))
 
     @property

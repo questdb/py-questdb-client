@@ -899,6 +899,20 @@ cdef extern from "questdb/ingress/qwp_sender.h":
         ) noexcept nogil
 
 
+# These declarations are correct only against a STATICALLY linked
+# `libquestdb_client` built from the same commit as the headers they mirror.
+# `setup.py` links the archive out of the `c-questdb-client` submodule that
+# also supplies `include/`, so header/library skew is not constructible and the
+# binding relies on that: it reads fields appended to the end of versioned
+# structs (`questdb_oidc_event.interval_seconds`, `.browser_target`) and the
+# tail of `questdb_oidc_config_view` / `questdb_oidc_error_view` without
+# consulting the `struct_size` prefix the library writes back, which `oidc.h`
+# requires of "code that can load an older shared library".
+#
+# Moving to dynamic linkage, or vendoring a separately built shared object,
+# breaks that assumption silently -- a shorter prefix leaves those reads on
+# memory the library never wrote. Doing so requires honouring the `struct_size`
+# contract at every view and event read first.
 cdef extern from "questdb/oidc.h":
     cdef struct questdb_oidc_builder:
         pass

@@ -5,8 +5,9 @@ Migration Guide
 5.0 to 5.1
 ==========
 
-Three changes need action: the two UUID / fixed-size-binary items below, and
-a new cap on callback inbox capacities. The
+Four changes need action: the two UUID / fixed-size-binary items below, a new
+cap on callback inbox capacities, and a warning an abandoned query result now
+surfaces instead of swallowing. The
 new ``ConnectionEventKind.CredentialUnavailable`` event kind needs none — it
 is additive, and an existing listener keeps working.
 
@@ -64,6 +65,19 @@ is additive, and an existing listener keeps working.
   inboxes bound memory when a listener cannot keep up, and a capacity that
   large is an allocation failure waiting to happen rather than useful
   buffering.
+
+* **An abandoned** :class:`~questdb.QueryResult` **now reports its**
+  ``ResourceWarning``. The finalizer previously swallowed it; it is now routed
+  through :func:`sys.unraisablehook`, which is what makes the leak visible.
+  Under warnings-as-errors this becomes a failure — and because it fires
+  whenever garbage collection happens to run, pytest attributes it to whatever
+  test was executing at the time rather than to the one that abandoned the
+  result. Close results deterministically::
+
+      with db.query('select * from trades') as result:
+          ...
+
+  or filter :class:`ResourceWarning` if a suite runs with ``-W error``.
 
 4.x to 5.0
 ==========

@@ -26,6 +26,17 @@
 # cython: language_level=3
 # cython: binding=True
 
+# Deliberately NOT `freethreading_compatible=True`. Without it the module
+# declares `Py_MOD_GIL_USED`, so importing it on a free-threaded interpreter
+# re-enables the GIL -- and that is what currently makes parts of this
+# extension safe, notably the OIDC provider's `_renderer`, `_closed` and
+# `_interrupt` slots, which native callback threads read and write with no
+# synchronisation of their own. The `cp314t` wheels in the CI matrix are
+# therefore usable but gain no free-threading benefit, and running them under
+# `PYTHON_GIL=0` is unsupported. Making the extension genuinely
+# free-threading safe is a separate piece of work; until then this comment is
+# the record of the decision.
+
 """
 API for fast data ingestion into and querying from QuestDB.
 """
@@ -43,6 +54,7 @@ __all__ = [
     'QuestDBErrorCode',
     'QuestDBServerRejectionError',
     'QwpWsProgress',
+    'SchemaOverride',
     'Sender',
     'SenderError',
     'SenderErrorCategory',
@@ -74,6 +86,7 @@ from cpython.datetime cimport (
 )
 from cpython.bool cimport bool
 from cpython.ref cimport Py_XDECREF
+from cpython.exc cimport PyErr_Clear
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
 from cpython.object cimport PyObject
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
@@ -96,17 +109,30 @@ ctypedef int void_int
 
 import cython
 
-# Imported before the includes: `oidc.pxi` builds its registry lock at module
-# scope, and an `include` is a text splice, so anything it evaluates at import
-# time must already be bound here.
+# Imported before the includes: `oidc.pxi` builds its registry lock and
+# registers its shutdown hook at module scope, and an `include` is a text
+# splice, so anything it evaluates at import time must already be bound here.
 import threading
+import atexit
 
 include "dataframe.pxi"
 include "oidc.pxi"
 include "egress.pxi"
 
 from enum import Enum
-from typing import List, Dict, Union, Any, Optional
+from typing import List, Dict, Literal, Tuple, Union, Any, Optional
+
+#: One ``schema_overrides`` value: a QuestDB column kind to reclassify a
+#: column as. ``'uuid'`` and ``'long256'`` claim binary columns of exactly 16
+#: and 32 bytes respectively; ``('geohash', bits)`` takes 1-60 bits.
+#:
+#: Defined at runtime, not only in `_client.pyi`: it names the type of a public
+#: parameter on three `dataframe()` overloads, so a caller annotating their own
+#: code needs to be able to import it.
+SchemaOverride = Union[
+    Literal['symbol', 'ipv4', 'char', 'uuid', 'long256'],
+    Tuple[Literal['geohash'], int],
+]
 from dataclasses import dataclass
 from cpython.bytes cimport (PyBytes_FromStringAndSize,
                             PyBytes_GET_SIZE, PyBytes_AsString)
@@ -1149,6 +1175,16 @@ cdef class SenderTransaction:
         # commit() -- or `__exit__` on the success path -- find the emptied
         # buffer and report success for a transaction that never landed.
         self._complete = True
+        # `Sender._close()` drops the buffer without resetting `_in_txn`, so
+        # `close(flush=False)` inside a `with` block leaves `__exit__` to call
+        # commit() on a closed sender. Report that the way row() and
+        # dataframe() already do: an unguarded `len(None)` raises TypeError,
+        # which is not a QuestDBError and so escapes every handler around the
+        # block.
+        if self._sender._buffer is None:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                "commit() can't be called: Sender is closed.")
         if len(self._sender._buffer):
             try:
                 self._sender.flush(transactional=True)
@@ -1477,16 +1513,26 @@ cdef class Buffer:
 
     cdef inline void_int _may_trigger_row_complete(self) except -1:
         cdef PyObject* sender = NULL
+        cdef int got
         if self._row_complete_sender != None:
             # > 0 (not just truthy): PyWeakref_GetRef returns -1 on error and
             # leaves the out-pointer NULL, which a truthiness test would enter
             # the branch on.
-            if PyWeakref_GetRef(self._row_complete_sender, &sender) > 0:
+            got = PyWeakref_GetRef(self._row_complete_sender, &sender)
+            if got > 0:
                 try:
                     may_flush_on_row_complete(
                         self, <Sender><object>sender)
                 finally:
                     Py_XDECREF(sender)
+            elif got < 0:
+                # -1 does not just report failure, it *sets* an exception.
+                # Returning 0 from an `except -1` function would leave that
+                # pending on the thread state to surface at some unrelated
+                # later check. Unreachable today -- `_row_complete_sender` is
+                # only ever assigned from `PyWeakref_NewRef` -- so clear it and
+                # carry on rather than failing a row over it.
+                PyErr_Clear()
 
     cdef inline void_int _at_ts_us(self, TimestampMicros ts) except -1:
         cdef line_sender_error* err = NULL
@@ -2423,18 +2469,41 @@ cdef bint _on_dispatch_thread_for(object handler, object listener):
     return False
 
 
+# Latches the first unrecognised connection-event ordinal so a native version
+# emitting one in a loop cannot flood the log.
+cdef bint _WARNED_UNKNOWN_CONNECTION_EVENT = False
+
+
 cdef void _connection_event_dispatch(
         void* user_data,
         const questdb_connection_event* event) noexcept with gil:
+    global _WARNED_UNKNOWN_CONNECTION_EVENT
     listener = <object>user_data
     stack = _dispatch_target_stack()
     stack.append(listener)
     try:
-        kind = ConnectionEventKind.Connected
+        kind = None
         for entry in ConnectionEventKind:
             if entry.c_value == <int>event.kind:
                 kind = entry
                 break
+        if kind is None:
+            # Previously this defaulted to `Connected` and was only overwritten
+            # on a match, so an ordinal this build does not know was delivered
+            # to the listener as a *successful connect* -- inverting the
+            # meaning of, say, a future credential or endpoint failure, and
+            # handing it a cause_code on an event that claims success. Dropping
+            # it is the honest option: the ordinals here are literals rather
+            # than bindings of the header's #defines, and only a native newer
+            # than this extension can produce one (impossible at the pinned,
+            # statically linked commit).
+            if not _WARNED_UNKNOWN_CONNECTION_EVENT:
+                _WARNED_UNKNOWN_CONNECTION_EVENT = True
+                logging.getLogger('questdb').warning(
+                    'dropping connection event with unrecognised kind %d; '
+                    'the native client is newer than this questdb package',
+                    <int>event.kind)
+            return
         listener(ConnectionEvent(
             kind=kind,
             host=_conn_event_str(event.host, event.host_len),
@@ -5243,6 +5312,18 @@ cdef object _validate_schema_overrides(object schema_overrides):
                 f'schema_overrides[{name!r}] kind {kind!r} not '
                 "in {'symbol', 'ipv4', 'char', 'uuid', 'long256', "
                 "'geohash'}.")
+        # Only 'geohash' reads the tuple's second element, but the (kind,
+        # value) shape is accepted for every kind -- so ('long256', 32) or
+        # ('uuid', 16) silently dropped the width and worked, which is worse
+        # than failing: the docs print those kinds next to ('geohash', bits),
+        # so writing a width by analogy is the natural mistake and it would
+        # teach an API shape that breaks the moment the argument means
+        # anything. Checked after the dispatch so an unrecognised kind still
+        # gets its own diagnostic.
+        if kind != 'geohash' and value is not None:
+            raise ValueError(
+                f'schema_overrides[{name!r}]: kind {kind!r} takes no '
+                "argument; only 'geohash' does (e.g. ('geohash', 30)).")
         out.append((name.encode('utf-8'), kind_int, arg_int))
     return out
 
@@ -6448,10 +6529,15 @@ cdef class QuestDB:
                 raise TypeError(
                     '"oidc_auth" must be an OidcDeviceAuth or None, '
                     f'not {_fqn(type(oidc_auth))}')
-            if oidc_auth is not None and (
-                    (<OidcDeviceAuth>oidc_auth)._raw == NULL
-                    or (<OidcDeviceAuth>oidc_auth)._closed):
-                raise ValueError('"oidc_auth" is closed')
+            if oidc_auth is not None:
+                # Distinguish the two states the way `_require_open` does: a
+                # NULL handle is a provider whose construction never completed,
+                # which "is closed" misdescribes and sends the caller looking
+                # for a close() they never made.
+                if (<OidcDeviceAuth>oidc_auth)._raw == NULL:
+                    raise ValueError('"oidc_auth" is not initialized')
+                if (<OidcDeviceAuth>oidc_auth)._closed:
+                    raise ValueError('"oidc_auth" is closed')
             if oidc_auth is not None:
                 # Same conflict as the Sender path, but the fixed credential
                 # arrives as a configuration key here. Name the keys the caller
@@ -6487,6 +6573,19 @@ cdef class QuestDB:
             db._error_handler = error_handler
             # Convert to C integers while still holding the GIL: a bad
             # value must raise here, not inside the nogil region below.
+            #
+            # Native validates `event_inbox_capacity` only when an event
+            # callback is installed, and one is installed only for a caller who
+            # passed `connection_listener` -- whereas the rejection callback is
+            # unconditional, so its capacity is always checked. That left the
+            # two keyword arguments the docstring, CHANGELOG and migration
+            # guide describe identically behaving differently. Enforce the
+            # documented cap here so it holds either way.
+            if not 0 <= connection_event_inbox_capacity <= 65536:
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    '"connection_event_inbox_capacity" must be between 0 and '
+                    f'65536, not {connection_event_inbox_capacity!r}.')
             c_event_inbox_capacity = connection_event_inbox_capacity
             c_error_inbox_capacity = error_event_inbox_capacity
             questdb_db_connect_options_init(
@@ -7310,8 +7409,13 @@ cdef class Sender:
                 raise TypeError(
                     '"oidc_auth" must be an OidcDeviceAuth or None, '
                     f'not {_fqn(type(oidc_auth))}')
-            if ((<OidcDeviceAuth>oidc_auth)._raw == NULL
-                    or (<OidcDeviceAuth>oidc_auth)._closed):
+            # Distinguish the two states the way `_require_open` does: a NULL
+            # handle is a provider whose construction never completed, which
+            # "is closed" misdescribes and sends the caller looking for a
+            # close() they never made.
+            if (<OidcDeviceAuth>oidc_auth)._raw == NULL:
+                raise ValueError('"oidc_auth" is not initialized')
+            if (<OidcDeviceAuth>oidc_auth)._closed:
                 raise ValueError('"oidc_auth" is closed')
             # Reject the conflict here, in terms of the parameters the caller
             # actually wrote. Native enforces it too, but reports the internal

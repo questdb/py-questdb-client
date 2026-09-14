@@ -9,6 +9,13 @@ The Python QuestDB client runs on any version of Python >= 3.10 on most
 platforms and architectures. Its only required run-time dependency is
 ``numpy>=1.21.0``.
 
+Wheels are published for free-threaded (``t``) CPython builds and import
+normally there, but the extension module declares ``Py_MOD_GIL_USED``: parts
+of it rely on the GIL to serialise access to state shared with native callback
+threads, so importing it on a free-threaded interpreter re-enables the GIL.
+The client is supported on those builds, it simply gains no free-threading
+benefit; running it under ``PYTHON_GIL=0`` is not supported.
+
 Optional Dependencies
 ---------------------
 

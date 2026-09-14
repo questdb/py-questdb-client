@@ -35,6 +35,7 @@ __all__ = [
     "QuestDBErrorCode",
     "QuestDBServerRejectionError",
     "QwpWsProgress",
+    "SchemaOverride",
     "Sender",
     "SenderError",
     "SenderErrorCategory",

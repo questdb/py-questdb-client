@@ -109,6 +109,63 @@ def _oidc_provider_collected(size_t provider_id, object provider_ref):
     _OIDC_NATIVE_HANDLES.pop(provider_id, None)
 
 
+cdef void _oidc_close_handle_at_exit(_OidcNativeHandle handle) noexcept:
+    """Close one native auth handle, swallowing any failure.
+
+    Native close is idempotent and cheap on an already-closed provider, so this
+    needs no liveness test beyond the NULL check.
+    """
+    cdef questdb_error* err = NULL
+    cdef bint ok
+    cdef PyThreadState* gs = NULL
+    if handle is None or handle.raw == NULL:
+        return
+    _ensure_doesnt_have_gil(&gs)
+    ok = questdb_oidc_auth_close(handle.raw, &err)
+    _ensure_has_gil(&gs)
+    if not ok and err != NULL:
+        questdb_error_free(err)
+
+
+def _oidc_close_providers_at_exit():
+    """Drain every still-registered provider before finalization begins.
+
+    ``_oidc_diagnostic_trampoline`` can be entered from a token-provider or
+    transport thread that Rust spawned, which ``threading._shutdown()`` does
+    not join, and its ``qdb_py_is_finalizing()`` guard is a TOCTOU:
+    finalization can begin between the test and the ``PyGILState_Ensure`` the
+    ``with gil`` dispatch emits. No check placed in the trampoline can close
+    that window.
+
+    ``atexit`` runs while the interpreter is still fully alive, and closing a
+    provider drains it, so running the close here is what actually narrows the
+    window rather than merely re-testing it. What remains is a provider already
+    dropped from the registry whose Rust worker is still running -- closing
+    that one is not possible from Python, and shutting the window completely
+    needs a native entry point that detaches diagnostics under the FFI's own
+    invocation mutex.
+
+    Snapshots under the registry lock and closes outside it: the close is a
+    blocking native call made with the GIL released, and holding the lock
+    across it would serialise shutdown against any concurrent construction.
+    Iterating the handle dict resurrects nothing -- it holds the handles, while
+    `_OIDC_PROVIDERS` holds only weakrefs to the providers themselves.
+    """
+    try:
+        with _OIDC_REGISTRY_LOCK:
+            handles = list(_OIDC_NATIVE_HANDLES.values())
+        for handle in handles:
+            _oidc_close_handle_at_exit(handle)
+    except BaseException:
+        # An atexit hook that raises prints a traceback and buys nothing: the
+        # process is going away regardless, and every provider this failed to
+        # reach is left exactly where it would have been without the hook.
+        pass
+
+
+atexit.register(_oidc_close_providers_at_exit)
+
+
 cdef inline object _oidc_text(const char* buf, size_t length):
     if buf == NULL:
         return None
@@ -117,6 +174,30 @@ cdef inline object _oidc_text(const char* buf, size_t length):
 
 # Resolved on first use and cached. See `_oidc_errors_module`.
 cdef object _OIDC_ERRORS_MOD = None
+
+
+# Every class `_oidc_err_to_py_unowned` and `_is_oidc_terminal_for_foreground`
+# resolve off the module. The readiness test must cover all of them, not just
+# the first: a module is published in `sys.modules` before its body runs, so a
+# sentinel on the first-defined class (`OidcError`, which `_errors.py` defines
+# ahead of the other six) accepts a module on which the rest do not exist yet
+# -- exactly the half-built window the test is there to reject.
+cdef tuple _OIDC_ERROR_NAMES = (
+    'OidcError', 'OidcConfigError', 'OidcNetworkError',
+    'OidcInteractionRequired', 'OidcCancelledError',
+    'OidcDeviceFlowError', 'OidcTimeoutError')
+
+
+cdef bint _oidc_errors_module_complete(object mod):
+    """Does ``mod`` carry every class the error paths resolve off it?
+
+    Checked as a whole rather than one sentinel, so a module caught partway
+    through its body is treated as absent by every caller.
+    """
+    for name in _OIDC_ERROR_NAMES:
+        if getattr(mod, name, None) is None:
+            return False
+    return True
 
 
 cdef object _oidc_errors_module_if_ready():
@@ -144,7 +225,7 @@ cdef object _oidc_errors_module_if_ready():
     if _OIDC_ERRORS_MOD is not None:
         return _OIDC_ERRORS_MOD
     mod = sys.modules.get('questdb.auth._errors')
-    if mod is None or getattr(mod, 'OidcError', None) is None:
+    if mod is None or not _oidc_errors_module_complete(mod):
         return None
     _OIDC_ERRORS_MOD = mod
     return mod
@@ -169,6 +250,7 @@ cdef object _oidc_errors_module():
     ``_oidc_err_to_py_unowned`` falls back to a plain ``QuestDBError`` carrying
     the same native message and code, which is strictly better than that.
     """
+    global _OIDC_ERRORS_MOD
     mod = _oidc_errors_module_if_ready()
     if mod is not None:
         return mod
@@ -181,7 +263,7 @@ cdef object _oidc_errors_module():
         import questdb.auth._errors as mod
     except BaseException:
         return None
-    if getattr(mod, 'OidcError', None) is None:
+    if not _oidc_errors_module_complete(mod):
         return None
     _OIDC_ERRORS_MOD = mod
     return mod
@@ -191,11 +273,13 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
     cdef const char* msg_buf = NULL
     cdef size_t msg_len = 0
     cdef questdb_oidc_error_view view
+    cdef line_sender_qwpws_error_view qwp_ws_view
     cdef object message
     cdef object idp_error = None
     cdef object description = None
     cdef object status = None
     cdef object retry_after = None
+    cdef object sender_error = None
     cdef bint in_doubt = False
     cdef object code
     cdef object exc
@@ -209,9 +293,12 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
             return QuestDBError(
                 QuestDBErrorCode.AuthError, 'Unknown native OIDC error.')
         msg_buf = questdb_error_msg(err, &msg_len)
+        if line_sender_error_qwpws_get_view(err, &qwp_ws_view):
+            sender_error = c_sender_error_view_to_raw(qwp_ws_view)
         return QuestDBError(
             c_err_code_to_py(questdb_error_get_code(err)),
             _oidc_text(msg_buf, msg_len) or 'Unknown native OIDC error.',
+            sender_error,
             in_doubt=questdb_error_in_doubt(err))
     OidcConfigError = errors.OidcConfigError
     OidcCancelledError = errors.OidcCancelledError
@@ -241,6 +328,14 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
     # retryable reconnect into an immediate raise, so `oidc_auth=` silently lost
     # the retry that `token=` still had.
     code = c_err_code_to_py(questdb_error_get_code(err))
+    # Native reports an OIDC cause anywhere in the causal chain, so a
+    # QWP/WebSocket rejection whose root cause was a token refresh reaches this
+    # branch with the transport's structured payload still attached. This is
+    # the only path that builds it, since returning here skips `c_err_to_fields`
+    # -- without this the payload, and `.sender_error` with it, was silently
+    # dropped for exactly the errors an `oidc_auth` transport produces.
+    if line_sender_error_qwpws_get_view(err, &qwp_ws_view):
+        sender_error = c_sender_error_view_to_raw(qwp_ws_view)
     memset(&view, 0, sizeof(questdb_oidc_error_view))
     view.struct_size = sizeof(questdb_oidc_error_view)
     if questdb_error_oidc_get_view(err, &view):
@@ -253,11 +348,11 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
         if view.kind == QUESTDB_OIDC_ERROR_CONFIG:
             exc = OidcConfigError(
                 message, status=status, retry_after=retry_after,
-                in_doubt=in_doubt, code=code)
+                in_doubt=in_doubt, code=code, sender_error=sender_error)
         elif view.kind == QUESTDB_OIDC_ERROR_NETWORK:
             exc = OidcNetworkError(
                 message, status=status, retry_after=retry_after,
-                in_doubt=in_doubt, code=code)
+                in_doubt=in_doubt, code=code, sender_error=sender_error)
         elif view.kind == QUESTDB_OIDC_ERROR_DEVICE_FLOW:
             exc = OidcDeviceFlowError(
                 message,
@@ -265,7 +360,7 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
                 error_description=description,
                 status=status,
                 retry_after=retry_after,
-                in_doubt=in_doubt, code=code)
+                in_doubt=in_doubt, code=code, sender_error=sender_error)
         elif view.kind == QUESTDB_OIDC_ERROR_TIMEOUT:
             # OidcTimeoutError is an OidcDeviceFlowError, and the native side
             # attaches the IdP error (e.g. "expired_token"); carry it through
@@ -276,21 +371,22 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
                 error_description=description,
                 status=status,
                 retry_after=retry_after,
-                in_doubt=in_doubt, code=code)
+                in_doubt=in_doubt, code=code, sender_error=sender_error)
         elif view.kind == QUESTDB_OIDC_ERROR_INTERACTION_REQUIRED:
             exc = OidcInteractionRequired(
                 message, status=status, retry_after=retry_after,
-                in_doubt=in_doubt, code=code)
+                in_doubt=in_doubt, code=code, sender_error=sender_error)
         elif view.kind == QUESTDB_OIDC_ERROR_CANCELLED:
             exc = OidcCancelledError(
                 message, status=status, retry_after=retry_after,
-                in_doubt=in_doubt, code=code)
+                in_doubt=in_doubt, code=code, sender_error=sender_error)
         else:
             exc = OidcError(
                 message, status=status, retry_after=retry_after,
-                in_doubt=in_doubt, code=code)
+                in_doubt=in_doubt, code=code, sender_error=sender_error)
     else:
-        exc = OidcError(message, in_doubt=in_doubt, code=code)
+        exc = OidcError(
+            message, in_doubt=in_doubt, code=code, sender_error=sender_error)
     return exc
 
 
@@ -347,11 +443,24 @@ cdef void _oidc_cancel_sign_in_from_callback(
     provider, discard credentials, or disable attached transports. Errors are
     swallowed deliberately: this runs on the interrupt path, where the pending
     ``KeyboardInterrupt`` or ``SystemExit`` is the thing worth surfacing.
+
+    The GIL is released around the native call for consistency with every other
+    native call in this file, not because a deadlock is known here: native's
+    ``cancel_sign_in`` takes only ``close_wait``, and ``CEventHandler::
+    cancel_sign_in`` takes ``callback_gate``, which is free while a callback
+    runs. Holding the GIL across a native lock acquisition is the shape this
+    file otherwise treats as a rule, so it is not worth being the one exception
+    should either of those lock disciplines change.
     """
     cdef questdb_error* err = NULL
+    cdef bint ok
+    cdef PyThreadState* gs = NULL
     if provider._raw == NULL:
         return
-    if not questdb_oidc_auth_cancel_sign_in(provider._raw, &err):
+    _ensure_doesnt_have_gil(&gs)
+    ok = questdb_oidc_auth_cancel_sign_in(provider._raw, &err)
+    _ensure_has_gil(&gs)
+    if not ok:
         if err != NULL:
             questdb_error_free(err)
 
@@ -442,10 +551,18 @@ cdef void _oidc_diagnostic_trampoline(
     # same shape `_connection_event_trampoline` and `_sender_error_trampoline`
     # in `_client.pyx` already use for genuinely background dispatch, and it
     # inherits their residual window: finalization can begin between this
-    # check and the GIL acquisition below, and no check can close that.
-    # Ordering the two needs a native call that disables diagnostics under the
-    # FFI's own invocation mutex, driven from an atexit hook over the provider
-    # registry -- which would close the same window for those two as well.
+    # check and the GIL acquisition below, and no check placed here can close
+    # that.
+    #
+    # What narrows it is `_oidc_close_providers_at_exit`, registered with
+    # `atexit` over the provider registry: it runs while the interpreter is
+    # still whole and closes -- and so drains -- every provider still
+    # registered, which is what stops a diagnostic arriving during
+    # finalization in the first place. The residue is a provider already
+    # dropped from the registry whose Rust worker is still running; shutting
+    # that case needs a native call disabling diagnostics under the FFI's own
+    # invocation mutex, which would close the same window for those two as
+    # well.
     #
     # It is narrower than both in one respect: `user_data` is NULL, so nothing
     # here dereferences a Python object from a native thread.
@@ -1025,6 +1142,13 @@ cdef class OidcDeviceAuth:
             if native.raw == NULL:
                 raise _oidc_err_to_py(err)
             self._raw = native.raw
+            # A failed build leaves `_raw` NULL and this function supports
+            # re-initialisation from that state, but `close()` latches
+            # `_closed` even on a NULL handle -- and `__cinit__`, the only
+            # other place the flag is cleared, does not re-run. Without this a
+            # retried `__init__` would build a perfectly usable provider that
+            # every entry point then refused as "closed", with no way back.
+            self._closed = False
         except:
             # Dropping `_native` releases the handle if the build got that far;
             # `_OidcNativeHandle.__dealloc__` is NULL-safe when it did not.

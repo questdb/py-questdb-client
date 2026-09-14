@@ -2366,11 +2366,25 @@ class TestEgressWithDatabase(unittest.TestCase):
                         else row['uu'].bytes)
             self.assertEqual(raw_uuid, expect_uuid.bytes)
 
+            def _uuid_bytes(value):
+                return value if isinstance(value, bytes) else value.bytes
+
             # Exercise the separate pyarrow-free UUID decoder too.
+            #
+            # Asserted on `.bytes` rather than on the reconstructed UUID or its
+            # int: this decoder (`_numpy_uuid_chunk`) assembles each half with
+            # `_be64`, which loads the reader's canonical RFC 4122 bytes a byte
+            # at a time so it is correct on either endianness. An earlier form
+            # used `memcpy` plus an unconditional `bswap64`, which agrees with
+            # this one on a little-endian host and byte-reverses every UUID on
+            # a big-endian one -- and no CI leg is big-endian. Comparing the
+            # canonical byte string states the invariant the portable load
+            # exists to hold, so a rebase that reinstates the non-portable
+            # version is at least contradicting an explicit assertion.
             with qi.QuestDB.from_conf(self._conf()) as client:
                 pdf = client.query(
                     f'SELECT uu FROM {table_name}').to_pandas()
-            self.assertEqual(pdf['uu'][0], expect_uuid)
+            self.assertEqual(_uuid_bytes(pdf['uu'][0]), expect_uuid.bytes)
 
             # Every remaining reader must agree on the byte order. UUID bytes
             # are canonical RFC 4122 big-endian at the API boundary, and that
@@ -2380,9 +2394,6 @@ class TestEgressWithDatabase(unittest.TestCase):
             # that reverted to the old lo/hi-LE layout would round-trip against
             # itself and be caught only here, against a fixed expected value.
             sql = f'SELECT uu FROM {table_name}'
-
-            def _uuid_bytes(value):
-                return value if isinstance(value, bytes) else value.bytes
 
             with qi.QuestDB.from_conf(self._conf()) as client:
                 batches = list(client.query(sql).iter_arrow())

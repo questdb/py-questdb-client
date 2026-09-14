@@ -1213,6 +1213,27 @@ class TestQwpWebSocketApi(unittest.TestCase):
             with self.assertRaises((TypeError, OverflowError)):
                 qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;lazy_connect=true;', **kwargs)
 
+    def test_from_conf_caps_connection_event_inbox_capacity(self):
+        # Native validates `event_inbox_capacity` only when an event callback
+        # is installed, and one is installed only for a caller who passed
+        # `connection_listener` -- so without the Python-side check the
+        # documented 65536 cap silently did not apply to the no-listener case,
+        # while `error_event_inbox_capacity` (whose callback is unconditional)
+        # was always capped. Assert it holds both ways.
+        for listener in (None, lambda event: None):
+            with self.assertRaises(qi.QuestDBError) as caught:
+                qi.QuestDB.from_conf(
+                    'ws::addr=127.0.0.1:1;lazy_connect=true;',
+                    connection_listener=listener,
+                    connection_event_inbox_capacity=65537)
+            self.assertEqual(
+                caught.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+        # The cap itself is still accepted.
+        with qi.QuestDB.from_conf(
+                'ws::addr=127.0.0.1:1;lazy_connect=true;',
+                connection_event_inbox_capacity=65536) as client:
+            pass
+
     def test_pool_rejection_handler_receives_server_rejection(self):
         rejections = []
         delivered = threading.Event()
