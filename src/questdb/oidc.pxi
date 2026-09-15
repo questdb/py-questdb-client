@@ -864,7 +864,9 @@ cdef class OidcDeviceAuth:
           answer. There is no terminal detection: a missing TTY is not evidence
           of a missing human.
         * ``qr`` — also render the verification URL as a QR code, for signing in
-          from a phone. Ignored when a custom ``renderer`` is supplied.
+          from a phone. The terminal QR needs ``qrcode``; the notebook PNG QR
+          additionally needs Pillow (install ``qrcode[pil]``). Ignored when a
+          custom ``renderer`` is supplied.
         * ``renderer`` — a :class:`~questdb.auth.Renderer` presenting the prompt.
           Its callbacks receive native display-normalised but still untrusted
           identity-provider text; see that class for sink-encoding, actionable-
@@ -961,7 +963,8 @@ cdef class OidcDeviceAuth:
         ``scope``, ``audience``, ``issuer``, ``token_endpoint`` and
         ``device_authorization_endpoint`` default to ``None``, meaning "take
         the server's value", and any you pass override it. ``client_id``,
-        ``scope``, ``audience`` and ``issuer`` must be non-empty when provided.
+        ``scope``, ``audience``, ``issuer``, ``token_endpoint`` and
+        ``device_authorization_endpoint`` must be non-empty when provided.
         The remaining parameters — ``insecure``, ``ca_bundle``, ``open_browser``,
         ``interactive``, ``qr``, ``renderer``, ``default_interval``,
         ``timeout`` and ``token_store`` — are not discovered at all and behave

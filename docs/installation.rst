@@ -36,7 +36,8 @@ Without it, you may still ingest data row-by-row through
 The :ref:`OIDC authentication helper <oidc_auth>` (:mod:`questdb.auth`) needs
 no extra dependencies for ``sign_in()`` / ``token()``. Some conveniences
 import the following lazily, only when used: ``sqlalchemy`` and ``psycopg`` /
-``psycopg2`` (PG-wire adapters), ``qrcode`` (QR-code prompt) and ``IPython``
+``psycopg2`` (PG-wire adapters), ``qrcode`` (terminal QR prompt;
+``qrcode[pil]`` or Pillow for the notebook PNG QR) and ``IPython``
 (rich Jupyter prompt).
 
 PIP

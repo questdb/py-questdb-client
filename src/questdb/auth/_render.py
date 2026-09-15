@@ -509,10 +509,8 @@ def _render_link(url: Optional[str], *, text: Optional[str] = None) -> str:
 # Untrusted device-response fields are echoed to a TTY / notebook DOM, where a
 # control, bidi-override (e.g. U+202E reverses a URL's host) or zero-width char
 # could spoof the prompt or hide the real sign-in URL (html.escape guards
-# markup, not these). Strip by Unicode general category so a newly-assigned
-# format codepoint is covered automatically, rather than an enumerated regex
-# that silently misses additions: control (Cc), format (Cf: bidi / zero-width /
-# soft hyphen / tag chars / the deprecated U+206x), unassigned (Cn),
+# markup, not these). Strip by Unicode general category: control (Cc), format
+# (Cf: bidi / zero-width / soft hyphen / tag chars / the deprecated U+206x),
 # private-use (Co), surrogates (Cs), line/paragraph separators (Zl/Zp), and
 # ENCLOSING combining marks (Me, e.g. U+20E0 / U+0489) — which overlay the
 # preceding glyph (a circle/slash/keycap) and are never part of a legitimate
@@ -523,7 +521,7 @@ def _render_link(url: Optional[str], *, text: Optional[str] = None) -> str:
 # separator (NBSP U+00A0, ideographic space U+3000, ...) is folded to a plain
 # space below, since an invisible-as-space char is a known phishing primitive
 # (it can hide trailing text in a user_code / identity / error).
-_STRIP_CATEGORIES = frozenset({'Cc', 'Cf', 'Cn', 'Co', 'Cs', 'Me', 'Zl', 'Zp'})
+_STRIP_CATEGORIES = frozenset({'Cc', 'Cf', 'Co', 'Cs', 'Me', 'Zl', 'Zp'})
 # Invisible characters the category rule above does NOT catch, stripped
 # explicitly:
 #  - the Hangul fillers (category Lo) — render as nothing, used to hide/spoof;
@@ -536,9 +534,9 @@ _STRIP_CATEGORIES = frozenset({'Cc', 'Cf', 'Cn', 'Co', 'Cs', 'Me', 'Zl', 'Zp'})
 #    joiner (U+034F), the Mongolian free variation selectors (U+180B–U+180D and
 #    U+180F) and the Khmer inherent vowels (U+17B4, U+17B5) — same hazard class
 #    as the variation selectors above, invisible and able to hide payload in a
-#    user_code / URL / identity. (The Cf/Cn/Lo Default_Ignorables — soft hyphen,
-#    U+180E, the zero-width/bidi runs, the tag chars — are already dropped by the
-#    category rule.)
+#    user_code / URL / identity. Assigned Cf Default_Ignorables are dropped by
+#    the category rule; reserved Cn tag ranges/noncharacters by
+#    _is_reserved_invisible; and Lo fillers by _STRIP_EXTRA.)
 #  - U+2800 BRAILLE PATTERN BLANK (category So, so neither the category rule nor
 #    the Zs space-fold below catches it) renders as a blank, cell-width glyph and
 #    is a known invisible-padding primitive that can hide trailing text in a
@@ -549,6 +547,29 @@ _STRIP_EXTRA = frozenset(
         0x2800, 0x034F, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F))
     + ''.join(chr(c) for c in range(0xFE00, 0xFE10))
     + ''.join(chr(c) for c in range(0xE0100, 0xE01F0)))
+
+
+def _is_reserved_invisible(codepoint: int) -> bool:
+    """Whether an unassigned codepoint is reserved as invisible/noncharacter.
+
+    Do not strip every ``Cn`` codepoint. ``unicodedata.category`` uses the
+    running interpreter's bundled Unicode Character Database, so a real letter
+    assigned in a newer Unicode release is reported as unassigned by an older
+    supported Python. Enumerating the reserved invisible ranges keeps rendering
+    stable across Python versions without admitting the ``Cn`` values that are
+    deliberately invisible.
+    """
+    return (
+        codepoint == 0x2065
+        or 0xFDD0 <= codepoint <= 0xFDEF
+        or 0xFFF0 <= codepoint <= 0xFFF8
+        or codepoint & 0xFFFF in (0xFFFE, 0xFFFF)
+        or codepoint == 0xE0000
+        or 0xE0002 <= codepoint <= 0xE001F
+        or 0xE0080 <= codepoint <= 0xE00FF
+        or 0xE01F0 <= codepoint <= 0xE0FFF
+    )
+
 
 # Cap consecutive non-spacing marks (category Mn) kept on one base character.
 # Mn marks stack vertically on the preceding glyph; a long run is a "Zalgo"
@@ -581,7 +602,7 @@ def _strip_control(text: Optional[str]) -> str:
     out = []
     combining_run = 0
     for ch in text:
-        if ch in _STRIP_EXTRA:
+        if ch in _STRIP_EXTRA or _is_reserved_invisible(ord(ch)):
             # Stripped chars are transparent to the combining-run count below, so
             # an attacker can't reset the cap by interleaving zero-width /
             # variation-selector chars between stacked marks.

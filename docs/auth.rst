@@ -191,11 +191,15 @@ working directory, and ``~`` is expanded by shells rather than by any QuestDB
 client, so neither names a single store the clients would actually share.
 Both are rejected rather than silently resolved. A path passed straight to
 ``FileTokenStore(...)`` is a Python path, not the shared setting, and is
-expanded and absolutised as usual. The native client writes plaintext JSON using atomic replacement and
-cross-process coordination; on POSIX, directories are mode ``0700`` and files
-mode ``0600``. Every failed store operation is logged at ``WARNING`` on the
-``questdb`` logger. A failed save or automatic clear is reported only there and
-leaves the in-memory credential usable; a failed load, or a refresh lease lost
+expanded and absolutised as usual. The native client writes plaintext JSON
+using atomic replacement and cross-process coordination; on POSIX, directories
+are mode ``0700`` and files mode ``0600``. On other platforms, protection
+depends on the directory's default ACL. Every failed store operation is logged
+at ``WARNING`` on the ``questdb`` logger during normal operation. Diagnostics
+are detached at interpreter exit, before ``atexit`` hooks registered earlier
+than ``import questdb`` run, so a store failure during that shutdown window may
+not be logged. A failed save or automatic clear is otherwise reported only
+there and leaves the in-memory credential usable; a failed load, or a refresh lease lost
 mid-refresh, is also raised to the caller as
 :class:`~questdb.auth.OidcNetworkError`, because an uncoordinated refresh could
 resubmit a rotating token. Enabling persistence stores a long-lived refresh token on disk, so use it
@@ -298,6 +302,7 @@ Optional dependencies
 =====================
 
 OIDC itself uses the native client and needs no extra package. ``sqlalchemy``
-and ``psycopg``/``psycopg2`` support the PG adapters, ``qrcode`` enables QR
-rendering, and ``IPython`` enables the rich Jupyter renderer. All are imported
-lazily.
+and ``psycopg``/``psycopg2`` support the PG adapters. ``qrcode`` enables the
+terminal QR; notebook PNG QR rendering additionally needs Pillow (install
+``qrcode[pil]``). ``IPython`` enables the rich Jupyter renderer. All are
+imported lazily.

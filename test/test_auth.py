@@ -735,6 +735,34 @@ class NativeOidcTest(unittest.TestCase):
             auth.close()
             _client._oidc_detach_diagnostics_at_exit()
 
+    def test_exit_hook_actually_silences_persistence_diagnostics(self):
+        # The companion test above proves detaching does not close providers;
+        # this positive half proves the hook reaches the native diagnostic
+        # sink. Reducing _oidc_detach_handle_diagnostics to a no-op makes the
+        # deterministic failed save below emit a WARNING and fail this test.
+        class SabotageRenderer(RecordingRenderer):
+            def __init__(self, directory):
+                super().__init__()
+                self.directory = directory
+
+            def on_prompt(self, challenge):
+                super().on_prompt(challenge)
+                shutil.rmtree(self.directory)
+                with open(self.directory, 'w', encoding='utf-8') as sink:
+                    sink.write('not a directory')
+
+        with tempfile.TemporaryDirectory() as parent:
+            directory = os.path.join(parent, 'store')
+            with OidcTestServer() as server:
+                auth = make_discovered_auth(
+                    server,
+                    token_store=FileTokenStore.at(directory),
+                    renderer=SabotageRenderer(directory))
+                _client._oidc_detach_diagnostics_at_exit()
+                with self.assertNoLogs('questdb', level='WARNING'):
+                    auth.sign_in()
+                self.assertEqual(auth.token(), 'AT-initial')
+
     @unittest.skipUnless(os.name == 'posix', 'POSIX bytes paths only')
     def test_non_utf8_file_store_path_is_typed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1911,6 +1939,88 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             for value in stats['upgrade_authorizations']))
         self.assertEqual(stats['errors'], [])
 
+    def test_background_token_provider_dispatches_persistence_diagnostic(self):
+        # The foreground sign-in diagnostic path starts on a Python thread that
+        # already has a thread state. Exercise the other boundary: QWP resolves
+        # a near-expiry credential on Rust's isolated token-provider worker,
+        # whose failed save enters _oidc_diagnostic_trampoline from that foreign
+        # thread and acquires the GIL there.
+        credential_path = None
+        sabotaged = threading.Event()
+
+        def sabotage_after_refresh_request():
+            # The refresh request is sent only after native has acquired the
+            # store lease and loaded the valid file. Replacing the target now
+            # lets refresh succeed but makes the following atomic replace fail.
+            # A reconnect may refresh again; sabotage only the first response.
+            if not sabotaged.is_set():
+                # Rotating-token safety removes the old JSON before sending the
+                # request; a non-rotating IdP may leave it until replacement.
+                # Either way, make the destination a directory so rename fails.
+                if os.path.isfile(credential_path):
+                    os.remove(credential_path)
+                os.mkdir(credential_path)
+                sabotaged.set()
+
+        with tempfile.TemporaryDirectory() as directory:
+            with OidcTestServer(
+                    initial_expires_in=4,
+                    refresh_request_hook=sabotage_after_refresh_request
+                    ) as oidc_server:
+                auth = make_discovered_auth(
+                    oidc_server, token_store=FileTokenStore.at(directory))
+                auth.sign_in()
+                credential_files = [
+                    name for name in os.listdir(directory)
+                    if name.endswith('.json')]
+                self.assertEqual(len(credential_files), 1)
+                credential_path = os.path.join(
+                    directory, credential_files[0])
+
+                with QwpAckServer(close_plan=(0, None)) as qwp_server:
+                    conf = (
+                        f'ws::addr=127.0.0.1:{qwp_server.port};'
+                        'lazy_connect=true;'
+                        'reconnect_initial_backoff_millis=1;'
+                        'reconnect_max_backoff_millis=1;'
+                        'reconnect_max_duration_millis=5000;'
+                        'close_flush_timeout_millis=5000;')
+                    sender = questdb.Sender.from_conf(
+                        conf, oidc_auth=auth, auto_flush=False)
+                    try:
+                        # Establish synchronously with the still-valid initial
+                        # token. The mock closes that first upgraded connection,
+                        # so the queued frame below is drained by the background
+                        # reconnect path rather than this Python caller.
+                        sender.establish()
+                        # Short-lived tokens cap the normal 30s skew at half
+                        # their lifetime. Cross that refresh threshold only
+                        # after the foreground connection has been established.
+                        time.sleep(2.25)
+                        main_thread = threading.get_ident()
+                        with self.assertLogs(
+                                'questdb', level='WARNING') as captured:
+                            sender.row(
+                                'events', columns={'value': 42},
+                                at=questdb.ServerTimestamp)
+                            fsn = sender.flush_and_get_fsn()
+                            self.assertTrue(
+                                sender.await_acked_fsn(fsn, 5000))
+                    finally:
+                        sender.close(flush=False)
+                    stats = qwp_server.snapshot()
+
+        self.assertTrue(sabotaged.is_set())
+        warnings = [
+            record for record in captured.records
+            if 'token store save failed' in record.getMessage()]
+        self.assertEqual(len(warnings), 1, captured.output)
+        self.assertNotEqual(
+            warnings[0].thread, main_thread,
+            'diagnostic unexpectedly ran on the Python caller thread')
+        self.assertEqual(stats['binary_frames'], 1)
+        self.assertEqual(stats['errors'], [])
+
     def test_qwp_pool_authenticates_and_flushes(self):
         # The pool opens its QWP connection through questdb_db_connect_ex -- a
         # different native path than the standalone Sender's
@@ -2855,6 +2965,20 @@ class RenderSanitizerTest(unittest.TestCase):
         # and can pad or hide trailing text in a user_code / identity / error.
         self.assertEqual(
             _render._strip_control('ab' + chr(0x2800) + 'cd'), 'abcd')
+
+    def test_strip_control_is_stable_across_python_unicode_versions(self):
+        # U+2EBF0 is a CJK Extension I letter assigned in Unicode 15.1. Older
+        # supported Pythons bundle an earlier UCD and report it as Cn; it must
+        # still survive instead of making the same identity version-dependent.
+        newer_letter = chr(0x2EBF0)
+        self.assertEqual(_render._strip_control(newer_letter), newer_letter)
+
+        # The reserved Cn values that are intentionally invisible remain
+        # stripped without relying on the interpreter's UCD classification.
+        for codepoint in (0x2065, 0xFDD0, 0xFFF0, 0x1FFFE,
+                          0xE0000, 0xE0002, 0xE0080, 0xE01F0):
+            with self.subTest(codepoint=f'U+{codepoint:04X}'):
+                self.assertEqual(_render._strip_control(chr(codepoint)), '')
 
     # -- _safe_link_url / _safe_target: what may be linkified / opened / QR'd --
     def test_safe_link_url_rejects_dangerous_schemes(self):

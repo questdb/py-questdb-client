@@ -925,6 +925,38 @@ class TestSchemaOverrides(unittest.TestCase):
         self.assertIn(value.bytes[::-1], payload)
         self.assertNotIn(value.bytes, payload)
 
+    @unittest.skipIf(
+        pa is None or pd is None or not hasattr(pa, 'uuid'),
+        'pandas and pyarrow with arrow.uuid are required')
+    def test_arrow_uuid_extension_uses_the_manual_planner_offline(self):
+        # A pyarrow.Table takes the Rust capsule path, and an all-Arrow pandas
+        # frame can too. Mix in a numpy-backed timestamp so this case reaches
+        # dataframe.pxi and pins its pre-unwrap `arrow.uuid` extension-name gate
+        # as well as the UUID wire byte order.
+        import uuid as uuid_mod
+        value = uuid_mod.UUID('123e4567-e89b-12d3-a456-426614174000')
+        uuid_type = pa.uuid()
+        extension = pa.ExtensionArray.from_storage(
+            uuid_type, pa.array([value.bytes], type=pa.binary(16)))
+        df = pd.DataFrame({
+            'u': pd.array(extension, dtype=pd.ArrowDtype(uuid_type)),
+            'ts': pd.to_datetime([_ts_us(2025, 1, 1)], unit='us'),
+        })
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='uuids_ext', at='ts', symbols=False)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(value.bytes[::-1], payload)
+        self.assertNotIn(value.bytes, payload)
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_object_dtype_uuid_column_reaches_the_wire_in_qwp_order(self):
         # The object-dtype `uuid.UUID` route (_dataframe_columnar_build_uuid_pyobj

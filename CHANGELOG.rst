@@ -165,8 +165,10 @@ Highlights:
   on disk.
 * OIDC prompt callbacks expose the bounded device-code lifetime and polling
   interval, matching the complete Java device challenge.
-* Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes owner-only
-  plaintext credentials atomically and coordinates refresh across processes.
+* Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes plaintext
+  credentials atomically and coordinates refresh across processes. Its
+  directories/files are owner-only (``0700``/``0600``) on Unix; on other
+  platforms protection depends on the directory's default ACL.
   Its directory is overridable with the
   ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` environment variable, shared with the
   native client. Custom Python token stores are not supported by the native

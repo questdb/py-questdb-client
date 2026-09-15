@@ -25,6 +25,7 @@ class OidcTestServer:
             refreshed_access_token='AT-refreshed',
             refreshed_expires_in=300,
             write_statuses=(),
+            refresh_request_hook=None,
             device_token_response=None,
             device_token_responses=(),
             refresh_token_response=None,
@@ -40,6 +41,10 @@ class OidcTestServer:
         self.refresh_token = refresh_token
         self.refreshed_access_token = refreshed_access_token
         self.refreshed_expires_in = refreshed_expires_in
+        # Optional synchronization/injection point after a refresh request has
+        # arrived (and therefore after the client took its store lease), but
+        # before the response that makes it persist the rotated credential.
+        self.refresh_request_hook = refresh_request_hook
         # Optional error injection for the token endpoint. Each override is a
         # ``(status, body, headers)`` tuple where ``body`` is a dict (serialized
         # as JSON), raw ``bytes`` (e.g. a non-JSON error page), or ``None``, and
@@ -172,6 +177,8 @@ class OidcTestServer:
         if handler.command == 'POST' and path == '/token':
             grant_type = request['form'].get('grant_type', [None])[0]
             if grant_type == 'refresh_token':
+                if self.refresh_request_hook is not None:
+                    self.refresh_request_hook()
                 if self.refresh_token_response is not None:
                     self._emit(handler, self.refresh_token_response)
                     return
