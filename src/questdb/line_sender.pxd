@@ -1075,11 +1075,6 @@ cdef extern from "questdb/oidc.h":
         questdb_error** err_out
         ) noexcept nogil
 
-    bint questdb_oidc_builder_default_file_token_store(
-        questdb_oidc_builder* builder,
-        questdb_error** err_out
-        ) noexcept nogil
-
     bint questdb_oidc_builder_event_handler(
         questdb_oidc_builder* builder,
         questdb_oidc_event_cb callback,
@@ -1098,11 +1093,6 @@ cdef extern from "questdb/oidc.h":
 
     questdb_oidc_auth* questdb_oidc_builder_build(
         const questdb_oidc_builder* builder,
-        questdb_error** err_out
-        ) noexcept nogil
-
-    questdb_oidc_auth* questdb_oidc_auth_clone(
-        const questdb_oidc_auth* auth,
         questdb_error** err_out
         ) noexcept nogil
 

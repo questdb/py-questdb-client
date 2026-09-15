@@ -75,6 +75,13 @@ def _debug_oidc_registry_size():
     return len(_OIDC_PROVIDERS)
 
 
+def _debug_oidc_registry_snapshot():
+    """Internal test hook: paired registry ids observed under their lock."""
+    with _OIDC_REGISTRY_LOCK:
+        return (frozenset(_OIDC_PROVIDERS),
+                frozenset(_OIDC_NATIVE_HANDLES))
+
+
 def _debug_oidc_reset_errors_module():
     """Internal test hook: drop the cached ``questdb.auth._errors`` module."""
     global _OIDC_ERRORS_MOD
@@ -154,8 +161,10 @@ def _oidc_detach_diagnostics_at_exit():
     ``QuestDB.__dealloc__`` -> ``questdb_db_close`` -> the bounded
     ``close_flush_timeout`` drain happens later. Detaching gives the hook's
     stated guarantee (no diagnostic callback running, none able to start)
-    without taking anything else away, and cannot stall exit either, since it
-    never waits on the acquisition lock behind an in-flight IdP request.
+    without taking anything else away. Detach can wait only for a diagnostic
+    callback already running; it never waits on the acquisition lock behind an
+    in-flight IdP request, so the provider's 30s/120s HTTP timeout is not added
+    to exit latency.
 
     Snapshots under the registry lock and detaches outside it: the detach is a
     native call made with the GIL released, and holding the lock across it
@@ -477,9 +486,34 @@ cdef void _oidc_cancel_sign_in_from_callback(
             questdb_error_free(err)
 
 
+cdef inline bint _oidc_event_has_browser_target(size_t struct_size):
+    # browser_target_len immediately precedes the appended uint64 interval.
+    # A struct from the ABI revision before interval therefore ends here.
+    return struct_size >= (
+        sizeof(questdb_oidc_event) - sizeof(uint64_t))
+
+
+cdef inline bint _oidc_event_has_interval(size_t struct_size):
+    return struct_size >= sizeof(questdb_oidc_event)
+
+
+def _debug_oidc_event_tail_support(size_t struct_size):
+    """Internal test hook for the event ABI's appended-field gates."""
+    return (_oidc_event_has_browser_target(struct_size),
+            _oidc_event_has_interval(struct_size))
+
+
+def _debug_oidc_event_tail_sizes():
+    """Internal test hook: minimum ABI sizes for browser URL and interval."""
+    return (sizeof(questdb_oidc_event) - sizeof(uint64_t),
+            sizeof(questdb_oidc_event))
+
+
 cdef void _oidc_event_dispatch(
         void* user_data,
         const questdb_oidc_event* event) noexcept with gil:
+    cdef object browser_target = None
+    cdef uint64_t interval_seconds = 0
     provider = _oidc_provider_from_user_data(user_data)
     if provider is None:
         return
@@ -488,6 +522,15 @@ cdef void _oidc_event_dispatch(
         return
     try:
         if event.kind == QUESTDB_OIDC_EVENT_PROMPT:
+            # These fields were appended to the public C struct. Static linkage
+            # makes this build use matching layouts today, but the callback ABI
+            # explicitly supports an older shared library: never read beyond
+            # the size that producer reported.
+            if _oidc_event_has_browser_target(event.struct_size):
+                browser_target = _oidc_text(
+                    event.browser_target, event.browser_target_len)
+            if _oidc_event_has_interval(event.struct_size):
+                interval_seconds = event.interval_seconds
             renderer.on_prompt({
                 'user_code': _oidc_text(event.user_code, event.user_code_len),
                 'verification_uri': _oidc_text(
@@ -502,11 +545,10 @@ cdef void _oidc_event_dispatch(
                 # uint64 -- rather than narrowed here: a C double->unsigned cast
                 # is in range only because native happens to clamp the lifetime.
                 'expires_in': event.expires_in_seconds,
-                'interval': event.interval_seconds,
+                'interval': interval_seconds,
                 # This is the only native-vetted actionable URL. Built-in
                 # renderers prefer it for links and QR codes.
-                'browser_target': _oidc_text(
-                    event.browser_target, event.browser_target_len),
+                'browser_target': browser_target,
             })
         elif event.kind == QUESTDB_OIDC_EVENT_WAITING:
             renderer.on_waiting(event.seconds_left)

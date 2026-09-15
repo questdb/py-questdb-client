@@ -202,7 +202,9 @@ Highlights:
   Operations on a closed provider raise the new
   :class:`~questdb.auth.OidcCancelledError`, except
   :meth:`~questdb.auth.OidcDeviceAuth.clear`, which stays available so the
-  persisted credential can still be removed, and ``config``, which remains
+  persisted credential can still be removed;
+  :meth:`~questdb.auth.OidcDeviceAuth.cancel_sign_in`, which remains an
+  idempotent no-op when no flow is running; and ``config``, which remains
   readable. ``Ctrl-C`` during ``sign_in()`` cancels only the current attempt and
   raises ``KeyboardInterrupt``; the provider remains open, already-attached
   ``Sender``/pool/reader instances remain usable, and a later ``sign_in()`` can

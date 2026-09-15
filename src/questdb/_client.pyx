@@ -613,6 +613,11 @@ cdef inline bint _is_oidc_terminal_for_foreground(object exc, object oidc_auth):
     return True
 
 
+def _debug_is_oidc_terminal_for_foreground(exc, oidc_auth):
+    """Internal test hook for the foreground OIDC retry gate."""
+    return bool(_is_oidc_terminal_for_foreground(exc, oidc_auth))
+
+
 cdef object _utf8_decode_error(
         PyObject* string, uint32_t bad_codepoint):
     cdef str s = <str><object>string

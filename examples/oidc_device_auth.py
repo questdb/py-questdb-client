@@ -12,6 +12,7 @@ loop), so it is not part of the automated example suite.
 
 import contextlib
 import sys
+import urllib.parse
 
 import questdb
 from questdb.auth import (
@@ -24,6 +25,22 @@ from questdb.auth import (
 
 
 QUESTDB_URL = 'https://questdb.example.com:9000'
+
+
+def _sender_conf(url: str) -> str:
+    """Translate the discovery URL's origin to an ILP/HTTP config string."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ('http', 'https') or parsed.hostname is None:
+        raise ValueError('QuestDB URL must be an absolute http(s) URL')
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError('QuestDB URL must not contain user information')
+    host = parsed.hostname
+    if ':' in host:  # Config-string IPv6 authorities retain URL brackets.
+        host = f'[{host}]'
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == 'https' else 80
+    return f'{parsed.scheme}::addr={host}:{port};'
 
 
 def sign_in(url: str = QUESTDB_URL) -> OidcDeviceAuth:
@@ -68,7 +85,7 @@ def persist_across_restarts(url: str = QUESTDB_URL) -> OidcDeviceAuth:
     re-runs the device flow. Pass a ``token_store`` to persist it: the restarted
     process resumes from the saved refresh token (a silent token-endpoint call)
     instead of re-prompting. ``FileTokenStore`` writes one file per identity
-    under ``~/.questdb/oidc-tokens/`` (``0600``, owner-only).
+    under ``~/.questdb/oidc-tokens/`` (``0600``, owner-only on Unix).
     """
     auth = OidcDeviceAuth.from_questdb(
         url, token_store=FileTokenStore.at_default_location())
@@ -88,8 +105,7 @@ def bring_your_own_client(url: str = QUESTDB_URL):
     # Ingestion retains the shared provider and pulls a fresh token on every
     # connect/reconnect instead of capturing the current token string.
     with questdb.Sender.from_conf(
-            'https::addr=questdb.example.com:9000;',
-            oidc_auth=auth) as sender:
+            _sender_conf(url), oidc_auth=auth) as sender:
         sender.row(
             'trades',
             symbols={'symbol': 'ETH-USD', 'side': 'sell'},

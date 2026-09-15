@@ -984,6 +984,46 @@ class NativeOidcTest(unittest.TestCase):
             size, baseline,
             f'the provider registry grew over {self._LEAK_ITERS} constructions')
 
+    def test_registry_lock_keeps_concurrent_provider_builds_paired(self):
+        # Build() releases the GIL, so constructors started together can
+        # interleave between id allocation, paired registry insertion, native
+        # construction and publication. The registry lock must give every
+        # provider one unique id and keep the weakref/handle maps paired.
+        workers = 8
+        barrier = threading.Barrier(workers)
+        providers = [None] * workers
+        failures = []
+
+        def build(index):
+            try:
+                barrier.wait()
+                providers[index] = make_auth(renderer=Renderer())
+            except BaseException as exc:
+                failures.append(exc)
+
+        baseline_providers, baseline_handles = (
+            _client._debug_oidc_registry_snapshot())
+        self.assertEqual(baseline_providers, baseline_handles)
+        threads = [
+            threading.Thread(target=build, args=(index,), daemon=True)
+            for index in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(15)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(failures, [])
+        self.assertTrue(all(provider is not None for provider in providers))
+
+        provider_ids, handle_ids = _client._debug_oidc_registry_snapshot()
+        self.assertEqual(provider_ids, handle_ids)
+        new_ids = provider_ids - baseline_providers
+        self.assertEqual(len(new_ids), workers)
+        self.assertTrue(new_ids.isdisjoint(baseline_providers))
+
+        providers.clear()
+        self.assertEqual(_settled_registry_size(), len(baseline_providers))
+
     # A path that reaches native build() rather than a Python pre-check: the
     # setter only stores it, and build() is what opens it. Anything rejected
     # earlier (an empty client_id, say, which `_oidc_required_utf8` refuses)
@@ -3651,18 +3691,49 @@ class OidcReviewFixTest(unittest.TestCase):
         # `sys.modules` lookup while the exception was built from the cached
         # module. Two independent lookups disagree after any `sys.modules`
         # swap, leaving `isinstance` permanently False and the gate silently
-        # disabled. Both now go through one resolver, so a swapped-in module
-        # missing the classes is reported as absent rather than mismatched.
+        # disabled. Call the gate itself so these assertions discriminate that
+        # regression rather than merely restating how the exception was built.
         _client._debug_oidc_reset_errors_module()
         try:
             self.assertTrue(_client._debug_oidc_errors_module_resolved())
             import questdb.auth._errors as errors
             exc = errors.OidcInteractionRequired('needs sign-in')
-            # Sanity: the resolver hands back the module the class came from.
-            self.assertIs(sys.modules['questdb.auth._errors'], errors)
-            self.assertIsInstance(exc, errors.OidcInteractionRequired)
+            self.assertTrue(
+                _client._debug_is_oidc_terminal_for_foreground(exc, None))
+
+            # Once resolved, a transient replacement in sys.modules must not
+            # change the class identity used by the gate.
+            half_built = types.ModuleType('questdb.auth._errors')
+            with mock.patch.dict(
+                    sys.modules, {'questdb.auth._errors': half_built}):
+                self.assertTrue(
+                    _client._debug_is_oidc_terminal_for_foreground(exc, None))
+
+            # The same error is transient while this provider reports a peer
+            # sign-in in progress; a different OIDC class is never gated.
+            busy = types.SimpleNamespace(_sign_in_in_progress=True)
+            self.assertFalse(
+                _client._debug_is_oidc_terminal_for_foreground(exc, busy))
+            self.assertFalse(_client._debug_is_oidc_terminal_for_foreground(
+                errors.OidcNetworkError('network'), None))
         finally:
             _client._debug_oidc_reset_errors_module()
+
+    def test_event_tail_fields_are_gated_by_struct_size(self):
+        # A callback from an older shared library can provide the pre-interval
+        # prefix or omit both appended URL fields. Static linkage makes that
+        # impossible in wheels today, but the public ABI explicitly permits it.
+        browser_size, interval_size = (
+            _client._debug_oidc_event_tail_sizes())
+        self.assertLess(browser_size, interval_size)
+        self.assertEqual(_client._debug_oidc_event_tail_support(
+            browser_size - 1), (False, False))
+        self.assertEqual(_client._debug_oidc_event_tail_support(
+            browser_size), (True, False))
+        self.assertEqual(_client._debug_oidc_event_tail_support(
+            interval_size - 1), (True, False))
+        self.assertEqual(_client._debug_oidc_event_tail_support(
+            interval_size), (True, True))
 
 
 if __name__ == '__main__':
