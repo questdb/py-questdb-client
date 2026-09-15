@@ -711,31 +711,36 @@ cdef class _OidcNativeHandle:
         # `_oidc_diagnostic_trampoline`, whose `qdb_py_is_finalizing()` test
         # cannot be atomic with the `with gil` acquisition that follows it: a
         # shutdown beginning in that window crashes or hangs the interpreter.
-        # `_oidc_close_providers_at_exit` cannot reach this provider either,
+        # `_oidc_detach_diagnostics_at_exit` cannot reach this provider either,
         # since the weakref callback has already dropped it from the registry.
         #
         # Detaching is the half no check placed in the trampoline can perform:
-        # it drains a callback already running and stops any later one, so the
-        # window is closed rather than merely re-tested.
+        # it stops any later callback, so the window is closed rather than
+        # merely re-tested.
         #
-        # The GIL must be released across it. A diagnostic that has already
-        # entered the callback gate is blocked acquiring the GIL, and detach
-        # waits for that gate -- holding the GIL here would deadlock the two
-        # against each other.
+        # The non-waiting form, because this runs wherever a collection fired
+        # and so cannot know what this thread already holds. The waiting form
+        # blocks on the callback gate, and the callback -- once it has the
+        # gate -- logs through `logging`, which takes the handler's lock. A
+        # collection triggered by an allocation inside that handler's `emit`
+        # runs this finalizer on a thread already owning that lock, so waiting
+        # parks both threads permanently: this one for the gate, the callback
+        # for the handler lock. Releasing the GIL below does not prevent it,
+        # because the GIL is not the lock in contention -- which is exactly
+        # what the waiting form's own contract now warns about.
+        #
+        # The GIL is still released: a diagnostic already inside the gate is
+        # blocked acquiring it, and even the bounded drain should let that
+        # callback finish rather than spin against it.
         #
         # Skipped once finalization has begun, where it can no longer achieve
-        # anything and would instead block forever: a diagnostic that passed
-        # the trampoline's check just before finalization started holds the
-        # callback gate and is parked in the `PyGILState_Ensure` that never
-        # returns for a non-main thread afterwards -- and `panic = "abort"`
-        # means its guard is never unwound either. Waiting on that gate would
-        # hang `Py_FinalizeEx` itself, turning an exit this handle used to
-        # allow into a process that has to be killed. A callback that has not
-        # passed the check returns at it, so nothing is left to drain either
-        # way.
+        # anything: a callback that has not passed the trampoline's
+        # `qdb_py_is_finalizing()` check returns at it, and one that has is
+        # already parked in a `PyGILState_Ensure` that never returns for a
+        # non-main thread afterwards.
         _ensure_doesnt_have_gil(&gs)
         if not qdb_py_is_finalizing():
-            questdb_oidc_auth_detach_diagnostics(raw)
+            questdb_oidc_auth_detach_diagnostics_nowait(raw)
         questdb_oidc_auth_free(raw)
         _ensure_has_gil(&gs)
 
