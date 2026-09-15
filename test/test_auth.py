@@ -1094,6 +1094,42 @@ class ProviderCycleSafetyTest(unittest.TestCase):
                 proc.returncode, proc.stdout, proc.stderr))
         return proc.stdout
 
+    def test_collected_store_provider_drains_and_exits_cleanly(self):
+        # A provider built with a token store is the only kind that installs
+        # `_oidc_diagnostic_trampoline`, so it is the only kind whose
+        # `_OidcNativeHandle.__dealloc__` reaches
+        # `questdb_oidc_auth_detach_diagnostics`. That dealloc releases the GIL
+        # around the native call, so this covers the plain path through it:
+        # the provider is still collected, the registry still drains, and the
+        # interpreter still exits 0 rather than hanging or crashing.
+        #
+        # Deliberately scoped to that. It does NOT prove the detach contract --
+        # nothing here emits a diagnostic, so a dealloc that skipped the detach
+        # entirely would pass. The contract itself (a callback in flight is
+        # drained, later ones are suppressed, siblings keep delivering, and a
+        # re-entrant call does not deadlock) is covered natively in
+        # `questdb-rs-ffi/src/oidc.rs`, where a callback can be driven
+        # synchronously; from Python it would need a real store failure racing
+        # a collection.
+        #
+        # Out-of-process because the failure modes it does cover are a hang or
+        # an interpreter crash, neither of which an in-process assertion
+        # survives.
+        out = self._run(
+            'import tempfile\n'
+            'from questdb.auth import FileTokenStore\n'
+            'directory = tempfile.mkdtemp()\n'
+            'auth = OidcDeviceAuth(\n'
+            '    "questdb",\n'
+            '    "https://idp.example/device",\n'
+            '    "https://idp.example/token",\n'
+            '    interactive=False, open_browser=False,\n'
+            '    token_store=FileTokenStore.at(directory))\n'
+            'assert sz() == 1, sz()\n'
+            'del auth\n'
+            'print(settle())\n')
+        self.assertEqual(out.strip().splitlines()[-1], '0')
+
     @unittest.skipIf(
         platform.python_implementation() == 'PyPy',
         'PyPy leaks reference cycles crossing a C-extension object (PyPy '

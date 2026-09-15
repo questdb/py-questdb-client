@@ -1106,6 +1106,10 @@ cdef extern from "questdb/oidc.h":
         questdb_error** err_out
         ) noexcept nogil
 
+    void questdb_oidc_auth_detach_diagnostics(
+        const questdb_oidc_auth* auth
+        ) noexcept nogil
+
     void questdb_oidc_auth_free(
         questdb_oidc_auth* auth
         ) noexcept nogil

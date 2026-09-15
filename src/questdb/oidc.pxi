@@ -139,11 +139,12 @@ def _oidc_close_providers_at_exit():
 
     ``atexit`` runs while the interpreter is still fully alive, and closing a
     provider drains it, so running the close here is what actually narrows the
-    window rather than merely re-testing it. What remains is a provider already
-    dropped from the registry whose Rust worker is still running -- closing
-    that one is not possible from Python, and shutting the window completely
-    needs a native entry point that detaches diagnostics under the FFI's own
-    invocation mutex.
+    window rather than merely re-testing it. A provider already dropped from
+    the registry cannot be reached from here at all -- its weakref callback has
+    removed both entries -- and is covered instead by
+    ``_OidcNativeHandle.__dealloc__``, which detaches that provider's
+    diagnostics natively before releasing the handle. Between the two, no
+    still-deliverable diagnostic target survives into finalization.
 
     Snapshots under the registry lock and closes outside it: the close is a
     blocking native call made with the GIL released, and holding the lock
@@ -554,15 +555,18 @@ cdef void _oidc_diagnostic_trampoline(
     # check and the GIL acquisition below, and no check placed here can close
     # that.
     #
-    # What narrows it is `_oidc_close_providers_at_exit`, registered with
-    # `atexit` over the provider registry: it runs while the interpreter is
-    # still whole and closes -- and so drains -- every provider still
-    # registered, which is what stops a diagnostic arriving during
-    # finalization in the first place. The residue is a provider already
-    # dropped from the registry whose Rust worker is still running; shutting
-    # that case needs a native call disabling diagnostics under the FFI's own
-    # invocation mutex, which would close the same window for those two as
-    # well.
+    # What closes it is stopping a diagnostic from arriving during
+    # finalization at all, which two places between them do:
+    # `_oidc_close_providers_at_exit`, registered with `atexit` over the
+    # provider registry, runs while the interpreter is still whole and closes
+    # -- and so drains -- every provider still registered; and
+    # `_OidcNativeHandle.__dealloc__` calls
+    # `questdb_oidc_auth_detach_diagnostics` for a provider that was already
+    # collected, which the registry can no longer reach but whose detached
+    # Rust worker may still be running. That native call drains a callback in
+    # flight and stops any later one, so neither kind of provider leaves a
+    # deliverable target behind. The check below remains for an embedder that
+    # tears the interpreter down without running `atexit`.
     #
     # It is narrower than both in one respect: `user_data` is NULL, so nothing
     # here dereferences a Python object from a native thread.
@@ -683,9 +687,46 @@ cdef class _OidcNativeHandle:
         self.raw = NULL
 
     def __dealloc__(self):
-        if self.raw != NULL:
-            questdb_oidc_auth_free(self.raw)
-            self.raw = NULL
+        cdef questdb_oidc_auth* raw = self.raw
+        cdef PyThreadState* gs = NULL
+        if raw == NULL:
+            return
+        self.raw = NULL
+        # Reaching here means the provider that owned this handle has been
+        # collected, so nothing in Python can close it any more -- but a
+        # cancelled token-acquisition worker, which Rust starts detached and
+        # never joins, can still hold a clone of the same shared state and
+        # reach a token-store write. Its persistence diagnostic would enter
+        # `_oidc_diagnostic_trampoline`, whose `qdb_py_is_finalizing()` test
+        # cannot be atomic with the `with gil` acquisition that follows it: a
+        # shutdown beginning in that window crashes or hangs the interpreter.
+        # `_oidc_close_providers_at_exit` cannot reach this provider either,
+        # since the weakref callback has already dropped it from the registry.
+        #
+        # Detaching is the half no check placed in the trampoline can perform:
+        # it drains a callback already running and stops any later one, so the
+        # window is closed rather than merely re-tested.
+        #
+        # The GIL must be released across it. A diagnostic that has already
+        # entered the callback gate is blocked acquiring the GIL, and detach
+        # waits for that gate -- holding the GIL here would deadlock the two
+        # against each other.
+        #
+        # Skipped once finalization has begun, where it can no longer achieve
+        # anything and would instead block forever: a diagnostic that passed
+        # the trampoline's check just before finalization started holds the
+        # callback gate and is parked in the `PyGILState_Ensure` that never
+        # returns for a non-main thread afterwards -- and `panic = "abort"`
+        # means its guard is never unwound either. Waiting on that gate would
+        # hang `Py_FinalizeEx` itself, turning an exit this handle used to
+        # allow into a process that has to be killed. A callback that has not
+        # passed the check returns at it, so nothing is left to drain either
+        # way.
+        _ensure_doesnt_have_gil(&gs)
+        if not qdb_py_is_finalizing():
+            questdb_oidc_auth_detach_diagnostics(raw)
+        questdb_oidc_auth_free(raw)
+        _ensure_has_gil(&gs)
 
 
 cdef class OidcDeviceAuth:
