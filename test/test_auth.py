@@ -705,6 +705,36 @@ class NativeOidcTest(unittest.TestCase):
             auth = make_auth(token_store=FileTokenStore.at(directory))
             self.assertEqual(auth.config.client_id, 'questdb')
 
+    def test_exit_hook_silences_diagnostics_without_closing_providers(self):
+        # The atexit hook exists to stop a persistence diagnostic entering a
+        # finalizing interpreter. It must not achieve that by closing the
+        # provider: every handle it can reach belongs to a provider the user
+        # still holds, i.e. exactly the set attached to live transports, and
+        # closing is terminal for all of them. A closed provider fails every
+        # later token pull non-retryably, so a reconnect during the rest of
+        # interpreter shutdown -- atexit runs BEFORE module clearing, so the
+        # pool's bounded close-flush drain happens after this hook -- would
+        # terminalize a QWP publication store and discard frames it had
+        # already accepted.
+        #
+        # Running the hook and then using the provider is the whole test: a
+        # closing hook makes every operation below raise OidcCancelledError.
+        with tempfile.TemporaryDirectory() as directory:
+            auth = make_auth(token_store=FileTokenStore.at(directory))
+
+            _client._oidc_detach_diagnostics_at_exit()
+
+            # Still open: a closing hook fails each of these instead.
+            self.assertEqual(auth.config.client_id, 'questdb')
+            auth.clear()
+            with self.assertRaises(OidcInteractionRequired):
+                auth.token()
+
+            # Idempotent, and harmless once the provider really is closed.
+            _client._oidc_detach_diagnostics_at_exit()
+            auth.close()
+            _client._oidc_detach_diagnostics_at_exit()
+
     @unittest.skipUnless(os.name == 'posix', 'POSIX bytes paths only')
     def test_non_utf8_file_store_path_is_typed(self):
         with tempfile.TemporaryDirectory() as directory:

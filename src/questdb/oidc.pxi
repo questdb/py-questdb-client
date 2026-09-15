@@ -109,26 +109,25 @@ def _oidc_provider_collected(size_t provider_id, object provider_ref):
     _OIDC_NATIVE_HANDLES.pop(provider_id, None)
 
 
-cdef void _oidc_close_handle_at_exit(_OidcNativeHandle handle) noexcept:
-    """Close one native auth handle, swallowing any failure.
+cdef void _oidc_detach_handle_diagnostics(_OidcNativeHandle handle) noexcept:
+    """Stop one native auth handle delivering diagnostics.
 
-    Native close is idempotent and cheap on an already-closed provider, so this
-    needs no liveness test beyond the NULL check.
+    Native detach is idempotent, NULL-tolerant and returns once no diagnostic
+    callback is running for the handle, so this needs no liveness test beyond
+    the NULL check. The GIL is released across it because a diagnostic already
+    inside the callback gate is blocked acquiring the GIL, and the detach waits
+    for that gate.
     """
-    cdef questdb_error* err = NULL
-    cdef bint ok
     cdef PyThreadState* gs = NULL
     if handle is None or handle.raw == NULL:
         return
     _ensure_doesnt_have_gil(&gs)
-    ok = questdb_oidc_auth_close(handle.raw, &err)
+    questdb_oidc_auth_detach_diagnostics(handle.raw)
     _ensure_has_gil(&gs)
-    if not ok and err != NULL:
-        questdb_error_free(err)
 
 
-def _oidc_close_providers_at_exit():
-    """Drain every still-registered provider before finalization begins.
+def _oidc_detach_diagnostics_at_exit():
+    """Silence every still-registered provider before finalization begins.
 
     ``_oidc_diagnostic_trampoline`` can be entered from a token-provider or
     transport thread that Rust spawned, which ``threading._shutdown()`` does
@@ -137,26 +136,38 @@ def _oidc_close_providers_at_exit():
     ``with gil`` dispatch emits. No check placed in the trampoline can close
     that window.
 
-    ``atexit`` runs while the interpreter is still fully alive, and closing a
-    provider drains it, so running the close here is what actually narrows the
-    window rather than merely re-testing it. A provider already dropped from
-    the registry cannot be reached from here at all -- its weakref callback has
-    removed both entries -- and is covered instead by
-    ``_OidcNativeHandle.__dealloc__``, which detaches that provider's
-    diagnostics natively before releasing the handle. Between the two, no
+    ``atexit`` runs while the interpreter is still fully alive, so detaching
+    here is what actually narrows the window rather than merely re-testing it.
+    A provider already dropped from the registry cannot be reached from here at
+    all -- its weakref callback has removed both entries -- and is covered
+    instead by ``_OidcNativeHandle.__dealloc__``, which detaches that
+    provider's diagnostics before releasing the handle. Between the two, no
     still-deliverable diagnostic target survives into finalization.
 
-    Snapshots under the registry lock and closes outside it: the close is a
-    blocking native call made with the GIL released, and holding the lock
-    across it would serialise shutdown against any concurrent construction.
-    Iterating the handle dict resurrects nothing -- it holds the handles, while
+    Detaches rather than closes. Every handle reachable here belongs to a
+    provider the user still holds, which is exactly the set attached to live
+    transports, and ``close()`` is terminal for all of them: a closed provider
+    fails every later token pull with a non-retryable error, so a reconnect
+    during the interpreter's remaining shutdown work terminalizes a QWP
+    publication store and discards frames it had already accepted. That work is
+    real and runs after this hook -- ``atexit`` precedes module clearing, so
+    ``QuestDB.__dealloc__`` -> ``questdb_db_close`` -> the bounded
+    ``close_flush_timeout`` drain happens later. Detaching gives the hook's
+    stated guarantee (no diagnostic callback running, none able to start)
+    without taking anything else away, and cannot stall exit either, since it
+    never waits on the acquisition lock behind an in-flight IdP request.
+
+    Snapshots under the registry lock and detaches outside it: the detach is a
+    native call made with the GIL released, and holding the lock across it
+    would serialise shutdown against any concurrent construction. Iterating the
+    handle dict resurrects nothing -- it holds the handles, while
     `_OIDC_PROVIDERS` holds only weakrefs to the providers themselves.
     """
     try:
         with _OIDC_REGISTRY_LOCK:
             handles = list(_OIDC_NATIVE_HANDLES.values())
         for handle in handles:
-            _oidc_close_handle_at_exit(handle)
+            _oidc_detach_handle_diagnostics(handle)
     except BaseException:
         # An atexit hook that raises prints a traceback and buys nothing: the
         # process is going away regardless, and every provider this failed to
@@ -164,7 +175,7 @@ def _oidc_close_providers_at_exit():
         pass
 
 
-atexit.register(_oidc_close_providers_at_exit)
+atexit.register(_oidc_detach_diagnostics_at_exit)
 
 
 cdef inline object _oidc_text(const char* buf, size_t length):
@@ -556,13 +567,13 @@ cdef void _oidc_diagnostic_trampoline(
     # that.
     #
     # What closes it is stopping a diagnostic from arriving during
-    # finalization at all, which two places between them do:
-    # `_oidc_close_providers_at_exit`, registered with `atexit` over the
-    # provider registry, runs while the interpreter is still whole and closes
-    # -- and so drains -- every provider still registered; and
-    # `_OidcNativeHandle.__dealloc__` calls
-    # `questdb_oidc_auth_detach_diagnostics` for a provider that was already
-    # collected, which the registry can no longer reach but whose detached
+    # finalization at all, which two places between them do, both through
+    # `questdb_oidc_auth_detach_diagnostics`:
+    # `_oidc_detach_diagnostics_at_exit`, registered with `atexit` over the
+    # provider registry, runs while the interpreter is still whole and
+    # detaches every provider still registered; and
+    # `_OidcNativeHandle.__dealloc__` detaches a provider that was already
+    # collected, which the registry can no longer reach but whose abandoned
     # Rust worker may still be running. That native call drains a callback in
     # flight and stops any later one, so neither kind of provider leaves a
     # deliverable target behind. The check below remains for an embedder that
