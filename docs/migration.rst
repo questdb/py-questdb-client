@@ -5,9 +5,10 @@ Migration Guide
 5.0 to 5.1
 ==========
 
-Four changes need action: the two UUID / fixed-size-binary items below, a new
-cap on callback inbox capacities, and a warning an abandoned query result now
-surfaces instead of swallowing. The
+Six changes need action: the two UUID / fixed-size-binary items below, caps on
+callback inbox capacities and config-string length, the completed-on-failure
+transaction rule, and a warning an abandoned query result now surfaces instead
+of swallowing. The
 new ``ConnectionEventKind.CredentialUnavailable`` event kind needs none — it
 is additive, and an existing listener keeps working.
 
@@ -65,6 +66,21 @@ is additive, and an existing listener keeps working.
   inboxes bound memory when a listener cannot keep up, and a capacity that
   large is an allocation failure waiting to happen rather than useful
   buffering.
+
+* **Config strings are capped at 1 MiB.** This applies to
+  :meth:`Sender.from_conf <questdb.Sender.from_conf>`, :func:`questdb.connect`,
+  :meth:`QuestDB.from_conf <questdb.QuestDB.from_conf>` and
+  ``QDB_CLIENT_CONF``. Remove accidentally duplicated or attacker-controlled
+  content from any string above that bound.
+
+* **A failed** :meth:`SenderTransaction.commit
+  <questdb.SenderTransaction.commit>` **now completes that transaction.** A
+  subsequent ``rollback()`` now raises ``QuestDBError`` with
+  ``QuestDBErrorCode.InvalidApiCall`` instead of clearing the transaction. Move
+  cleanup that must happen after a failed commit outside the transaction API;
+  do not try to roll back a commit attempt whose delivery outcome may already
+  be uncertain. ``commit()`` after the owning sender was closed now also raises
+  ``QuestDBError(InvalidApiCall)`` instead of an internal ``TypeError``.
 
 * **An abandoned** :class:`~questdb.QueryResult` **now reports its**
   ``ResourceWarning``. The finalizer previously swallowed it; it is now routed

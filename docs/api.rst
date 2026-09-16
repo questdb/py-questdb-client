@@ -183,22 +183,29 @@ See the :ref:`oidc_auth` guide for an overview.
 .. autofunction:: questdb.auth.sanitize_display_text
 
 .. autoexception:: questdb.auth.OidcError
+   :members:
    :show-inheritance:
 
 .. autoexception:: questdb.auth.OidcConfigError
+   :members:
    :show-inheritance:
 
 .. autoexception:: questdb.auth.OidcCancelledError
+   :members:
    :show-inheritance:
 
 .. autoexception:: questdb.auth.OidcNetworkError
+   :members:
    :show-inheritance:
 
 .. autoexception:: questdb.auth.OidcInteractionRequired
+   :members:
    :show-inheritance:
 
 .. autoexception:: questdb.auth.OidcDeviceFlowError
+   :members:
    :show-inheritance:
 
 .. autoexception:: questdb.auth.OidcTimeoutError
+   :members:
    :show-inheritance:

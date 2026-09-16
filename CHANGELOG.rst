@@ -103,6 +103,17 @@ already drop the oldest event on overflow, so a very large capacity defers that
 policy rather than avoiding it. Lower any value above the cap; ``0`` still
 selects the default of 64.
 
+Config strings are capped at 1 MiB
+**********************************
+
+Every native config-string entry point now rejects an input longer than 1 MiB
+before parsing it, including :meth:`Sender.from_conf <questdb.Sender.from_conf>`,
+:func:`questdb.connect`, :meth:`QuestDB.from_conf <questdb.QuestDB.from_conf>`
+and the ``QDB_CLIENT_CONF`` environment path. A larger string was previously
+accepted. Real connection strings are many orders of magnitude smaller; remove
+accidentally duplicated or attacker-controlled content rather than trying to
+raise this safety bound.
+
 Features
 ~~~~~~~~
 
@@ -145,6 +156,12 @@ Highlights:
   keeps catching auth failures; catch :class:`~questdb.auth.OidcError` (or a
   typed subclass such as :class:`~questdb.auth.OidcInteractionRequired`) for
   auth-specific handling.
+* Token-endpoint diagnostics are credential-safe before they reach a renderer,
+  exception, C view or log. If an IdP reflects the submitted device code or
+  refresh token in a non-issued-token field, the occurrence becomes
+  ``[redacted credential]``. Python exposes the sanitized fields as
+  ``OidcDeviceFlowError.error`` and ``.error_description``. Issued token fields
+  remain unchanged, including a non-rotating refresh token.
 * OIDC discovery, endpoint validation, token selection, caching, refresh, and
   concurrency control use the same native implementation as the C/C++ clients.
 * OIDC scopes are preserved exactly for groups-mode token selection and the
@@ -261,6 +278,13 @@ opts in by handling the new kind.
 Other changes
 ~~~~~~~~~~~~~
 
+- A failed :meth:`SenderTransaction.commit
+  <questdb.SenderTransaction.commit>` now completes the transaction before it
+  flushes, so a following ``rollback()`` raises ``InvalidApiCall`` instead of
+  clearing it. Calling ``commit()`` after its sender was closed now raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.InvalidApiCall`` instead of leaking an internal
+  ``TypeError``.
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a

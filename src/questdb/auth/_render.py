@@ -745,7 +745,10 @@ class Renderer:
 
     The rejection applies to any thread, not only the callback's own, because a
     callback may hand work to another thread and wait for it — so a blocking
-    call there would deadlock just the same. A concurrent
+    call there would deadlock just the same. A callback must also return
+    promptly: interpreter shutdown waits for an in-flight renderer callback to
+    finish before detaching managed-runtime entry points, so a callback that
+    waits forever can prevent process exit. A concurrent
     :meth:`~questdb.auth.OidcDeviceAuth.token` elsewhere — a pooled PG-wire
     checkout, say — therefore succeeds only from a *valid cached token*, which
     needs no lock the callback holds; if a fresh acquisition would be required

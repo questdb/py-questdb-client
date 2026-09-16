@@ -30,8 +30,11 @@
 # declares `Py_MOD_GIL_USED`, so importing it on a free-threaded interpreter
 # re-enables the GIL -- and that is what currently makes parts of this
 # extension safe, notably the OIDC provider's `_renderer`, `_closed` and
-# `_interrupt` slots, which native callback threads read and write with no
-# synchronisation of their own. The `cp314t` wheels in the CI matrix are
+# `_interrupt` slots and the `_WARNED_UNKNOWN_CONNECTION_EVENT`
+# read/modify/write latch, which native callback threads reach without
+# free-threading synchronization. The paired OIDC registry dictionaries are
+# independently protected by `_OIDC_REGISTRY_LOCK`. The `cp314t` wheels in the
+# CI matrix are
 # therefore usable but gain no free-threading benefit, and running them under
 # `PYTHON_GIL=0` is unsupported. Making the extension genuinely
 # free-threading safe is a separate piece of work; until then this comment is
@@ -114,6 +117,10 @@ import cython
 # splice, so anything it evaluates at import time must already be bound here.
 import threading
 import atexit
+# Import logging before oidc.pxi registers its atexit hook. atexit is LIFO:
+# this makes the callback-detach drain run before logging.shutdown(), so a
+# final token-store diagnostic cannot enter an already-closed FileHandler.
+import logging
 
 include "dataframe.pxi"
 include "oidc.pxi"
@@ -143,7 +150,6 @@ import sys
 import time
 import uuid
 import warnings
-import logging
 
 import numpy
 cimport numpy as cnp
@@ -583,8 +589,8 @@ cdef inline bint _is_oidc_terminal_for_foreground(object exc, object oidc_auth):
     Every other OIDC failure is already handled by the caller's code check:
     ``classify_provider_error`` exempts ``OidcErrorKind::Config`` from the
     reclassification to ``SocketError``, so an ``OidcConfigError`` arrives with
-    ``ConfigError`` (or ``AuthError`` when raised on the Python side) and is
-    terminal there.
+    ``ConfigError`` from both native conversion and direct Python construction
+    and is terminal there.
 
     Resolved without importing: if ``questdb.auth`` was never imported then no
     OIDC error can exist, so this costs one dict lookup on the ordinary error
@@ -2341,17 +2347,21 @@ class ConnectionEventKind(TaggedEnum):
     Connection-state transitions observed by the ingress connection pool.
     """
     #: First successful connect of the pool's lifetime.
-    Connected = ('connected', 0)
+    Connected = ('connected', questdb_connection_event_connected)
     #: An active wire connection died.
-    Disconnected = ('disconnected', 1)
+    Disconnected = ('disconnected', questdb_connection_event_disconnected)
     #: Reconnect succeeded against the same endpoint after a failure.
-    Reconnected = ('reconnected', 2)
+    Reconnected = ('reconnected', questdb_connection_event_reconnected)
     #: Reconnect succeeded against a different endpoint.
-    FailedOver = ('failed_over', 3)
+    FailedOver = ('failed_over', questdb_connection_event_failed_over)
     #: One endpoint connect/upgrade attempt failed; the walk moves on.
-    EndpointAttemptFailed = ('endpoint_attempt_failed', 4)
+    EndpointAttemptFailed = (
+        'endpoint_attempt_failed',
+        questdb_connection_event_endpoint_attempt_failed)
     #: Every configured endpoint was attempted and none accepted.
-    AllEndpointsUnreachable = ('all_endpoints_unreachable', 5)
+    AllEndpointsUnreachable = (
+        'all_endpoints_unreachable',
+        questdb_connection_event_all_endpoints_unreachable)
     #: Terminal: the server rejected a credential the client presented.
     #:
     #: :attr:`ConnectionEvent.host` and :attr:`ConnectionEvent.port` are always
@@ -2360,7 +2370,7 @@ class ConnectionEventKind(TaggedEnum):
     #:
     #: A credential the client could not *obtain* is
     #: :attr:`CredentialUnavailable`, never this.
-    AuthFailed = ('auth_failed', 6)
+    AuthFailed = ('auth_failed', questdb_connection_event_auth_failed)
     #: An ``oidc_auth=`` token provider failed, so no credential was ever
     #: offered and no endpoint was dialled.
     #:
@@ -2389,7 +2399,9 @@ class ConnectionEventKind(TaggedEnum):
     #:
     #: Counterpart of the Java client's ``QwpCredentialUnavailableException``,
     #: which is likewise distinct from its terminal ``QwpAuthFailedException``.
-    CredentialUnavailable = ('credential_unavailable', 7)
+    CredentialUnavailable = (
+        'credential_unavailable',
+        questdb_connection_event_credential_unavailable)
 
 
 @dataclass(frozen=True)
@@ -2498,10 +2510,10 @@ cdef void _connection_event_dispatch(
             # to the listener as a *successful connect* -- inverting the
             # meaning of, say, a future credential or endpoint failure, and
             # handing it a cause_code on an event that claims success. Dropping
-            # it is the honest option: the ordinals here are literals rather
-            # than bindings of the header's #defines, and only a native newer
-            # than this extension can produce one (impossible at the pinned,
-            # statically linked commit).
+            # it is the honest option. The Python enum now binds the header's
+            # constants directly, so only a native newer than this extension can
+            # produce one (impossible at the pinned, statically linked commit,
+            # but possible if packaging ever moves to dynamic linkage).
             if not _WARNED_UNKNOWN_CONNECTION_EVENT:
                 _WARNED_UNKNOWN_CONNECTION_EVENT = True
                 logging.getLogger('questdb').warning(
@@ -2531,6 +2543,18 @@ cdef void _connection_event_dispatch(
         stack.pop()
 
 
+def _debug_connection_event_dispatch(
+        uint32_t kind_ordinal, object listener, bint reset_warning=False):
+    """Internal test seam for forward-compatible event-ordinal handling."""
+    global _WARNED_UNKNOWN_CONNECTION_EVENT
+    cdef questdb_connection_event event
+    if reset_warning:
+        _WARNED_UNKNOWN_CONNECTION_EVENT = False
+    memset(&event, 0, sizeof(questdb_connection_event))
+    event.kind = kind_ordinal
+    _connection_event_dispatch(<void*>listener, &event)
+
+
 cdef void _connection_event_trampoline(
         void* user_data,
         const questdb_connection_event* event) noexcept nogil:
@@ -2545,13 +2569,13 @@ class ServerRole(TaggedEnum):
     """
     Cluster role advertised by the server's ``SERVER_INFO`` handshake.
     """
-    Standalone = ('standalone', 0)
-    Primary = ('primary', 1)
-    Replica = ('replica', 2)
-    PrimaryCatchup = ('primary_catchup', 3)
+    Standalone = ('standalone', qwp_reader_server_role_standalone)
+    Primary = ('primary', qwp_reader_server_role_primary)
+    Replica = ('replica', qwp_reader_server_role_replica)
+    PrimaryCatchup = ('primary_catchup', qwp_reader_server_role_primary_catchup)
     #: Forward-compat: a role byte this client doesn't recognise. The raw
     #: byte is available via :attr:`ServerInfo.role_byte`.
-    Other = ('other', 0xFF)
+    Other = ('other', qwp_reader_server_role_other)
 
 
 @dataclass(frozen=True)
@@ -6623,11 +6647,13 @@ cdef class QuestDB:
             # different types for the same bad input, which is the asymmetry
             # this check exists to remove.
             if (isinstance(connection_event_inbox_capacity, int)
-                    and connection_event_inbox_capacity > 65536):
+                    and connection_event_inbox_capacity
+                    > QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY):
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
                     '"connection_event_inbox_capacity" must be between 0 and '
-                    f'65536, not {connection_event_inbox_capacity!r}.')
+                    f'{QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY}, not '
+                    f'{connection_event_inbox_capacity!r}.')
             c_event_inbox_capacity = connection_event_inbox_capacity
             c_error_inbox_capacity = error_event_inbox_capacity
             questdb_db_connect_options_init(
@@ -6728,7 +6754,7 @@ cdef class QuestDB:
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
             at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
             max_rows_per_batch: int = DEFAULT_MAX_CHUNK_ROWS,
-            schema_overrides: Optional[Dict[str, object]] = None):
+            schema_overrides: Optional[Dict[str, SchemaOverride]] = None):
         """
         Ingest a dataframe through the pooled columnar QWP path.
 
@@ -7417,11 +7443,13 @@ cdef class Sender:
         # listener or not. Upper bound only, for the reason given at the pool's
         # copy of this check.
         if (isinstance(connection_event_inbox_capacity, int)
-                and connection_event_inbox_capacity > 65536):
+                and connection_event_inbox_capacity
+                > QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY):
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 '"connection_event_inbox_capacity" must be between 0 and '
-                f'65536, not {connection_event_inbox_capacity!r}.')
+                f'{QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY}, not '
+                f'{connection_event_inbox_capacity!r}.')
         if connection_listener is not None and not callable(
                 connection_listener):
             raise TypeError(
@@ -8336,7 +8364,7 @@ cdef class Sender:
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
             at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
             max_rows_per_batch: int = DEFAULT_MAX_CHUNK_ROWS,
-            schema_overrides: Optional[Dict[str, object]] = None):
+            schema_overrides: Optional[Dict[str, SchemaOverride]] = None):
         """
         Write a Pandas DataFrame to QuestDB.
 
@@ -9145,7 +9173,7 @@ cdef class PooledSender:
             at: Union[ServerTimestampType, int, str, TimestampNanos,
                       datetime.datetime],
             max_rows_per_batch: int = DEFAULT_MAX_CHUNK_ROWS,
-            schema_overrides: Optional[Dict[str, object]] = None):
+            schema_overrides: Optional[Dict[str, SchemaOverride]] = None):
         """
         Bulk-load a whole DataFrame over a direct columnar connection
         borrowed from the pool for the duration of this call.

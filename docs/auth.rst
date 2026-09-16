@@ -195,11 +195,13 @@ expanded and absolutised as usual. The native client writes plaintext JSON
 using atomic replacement and cross-process coordination; on POSIX, directories
 are mode ``0700`` and files mode ``0600``. On other platforms, protection
 depends on the directory's default ACL. Every failed store operation is logged
-at ``WARNING`` on the ``questdb`` logger during normal operation. Diagnostics
-are detached at interpreter exit, before ``atexit`` hooks registered earlier
-than ``import questdb`` run, so a store failure during that shutdown window may
-not be logged. A failed save or automatic clear is otherwise reported only
-there and leaves the in-memory credential usable; a failed load, or a refresh lease lost
+at ``WARNING`` on the ``questdb`` logger during normal operation. The binding
+imports ``logging`` before registering its own shutdown hook, so the hook first
+drains and detaches OIDC callbacks while logging handlers are still live;
+``logging.shutdown()`` runs afterwards. Diagnostics produced after the detach
+are deliberately suppressed rather than entering Python during finalization. A
+failed save or automatic clear is otherwise reported only there and leaves the
+in-memory credential usable; a failed load, or a refresh lease lost
 mid-refresh, is also raised to the caller as
 :class:`~questdb.auth.OidcNetworkError`, because an uncoordinated refresh could
 resubmit a rotating token. Enabling persistence stores a long-lived refresh token on disk, so use it
@@ -256,7 +258,9 @@ different machine from the reader; pass ``True`` to open one anyway (a *local*
 ``jupyter lab``) or ``False`` to never open one.
 The custom renderer's prompt dictionary includes ``user_code``, both
 verification URLs, ``expires_in`` and ``interval`` in seconds, plus the vetted
-``browser_target``.
+``browser_target``. Renderer callbacks must return promptly: interpreter
+shutdown drains an in-flight callback before it detaches Python entry points, so
+a callback that waits forever can prevent process exit.
 
 ``sign_in()`` prompts by default, wherever it is called from: a missing TTY is
 not evidence of a missing human, so there is no terminal detection to refuse a
@@ -285,6 +289,16 @@ Security notes
   escaping), and use only ``browser_target`` for links, browser opening or QR
   codes. :func:`~questdb.auth.sanitize_display_text` remains available for raw
   values from other sources or defense-in-depth; it does not HTML-escape.
+* Token-endpoint diagnostics are scanned before they reach renderers,
+  exceptions, C views, or logs. If an IdP reflects the submitted device code or
+  refresh token in a non-issued-token string, that occurrence is replaced with
+  the literal ``[redacted credential]``. Issued ``access_token``, ``id_token``
+  and ``refresh_token`` fields are preserved exactly so non-rotating refresh
+  tokens remain usable. In Python the sanitized IdP fields are available as
+  :attr:`OidcDeviceFlowError.error
+  <questdb.auth.OidcDeviceFlowError.error>` and
+  :attr:`OidcDeviceFlowError.error_description
+  <questdb.auth.OidcDeviceFlowError.error_description>`.
 * Avoid logging tokens, authorization headers, or PG connection parameters.
 * The PG-wire adapters send the token as the ``_sso`` password, so remote hosts
   and hostnames such as ``localhost`` default to ``sslmode="verify-full"``.

@@ -990,6 +990,50 @@ class TestSchemaOverrides(unittest.TestCase):
         self.assertIn(value.bytes[::-1], payload)
         self.assertNotIn(value.bytes, payload)
 
+    @unittest.skipIf(pa is None or pd is None, 'pandas and pyarrow required')
+    def test_non_uuid_fsb16_extension_stays_binary(self):
+        # Width 16 plus *any* extension label is not enough to claim UUID. Only
+        # the standard `arrow.uuid` label may trigger the byte reversal; a
+        # third-party fixed-size-binary extension is opaque BINARY.
+        import uuid as uuid_mod
+
+        class Opaque16(pa.ExtensionType):
+            def __init__(self):
+                super().__init__(pa.binary(16), 'example.opaque16')
+
+            def __arrow_ext_serialize__(self):
+                return b''
+
+            @classmethod
+            def __arrow_ext_deserialize__(cls, storage_type, serialized):
+                return cls()
+
+        value = uuid_mod.UUID('123e4567-e89b-12d3-a456-426614174000')
+        opaque_type = Opaque16()
+        extension = pa.ExtensionArray.from_storage(
+            opaque_type, pa.array([value.bytes], type=pa.binary(16)))
+        # Mix in a NumPy timestamp so this reaches dataframe.pxi's manual
+        # planner and directly exercises its extension-name gate.
+        df = pd.DataFrame({
+            'u': pd.array(extension, dtype=pd.ArrowDtype(opaque_type)),
+            'ts': pd.to_datetime([_ts_us(2025, 1, 1)], unit='us'),
+        })
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='opaque_extension', at='ts', symbols=False)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(b'u\x17', payload)
+        self.assertIn(value.bytes, payload)
+        self.assertNotIn(value.bytes[::-1], payload)
+
     @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_schema_overrides_long256_forwards_verbatim(self):
         value = bytes(range(32))

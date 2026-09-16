@@ -9,6 +9,7 @@ import datetime
 import timeit
 import time
 import threading
+import uuid
 from enum import Enum
 import random
 import pathlib
@@ -224,7 +225,10 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_connection_event_enum_and_shape(self):
         self.assertEqual(qi.ConnectionEventKind.parse('connected'),
                          qi.ConnectionEventKind.Connected)
-        self.assertEqual(qi.ConnectionEventKind.Connected.c_value, 0)
+        self.assertEqual(
+            [kind.c_value for kind in qi.ConnectionEventKind],
+            list(range(8)),
+            'connection event ordinals are a public native/Python ABI')
         self.assertEqual(qi.ConnectionEventKind.AuthFailed.c_value, 6)
         # Appended, so the existing ordinals stay put: the C callback maps by
         # `c_value` and the constants are ABI.
@@ -241,6 +245,17 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(event.previous_host, 'a')
         with self.assertRaises(Exception):
             event.host = 'c'  # frozen
+
+    def test_unknown_connection_event_is_dropped_and_warned_once(self):
+        delivered = []
+        with self.assertLogs('questdb', level='WARNING') as captured:
+            qi._debug_connection_event_dispatch(
+                0xFFFF_FFFE, delivered.append, reset_warning=True)
+            qi._debug_connection_event_dispatch(
+                0xFFFF_FFFE, delivered.append)
+        self.assertEqual(delivered, [])
+        self.assertEqual(len(captured.records), 1)
+        self.assertIn('unrecognised kind', captured.records[0].getMessage())
 
     def test_server_role_enum_and_server_info_shape(self):
         self.assertEqual(qi.ServerRole.parse('standalone'),
@@ -259,6 +274,25 @@ class TestQwpWebSocketApi(unittest.TestCase):
         with self.assertRaises(Exception):
             info.epoch = 8  # frozen
 
+    def test_uuid_integer_constructor_positional_slot(self):
+        # The query hot path passes `int` positionally to avoid one kwargs dict
+        # per UUID cell. Pin stdlib's public slot order so a future CPython
+        # signature change fails loudly rather than silently mis-binding.
+        value = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
+        self.assertEqual(
+            uuid.UUID(None, None, None, None, value.int),
+            uuid.UUID(int=value.int))
+
+    def test_dataframe_runtime_annotations_name_schema_override(self):
+        expected = 'Optional[Dict[str, SchemaOverride]]'
+        for method in (
+                qi.QuestDB.dataframe,
+                qi.PooledSender.dataframe,
+                qi.Sender.dataframe):
+            with self.subTest(method=method.__qualname__):
+                self.assertEqual(
+                    method.__annotations__['schema_overrides'], expected)
+
     def test_connection_types_exported_from_package(self):
         from questdb import (
             ConnectionEvent, ConnectionEventKind, ServerInfo, ServerRole)
@@ -266,6 +300,31 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertIs(ConnectionEventKind, qi.ConnectionEventKind)
         self.assertIs(ServerInfo, qi.ServerInfo)
         self.assertIs(ServerRole, qi.ServerRole)
+
+    def test_cursor_finalizer_reclaim_never_waits_for_busy_lock(self):
+        handle = qi._debug_new_cursor_handle()
+        entered = threading.Event()
+        release = threading.Event()
+        holder = threading.Thread(
+            target=qi._debug_hold_cursor_handle_lock,
+            args=(handle, entered, release), daemon=True)
+        holder.start()
+        self.assertTrue(entered.wait(5))
+
+        outcomes = []
+        reclaimer = threading.Thread(
+            target=lambda: outcomes.append(
+                qi._debug_try_reclaim_cursor_handle(handle)),
+            daemon=True)
+        reclaimer.start()
+        reclaimer.join(1)
+        finished_without_release = not reclaimer.is_alive()
+        release.set()
+        holder.join(5)
+        reclaimer.join(5)
+        self.assertTrue(finished_without_release,
+                        'finalizer reclaim blocked behind the cursor lock')
+        self.assertEqual(outcomes, [-1])
 
     def test_pooled_lease_types_exported_from_package(self):
         from questdb import PooledReader, PooledSender

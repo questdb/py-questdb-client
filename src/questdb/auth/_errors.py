@@ -54,6 +54,10 @@ class OidcError(QuestDBError):
     retryable (a transient token-provider failure on a reconnect), and
     ``ConfigError`` for a misconfiguration. Retry logic that keys on ``code``
     therefore treats an OIDC failure exactly as it treats any other.
+
+    ``status`` is the HTTP status behind a non-JSON IdP response when known,
+    otherwise ``None``. ``retry_after`` is the parsed ``Retry-After`` delay in
+    seconds for a non-JSON 429/503 response when present, otherwise ``None``.
     """
 
     #: Code reported when a raise site does not supply one. Native-built
@@ -111,13 +115,12 @@ class OidcError(QuestDBError):
             sender_error,
             in_doubt=in_doubt)
         self.args = args
-        # HTTP status behind a non-JSON HTTP response (else None), so the poll
-        # loop and silent refresh can tell a terminal 4xx (e.g. a WAF error
-        # page) from a transient 5xx/429/network blip.
+        #: HTTP status behind a non-JSON HTTP response, otherwise ``None``.
+        #: This lets a poll or silent-refresh caller distinguish a terminal 4xx
+        #: response (for example, a WAF page) from a transient 5xx/429 failure.
         self.status = status
-        # Parsed Retry-After (delta-seconds) off a non-JSON 429/503 error body,
-        # so the poll loop can honor it the same way the JSON path does (via
-        # _PostResult.retry_after). None when absent / not applicable.
+        #: Parsed ``Retry-After`` delta-seconds from a non-JSON 429/503 response,
+        #: otherwise ``None``.
         self.retry_after = retry_after
 
 
@@ -160,8 +163,12 @@ class OidcCancelledError(OidcError):
 
 class OidcDeviceFlowError(OidcError):
     """
-    The OAuth 2.0 device authorization grant failed; the IdP
-    ``error``/``error_description`` are preserved when available.
+    The OAuth 2.0 device authorization grant failed. The IdP fields are exposed
+    as ``error`` and ``error_description`` when available, after display-control
+    sanitisation. If a token endpoint reflects the submitted device code or
+    refresh token in either field, that credential is replaced with the literal
+    ``[redacted credential]`` before the exception is constructed. Issued token
+    fields are not altered.
     """
 
     def __init__(
@@ -192,9 +199,13 @@ class OidcDeviceFlowError(OidcError):
         # a non-string field can't crash the strip with a TypeError and escape
         # the typed-error contract. None is kept as None (not coerced to '') so
         # "absent" stays distinguishable.
+        #: OAuth ``error`` returned by the IdP, or ``None``. A reflected
+        #: submitted credential appears as ``[redacted credential]``.
         self.error = (
             _strip_control(error if isinstance(error, str) else str(error))
             if error is not None else None)
+        #: OAuth ``error_description`` returned by the IdP, or ``None``, with
+        #: the same reflected-credential redaction as :attr:`error`.
         self.error_description = (
             _strip_control(
                 error_description if isinstance(error_description, str)

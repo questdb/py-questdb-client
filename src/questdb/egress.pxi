@@ -197,6 +197,22 @@ cdef class _CursorHandle:
         self._free()
 
 
+def _debug_new_cursor_handle():
+    """Internal test seam: an empty handle is sufficient to test lock policy."""
+    return _CursorHandle()
+
+
+def _debug_hold_cursor_handle_lock(
+        _CursorHandle handle, object entered, object release):
+    with handle._lock:
+        entered.set()
+        release.wait()
+
+
+def _debug_try_reclaim_cursor_handle(_CursorHandle handle):
+    return handle._try_reclaim()
+
+
 cdef object _fetch_one_batch(
         _CursorHandle handle, object pa_module, bint compact=False):
     """Pull one batch via qwp_reader_cursor_next_arrow_batch.
@@ -1483,16 +1499,22 @@ cdef object _numpy_uuid_chunk(
         # The reader hands out canonical RFC 4122 network-order bytes, having
         # already reversed them out of QWP wire order.
         #
-        # Built through `int=` rather than `bytes=`: the latter allocates a
-        # `bytes` per row and then re-does the work inside `UUID.__init__`
+        # Built through UUID's `int` parameter rather than `bytes`: the latter
+        # allocates a `bytes` per row and then re-does the work inside `UUID.__init__`
         # (a `len`, an `isinstance` assert and an `int.from_bytes`) that the
         # `int=` branch skips, which measured ~20% slower per row on the
         # default `to_pandas()` read path. `_be64` keeps that portable, which
         # the pre-existing native-load-plus-swap version was not.
         row = values + r * stride
+        # `int` is positional slot 5 in uuid.UUID's stable public signature.
+        # Passing it by name builds a fresh kwargs dict for every row on this
+        # per-cell hot path. The unit test pins the positional mapping so a
+        # future CPython signature change fails loudly rather than mis-binding.
         _obj_chunk_set(
             out, r,
-            uuid_cls(int=((<object>_be64(row)) << 64) | (<object>_be64(row + 8))))
+            uuid_cls(
+                None, None, None, None,
+                ((<object>_be64(row)) << 64) | (<object>_be64(row + 8))))
     return out
 
 

@@ -45,21 +45,19 @@
 # had its handle freed by this callback and was then handed to a `__del__` in
 # the same cycle that called `close()` on the dangling pointer.
 #
-# `_OIDC_REGISTRY_LOCK` guards the id counter and the paired dict writes. Under
-# the GIL those are already atomic and the lock is nearly free -- it is taken
-# once per provider construction, never on a hot path. It is here so the
-# invariant does not silently depend on the GIL: `_oidc_last_provider_id += 1`
-# is a read-modify-write, and on a free-threaded build two providers could take
-# the same id and evict each other's entries. The weakref callback deliberately
-# does NOT take it: it can run from inside a collection, and a non-reentrant
-# lock held by the same thread would deadlock there.
+# `_OIDC_REGISTRY_LOCK` guards the id counter and every paired dict update. It
+# is re-entrant because a weakref callback can run synchronously inside a
+# collection triggered while the same thread already holds it; an ordinary lock
+# would deadlock there. The RLock keeps the registry invariant independent of
+# the GIL without changing a hot path -- it is taken only during provider
+# construction, collection, and the one shutdown snapshot.
 #
 # A module-level `cdef object` is a C static rather than an entry in the module
 # dict, so `_PyModule_Clear` never swaps it for None at interpreter shutdown:
 # readers need no None guard.
 cdef object _OIDC_PROVIDERS = {}
 cdef object _OIDC_NATIVE_HANDLES = {}
-cdef object _OIDC_REGISTRY_LOCK = threading.Lock()
+cdef object _OIDC_REGISTRY_LOCK = threading.RLock()
 cdef size_t _oidc_last_provider_id = 0
 # Set before the atexit hook snapshots the registry. A provider whose native
 # build completes after that snapshot observes the flag under the same lock and
@@ -130,8 +128,9 @@ def _oidc_provider_collected(size_t provider_id, object provider_ref):
     _native`), so neither this callback nor a caller invoking it with a forged
     id can release a handle that is still in use.
     """
-    _OIDC_PROVIDERS.pop(provider_id, None)
-    _OIDC_NATIVE_HANDLES.pop(provider_id, None)
+    with _OIDC_REGISTRY_LOCK:
+        _OIDC_PROVIDERS.pop(provider_id, None)
+        _OIDC_NATIVE_HANDLES.pop(provider_id, None)
 
 
 cdef void _oidc_detach_handle_callbacks(_OidcNativeHandle handle) noexcept:
@@ -222,6 +221,25 @@ cdef inline object _oidc_text(const char* buf, size_t length):
     if buf == NULL:
         return None
     return PyUnicode_FromStringAndSize(buf, <Py_ssize_t>length)
+
+
+cdef inline bint _oidc_error_view_is_full(size_t struct_size):
+    return struct_size >= sizeof(questdb_oidc_error_view)
+
+
+cdef inline bint _oidc_config_view_is_full(size_t struct_size):
+    return struct_size >= sizeof(questdb_oidc_config_view)
+
+
+def _debug_oidc_view_prefix_support(size_t error_size, size_t config_size):
+    """Internal test hook for config/error view write-back gates."""
+    return (_oidc_error_view_is_full(error_size),
+            _oidc_config_view_is_full(config_size))
+
+
+def _debug_oidc_view_sizes():
+    return (sizeof(questdb_oidc_error_view),
+            sizeof(questdb_oidc_config_view))
 
 
 # Resolved on first use and cached. See `_oidc_errors_module`.
@@ -390,7 +408,11 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
         sender_error = c_sender_error_view_to_raw(qwp_ws_view)
     memset(&view, 0, sizeof(questdb_oidc_error_view))
     view.struct_size = sizeof(questdb_oidc_error_view)
-    if questdb_error_oidc_get_view(err, &view):
+    if (questdb_error_oidc_get_view(err, &view)
+            and _oidc_error_view_is_full(view.struct_size)):
+        # The function writes back the prefix it populated. Re-read it before
+        # touching fields so a future dynamically linked older library cannot
+        # leave us reading beyond that prefix.
         idp_error = _oidc_text(view.idp_error, view.idp_error_len)
         description = _oidc_text(
             view.idp_error_description, view.idp_error_description_len)
@@ -1113,6 +1135,7 @@ cdef class OidcDeviceAuth:
         cdef questdb_oidc_auth* built_raw = NULL
         cdef size_t provider_id
         cdef bint detach_callbacks_after_build
+        cdef object selected_renderer
         from questdb.auth._errors import OidcConfigError
         from questdb.auth._render import (
             detect_interactive, in_ipython_kernel, make_renderer)
@@ -1199,11 +1222,14 @@ cdef class OidcDeviceAuth:
                     PyBytes_AsString(encoded), PyBytes_GET_SIZE(encoded), &err):
                 raise _oidc_err_to_py(err)
 
-        self._renderer = (
+        # Validate a local before publishing it on `self`. A renderer is allowed
+        # to hold its provider, so assigning first made a validation failure a
+        # provider <-> renderer cycle that PyPy cpyext cannot reclaim.
+        selected_renderer = (
             renderer if renderer is not None else make_renderer(qr=qr is True))
         for callback_name in (
                 'on_prompt', 'on_waiting', 'on_success', 'on_failure'):
-            if not callable(getattr(self._renderer, callback_name, None)):
+            if not callable(getattr(selected_renderer, callback_name, None)):
                 raise OidcConfigError(
                     f'renderer callback {callback_name} must be callable')
         # Hand native an opaque integer key, not a `PyObject*`. Native callback
@@ -1228,6 +1254,7 @@ cdef class OidcDeviceAuth:
         # weak renderer back-reference. Attached transports retain the provider
         # separately, and native holds its own cloned handle on top of that.
         try:
+            self._renderer = selected_renderer
             from functools import partial
             provider_ref = PyWeakref_NewRef(
                 self, partial(_oidc_provider_collected, provider_id))
@@ -1301,6 +1328,10 @@ cdef class OidcDeviceAuth:
             self._raw = NULL
             self._native = None
             self._provider_id = 0
+            # Match close(): break the supported renderer -> provider back-edge
+            # on every failed native build. Validation failures never publish
+            # the renderer at all.
+            self._renderer = None
             with _OIDC_REGISTRY_LOCK:
                 _OIDC_PROVIDERS.pop(provider_id, None)
                 _OIDC_NATIVE_HANDLES.pop(provider_id, None)
@@ -1538,6 +1569,11 @@ cdef class OidcDeviceAuth:
         view.struct_size = sizeof(questdb_oidc_config_view)
         if not questdb_oidc_auth_get_config(self._raw, &view):
             raise RuntimeError('native OIDC config view is unavailable')
+        # The callee replaces struct_size with the prefix it wrote. Static
+        # linkage supplies the full v1 view today; checking still prevents an
+        # out-of-prefix read if packaging ever loads an older shared library.
+        if not _oidc_config_view_is_full(view.struct_size):
+            raise RuntimeError('native OIDC config view is shorter than v1')
         client_id = _oidc_text(view.client_id, view.client_id_len)
         token_endpoint = _oidc_text(
             view.token_endpoint, view.token_endpoint_len)

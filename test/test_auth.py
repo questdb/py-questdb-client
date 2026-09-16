@@ -1056,6 +1056,54 @@ class NativeOidcTest(unittest.TestCase):
                 with self.assertRaisesRegex(OidcConfigError, callback_name):
                     make_auth(renderer=types.SimpleNamespace(**non_callable))
 
+    def test_failed_construction_releases_renderer_back_reference_immediately(self):
+        # Disable cyclic GC so this pins explicit unwind rather than CPython's
+        # ability to rescue the provider<->renderer cycle later. PyPy cpyext
+        # cannot rescue that cycle at all.
+        class BackReferencingRenderer(Renderer):
+            provider = None
+
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            # Early callback validation used to publish the renderer before the
+            # validation loop, outside the native-build try/except.
+            provider = OidcDeviceAuth.__new__(OidcDeviceAuth)
+            renderer = BackReferencingRenderer()
+            renderer.provider = provider
+            renderer.on_failure = None
+            provider_ref = weakref.ref(provider)
+            renderer_ref = weakref.ref(renderer)
+            with self.assertRaisesRegex(OidcConfigError, 'on_failure'):
+                provider.__init__(
+                    'questdb', 'https://idp.example/device',
+                    'https://idp.example/token', interactive=False,
+                    open_browser=False, renderer=renderer)
+            del provider, renderer
+            self.assertIsNone(provider_ref())
+            self.assertIsNone(renderer_ref())
+
+            # A failure after callback registration takes the separate unwind
+            # path and must clear the same edge.
+            provider = OidcDeviceAuth.__new__(OidcDeviceAuth)
+            renderer = BackReferencingRenderer()
+            renderer.provider = provider
+            provider_ref = weakref.ref(provider)
+            renderer_ref = weakref.ref(renderer)
+            with self.assertRaises(OidcError):
+                provider.__init__(
+                    'questdb', 'https://idp.example/device',
+                    'https://idp.example/token', interactive=False,
+                    open_browser=False, renderer=renderer,
+                    ca_bundle=self._UNREADABLE_CA_BUNDLE)
+            del provider, renderer
+            self.assertIsNone(provider_ref())
+            self.assertIsNone(renderer_ref())
+        finally:
+            if was_enabled:
+                gc.enable()
+            gc.collect()
+
     def test_renderer_browser_target_uses_native_vetted_value(self):
         self.assertEqual(
             _verification_target({
@@ -1200,6 +1248,21 @@ class NativeOidcTest(unittest.TestCase):
         # before the builder is populated, this test would silently stop
         # covering the post-registration path.
         self.assertIn('CA bundle', str(caught.exception))
+
+    def test_ca_bundle_rejects_unexpanded_home_prefix(self):
+        for bad in ('~', '~/ca.pem', '~\\ca.pem'):
+            with self.subTest(path=bad):
+                with self.assertRaisesRegex(
+                        OidcError, 'already-expanded absolute path') as caught:
+                    make_auth(ca_bundle=bad)
+                self.assertIs(
+                    caught.exception.code,
+                    questdb.QuestDBErrorCode.ConfigError)
+        # A tilde away from the leading path component is not expansion syntax;
+        # it reaches the ordinary build-time file-open error instead.
+        with self.assertRaises(OidcError) as caught:
+            make_auth(ca_bundle='dir/has~tilde.pem')
+        self.assertNotIn('already-expanded', str(caught.exception))
 
     def test_insecure_gates_plaintext_discovery(self):
         # `insecure` was only ever type-checked: nothing asserted it DOES
@@ -2947,6 +3010,58 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         self.assertIsInstance(
             caught.exception.__context__, OidcInteractionRequired)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_pool_dataframe_replays_after_probe_acquires_token(self):
+        # Deterministically close the race the foreground probe exists for: the
+        # first native connect sees no token and raises InteractionRequired; the
+        # immediate Python probe completes sign-in, so only replaying data
+        # preparation can deliver the frame.
+        class SignInOnProbe(OidcDeviceAuth):
+            probes = 0
+
+            def token(self):
+                type(self).probes += 1
+                if type(self).probes == 1:
+                    self.sign_in()
+                return super().token()
+
+        with OidcTestServer() as oidc_server:
+            config = make_discovered_auth(oidc_server).config
+            auth = SignInOnProbe(
+                config.client_id,
+                config.device_authorization_endpoint,
+                config.token_endpoint,
+                scope=config.scope,
+                audience=config.audience,
+                issuer=config.issuer,
+                interactive=True,
+                open_browser=False,
+                renderer=RecordingRenderer())
+            with QwpAckServer(
+                    required_authorization='Bearer AT-initial') as qwp_server:
+                conf = (
+                    f'ws::addr=127.0.0.1:{qwp_server.port};'
+                    'lazy_connect=true;'
+                    'reconnect_initial_backoff_millis=1;'
+                    'reconnect_max_backoff_millis=1;'
+                    'reconnect_max_duration_millis=5000;')
+                db = questdb.connect(conf, oidc_auth=auth)
+                try:
+                    db.dataframe(
+                        pd.DataFrame({
+                            'value': [1],
+                            'ts': pd.to_datetime([1700000000], unit='s'),
+                        }),
+                        table_name='oidc_probe_replay',
+                        at='ts')
+                finally:
+                    db.close()
+                stats = qwp_server.snapshot()
+
+        self.assertEqual(SignInOnProbe.probes, 1)
+        self.assertGreaterEqual(stats['binary_frames'], 1)
+        self.assertEqual(stats['errors'], [])
+
     def test_flush_surfaces_typed_oidc_error(self):
         # The plain row()/flush() path (not the dataframe path) whose OIDC token
         # pull fails at connect surfaces the typed OidcError through c_err_to_py.
@@ -4071,6 +4186,41 @@ class OidcReviewFixTest(unittest.TestCase):
                 errors.OidcNetworkError('network'), None))
         finally:
             _client._debug_oidc_reset_errors_module()
+
+    def test_native_handle_publication_and_shutdown_import_order_are_pinned(self):
+        # Synchronization bugs are not deterministically observable on a
+        # GIL-holding CPython build. Pin the source ordering itself: native build
+        # writes only a C local while the GIL is released, then publishes the
+        # shared handle after reacquisition; logging must likewise import before
+        # oidc.pxi registers its LIFO atexit hook.
+        root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, 'src', 'questdb', 'oidc.pxi'),
+                  encoding='utf-8') as source_file:
+            oidc_source = source_file.read()
+        build = oidc_source.index(
+            'built_raw = questdb_oidc_builder_build(builder, &err)')
+        reacquire = oidc_source.index('_ensure_has_gil(&gs)', build)
+        publish = oidc_source.index('native.raw = built_raw', reacquire)
+        self.assertLess(build, reacquire)
+        self.assertLess(reacquire, publish)
+
+        with open(os.path.join(root, 'src', 'questdb', '_client.pyx'),
+                  encoding='utf-8') as source_file:
+            client_source = source_file.read()
+        self.assertLess(
+            client_source.index('import logging'),
+            client_source.index('include "oidc.pxi"'))
+
+    def test_config_and_error_views_recheck_written_prefix(self):
+        error_size, config_size = _client._debug_oidc_view_sizes()
+        self.assertEqual(
+            _client._debug_oidc_view_prefix_support(
+                error_size - 1, config_size - 1),
+            (False, False))
+        self.assertEqual(
+            _client._debug_oidc_view_prefix_support(
+                error_size, config_size),
+            (True, True))
 
     def test_event_tail_fields_are_gated_by_struct_size(self):
         # A callback from an older shared library can provide the pre-interval
