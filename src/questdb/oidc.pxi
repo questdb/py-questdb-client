@@ -61,6 +61,11 @@ cdef object _OIDC_PROVIDERS = {}
 cdef object _OIDC_NATIVE_HANDLES = {}
 cdef object _OIDC_REGISTRY_LOCK = threading.Lock()
 cdef size_t _oidc_last_provider_id = 0
+# Set before the atexit hook snapshots the registry. A provider whose native
+# build completes after that snapshot observes the flag under the same lock and
+# detaches its callbacks before construction returns, closing the new-provider
+# race while the hook releases the GIL to drain an older callback.
+cdef bint _oidc_callbacks_shutting_down = False
 
 
 def _debug_oidc_registry_size():
@@ -80,6 +85,19 @@ def _debug_oidc_registry_snapshot():
     with _OIDC_REGISTRY_LOCK:
         return (frozenset(_OIDC_PROVIDERS),
                 frozenset(_OIDC_NATIVE_HANDLES))
+
+
+def _debug_oidc_callbacks_shutting_down():
+    """Internal test hook: has the callback-detach atexit phase started?"""
+    with _OIDC_REGISTRY_LOCK:
+        return bool(_oidc_callbacks_shutting_down)
+
+
+def _debug_oidc_reset_callback_shutdown():
+    """Internal test hook: undo a manually invoked atexit phase."""
+    global _oidc_callbacks_shutting_down
+    with _OIDC_REGISTRY_LOCK:
+        _oidc_callbacks_shutting_down = False
 
 
 def _debug_oidc_reset_errors_module():
@@ -116,19 +134,18 @@ def _oidc_provider_collected(size_t provider_id, object provider_ref):
     _OIDC_NATIVE_HANDLES.pop(provider_id, None)
 
 
-cdef void _oidc_detach_handle_diagnostics(_OidcNativeHandle handle) noexcept:
-    """Stop one native auth handle delivering diagnostics.
+cdef void _oidc_detach_handle_callbacks(_OidcNativeHandle handle) noexcept:
+    """Stop one native auth handle delivering managed-runtime callbacks.
 
-    Native detach is idempotent, NULL-tolerant and returns once no diagnostic
-    callback is running for the handle, so this needs no liveness test beyond
-    the NULL check. The GIL is released across it because a diagnostic already
-    inside the callback gate is blocked acquiring the GIL, and the detach waits
-    for that gate.
+    Both native detaches are idempotent and NULL-tolerant. The GIL is released
+    because an event or diagnostic already inside its native callback gate may
+    be blocked acquiring it while the detach waits for that gate.
     """
     cdef PyThreadState* gs = NULL
     if handle is None or handle.raw == NULL:
         return
     _ensure_doesnt_have_gil(&gs)
+    questdb_oidc_auth_detach_events(handle.raw)
     questdb_oidc_auth_detach_diagnostics(handle.raw)
     _ensure_has_gil(&gs)
 
@@ -136,20 +153,24 @@ cdef void _oidc_detach_handle_diagnostics(_OidcNativeHandle handle) noexcept:
 def _oidc_detach_diagnostics_at_exit():
     """Silence every still-registered provider before finalization begins.
 
-    ``_oidc_diagnostic_trampoline`` can be entered from a token-provider or
-    transport thread that Rust spawned, which ``threading._shutdown()`` does
-    not join, and its ``qdb_py_is_finalizing()`` guard is a TOCTOU:
-    finalization can begin between the test and the ``PyGILState_Ensure`` the
-    ``with gil`` dispatch emits. No check placed in the trampoline can close
-    that window.
+    Both native trampolines can run on non-main threads: diagnostics from an
+    attached transport worker, and renderer events when the application put
+    ``sign_in()`` on a daemon thread. In either case their
+    ``qdb_py_is_finalizing()`` guard is a TOCTOU: finalization can begin between
+    the test and the ``PyGILState_Ensure`` the ``with gil`` dispatch emits. No
+    check placed in a trampoline can close that window.
 
     ``atexit`` runs while the interpreter is still fully alive, so detaching
-    here is what actually narrows the window rather than merely re-testing it.
+    both managed-runtime callback targets here closes the window rather than
+    merely re-testing it.
+
     A provider already dropped from the registry cannot be reached from here at
     all -- its weakref callback has removed both entries -- and is covered
-    instead by ``_OidcNativeHandle.__dealloc__``, which detaches that
-    provider's diagnostics before releasing the handle. Between the two, no
-    still-deliverable diagnostic target survives into finalization.
+    instead by ``_OidcNativeHandle.__dealloc__``, which detaches that provider's
+    diagnostics before releasing the handle. Renderer events require a live
+    ``sign_in`` frame, which itself retains the provider, so a collected
+    provider needs no separate event detach. Between the two paths, no
+    still-deliverable managed-runtime callback target survives finalization.
 
     Detaches rather than closes. Every handle reachable here belongs to a
     provider the user still holds, which is exactly the set attached to live
@@ -160,23 +181,33 @@ def _oidc_detach_diagnostics_at_exit():
     real and runs after this hook -- ``atexit`` precedes module clearing, so
     ``QuestDB.__dealloc__`` -> ``questdb_db_close`` -> the bounded
     ``close_flush_timeout`` drain happens later. Detaching gives the hook's
-    stated guarantee (no diagnostic callback running, none able to start)
-    without taking anything else away. Detach can wait only for a diagnostic
-    callback already running; it never waits on the acquisition lock behind an
-    in-flight IdP request, so the provider's 30s/120s HTTP timeout is not added
-    to exit latency.
+    stated guarantee (no managed-runtime callback running, none able to start)
+    without taking anything else away. Detach can wait only for a callback
+    already running; it never waits on the acquisition lock behind an in-flight
+    IdP request, so the provider's 30s/120s HTTP timeout is not added to exit
+    latency.
 
-    Snapshots under the registry lock and detaches outside it: the detach is a
-    native call made with the GIL released, and holding the lock across it
-    would serialise shutdown against any concurrent construction. Iterating the
-    handle dict resurrects nothing -- it holds the handles, while
+    Marks callback shutdown and snapshots under the registry lock, then
+    detaches outside it: the detach is a native call made with the GIL released,
+    and holding the lock across it would invert against concurrent provider
+    registration. A constructor that finishes after the snapshot checks the
+    marker under the same lock and detaches its own completed native handle
+    before returning, so it cannot escape through that GIL-release window.
+    Iterating the handle dict resurrects nothing -- it holds the handles, while
     `_OIDC_PROVIDERS` holds only weakrefs to the providers themselves.
     """
+    global _oidc_callbacks_shutting_down
     try:
         with _OIDC_REGISTRY_LOCK:
+            # Publish before the snapshot. A constructor can run while native
+            # detach below has released the GIL; after its build it checks this
+            # flag under the same lock and detaches itself if it missed the
+            # snapshot. Holding the registry lock across a native drain would
+            # instead create a lock inversion with provider registration.
+            _oidc_callbacks_shutting_down = True
             handles = list(_OIDC_NATIVE_HANDLES.values())
         for handle in handles:
-            _oidc_detach_handle_diagnostics(handle)
+            _oidc_detach_handle_callbacks(handle)
     except BaseException:
         # An atexit hook that raises prints a traceback and buys nothing: the
         # process is going away regardless, and every provider this failed to
@@ -639,20 +670,15 @@ cdef void _oidc_event_trampoline(
     since it is not local to this function:
 
     Renderer events are emitted only by the device flow, which is reached only
-    through ``sign_in()``. That is a foreground call, so for the whole time
-    events can arrive the interpreter is running, the calling thread is blocked
-    inside the native call, and the provider is strongly referenced by that
-    frame. There is no background refresh path that renders: ``token()`` is
-    non-interactive and silent. So this cannot be reached by an abandoned worker
-    after the interpreter has begun finalizing -- the hazard that made the
-    release callback stop entering Python at all.
+    through ``sign_in()``; background refresh is silent. The provider is
+    strongly referenced by that frame, but Python does not require callers to
+    keep the sign-in on the main thread: a daemon sign-in can still be alive
+    when interpreter shutdown starts.
 
-    The ``qdb_py_is_finalizing`` check is therefore belt-and-braces rather than
-    load-bearing. It is retained for an embedder that tears down the interpreter
-    while another thread is still inside ``sign_in()``, but note it is a TOCTOU:
-    finalization can begin between the check and the GIL acquisition, and no
-    check can close that. Keeping the flow foreground-only is what makes this
-    path safe.
+    The ``qdb_py_is_finalizing`` check is a final fallback for embedders, not
+    the synchronization: finalization can begin between it and the GIL
+    acquisition. The registered atexit hook closes that window by detaching
+    every live provider's event target while Python is still fully callable.
     """
     if qdb_py_is_finalizing():
         return
@@ -1085,6 +1111,7 @@ cdef class OidcDeviceAuth:
         cdef PyThreadState* gs = NULL
         cdef _OidcNativeHandle native
         cdef size_t provider_id
+        cdef bint detach_callbacks_after_build
         from questdb.auth._errors import OidcConfigError
         from questdb.auth._render import (
             detect_interactive, in_ipython_kernel, make_renderer)
@@ -1243,6 +1270,14 @@ cdef class OidcDeviceAuth:
             _ensure_has_gil(&gs)
             if native.raw == NULL:
                 raise _oidc_err_to_py(err)
+            with _OIDC_REGISTRY_LOCK:
+                detach_callbacks_after_build = _oidc_callbacks_shutting_down
+            if detach_callbacks_after_build:
+                # This provider finished after the atexit snapshot while an
+                # older callback drain had released the GIL. No Python caller
+                # can use it before __init__ returns, so detach both callback
+                # targets now, before exposing the completed provider.
+                _oidc_detach_handle_callbacks(native)
             self._raw = native.raw
             # A failed build leaves `_raw` NULL and this function supports
             # re-initialisation from that state, but `close()` latches

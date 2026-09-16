@@ -6171,17 +6171,31 @@ cdef void_int _direct_dataframe_run(
             # documented never to prompt, so the call would stall for the whole
             # reconnect budget (300s by default) only to raise the same error.
             # Usually fail fast and let the caller run sign_in(). One immediate
-            # probe closes the race where the error was produced while a peer
-            # sign-in held the lock but Python observes that lock only after it
-            # has completed. If nobody signed in, the second identical failure
-            # is terminal instead of burning the reconnect budget.
+            # TOKEN probe closes the race where the error was produced while a
+            # peer sign-in held the lock but Python observes that lock only
+            # after it has completed. Probe the provider directly rather than
+            # rebuilding/re-exporting the whole dataframe just to discover the
+            # same InteractionRequired result. Only a newly available token
+            # justifies replaying data preparation once.
             if _is_oidc_terminal_for_foreground(exc, oidc_auth):
                 if (oidc_terminal_probe_used or exc.in_doubt
-                        or committed_prefix or nonreplayable_consumed):
+                        or committed_prefix or nonreplayable_consumed
+                        or oidc_auth is None):
                     raise
                 oidc_terminal_probe_used = True
-                budget_ms = 0
-                continue
+                try:
+                    oidc_auth.token()
+                except QuestDBError as probe_exc:
+                    if _is_oidc_terminal_for_foreground(
+                            probe_exc, oidc_auth):
+                        raise exc
+                    # A different transient provider failure belongs in the
+                    # ordinary bounded-retry path below, with its own type and
+                    # structured OIDC detail preserved.
+                    exc = probe_exc
+                else:
+                    budget_ms = 0
+                    continue
             # FailoverRetry = transient flush/sync; SocketError = a
             # re-borrow that has not reached a live primary yet.
             if exc.code not in (

@@ -212,6 +212,12 @@ cdef object _fetch_one_batch(
     cdef qwp_reader_arrow_batch_result result
     cdef qwp_reader_cursor* cursor
 
+    # The native Arrow export leaves both outputs untouched on failure. Mark
+    # them released up front so any future shared cleanup path can safely use
+    # the Arrow C Data convention (release == NULL) on every return path.
+    array.release = NULL
+    schema.release = NULL
+
     with handle._lock:
         cursor = handle._cursor
         if cursor == NULL:

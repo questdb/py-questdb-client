@@ -27,6 +27,7 @@
 import dataclasses
 import gc
 import io
+import logging
 import os
 import platform
 import shutil
@@ -37,6 +38,7 @@ import threading
 import time
 import types
 import unittest
+import uuid
 import weakref
 from unittest import mock
 
@@ -706,6 +708,7 @@ class NativeOidcTest(unittest.TestCase):
             self.assertEqual(auth.config.client_id, 'questdb')
 
     def test_exit_hook_silences_diagnostics_without_closing_providers(self):
+        self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
         # The atexit hook exists to stop a persistence diagnostic entering a
         # finalizing interpreter. It must not achieve that by closing the
         # provider: every handle it can reach belongs to a provider the user
@@ -735,10 +738,29 @@ class NativeOidcTest(unittest.TestCase):
             auth.close()
             _client._oidc_detach_diagnostics_at_exit()
 
+    def test_exit_hook_silences_renderer_events_without_closing_provider(self):
+        self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
+        renderer = RecordingRenderer()
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(server, renderer=renderer)
+            _client._oidc_detach_diagnostics_at_exit()
+
+            # The hook suppresses every callback that would enter Python, but
+            # deliberately keeps the provider usable for transports draining
+            # after atexit. Sign-in therefore completes and commits its token
+            # without invoking the detached renderer.
+            auth.sign_in()
+            self.assertEqual(auth.token(), 'AT-initial')
+            self.assertEqual(renderer.prompts, [])
+            self.assertEqual(renderer.waiting, [])
+            self.assertEqual(renderer.successes, [])
+            self.assertEqual(renderer.failures, [])
+
     def test_exit_hook_actually_silences_persistence_diagnostics(self):
+        self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
         # The companion test above proves detaching does not close providers;
         # this positive half proves the hook reaches the native diagnostic
-        # sink. Reducing _oidc_detach_handle_diagnostics to a no-op makes the
+        # sink. Reducing _oidc_detach_handle_callbacks to a no-op makes the
         # deterministic failed save below emit a WARNING and fail this test.
         class SabotageRenderer(RecordingRenderer):
             def __init__(self, directory):
@@ -762,6 +784,137 @@ class NativeOidcTest(unittest.TestCase):
                 with self.assertNoLogs('questdb', level='WARNING'):
                     auth.sign_in()
                 self.assertEqual(auth.token(), 'AT-initial')
+
+    def test_exit_hook_detaches_provider_built_after_its_snapshot(self):
+        self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
+        prompt_entered = threading.Event()
+        release_prompt = threading.Event()
+
+        class BlockingRenderer(RecordingRenderer):
+            def on_prompt(self, challenge):
+                super().on_prompt(challenge)
+                prompt_entered.set()
+                release_prompt.wait()
+
+        first_renderer = BlockingRenderer()
+        second_renderer = RecordingRenderer()
+        constructed = []
+        construction_errors = []
+        sign_in_errors = []
+
+        with OidcTestServer() as first_server, OidcTestServer() as second_server:
+            first = make_discovered_auth(
+                first_server, renderer=first_renderer)
+
+            def sign_in_first():
+                try:
+                    first.sign_in()
+                except BaseException as exc:
+                    sign_in_errors.append(exc)
+
+            signer = threading.Thread(target=sign_in_first, daemon=True)
+            signer.start()
+            self.assertTrue(prompt_entered.wait(5), 'first prompt did not start')
+
+            def construct_after_shutdown_starts():
+                try:
+                    # The main thread holds the GIL until the hook has taken
+                    # its registry snapshot. This thread first runs when event
+                    # detach releases the GIL while waiting for the blocked
+                    # prompt. The deadline keeps the regression discriminating
+                    # if the shutdown flag assignment itself is deleted.
+                    deadline = time.monotonic() + 0.5
+                    while (not _client._debug_oidc_callbacks_shutting_down()
+                           and time.monotonic() < deadline):
+                        time.sleep(0.001)
+                    constructed.append(make_discovered_auth(
+                        second_server, renderer=second_renderer))
+                except BaseException as exc:
+                    construction_errors.append(exc)
+                finally:
+                    release_prompt.set()
+
+            constructor = threading.Thread(
+                target=construct_after_shutdown_starts, daemon=True)
+            constructor.start()
+            _client._oidc_detach_diagnostics_at_exit()
+            constructor.join(10)
+            signer.join(10)
+            self.assertFalse(constructor.is_alive())
+            self.assertFalse(signer.is_alive())
+            self.assertEqual(construction_errors, [])
+            self.assertEqual(sign_in_errors, [])
+            self.assertEqual(len(constructed), 1)
+
+            late = constructed[0]
+            late.sign_in()
+            self.assertEqual(late.token(), 'AT-initial')
+            self.assertEqual(second_renderer.prompts, [])
+            self.assertEqual(second_renderer.waiting, [])
+            self.assertEqual(second_renderer.successes, [])
+            self.assertEqual(second_renderer.failures, [])
+
+    def test_persistence_diagnostic_can_close_its_provider(self):
+        class SabotageRenderer(RecordingRenderer):
+            def __init__(self, directory):
+                super().__init__()
+                self.directory = directory
+
+            def on_prompt(self, challenge):
+                super().on_prompt(challenge)
+                shutil.rmtree(self.directory)
+                with open(self.directory, 'w', encoding='utf-8') as sink:
+                    sink.write('not a directory')
+
+        class ClosingHandler(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.auth = None
+                self.returned = threading.Event()
+
+            def emit(self, record):
+                # logging.Handler.handle owns this handler's lock here. Native
+                # must not wait on the acquisition mutex held by the diagnostic
+                # callback's own persistence stack.
+                self.auth.close()
+                self.returned.set()
+
+        with tempfile.TemporaryDirectory() as parent:
+            directory = os.path.join(parent, 'store')
+            with OidcTestServer() as server:
+                auth = make_discovered_auth(
+                    server,
+                    token_store=FileTokenStore.at(directory),
+                    renderer=SabotageRenderer(directory))
+                handler = ClosingHandler()
+                handler.auth = auth
+                logger = logging.getLogger('questdb')
+                old_level = logger.level
+                logger.addHandler(handler)
+                logger.setLevel(logging.WARNING)
+                outcome = []
+
+                def sign_in():
+                    try:
+                        auth.sign_in()
+                    except BaseException as exc:
+                        outcome.append(exc)
+
+                thread = threading.Thread(target=sign_in, daemon=True)
+                try:
+                    thread.start()
+                    thread.join(10)
+                    self.assertFalse(
+                        thread.is_alive(),
+                        'close() waited for its own persistence diagnostic')
+                    self.assertTrue(
+                        handler.returned.is_set(),
+                        'the persistence diagnostic did not return from close()')
+                    if outcome:
+                        self.assertIsInstance(outcome[0], OidcCancelledError)
+                finally:
+                    logger.removeHandler(handler)
+                    logger.setLevel(old_level)
 
     @unittest.skipUnless(os.name == 'posix', 'POSIX bytes paths only')
     def test_non_utf8_file_store_path_is_typed(self):
@@ -2574,9 +2727,19 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         # assertion meaningful. Before the fix this took the full budget; the
         # gate now recognises the OIDC kind and re-raises immediately.
         budget_s = 60
+        class CountingUUID(uuid.UUID):
+            int_reads = 0
+
+            def __getattribute__(self, name):
+                if name == 'int':
+                    type(self).int_reads += 1
+                return super().__getattribute__(name)
+
+        value = CountingUUID('12345678-1234-5678-1234-567812345678')
         df = pd.DataFrame({
-            'value': [1],
+            'value': [value],
             'ts': pd.to_datetime([1700000000], unit='s')})
+        CountingUUID.int_reads = 0
         auth = make_auth()  # never signed in
         db = questdb.connect(
             'ws::addr=127.0.0.1:19009;lazy_connect=on;'
@@ -2591,6 +2754,10 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 elapsed, budget_s / 4,
                 'dataframe() burned the reconnect budget on an OIDC failure '
                 'that only an interactive sign_in() can clear')
+            self.assertEqual(
+                CountingUUID.int_reads, 1,
+                'the terminal OIDC probe rebuilt the whole dataframe instead '
+                'of polling the provider directly')
         finally:
             db.close()
 
