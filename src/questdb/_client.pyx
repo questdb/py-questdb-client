@@ -32,9 +32,13 @@
 # extension safe, notably the OIDC provider's `_renderer`, `_closed` and
 # `_interrupt` slots and the `_WARNED_UNKNOWN_CONNECTION_EVENT`
 # read/modify/write latch, which native callback threads reach without
-# free-threading synchronization. The paired OIDC registry dictionaries are
-# independently protected by `_OIDC_REGISTRY_LOCK`. The `cp314t` wheels in the
-# CI matrix are
+# free-threading synchronization. `_OIDC_ERRORS_MOD` is another Python-object
+# read/modify/write cache and likewise relies on the enabled GIL. The paired
+# OIDC registry dictionaries are independently protected by
+# `_OIDC_REGISTRY_LOCK`. Native OIDC raw pointers are published monotonically
+# under the GIL; GIL-released reads are safe only because each caller retains a
+# strong reference to the owning handle/provider until the native call returns.
+# The `cp314t` wheels in the CI matrix are
 # therefore usable but gain no free-threading benefit, and running them under
 # `PYTHON_GIL=0` is unsupported. Making the extension genuinely
 # free-threading safe is a separate piece of work; until then this comment is
@@ -6457,8 +6461,9 @@ cdef class QuestDB:
         the pool; connection and reconnect paths never start an interactive
         device flow.
 
-        The underlying connection pool is opened by `questdb_db_connect_ex`.
-        Dataframe ingestion always uses the direct (non-store-and-forward)
+        The connection pool is opened eagerly unless configuration selects a
+        lazy connection. Dataframe ingestion always uses the direct
+        (non-store-and-forward)
         QWP/WebSocket column sender, independent of ``sf_dir``. On a transient
         connection failure the frame is re-sent from the caller's DataFrame
         only when the failed operation is provably not delivered. A

@@ -178,7 +178,8 @@ cdef class _CursorHandle:
 
         Returns 1 when it freed an un-drained cursor (the caller should warn),
         0 when it freed a drained one or there was nothing to free, and -1 when
-        the lock was busy and it did nothing -- whoever holds it will free it.
+        the lock was busy and it did nothing. The lock holder need not be a
+        freeing operation; ``__dealloc__`` remains the eventual fallback.
         """
         cdef bint undrained
         if not self._lock.acquire(False):
@@ -1463,6 +1464,22 @@ cdef inline uint64_t _be64(const uint8_t* p) noexcept nogil:
             | ((<uint64_t>p[6]) << 8) | (<uint64_t>p[7]))
 
 
+cdef inline object _uuid_from_canonical(
+        const uint8_t* row, object uuid_cls):
+    """Build one UUID from canonical RFC 4122 bytes without host-endian loads."""
+    return uuid_cls(
+        None, None, None, None,
+        ((<object>_be64(row)) << 64) | (<object>_be64(row + 8)))
+
+
+def _debug_decode_uuid_bytes(bytes value):
+    """Internal offline seam for the canonical query UUID decoder."""
+    if PyBytes_GET_SIZE(value) != 16:
+        raise ValueError('a UUID must contain exactly 16 bytes')
+    return _uuid_from_canonical(
+        <const uint8_t*>PyBytes_AsString(value), _uuid_module().UUID)
+
+
 cdef object _numpy_uuid_chunk(
         const qwp_reader_batch* batch,
         size_t col_idx,
@@ -1510,11 +1527,7 @@ cdef object _numpy_uuid_chunk(
         # Passing it by name builds a fresh kwargs dict for every row on this
         # per-cell hot path. The unit test pins the positional mapping so a
         # future CPython signature change fails loudly rather than mis-binding.
-        _obj_chunk_set(
-            out, r,
-            uuid_cls(
-                None, None, None, None,
-                ((<object>_be64(row)) << 64) | (<object>_be64(row + 8))))
+        _obj_chunk_set(out, r, _uuid_from_canonical(row, uuid_cls))
     return out
 
 
@@ -1523,6 +1536,10 @@ cdef object _numpy_long256_chunk(
         size_t col_idx,
         size_t row_count,
         object np):
+    # Attribute lookup is otherwise repeated for every cell. ``signed=False``
+    # is int.from_bytes' default, so omitting that keyword also avoids a kwargs
+    # container on this per-cell path.
+    cdef object from_bytes = int.from_bytes
     cdef qwp_reader_column_data cd
     cdef questdb_error* err = NULL
     cdef const uint8_t* validity
@@ -1546,9 +1563,9 @@ cdef object _numpy_long256_chunk(
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
             continue
-        _obj_chunk_set(out, r, int.from_bytes(
+        _obj_chunk_set(out, r, from_bytes(
             PyBytes_FromStringAndSize(<const char*>(values + r * stride), 32),
-            'little', signed=False))
+            'little'))
     return out
 
 
@@ -2684,8 +2701,9 @@ class QueryResult:
             # free ahead of the warning makes that structurally impossible.
             outcome = handle._try_reclaim()
             if outcome < 0:
-                # Another thread owns the lock; it frees the cursor. Do not
-                # block here -- see `_try_reclaim`.
+                # Another thread owns the lock. It may not be freeing; leave
+                # the handle attached so its eventual __dealloc__ reclaims the
+                # cursor without blocking this finalizer.
                 return
             self._cursor_handle = None
             self._cancel_handle = None

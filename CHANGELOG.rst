@@ -82,6 +82,14 @@ For the 16-byte case the ``arrow.uuid`` extension type works on either path
 and needs no conversion; LONG256 has no such label, so ``schema_overrides``
 on an Arrow-backed frame is the only route.
 
+``schema_overrides`` now rejects an argument for any kind except ``'geohash'``.
+For example, ``{'x': ('symbol', 16)}`` previously worked by silently discarding
+``16``; write ``{'x': 'symbol'}`` instead. Only
+``('geohash', bits)`` accepts a two-item tuple.
+
+The new public :data:`questdb.SchemaOverride` type alias describes one
+``schema_overrides`` value and can be imported for application annotations.
+
 Callback inbox capacities are capped
 ************************************
 
@@ -279,9 +287,11 @@ Other changes
 ~~~~~~~~~~~~~
 
 - A failed :meth:`SenderTransaction.commit
-  <questdb.SenderTransaction.commit>` now completes the transaction before it
-  flushes, so a following ``rollback()`` raises ``InvalidApiCall`` instead of
-  clearing it. Calling ``commit()`` after its sender was closed now raises
+  <questdb.SenderTransaction.commit>` now clears the sender's local buffer,
+  rather than leaving rows that the failed flush may already have delivered.
+  The transaction was already completed before the flush in 5.0, so a
+  following ``rollback()`` continues to raise ``InvalidApiCall``. Calling
+  ``commit()`` after its sender was closed now raises
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.InvalidApiCall`` instead of leaking an internal
   ``TypeError``.

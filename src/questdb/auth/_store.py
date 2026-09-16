@@ -44,6 +44,33 @@ from ._errors import OidcConfigError
 TOKEN_STORE_DIR_ENV = 'QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR'
 
 
+def _default_token_store_directory() -> str:
+    """Resolve the shared native/Python default token-store directory.
+
+    Keep this as the single Python implementation of the native ``home_dir``
+    contract: an absolute environment override wins; otherwise use only the
+    platform's primary home variable, with no ``expanduser`` fallback.
+    """
+    override = os.environ.get(TOKEN_STORE_DIR_ENV)
+    if override:
+        if not os.path.isabs(override):
+            raise OidcConfigError(
+                f'{TOKEN_STORE_DIR_ENV} must be an absolute path, not '
+                f'{override!r}. A relative path follows the working '
+                'directory, and `~` is expanded by shells rather than by '
+                'the QuestDB clients, so neither names one store shared '
+                'with the native client. Use an absolute path, or pass '
+                'FileTokenStore(dir) explicitly.')
+        return override
+    home = os.environ.get('USERPROFILE' if os.name == 'nt' else 'HOME')
+    if not home or not os.path.isabs(home):
+        raise OidcConfigError(
+            'could not resolve the home directory for the default OIDC '
+            f'token-store location; set {TOKEN_STORE_DIR_ENV} to an '
+            'absolute path')
+    return os.path.join(home, '.questdb', 'oidc-tokens')
+
+
 class FileTokenStore:
     """Opt into the native plaintext JSON token store at ``directory``.
 
@@ -97,48 +124,28 @@ class FileTokenStore:
 
     @classmethod
     def at(cls, directory: Any) -> 'FileTokenStore':
+        """Construct a store at ``directory``.
+
+        This is an exact constructor alias, provided to read symmetrically with
+        :meth:`at_default_location`; ``FileTokenStore(directory)`` is equally
+        valid.
+        """
         return cls(directory)
 
     @classmethod
     def at_default_location(cls) -> 'FileTokenStore':
-        override = os.environ.get(TOKEN_STORE_DIR_ENV)
-        if override:
-            # Reject a non-absolute override rather than normalizing it, which
-            # is what the constructor does for a path the caller passes
-            # directly. This setting is shared with the native client, which
-            # does not expand `~`: it would create a directory literally named
-            # `~` where expanding it here would land in `$HOME`, so the
-            # "shared" store would silently become two. A
-            # relative path is the same problem via the working directory.
-            # Native rejects these too; checking here names the setting in a
-            # typed error instead of surfacing an io error from build().
-            # `~/x` is not absolute either, so this one test covers both.
-            if not os.path.isabs(override):
-                raise OidcConfigError(
-                    f'{TOKEN_STORE_DIR_ENV} must be an absolute path, not '
-                    f'{override!r}. A relative path follows the working '
-                    'directory, and `~` is expanded by shells rather than by '
-                    'the QuestDB clients, so neither names one store shared '
-                    'with the native client. Use an absolute path, or pass '
-                    'FileTokenStore(dir) explicitly.')
-            return cls(override)
-        # Mirror native's `home_dir()` exactly: `HOME` on POSIX,
-        # `USERPROFILE` on Windows, and absolute only. `os.path.expanduser`
-        # is deliberately NOT used here -- its `pwd.getpwuid()` fallback on
-        # POSIX (and `HOMEDRIVE` + `HOMEPATH` on Windows) resolves a path in
-        # precisely the environment where native refuses, the distroless /
-        # arbitrary-uid container with no `HOME`. The two clients would then
-        # name different stores, so this client would write a long-lived
-        # plaintext refresh token where the native and Java clients never look
-        # -- and a credential cleared through one would survive in the other.
-        home = os.environ.get('USERPROFILE' if os.name == 'nt' else 'HOME')
-        if not home or not os.path.isabs(home):
-            raise OidcConfigError(
-                'could not resolve the home directory for the default OIDC '
-                f'token-store location; set {TOKEN_STORE_DIR_ENV} to an '
-                'absolute path')
-        return cls(os.path.join(home, '.questdb', 'oidc-tokens'))
+        """Use the default location shared with the native client.
+
+        An absolute ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` override wins.
+        Otherwise this
+        uses ``HOME`` on POSIX or ``USERPROFILE`` on Windows and appends
+        ``.questdb/oidc-tokens``. Missing, relative and ``~``-prefixed defaults
+        are rejected so different clients cannot silently select different
+        credential stores.
+        """
+        return cls(_default_token_store_directory())
 
     @property
     def directory(self) -> str:
+        """The expanded absolute directory passed to the native token store."""
         return self._directory

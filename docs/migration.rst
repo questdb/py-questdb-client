@@ -5,12 +5,12 @@ Migration Guide
 5.0 to 5.1
 ==========
 
-Six changes need action: the two UUID / fixed-size-binary items below, caps on
-callback inbox capacities and config-string length, the completed-on-failure
-transaction rule, and a warning an abandoned query result now surfaces instead
-of swallowing. The
-new ``ConnectionEventKind.CredentialUnavailable`` event kind needs none — it
-is additive, and an existing listener keeps working.
+Seven changes need action: the two UUID / fixed-size-binary items below, the
+stricter ``schema_overrides`` tuple validation, caps on callback inbox
+capacities and config-string length, the failed-commit cleanup and exception
+changes, and a warning an abandoned query result now surfaces instead of
+swallowing. The new ``ConnectionEventKind.CredentialUnavailable`` event kind
+needs none — it is additive, and an existing listener keeps working.
 
 * **UUID bytes are canonical RFC 4122.** UUID values are read and written in
   canonical big-endian order at every API boundary; the client byte-swaps to
@@ -59,6 +59,12 @@ is additive, and an existing listener keeps working.
   equivalent label, so an Arrow-backed frame plus ``schema_overrides`` is the
   only route for it.
 
+* **Only a geohash schema override accepts an argument.** A tuple such as
+  ``{'x': ('symbol', 16)}`` previously worked by silently discarding ``16``;
+  write ``{'x': 'symbol'}`` instead. The two-item form is reserved for
+  ``('geohash', bits)``. :data:`questdb.SchemaOverride` is now importable for
+  annotating these values.
+
 * **Callback inbox capacities are capped at 65536.**
   ``connection_event_inbox_capacity`` and ``error_event_inbox_capacity``, and
   the ``error_inbox_capacity`` config-string key, now reject a larger value
@@ -74,12 +80,12 @@ is additive, and an existing listener keeps working.
   content from any string above that bound.
 
 * **A failed** :meth:`SenderTransaction.commit
-  <questdb.SenderTransaction.commit>` **now completes that transaction.** A
-  subsequent ``rollback()`` now raises ``QuestDBError`` with
-  ``QuestDBErrorCode.InvalidApiCall`` instead of clearing the transaction. Move
-  cleanup that must happen after a failed commit outside the transaction API;
-  do not try to roll back a commit attempt whose delivery outcome may already
-  be uncertain. ``commit()`` after the owning sender was closed now also raises
+  <questdb.SenderTransaction.commit>` **now clears the sender's local buffer.**
+  The transaction was already completed before the flush in 5.0, so a
+  subsequent ``rollback()`` continues to raise
+  ``QuestDBError(InvalidApiCall)``. The new local clear prevents a retry from
+  resending rows whose delivery may already be uncertain. ``commit()`` after
+  the owning sender was closed now also raises
   ``QuestDBError(InvalidApiCall)`` instead of an internal ``TypeError``.
 
 * **An abandoned** :class:`~questdb.QueryResult` **now reports its**

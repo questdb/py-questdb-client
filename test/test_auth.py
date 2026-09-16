@@ -60,6 +60,9 @@ from questdb.auth import (
     OidcInteractionRequired,
     OidcTimeoutError,
     Renderer,
+    psycopg_connect,
+    sanitize_display_text,
+    sqlalchemy_engine,
 )
 from questdb import _client
 from questdb._client import _debug_oidc_registry_size
@@ -617,19 +620,27 @@ class NativeOidcTest(unittest.TestCase):
         self.assertEqual(auth.config.client_id, 'questdb')
 
     def test_connect_preserves_oidc_error_that_looks_like_duplicate_key(self):
-        err = OidcNetworkError(
-            'identity provider said duplicate key "query_pool_min"',
-            status=503,
-            retry_after=7)
-        fake_db = mock.Mock()
-        fake_db.from_conf.side_effect = err
-        with mock.patch.dict(questdb.connect.__globals__, {'QuestDB': fake_db}):
-            with self.assertRaises(OidcNetworkError) as raised:
-                questdb.connect(
-                    'ws::addr=127.0.0.1:9000;', query_pool_min=1)
-        self.assertIs(raised.exception, err)
-        self.assertEqual(raised.exception.status, 503)
-        self.assertEqual(raised.exception.retry_after, 7)
+        for err in (
+                OidcNetworkError(
+                    'identity provider said duplicate key "query_pool_min"',
+                    status=503, retry_after=7),
+                OidcConfigError(
+                    'identity provider said duplicate key "query_pool_min"')):
+            with self.subTest(error_type=type(err).__name__):
+                fake_db = mock.Mock()
+                fake_db.from_conf.side_effect = err
+                with mock.patch.dict(
+                        questdb.connect.__globals__, {'QuestDB': fake_db}):
+                    with self.assertRaises(type(err)) as raised:
+                        questdb.connect(
+                            'ws::addr=127.0.0.1:9000;', query_pool_min=1)
+                self.assertIs(raised.exception, err)
+                if isinstance(err, OidcNetworkError):
+                    self.assertEqual(raised.exception.status, 503)
+                    self.assertEqual(raised.exception.retry_after, 7)
+                else:
+                    self.assertEqual(
+                        err.code, questdb.QuestDBErrorCode.ConfigError)
 
     def test_invalid_unicode_is_typed(self):
         with self.assertRaises(OidcConfigError):
@@ -785,6 +796,85 @@ class NativeOidcTest(unittest.TestCase):
                     auth.sign_in()
                 self.assertEqual(auth.token(), 'AT-initial')
 
+    def test_exit_hook_does_not_wait_for_parked_persistence_diagnostic(self):
+        self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
+        diagnostic_entered = threading.Event()
+        release_diagnostic = threading.Event()
+
+        class SabotageRenderer(RecordingRenderer):
+            def __init__(self, directory):
+                super().__init__()
+                self.directory = directory
+
+            def on_prompt(self, challenge):
+                super().on_prompt(challenge)
+                shutil.rmtree(self.directory)
+                with open(self.directory, 'w', encoding='utf-8') as sink:
+                    sink.write('not a directory')
+
+        class BlockingHandler(logging.Handler):
+            def emit(self, record):
+                diagnostic_entered.set()
+                release_diagnostic.wait()
+
+        with tempfile.TemporaryDirectory() as parent:
+            directory = os.path.join(parent, 'store')
+            with OidcTestServer() as server:
+                auth = make_discovered_auth(
+                    server,
+                    token_store=FileTokenStore.at(directory),
+                    renderer=SabotageRenderer(directory))
+                handler = BlockingHandler()
+                logger = logging.getLogger('questdb')
+                old_level = logger.level
+                logger.addHandler(handler)
+                logger.setLevel(logging.WARNING)
+                sign_in_errors = []
+
+                def sign_in():
+                    try:
+                        auth.sign_in()
+                    except BaseException as exc:
+                        sign_in_errors.append(exc)
+
+                signer = threading.Thread(target=sign_in, daemon=True)
+                hook = threading.Thread(
+                    target=_client._oidc_detach_diagnostics_at_exit,
+                    daemon=True)
+                try:
+                    signer.start()
+                    self.assertTrue(
+                        diagnostic_entered.wait(10),
+                        'persistence diagnostic did not reach logging')
+
+                    # Suppression must be published without draining arbitrary
+                    # logging.Handler code already inside the native callback
+                    # gate. The waiting diagnostic detach hangs here until
+                    # release_diagnostic is set.
+                    hook.start()
+                    hook.join(2)
+                    if hook.is_alive():
+                        release_diagnostic.set()
+                        hook.join(5)
+                        signer.join(5)
+                        self.fail(
+                            'exit hook waited for a parked diagnostic callback')
+                    self.assertFalse(release_diagnostic.is_set())
+                    self.assertTrue(
+                        _client._debug_oidc_callbacks_shutting_down())
+
+                    release_diagnostic.set()
+                    signer.join(10)
+                    self.assertFalse(signer.is_alive())
+                    self.assertEqual(sign_in_errors, [])
+                    self.assertEqual(auth.token(), 'AT-initial')
+                finally:
+                    release_diagnostic.set()
+                    hook.join(5)
+                    signer.join(5)
+                    logger.removeHandler(handler)
+                    logger.setLevel(old_level)
+
     def test_exit_hook_detaches_provider_built_after_its_snapshot(self):
         self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
         prompt_entered = threading.Event()
@@ -798,8 +888,6 @@ class NativeOidcTest(unittest.TestCase):
 
         first_renderer = BlockingRenderer()
         second_renderer = RecordingRenderer()
-        constructed = []
-        construction_errors = []
         sign_in_errors = []
 
         with OidcTestServer() as first_server, OidcTestServer() as second_server:
@@ -816,37 +904,32 @@ class NativeOidcTest(unittest.TestCase):
             signer.start()
             self.assertTrue(prompt_entered.wait(5), 'first prompt did not start')
 
-            def construct_after_shutdown_starts():
-                try:
-                    # The main thread holds the GIL until the hook has taken
-                    # its registry snapshot. This thread first runs when event
-                    # detach releases the GIL while waiting for the blocked
-                    # prompt. The deadline keeps the regression discriminating
-                    # if the shutdown flag assignment itself is deleted.
-                    deadline = time.monotonic() + 0.5
-                    while (not _client._debug_oidc_callbacks_shutting_down()
-                           and time.monotonic() < deadline):
-                        time.sleep(0.001)
-                    constructed.append(make_discovered_auth(
-                        second_server, renderer=second_renderer))
-                except BaseException as exc:
-                    construction_errors.append(exc)
-                finally:
-                    release_prompt.set()
+            # The hook must publish event suppression and return while arbitrary
+            # renderer code remains parked. Running it in a helper lets a
+            # regression cleanly release the callback instead of hanging the
+            # whole test process forever.
+            hook = threading.Thread(
+                target=_client._oidc_detach_diagnostics_at_exit, daemon=True)
+            hook.start()
+            hook.join(2)
+            if hook.is_alive():
+                release_prompt.set()
+                hook.join(5)
+                signer.join(5)
+                self.fail('exit hook waited for a parked renderer callback')
+            self.assertFalse(release_prompt.is_set())
+            self.assertTrue(_client._debug_oidc_callbacks_shutting_down())
 
-            constructor = threading.Thread(
-                target=construct_after_shutdown_starts, daemon=True)
-            constructor.start()
-            _client._oidc_detach_diagnostics_at_exit()
-            constructor.join(10)
+            # A provider completed after the hook's snapshot observes the
+            # shutdown marker and self-detaches before it is exposed.
+            late = make_discovered_auth(
+                second_server, renderer=second_renderer)
+
+            release_prompt.set()
             signer.join(10)
-            self.assertFalse(constructor.is_alive())
             self.assertFalse(signer.is_alive())
-            self.assertEqual(construction_errors, [])
             self.assertEqual(sign_in_errors, [])
-            self.assertEqual(len(constructed), 1)
 
-            late = constructed[0]
             late.sign_in()
             self.assertEqual(late.token(), 'AT-initial')
             self.assertEqual(second_renderer.prompts, [])
@@ -1919,6 +2002,20 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 10)
         self.assertEqual(outcome[:1], ['closed'])
 
+    def test_renderer_on_success_can_read_committed_token(self):
+        holder = []
+
+        class TokenReadingRenderer(RecordingRenderer):
+            def on_success(self, identity, expires_in):
+                super().on_success(identity, expires_in)
+                holder.append(auth.token())
+
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(
+                server, renderer=TokenReadingRenderer())
+            auth.sign_in()
+            self.assertEqual(holder, [server.initial_access_token])
+
     def test_interrupt_on_success_does_not_discard_the_new_token(self):
         # oidc.pxi cancels the flow only for PROMPT/WAITING: on SUCCESS the
         # token has just been acquired and closing there would throw it away.
@@ -2745,7 +2842,7 @@ class NativeTransportAttachmentTest(unittest.TestCase):
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_dataframe_auto_flush_preserves_oidc_error(self):
         auth = make_auth()
-        with self.assertRaises(OidcInteractionRequired):
+        with self.assertRaises(OidcInteractionRequired) as caught:
             with questdb.Sender(
                     questdb.Protocol.Http,
                     '127.0.0.1',
@@ -2759,6 +2856,7 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                     pd.DataFrame({'value': [1]}),
                     table_name='oidc_auto_flush',
                     at=questdb.ServerTimestamp)
+        self.assertIn(' - See https://', str(caught.exception))
 
     def test_native_holds_no_python_reference_for_its_callback(self):
         # Regression: the event handler's user_data used to be an INCREF'd
@@ -3399,7 +3497,24 @@ class RenderSanitizerTest(unittest.TestCase):
     exercised here -- only ``questdb.auth._render``.
     """
 
+    def test_public_auth_surface_resolves_and_sanitizes(self):
+        import questdb.auth as auth
+        for name in auth.__all__:
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(auth, name))
+        self.assertIs(auth.psycopg_connect, psycopg_connect)
+        self.assertIs(auth.sqlalchemy_engine, sqlalchemy_engine)
+        self.assertIs(auth.sanitize_display_text, sanitize_display_text)
+        self.assertEqual(sanitize_display_text('\x1b[31mx\u200b'), '[31mx')
+
     # -- _strip_control: strip control / bidi / zero-width / format chars --
+    def test_strip_control_printable_ascii_fast_path_and_unicode_slow_path(self):
+        text = 'Token acquisition failed: retry later (HTTP 503).'
+        self.assertIs(_render._strip_control(text), text)
+        self.assertEqual(
+            _render._strip_control('café\u00a0x\x1b\u200b'),
+            'café x')
+
     def test_strip_control_removes_bidi_override(self):
         # U+202E RIGHT-TO-LEFT OVERRIDE can visually reverse a host/URL.
         self.assertEqual(_render._strip_control('ab‮cd'), 'abcd')

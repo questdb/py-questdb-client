@@ -24,6 +24,8 @@ _limit_malloc_arenas()
 import patch_path
 
 import questdb._client as qi
+from questdb.auth import OidcConfigError, OidcDeviceAuth, Renderer
+from oidc_test_server import OidcTestServer
 
 try:
     import numpy as np
@@ -96,6 +98,65 @@ def _assert_no_leak(test, work, warmup, measure):
         f'RSS not plateauing: per-window growth {growths} bytes over '
         f'{len(growths)} windows of {per} iterations (head {head:.0f}, '
         f'tail {tail:.0f}); likely a leaked native buffer.')
+
+
+@unittest.skipUnless(psutil is not None, 'psutil not installed')
+class TestOidcNativeLeak(unittest.TestCase):
+    """Mutation-discriminating coverage for every OIDC native free site."""
+
+    # Each native object owns a copy of this field. Twenty leaked objects in one
+    # RSS window exceed the harness's 3 MiB allocator-retention allowance while
+    # the correct implementation quickly reuses/returns the allocation.
+    PAYLOAD = 'x' * (256 * 1024)
+
+    def test_provider_builder_and_zeroizing_token_frees_plateau(self):
+        def direct_success():
+            auth = OidcDeviceAuth(
+                self.PAYLOAD,
+                'https://idp.example/device',
+                'https://idp.example/token',
+                interactive=False, open_browser=False)
+            auth.close()
+
+        def direct_failure():
+            try:
+                # Fail only after the large client ID has been copied into the
+                # native builder. A pre-validation encoding error leaves an
+                # almost-empty builder, too small for the RSS harness to
+                # distinguish if the exceptional-path free is removed.
+                OidcDeviceAuth(
+                    self.PAYLOAD,
+                    'https://idp.example/device',
+                    'https://idp.example/token',
+                    timeout=0,
+                    interactive=False, open_browser=False)
+            except OidcConfigError:
+                pass
+
+        for name, work in (
+                ('direct builder/auth success', direct_success),
+                ('direct builder exception', direct_failure)):
+            with self.subTest(path=name):
+                _assert_no_leak(self, work, warmup=8, measure=120)
+
+        with OidcTestServer(settings_config_overrides={
+                'acl.oidc.client.id': self.PAYLOAD}) as server:
+            def discovered_success():
+                auth = OidcDeviceAuth.from_questdb(
+                    server.url, interactive=False, open_browser=False,
+                    renderer=Renderer())
+                auth.close()
+
+            _assert_no_leak(
+                self, discovered_success, warmup=8, measure=120)
+
+        with OidcTestServer(initial_access_token=self.PAYLOAD) as server:
+            auth = OidcDeviceAuth.from_questdb(
+                server.url, interactive=True, open_browser=False,
+                renderer=Renderer(), timeout=5)
+            auth.sign_in()
+            self.assertEqual(len(auth.token()), len(self.PAYLOAD))
+            _assert_no_leak(self, auth.token, warmup=8, measure=120)
 
 
 class TestLeakHarness(unittest.TestCase):

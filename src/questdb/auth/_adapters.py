@@ -44,12 +44,12 @@ import re
 import urllib.parse
 from typing import TYPE_CHECKING, Any, Optional
 
-from questdb._client import OidcDeviceAuth
 from ._errors import OidcConfigError
 
 if TYPE_CHECKING:
-    # Forward references only: sqlalchemy is imported lazily at call time so it
-    # stays an optional dependency, but the return annotation must still resolve.
+    # Annotation-only dependencies. Runtime imports stay lazy/centralized in
+    # questdb.auth; postponed annotations preserve these public signatures.
+    from questdb._client import OidcDeviceAuth
     import sqlalchemy.engine
 
 _DEFAULT_PG_PORT = 8812

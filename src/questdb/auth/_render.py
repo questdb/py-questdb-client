@@ -599,6 +599,12 @@ def _strip_control(text: Optional[str]) -> str:
         return ''
     if not isinstance(text, str):
         text = str(text)
+    # Printable ASCII cannot contain any category or reserved code point this
+    # sanitizer removes. Keep the overwhelmingly common native error/message
+    # path in C instead of doing two Python calls and a category lookup for
+    # every character.
+    if text.isascii() and text.isprintable():
+        return text
     out = []
     combining_run = 0
     for ch in text:
@@ -733,10 +739,12 @@ class Renderer:
 
     **Concurrency.** The callbacks run while ``OidcDeviceAuth`` holds its
     (non-reentrant) acquisition lock, so a callback must not call back into the
-    same instance's :meth:`~questdb.auth.OidcDeviceAuth.sign_in`,
-    :meth:`~questdb.auth.OidcDeviceAuth.token` or
+    same instance's :meth:`~questdb.auth.OidcDeviceAuth.sign_in` or
     :meth:`~questdb.auth.OidcDeviceAuth.clear` — each raises rather than
-    deadlocking. :meth:`~questdb.auth.OidcDeviceAuth.cancel_sign_in` is the
+    deadlocking. :meth:`~questdb.auth.OidcDeviceAuth.token` succeeds from a
+    valid cache (including the token just committed before ``on_success``) and
+    raises only when it would need a fresh acquisition.
+    :meth:`~questdb.auth.OidcDeviceAuth.cancel_sign_in` is the
     exception intended for a renderer's "cancel" affordance: it aborts only the
     current device flow and leaves the provider and attached transports usable.
     :meth:`~questdb.auth.OidcDeviceAuth.close` is also callback-safe, but is the
@@ -745,10 +753,10 @@ class Renderer:
 
     The rejection applies to any thread, not only the callback's own, because a
     callback may hand work to another thread and wait for it — so a blocking
-    call there would deadlock just the same. A callback must also return
-    promptly: interpreter shutdown waits for an in-flight renderer callback to
-    finish before detaching managed-runtime entry points, so a callback that
-    waits forever can prevent process exit. A concurrent
+    call there would deadlock just the same. A callback should return promptly;
+    interpreter shutdown suppresses later callbacks and does not wait for an
+    in-flight renderer callback, so unfinished callback work is abandoned with
+    its daemon thread. A concurrent
     :meth:`~questdb.auth.OidcDeviceAuth.token` elsewhere — a pooled PG-wire
     checkout, say — therefore succeeds only from a *valid cached token*, which
     needs no lock the callback holds; if a fresh acquisition would be required

@@ -133,19 +133,25 @@ def _oidc_provider_collected(size_t provider_id, object provider_ref):
         _OIDC_NATIVE_HANDLES.pop(provider_id, None)
 
 
-cdef void _oidc_detach_handle_callbacks(_OidcNativeHandle handle) noexcept:
+cdef void _oidc_detach_handle_callbacks(
+        _OidcNativeHandle handle, bint wait_for_events) noexcept:
     """Stop one native auth handle delivering managed-runtime callbacks.
 
-    Both native detaches are idempotent and NULL-tolerant. The GIL is released
-    because an event or diagnostic already inside its native callback gate may
-    be blocked acquiring it while the detach waits for that gate.
+    Both native detaches are idempotent and NULL-tolerant. At interpreter exit
+    suppression must be published without waiting for arbitrary renderer or
+    logging-handler code; construction-time self-detach may use the draining
+    forms because the provider has not yet been exposed.
     """
     cdef PyThreadState* gs = NULL
     if handle is None or handle.raw == NULL:
         return
     _ensure_doesnt_have_gil(&gs)
-    questdb_oidc_auth_detach_events(handle.raw)
-    questdb_oidc_auth_detach_diagnostics(handle.raw)
+    if wait_for_events:
+        questdb_oidc_auth_detach_events(handle.raw)
+        questdb_oidc_auth_detach_diagnostics(handle.raw)
+    else:
+        questdb_oidc_auth_detach_events_nowait(handle.raw)
+        questdb_oidc_auth_detach_diagnostics_nowait(handle.raw)
     _ensure_has_gil(&gs)
 
 
@@ -171,6 +177,11 @@ def _oidc_detach_diagnostics_at_exit():
     provider needs no separate event detach. Between the two paths, no
     still-deliverable managed-runtime callback target survives finalization.
 
+    Both detaches publish exact suppression but deliberately do not wait for
+    callback code already running. Renderer callbacks are arbitrary user code,
+    and a diagnostic callback can itself be parked in an arbitrary user
+    ``logging.Handler``; either may be abandoned as the process exits.
+
     Detaches rather than closes. Every handle reachable here belongs to a
     provider the user still holds, which is exactly the set attached to live
     transports, and ``close()`` is terminal for all of them: a closed provider
@@ -180,11 +191,10 @@ def _oidc_detach_diagnostics_at_exit():
     real and runs after this hook -- ``atexit`` precedes module clearing, so
     ``QuestDB.__dealloc__`` -> ``questdb_db_close`` -> the bounded
     ``close_flush_timeout`` drain happens later. Detaching gives the hook's
-    stated guarantee (no managed-runtime callback running, none able to start)
-    without taking anything else away. Detach can wait only for a callback
-    already running; it never waits on the acquisition lock behind an in-flight
-    IdP request, so the provider's 30s/120s HTTP timeout is not added to exit
-    latency.
+    stated guarantee (no new managed-runtime callback can start) without taking
+    anything else away. It never waits on a renderer or on the acquisition lock
+    behind an in-flight IdP request, so user code and the provider's 30s/120s
+    HTTP timeout are not added to exit latency.
 
     Marks callback shutdown and snapshots under the registry lock, then
     detaches outside it: the detach is a native call made with the GIL released,
@@ -206,7 +216,7 @@ def _oidc_detach_diagnostics_at_exit():
             _oidc_callbacks_shutting_down = True
             handles = list(_OIDC_NATIVE_HANDLES.values())
         for handle in handles:
-            _oidc_detach_handle_callbacks(handle)
+            _oidc_detach_handle_callbacks(handle, False)
     except BaseException:
         # An atexit hook that raises prints a traceback and buys nothing: the
         # process is going away regardless, and every provider this failed to
@@ -662,17 +672,17 @@ cdef void _oidc_diagnostic_trampoline(
     # that.
     #
     # What closes it is stopping a diagnostic from arriving during
-    # finalization at all, which two places between them do, both through
-    # `questdb_oidc_auth_detach_diagnostics`:
-    # `_oidc_detach_diagnostics_at_exit`, registered with `atexit` over the
-    # provider registry, runs while the interpreter is still whole and
-    # detaches every provider still registered; and
-    # `_OidcNativeHandle.__dealloc__` detaches a provider that was already
+    # finalization at all, which two places between them do through the
+    # non-waiting native diagnostic detach: `_oidc_detach_diagnostics_at_exit`,
+    # registered with `atexit` over the provider registry, runs while the
+    # interpreter is still whole and detaches every provider still registered;
+    # and `_OidcNativeHandle.__dealloc__` detaches a provider that was already
     # collected, which the registry can no longer reach but whose abandoned
-    # Rust worker may still be running. That native call drains a callback in
-    # flight and stops any later one, so neither kind of provider leaves a
-    # deliverable target behind. The check below remains for an embedder that
-    # tears the interpreter down without running `atexit`.
+    # Rust worker may still be running. The native call publishes exact
+    # suppression without waiting for arbitrary user logging-handler code, so
+    # neither kind of provider leaves a newly deliverable target behind. The
+    # check below remains for an embedder that tears the interpreter down
+    # without running `atexit`.
     #
     # It is narrower than both in one respect: `user_data` is NULL, so nothing
     # here dereferences a Python object from a native thread.
@@ -1313,7 +1323,7 @@ cdef class OidcDeviceAuth:
                 # older callback drain had released the GIL. No Python caller
                 # can use it before __init__ returns, so detach both callback
                 # targets now, before exposing the completed provider.
-                _oidc_detach_handle_callbacks(native)
+                _oidc_detach_handle_callbacks(native, True)
             self._raw = native.raw
             # A failed build leaves `_raw` NULL and this function supports
             # re-initialisation from that state, but `close()` latches
@@ -1542,10 +1552,12 @@ cdef class OidcDeviceAuth:
         self._renderer = None
 
     def __enter__(self):
+        """Return this open provider for use as a context manager."""
         self._require_open()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        """Close the provider permanently when leaving a ``with`` block."""
         self.close()
         return False
 

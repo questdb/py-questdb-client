@@ -866,15 +866,6 @@ cdef extern from "questdb/ingress/qwp_sender.h":
         const questdb_connection_event* event
         ) noexcept nogil
 
-    questdb_db* questdb_db_connect_with_event_handler(
-        const char* conf,
-        size_t conf_len,
-        questdb_connection_event_cb callback,
-        void* user_data,
-        size_t inbox_capacity,
-        questdb_error** err_out
-        ) noexcept nogil
-
     uint64_t questdb_db_connection_events_dropped(
         const questdb_db* db
         ) noexcept nogil
@@ -1092,6 +1083,10 @@ cdef extern from "questdb/oidc.h":
         ) noexcept nogil
 
     void questdb_oidc_auth_detach_events(
+        const questdb_oidc_auth* auth
+        ) noexcept nogil
+
+    void questdb_oidc_auth_detach_events_nowait(
         const questdb_oidc_auth* auth
         ) noexcept nogil
 

@@ -5598,6 +5598,17 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         # Index 2 may be None (null sentinel) — pin that contract.
         self.assertIn(got_bytes[2], (v2, None))
 
+        # Exercise the separate pyarrow-free object decoder. Values are
+        # unsigned little-endian 256-bit integers; v1 has its top bit set and
+        # therefore discriminates an accidental signed=True conversion.
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            pdf = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_pandas()
+        self.assertEqual(pdf['v'][0], int.from_bytes(v0, 'little'))
+        self.assertEqual(pdf['v'][1], int.from_bytes(v1, 'little'))
+        self.assertGreaterEqual(pdf['v'][1], 1 << 255)
+        self.assertTrue(pdf['v'].isna()[2])
+
     def test_long256_with_nulls_round_trip(self):
         import pyarrow as pa
         self._require_qwp_ws()

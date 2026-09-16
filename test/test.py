@@ -2,6 +2,8 @@
 import sys
 
 sys.dont_write_bytecode = True
+import ast
+import importlib
 import os
 import unittest
 from unittest import mock
@@ -15,6 +17,7 @@ import random
 import pathlib
 import tempfile
 import warnings
+import typing
 import numpy as np
 
 import patch_path
@@ -153,6 +156,7 @@ from test_client_polars_fuzz import (
 from test_dataframe_leaks import (
     TestCategoricalArrowLeak,
     TestLeakHarness,
+    TestOidcNativeLeak,
     TestPyobjColumnarLeak,
 )
 
@@ -197,10 +201,13 @@ class TestManifest(unittest.TestCase):
         with open(repo_root / 'examples.manifest.yaml', 'r') as f:
             manifest = yaml.safe_load(f)
         for entry in manifest:
+            path = repo_root / entry['path']
             self.assertTrue(
-                (repo_root / entry['path']).is_file(),
+                path.is_file(),
                 f"manifest entry {entry['name']!r} points at a missing "
                 f"file: {entry['path']}")
+            if entry.get('lang') == 'python':
+                compile(path.read_bytes(), str(path), 'exec')
 
 
 class TestQwpWebSocketApi(unittest.TestCase):
@@ -273,6 +280,16 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(info.epoch, 7)
         with self.assertRaises(Exception):
             info.epoch = 8  # frozen
+
+    def test_uuid_query_decoder_uses_canonical_bytes_offline(self):
+        raw = bytes.fromhex('123e4567e89b12d3a456426614174000')
+        decoded = qi._debug_decode_uuid_bytes(raw)
+        self.assertEqual(decoded, uuid.UUID(bytes=raw))
+        self.assertEqual(decoded.bytes, raw)
+        self.assertNotEqual(decoded.bytes, raw[::-1])
+        for invalid in (b'', raw[:-1], raw + b'x'):
+            with self.subTest(length=len(invalid)), self.assertRaises(ValueError):
+                qi._debug_decode_uuid_bytes(invalid)
 
     def test_uuid_integer_constructor_positional_slot(self):
         # The query hot path passes `int` positionally to avoid one kwargs dict
@@ -4275,8 +4292,8 @@ class TestSuiteWiring(unittest.TestCase):
     """
 
     # Modules whose cases this file imports unconditionally. `test_dataframe`
-    # is deliberately absent: it is imported only when pandas and pyarrow are
-    # both present, and a legitimate no-pandas run must not fail here.
+    # is added by the test when pandas and pyarrow are present, matching the
+    # conditional imports above without failing a legitimate no-pandas run.
     _AGGREGATED = (
         'test_auth',
         'test_client_capsule_path',
@@ -4292,7 +4309,10 @@ class TestSuiteWiring(unittest.TestCase):
             name
             for name, obj in globals().items()
             if isinstance(obj, type) and issubclass(obj, unittest.TestCase)}
-        for mod_name in self._AGGREGATED:
+        modules = list(self._AGGREGATED)
+        if pd is not None and pyarrow is not None:
+            modules.append('test_dataframe')
+        for mod_name in modules:
             mod = importlib.import_module(mod_name)
             for name, obj in vars(mod).items():
                 # `__module__` filters out cases merely re-exported by `mod`.
@@ -4303,6 +4323,45 @@ class TestSuiteWiring(unittest.TestCase):
                         name, collected,
                         f'{mod_name}.{name} is not imported into test.py, so '
                         f'unittest.main() never collects it')
+
+    def test_stub_auth_names_and_schema_override_match_runtime(self):
+        stub_path = PROJ_ROOT / 'src' / 'questdb' / '_client.pyi'
+        tree = ast.parse(stub_path.read_text(encoding='utf-8'))
+        for node in tree.body:
+            if (isinstance(node, ast.ImportFrom) and node.level == 1
+                    and node.module and node.module.startswith('auth.')):
+                module = importlib.import_module(f'questdb.{node.module}')
+                for alias in node.names:
+                    self.assertTrue(
+                        hasattr(module, alias.name),
+                        f'{node.module}.{alias.name} imported by _client.pyi '
+                        'does not exist at runtime')
+
+        assignment = next(
+            node for node in tree.body
+            if (isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name)
+                        and target.id == 'SchemaOverride'
+                        for target in node.targets)))
+        stub_literals = {
+            node.value for node in ast.walk(assignment.value)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+
+        def literal_strings(annotation):
+            values = set()
+            origin = typing.get_origin(annotation)
+            args = typing.get_args(annotation)
+            if origin is typing.Literal:
+                values.update(value for value in args
+                              if isinstance(value, str))
+            else:
+                for arg in args:
+                    values.update(literal_strings(arg))
+            return values
+
+        self.assertEqual(stub_literals, literal_strings(qi.SchemaOverride))
+        self.assertIn("Tuple[Literal['geohash'], int]",
+                      ast.unparse(assignment.value))
 
 
 if __name__ == '__main__':
