@@ -161,5 +161,5 @@
     adapters. Configure an OIDC-enabled QuestDB endpoint before running it.
 
     ```
-    python3 -m pip install -U 'questdb[sqlalchemy]'
+    python3 -m pip install -U questdb sqlalchemy 'psycopg[binary]'
     ```

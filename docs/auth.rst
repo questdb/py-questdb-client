@@ -196,8 +196,8 @@ using atomic replacement and cross-process coordination; on POSIX, directories
 are mode ``0700`` and files mode ``0600``. On other platforms, protection
 depends on the directory's default ACL. Every failed store operation is logged
 at ``WARNING`` on the ``questdb`` logger during normal operation. The binding
-imports ``logging`` before registering its own shutdown hook, so the hook first
-drains and detaches OIDC callbacks while logging handlers are still live;
+imports ``logging`` before registering its own shutdown hook, so the hook
+detaches OIDC callbacks while logging handlers are still live;
 ``logging.shutdown()`` runs afterwards. Diagnostics produced after the detach
 are deliberately suppressed rather than entering Python during finalization. A
 failed save or automatic clear is otherwise reported only there and leaves the
@@ -259,8 +259,10 @@ different machine from the reader; pass ``True`` to open one anyway (a *local*
 The custom renderer's prompt dictionary includes ``user_code``, both
 verification URLs, ``expires_in`` and ``interval`` in seconds, plus the vetted
 ``browser_target``. Renderer callbacks must return promptly: interpreter
-shutdown drains an in-flight callback before it detaches Python entry points, so
-a callback that waits forever can prevent process exit.
+shutdown suppresses later callbacks without waiting for one already running, so
+work left unfinished in a renderer is abandoned. Run ``sign_in()`` on a daemon
+thread if a callback can block for a long time, because a non-daemon worker is
+joined before the shutdown hook runs and would delay process exit.
 
 ``sign_in()`` prompts by default, wherever it is called from: a missing TTY is
 not evidence of a missing human, so there is no terminal detection to refuse a

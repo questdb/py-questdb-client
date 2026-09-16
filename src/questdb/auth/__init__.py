@@ -67,6 +67,7 @@ from ._errors import (
 )
 from ._store import (
     FileTokenStore,
+    TOKEN_STORE_DIR_ENV,
 )
 from ._adapters import sqlalchemy_engine, psycopg_connect
 
@@ -82,6 +83,7 @@ __all__ = [
     'OidcNetworkError',
     'OidcTimeoutError',
     'Renderer',
+    'TOKEN_STORE_DIR_ENV',
     'psycopg_connect',
     'sanitize_display_text',
     'sqlalchemy_engine',

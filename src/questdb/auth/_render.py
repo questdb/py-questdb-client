@@ -1027,7 +1027,11 @@ class JupyterRenderer(Renderer):
             '❌ ' + html.escape(_strip_control(message)), color='#c62828')
 
     def _render_with_status(self, status_html: str, color: str) -> None:
-        body = self._prompt_head()
+        # A terminal event can arrive without a preceding prompt (a driver
+        # that reports failure before the device code was issued). Without
+        # a prompt there is no URL and no user code, so emitting the prompt
+        # scaffold would paint an empty "Open  and enter code:" panel.
+        body = self._prompt_head() if self._resp else []
         body.append(
             f'<div style="color:{color};margin-top:8px">{status_html}</div>')
         self._display(self._panel(''.join(body)))

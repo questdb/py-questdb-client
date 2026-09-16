@@ -1796,8 +1796,11 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 waiting.wait(5), 'sign-in did not enter its polling wait')
             started = time.monotonic()
             auth.close()
-            self.assertLess(time.monotonic() - started, 2)
-            worker.join(2)
+            # The regression is a stall until the 20s device-code lifetime
+            # expires, so 10s still discriminates while leaving room for an
+            # in-flight loopback request to unwind on a slow agent.
+            self.assertLess(time.monotonic() - started, 10)
+            worker.join(10)
             self.assertFalse(worker.is_alive())
 
         self.assertEqual(len(result), 1)
@@ -3501,6 +3504,8 @@ class RenderSanitizerTest(unittest.TestCase):
         for name in auth.__all__:
             with self.subTest(name=name):
                 self.assertTrue(hasattr(auth, name))
+        self.assertEqual(
+            auth.TOKEN_STORE_DIR_ENV, 'QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR')
         self.assertIs(auth.psycopg_connect, psycopg_connect)
         self.assertIs(auth.sqlalchemy_engine, sqlalchemy_engine)
         self.assertIs(auth.sanitize_display_text, sanitize_display_text)
@@ -4036,6 +4041,39 @@ class RenderSanitizerTest(unittest.TestCase):
         self.assertNotIn('<script>', html)
         self.assertIn('&lt;img', html)                # message markup escaped
         self.assertNotIn('href="javascript:', html)   # dangerous scheme inert
+
+    def test_status_only_render_before_prompt_omits_prompt_scaffold(self):
+        # A terminal event without a preceding prompt has no URL and no user
+        # code, so the panel must carry the status alone rather than an empty
+        # "Open  and enter code:" scaffold.
+        captured = []
+
+        class _FakeHTML:
+            def __init__(self, data):
+                self.data = data
+
+        class _FakeHandle:
+            def update(self, obj):
+                captured.append(obj.data)
+
+        def _fake_display(obj, display_id=None):
+            captured.append(obj.data)
+            return _FakeHandle()
+
+        ipython = types.ModuleType('IPython')
+        display_mod = types.ModuleType('IPython.display')
+        display_mod.HTML = _FakeHTML
+        display_mod.display = _fake_display
+        ipython.display = display_mod
+        with mock.patch.dict(
+                sys.modules,
+                {'IPython': ipython, 'IPython.display': display_mod}):
+            renderer = _render.JupyterRenderer(qr=False)
+            renderer.on_failure('boom')
+        html = '\n'.join(captured)
+        self.assertTrue(captured, 'renderer emitted nothing')
+        self.assertIn('boom', html)
+        self.assertNotIn('and enter code:', html)
 
 
 class AdapterTest(unittest.TestCase):

@@ -176,6 +176,8 @@ See the :ref:`oidc_auth` guide for an overview.
    :undoc-members:
    :show-inheritance:
 
+.. autodata:: questdb.auth.TOKEN_STORE_DIR_ENV
+
 .. autoclass:: questdb.auth.Renderer
    :members:
    :show-inheritance:

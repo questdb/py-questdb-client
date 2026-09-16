@@ -3642,7 +3642,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
     cdef size_t buf_bytes = row_count * 16 if row_count > 0 else 16
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
-    cdef object be_bytes
+    cdef bytes be_bytes
     cdef object uuid_cls = _uuid.UUID
 
     try:
@@ -3662,7 +3662,19 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
                 # `.int.to_bytes(16, 'big')` is what `UUID.bytes`
                 # returns, reached in one C-implemented call + one
                 # 16-byte memcpy per row.
+                #
+                # `int` is a plain slot a subclass can override and a
+                # caller can rebind, so the width is checked before the
+                # memcpy reads exactly 16 bytes: a short result would
+                # otherwise copy adjacent heap onto the wire. Same guard
+                # as the query-bind twin in `egress.pxi`.
                 be_bytes = (<object>cell).int.to_bytes(16, 'big')
+                if PyBytes_GET_SIZE(be_bytes) != 16:
+                    raise QuestDBError(
+                        QuestDBErrorCode.BadDataFrame,
+                        f'Bad column {df_col_name!r} at row {i}: '
+                        f'uuid.UUID.int.to_bytes returned '
+                        f'{PyBytes_GET_SIZE(be_bytes)} bytes, expected 16.')
                 memcpy(buf + i * 16, PyBytes_AsString(be_bytes), 16)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)

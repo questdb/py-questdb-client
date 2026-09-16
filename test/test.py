@@ -16,6 +16,7 @@ import uuid
 from enum import Enum
 import random
 import pathlib
+import re
 import tempfile
 import warnings
 import typing
@@ -210,6 +211,35 @@ class TestManifest(unittest.TestCase):
             if entry.get('lang') == 'python':
                 compile(path.read_bytes(), str(path), 'exec')
 
+    def test_headers_only_name_declared_extras(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest('Python version does not support yaml')
+        try:
+            import tomllib
+        except ImportError:
+            self.skipTest('Python version does not support tomllib')
+        repo_root = pathlib.Path(__file__).parent.parent
+        with open(repo_root / 'examples.manifest.yaml', 'r') as f:
+            manifest = yaml.safe_load(f)
+        with open(repo_root / 'pyproject.toml', 'rb') as f:
+            declared = set(
+                tomllib.load(f)['project']['optional-dependencies'])
+        # pip drops an undeclared extra with a warning and installs the bare
+        # wheel, so a bad `questdb[...]` here silently yields an environment
+        # the example cannot run in.
+        for entry in manifest:
+            for extra in re.findall(
+                    r'questdb\[([^\]]+)\]', entry.get('header') or ''):
+                for name in extra.split(','):
+                    with self.subTest(entry=entry['name'], extra=name):
+                        self.assertIn(
+                            name.strip(), declared,
+                            f"manifest entry {entry['name']!r} installs "
+                            f"questdb[{name.strip()}], which "
+                            'pyproject.toml does not declare')
+
 
 class TestNumpyDecoderCompatibility(unittest.TestCase):
     """Offline coverage run under every supported NumPy CI version."""
@@ -357,7 +387,10 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 qi._debug_try_reclaim_cursor_handle(handle)),
             daemon=True)
         reclaimer.start()
-        reclaimer.join(1)
+        # A blocked reclaim cannot finish before `release.set()` below, so a
+        # generous deadline discriminates exactly as well as a tight one and
+        # does not turn a slow CI agent into a fake deadlock report.
+        reclaimer.join(10)
         finished_without_release = not reclaimer.is_alive()
         release.set()
         holder.join(5)
@@ -394,7 +427,9 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 dropper = threading.Thread(
                     target=drop_last_owner, daemon=True)
                 dropper.start()
-                finished_without_release = dropped.wait(1)
+                # Deadline covers an unbounded `gc.collect()`; see the note in
+                # the sibling test. The blocked case still cannot finish early.
+                finished_without_release = dropped.wait(10)
                 release.set()
                 holder.join(5)
                 dropper.join(5)
