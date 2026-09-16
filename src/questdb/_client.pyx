@@ -6192,6 +6192,21 @@ cdef void_int _direct_dataframe_run(
                     # A different transient provider failure belongs in the
                     # ordinary bounded-retry path below, with its own type and
                     # structured OIDC detail preserved.
+                    #
+                    # Every exit below therefore says `raise exc`, never a bare
+                    # `raise`: a bare one re-raises whatever the ENCLOSING
+                    # `except` is handling, and this nested handler completes
+                    # normally, so CPython restores the outer exception state
+                    # before control reaches them. The rebinding above then
+                    # steered the retry decision while the caller still got the
+                    # original error -- an `OidcCancelledError` from a provider
+                    # closed on another thread (AuthError, so it fails the code
+                    # check below) surfaced as the original
+                    # `OidcInteractionRequired`, telling the caller to run
+                    # `sign_in()` on a provider that is closed for good and can
+                    # never produce a token. `raise exc` re-raises the same
+                    # object when nothing was rebound, and keeps the original as
+                    # `__context__` when it was.
                     exc = probe_exc
                 else:
                     budget_ms = 0
@@ -6201,12 +6216,12 @@ cdef void_int _direct_dataframe_run(
             if exc.code not in (
                     QuestDBErrorCode.FailoverRetry,
                     QuestDBErrorCode.SocketError):
-                raise
+                raise exc
             # The native operation may have committed a split prefix, or an
             # explicit intermediate sync already committed one. Restarting
             # from row 0 would duplicate it.
             if exc.in_doubt or committed_prefix:
-                raise
+                raise exc
             # A drained one-shot stream has no rows left to replay: retrying
             # would report success while writing nothing.
             if nonreplayable_consumed:
@@ -6228,10 +6243,10 @@ cdef void_int _direct_dataframe_run(
                     f'{exc} The input stream was already partially '
                     f'consumed and cannot be replayed; retry with a '
                     f'fresh reader.',)
-                raise
+                raise exc
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
-                raise
+                raise exc
             budget_ms = <uint64_t>(remaining * 1000.0)
 
 
@@ -7391,6 +7406,22 @@ cdef class Sender:
                 self._error_handler = None
                 raise c_err_to_py(err)
 
+        # Native validates this capacity only when an event callback is
+        # installed, and one is installed only for a caller who also passed
+        # `connection_listener` -- so without a listener an out-of-range value
+        # was silently discarded, and with one it surfaced as a native
+        # `ConfigError`. Both contradict the documented contract (CHANGELOG
+        # "Callback inbox capacities are capped"), which promises rejection at
+        # connect time with `InvalidApiCall`. Enforce it here so the keyword
+        # behaves the same on `Sender`, `from_conf`, `from_env` and the pool,
+        # listener or not. Upper bound only, for the reason given at the pool's
+        # copy of this check.
+        if (isinstance(connection_event_inbox_capacity, int)
+                and connection_event_inbox_capacity > 65536):
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                '"connection_event_inbox_capacity" must be between 0 and '
+                f'65536, not {connection_event_inbox_capacity!r}.')
         if connection_listener is not None and not callable(
                 connection_listener):
             raise TypeError(

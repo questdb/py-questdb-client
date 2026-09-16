@@ -1234,6 +1234,51 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 connection_event_inbox_capacity=65536) as client:
             pass
 
+    def test_sender_caps_connection_event_inbox_capacity(self):
+        # The pool path got the documented cap; `Sender` did not. Native only
+        # validates the capacity when an event callback is installed, and one
+        # is installed only for a caller who also passed `connection_listener`,
+        # so `Sender(..., connection_event_inbox_capacity=65537)` with no
+        # listener silently discarded the value -- and with a listener it
+        # failed as a native `ConfigError`, not the `InvalidApiCall` the
+        # CHANGELOG promises for this keyword. Assert both shapes, on all three
+        # constructors that expose it.
+        for listener in (None, lambda event: None):
+            with self.assertRaises(qi.QuestDBError) as caught:
+                qi.Sender(
+                    qi.Protocol.Ws, '127.0.0.1', 1,
+                    connection_listener=listener,
+                    connection_event_inbox_capacity=65537)
+            self.assertEqual(
+                caught.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+
+            with self.assertRaises(qi.QuestDBError) as caught:
+                qi.Sender.from_conf(
+                    'ws::addr=127.0.0.1:1;',
+                    connection_listener=listener,
+                    connection_event_inbox_capacity=65537)
+            self.assertEqual(
+                caught.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+
+            with mock.patch.dict(
+                    os.environ,
+                    {'QDB_CLIENT_CONF': 'ws::addr=127.0.0.1:1;'}):
+                with self.assertRaises(qi.QuestDBError) as caught:
+                    qi.Sender.from_env(
+                        connection_listener=listener,
+                        connection_event_inbox_capacity=65537)
+            self.assertEqual(
+                caught.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+
+        # The cap itself is still accepted, with and without a listener.
+        qi.Sender(
+            qi.Protocol.Ws, '127.0.0.1', 1,
+            connection_event_inbox_capacity=65536)
+        qi.Sender(
+            qi.Protocol.Ws, '127.0.0.1', 1,
+            connection_listener=lambda event: None,
+            connection_event_inbox_capacity=65536)
+
     def test_pool_rejection_handler_receives_server_rejection(self):
         rejections = []
         delivered = threading.Event()
@@ -2295,6 +2340,38 @@ class TestQwpWebSocketApi(unittest.TestCase):
         finally:
             sender.close(False)
 
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_dataframe_schema_overrides_rejects_argument_for_plain_kinds(self):
+        # Only 'geohash' reads the tuple's second element, so ('long256', 32)
+        # or ('uuid', 16) silently dropped the width and "worked" -- which is
+        # worse than failing, because the docs print those kinds next to
+        # ('geohash', bits) and writing a width by analogy is the natural
+        # mistake. The rejection must also keep an unrecognised kind reporting
+        # its own diagnostic rather than this one.
+        df = pd.DataFrame({'x': ['a']})
+        sender = qi.Sender(qi.Protocol.Ws, '127.0.0.1', 1)
+        try:
+            for kind in ('symbol', 'long256', 'uuid'):
+                with self.assertRaisesRegex(
+                        ValueError,
+                        rf"schema_overrides\['x'\]: kind {kind!r} takes no "
+                        r"argument; only 'geohash' does"):
+                    sender.dataframe(
+                        df,
+                        table_name='t',
+                        at=qi.ServerTimestamp,
+                        schema_overrides={'x': (kind, 16)})
+            # 'geohash' still takes its argument, and an unrecognised kind
+            # still gets the dispatch diagnostic, not the one above.
+            with self.assertRaisesRegex(ValueError, 'nonsense'):
+                sender.dataframe(
+                    df,
+                    table_name='t',
+                    at=qi.ServerTimestamp,
+                    schema_overrides={'x': ('nonsense', 16)})
+        finally:
+            sender.close(False)
+
     def test_qwpws_flush_and_keep_and_get_fsn_happy_path(self):
         with QwpAckServer() as server:
             with qi.Sender.from_conf(
@@ -3139,6 +3216,23 @@ class TestBases:
                     qi.QuestDBError,
                     'Transactions are only supported for ILP/HTTP.',
                     sender.transaction, 'table_name')
+
+        def test_transaction_commit_on_closed_sender_raises_questdb_error(self):
+            # `Sender._close()` drops the buffer without resetting `_in_txn`,
+            # so `close(flush=False)` inside a `with` block leaves `__exit__`
+            # to call commit() on a closed sender. Unguarded, `len(None)`
+            # raised TypeError, which is not a QuestDBError and so escaped
+            # every handler around the block.
+            with HttpServer() as server, self.builder(
+                    'http', '127.0.0.1', server.port) as sender:
+                txn = sender.transaction('table_name')
+                txn.__enter__()
+                txn.row(symbols={'sym1': 'val1'}, at=qi.TimestampNanos.now())
+                sender.close(flush=False)
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        r"commit\(\) can't be called: Sender is closed"):
+                    txn.commit()
 
         def test_transaction_basic(self):
             ts = qi.TimestampNanos.now()

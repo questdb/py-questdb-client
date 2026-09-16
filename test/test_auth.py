@@ -2895,6 +2895,58 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         finally:
             db.close()
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_pool_dataframe_surfaces_the_probe_failure_not_the_original(self):
+        # The foreground gate probes the provider once before deciding, and
+        # rebinds `exc` to the probe's error so "its own type and structured
+        # OIDC detail" reach the caller. Every exit from that handler was a
+        # BARE `raise`, which re-raises whatever the ENCLOSING `except` is
+        # handling -- and the nested probe handler completes normally, so
+        # CPython restores the outer exception state first. The rebinding
+        # therefore steered the retry decision while the caller still got the
+        # original error.
+        #
+        # Concretely: a provider closed on another thread makes the probe raise
+        # OidcCancelledError (AuthError, so it fails the retryable-code check),
+        # and the caller was told to run sign_in() on a provider that is closed
+        # for good and can never produce a token -- with `except
+        # OidcCancelledError` not matching, and .status/.retry_after/.error/
+        # .error_description dropped.
+        class ClosedDuringProbe(OidcDeviceAuth):
+            probes = 0
+
+            def token(self):
+                type(self).probes += 1
+                raise OidcCancelledError(
+                    'the provider was closed while the flush was in flight')
+
+        df = pd.DataFrame({
+            'value': [1],
+            'ts': pd.to_datetime([1700000000], unit='s')})
+        auth = ClosedDuringProbe(  # never signed in
+            'questdb',
+            'https://idp.example/device',
+            'https://idp.example/token',
+            interactive=False,
+            open_browser=False)
+        db = questdb.connect(
+            'ws::addr=127.0.0.1:19009;lazy_connect=on;'
+            'reconnect_max_duration_millis=60000;',
+            oidc_auth=auth)
+        try:
+            with self.assertRaises(OidcCancelledError) as caught:
+                db.dataframe(df, table_name='oidc_probe', at='ts')
+        finally:
+            db.close()
+        self.assertEqual(
+            ClosedDuringProbe.probes, 1,
+            'the foreground gate must probe the provider exactly once')
+        self.assertNotIsInstance(caught.exception, OidcInteractionRequired)
+        # The original failure is not lost: it is the context of the one that
+        # is raised, so a traceback still shows both.
+        self.assertIsInstance(
+            caught.exception.__context__, OidcInteractionRequired)
+
     def test_flush_surfaces_typed_oidc_error(self):
         # The plain row()/flush() path (not the dataframe path) whose OIDC token
         # pull fails at connect surfaces the typed OidcError through c_err_to_py.
