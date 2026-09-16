@@ -1615,6 +1615,12 @@ cdef class OidcDeviceAuth:
                       if audience is not None else None),
             issuer=_strip_control(issuer) if issuer is not None else None)
 
+
+def _debug_oidc_renderer_attached(OidcDeviceAuth provider):
+    """Internal test seam: whether construction published a renderer edge."""
+    return provider._renderer is not None
+
+
 cdef object _oidc_provider_from_user_data(void* user_data):
     """Resolve the provider a native event belongs to. Requires the GIL.
 

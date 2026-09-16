@@ -1056,53 +1056,39 @@ class NativeOidcTest(unittest.TestCase):
                 with self.assertRaisesRegex(OidcConfigError, callback_name):
                     make_auth(renderer=types.SimpleNamespace(**non_callable))
 
-    def test_failed_construction_releases_renderer_back_reference_immediately(self):
-        # Disable cyclic GC so this pins explicit unwind rather than CPython's
-        # ability to rescue the provider<->renderer cycle later. PyPy cpyext
-        # cannot rescue that cycle at all.
+    def test_failed_construction_clears_renderer_back_reference(self):
+        # Inspect the Cython slot directly through a test seam rather than
+        # inferring it from immediate weakref destruction. The latter is a
+        # CPython refcount property, not a language guarantee, and failed on
+        # PyPy even when the provider no longer held the renderer.
         class BackReferencingRenderer(Renderer):
             provider = None
 
-        was_enabled = gc.isenabled()
-        gc.disable()
-        try:
-            # Early callback validation used to publish the renderer before the
-            # validation loop, outside the native-build try/except.
-            provider = OidcDeviceAuth.__new__(OidcDeviceAuth)
-            renderer = BackReferencingRenderer()
-            renderer.provider = provider
-            renderer.on_failure = None
-            provider_ref = weakref.ref(provider)
-            renderer_ref = weakref.ref(renderer)
-            with self.assertRaisesRegex(OidcConfigError, 'on_failure'):
-                provider.__init__(
-                    'questdb', 'https://idp.example/device',
-                    'https://idp.example/token', interactive=False,
-                    open_browser=False, renderer=renderer)
-            del provider, renderer
-            self.assertIsNone(provider_ref())
-            self.assertIsNone(renderer_ref())
+        # Early callback validation used to publish the renderer before the
+        # validation loop, outside the native-build try/except.
+        provider = OidcDeviceAuth.__new__(OidcDeviceAuth)
+        renderer = BackReferencingRenderer()
+        renderer.provider = provider
+        renderer.on_failure = None
+        with self.assertRaisesRegex(OidcConfigError, 'on_failure'):
+            provider.__init__(
+                'questdb', 'https://idp.example/device',
+                'https://idp.example/token', interactive=False,
+                open_browser=False, renderer=renderer)
+        self.assertFalse(_client._debug_oidc_renderer_attached(provider))
 
-            # A failure after callback registration takes the separate unwind
-            # path and must clear the same edge.
-            provider = OidcDeviceAuth.__new__(OidcDeviceAuth)
-            renderer = BackReferencingRenderer()
-            renderer.provider = provider
-            provider_ref = weakref.ref(provider)
-            renderer_ref = weakref.ref(renderer)
-            with self.assertRaises(OidcError):
-                provider.__init__(
-                    'questdb', 'https://idp.example/device',
-                    'https://idp.example/token', interactive=False,
-                    open_browser=False, renderer=renderer,
-                    ca_bundle=self._UNREADABLE_CA_BUNDLE)
-            del provider, renderer
-            self.assertIsNone(provider_ref())
-            self.assertIsNone(renderer_ref())
-        finally:
-            if was_enabled:
-                gc.enable()
-            gc.collect()
+        # A failure after callback registration takes the separate unwind path
+        # and must clear the same edge.
+        provider = OidcDeviceAuth.__new__(OidcDeviceAuth)
+        renderer = BackReferencingRenderer()
+        renderer.provider = provider
+        with self.assertRaises(OidcError):
+            provider.__init__(
+                'questdb', 'https://idp.example/device',
+                'https://idp.example/token', interactive=False,
+                open_browser=False, renderer=renderer,
+                ca_bundle=self._UNREADABLE_CA_BUNDLE)
+        self.assertFalse(_client._debug_oidc_renderer_attached(provider))
 
     def test_renderer_browser_target_uses_native_vetted_value(self):
         self.assertEqual(
