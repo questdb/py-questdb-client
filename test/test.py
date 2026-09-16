@@ -3,6 +3,7 @@ import sys
 
 sys.dont_write_bytecode = True
 import ast
+import gc
 import importlib
 import os
 import unittest
@@ -210,6 +211,28 @@ class TestManifest(unittest.TestCase):
                 compile(path.read_bytes(), str(path), 'exec')
 
 
+class TestNumpyDecoderCompatibility(unittest.TestCase):
+    """Offline coverage run under every supported NumPy CI version."""
+
+    def test_uuid_decoder_uses_canonical_bytes_and_null_bitmap(self):
+        values = [
+            uuid.UUID('123e4567-e89b-12d3-a456-426614174000'),
+            uuid.UUID('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'),
+            uuid.UUID('ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb'),
+        ]
+        decoded = qi._debug_decode_numpy_values(
+            'uuid', b''.join(value.bytes for value in values), b'\x02')
+        self.assertEqual(decoded.dtype, np.dtype(object))
+        self.assertEqual(decoded.tolist(), [values[0], None, values[2]])
+
+    def test_long256_decoder_uses_little_endian_and_null_bitmap(self):
+        values = [1, (1 << 255) + 17, (1 << 256) - 1]
+        raw = b''.join(value.to_bytes(32, 'little') for value in values)
+        decoded = qi._debug_decode_numpy_values('long256', raw, b'\x04')
+        self.assertEqual(decoded.dtype, np.dtype(object))
+        self.assertEqual(decoded.tolist(), [values[0], values[1], None])
+
+
 class TestQwpWebSocketApi(unittest.TestCase):
     def test_protocol_enum(self):
         self.assertEqual(qi.Protocol.parse('ws'), qi.Protocol.Ws)
@@ -342,6 +365,44 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertTrue(finished_without_release,
                         'finalizer reclaim blocked behind the cursor lock')
         self.assertEqual(outcomes, [-1])
+
+    @unittest.skipUnless(
+        hasattr(sys, 'getrefcount'), 'requires refcounting finalizers')
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_every_cursor_owner_finalizer_uses_nonblocking_reclaim(self):
+        for kind in ('numpy', 'generator', 'capsule'):
+            with self.subTest(kind=kind):
+                handle = qi._debug_new_cursor_handle()
+                owner = qi._debug_new_cursor_finalizer_owner(kind, handle)
+                entered = threading.Event()
+                release = threading.Event()
+                holder = threading.Thread(
+                    target=qi._debug_hold_cursor_handle_lock,
+                    args=(handle, entered, release), daemon=True)
+                holder.start()
+                self.assertTrue(entered.wait(5))
+
+                owners = [owner]
+                del owner
+                dropped = threading.Event()
+
+                def drop_last_owner():
+                    owners.pop()
+                    gc.collect()
+                    dropped.set()
+
+                dropper = threading.Thread(
+                    target=drop_last_owner, daemon=True)
+                dropper.start()
+                finished_without_release = dropped.wait(1)
+                release.set()
+                holder.join(5)
+                dropper.join(5)
+                self.assertFalse(holder.is_alive())
+                self.assertFalse(dropper.is_alive())
+                self.assertTrue(
+                    finished_without_release,
+                    f'{kind} finalizer blocked behind the cursor lock')
 
     def test_pooled_lease_types_exported_from_package(self):
         from questdb import PooledReader, PooledSender

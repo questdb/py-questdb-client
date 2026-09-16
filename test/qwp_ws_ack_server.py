@@ -127,7 +127,8 @@ class QwpAckServer:
                  close_plan=None, max_batch_size=0,
                  defer_aware_acks=False, record_payloads=False,
                  error_status=None, error_message=b"mock rejection",
-                 tls=False, required_authorization=None):
+                 tls=False, required_authorization=None,
+                 close_after_upgrade_unless_authorization=None):
         """
         `close_plan`: iterable consumed one value per accepted connection;
         a connection with value N is closed after handling its Nth binary
@@ -158,6 +159,12 @@ class QwpAckServer:
         Authorization header and reject a mismatch with HTTP 401. This lets
         authentication integration tests verify initial and reconnected
         transport handshakes without implementing a complete QuestDB server.
+
+        `close_after_upgrade_unless_authorization`: when set, complete the
+        WebSocket upgrade for every credential but immediately close sessions
+        whose Authorization value does not match. This deterministically keeps
+        a reconnect loop active until a rotating provider supplies the expected
+        credential, without a test-side sleep or a server-auth rejection.
         """
         self.host = host
         self.ack_delay_s = ack_delay_s
@@ -168,6 +175,8 @@ class QwpAckServer:
         self.error_status = error_status
         self.error_message = error_message
         self.required_authorization = required_authorization
+        self.close_after_upgrade_unless_authorization = (
+            close_after_upgrade_unless_authorization)
         self._tls_context = None
         if tls:
             self._tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -348,6 +357,12 @@ class QwpAckServer:
                 response += f"X-QWP-Max-Batch-Size: {self.max_batch_size}\r\n"
             response += "\r\n"
             conn.sendall(response.encode("ascii"))
+            if (
+                    self.close_after_upgrade_unless_authorization is not None
+                    and authorization !=
+                    self.close_after_upgrade_unless_authorization):
+                _fin_close(conn)
+                return
             if close_after is not None and close_after == 0:
                 _fin_close(conn)
                 return

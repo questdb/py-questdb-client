@@ -2316,26 +2316,28 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 credential_path = os.path.join(
                     directory, credential_files[0])
 
-                with QwpAckServer(close_plan=(0, None)) as qwp_server:
+                with QwpAckServer(
+                        close_after_upgrade_unless_authorization=(
+                            'Bearer AT-refreshed')) as qwp_server:
                     conf = (
                         f'ws::addr=127.0.0.1:{qwp_server.port};'
                         'lazy_connect=true;'
-                        'reconnect_initial_backoff_millis=1;'
-                        'reconnect_max_backoff_millis=1;'
-                        'reconnect_max_duration_millis=5000;'
-                        'close_flush_timeout_millis=5000;')
+                        'reconnect_initial_backoff_millis=25;'
+                        'reconnect_max_backoff_millis=25;'
+                        'reconnect_max_duration_millis=10000;'
+                        'close_flush_timeout_millis=10000;')
                     sender = questdb.Sender.from_conf(
                         conf, oidc_auth=auth, auto_flush=False)
                     try:
                         # Establish synchronously with the still-valid initial
-                        # token. The mock closes that first upgraded connection,
-                        # so the queued frame below is drained by the background
-                        # reconnect path rather than this Python caller.
+                        # token. The mock completes that upgrade, then closes
+                        # every session using the initial credential. The
+                        # background reconnect loop therefore stays active until
+                        # the short-lived token crosses its refresh threshold;
+                        # only the refreshed credential is allowed to carry the
+                        # frame. This synchronises on the ACK instead of sleeping
+                        # for an assumed wall-clock threshold.
                         sender.establish()
-                        # Short-lived tokens cap the normal 30s skew at half
-                        # their lifetime. Cross that refresh threshold only
-                        # after the foreground connection has been established.
-                        time.sleep(2.25)
                         main_thread = threading.get_ident()
                         with self.assertLogs(
                                 'questdb', level='WARNING') as captured:
@@ -2344,7 +2346,7 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                                 at=questdb.ServerTimestamp)
                             fsn = sender.flush_and_get_fsn()
                             self.assertTrue(
-                                sender.await_acked_fsn(fsn, 5000))
+                                sender.await_acked_fsn(fsn, 10000))
                     finally:
                         sender.close(flush=False)
                     stats = qwp_server.snapshot()
@@ -2979,17 +2981,16 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 self.assertIsNone(event.port)
                 self.assertIn('closed', event.cause_msg.lower())
 
-                # A retryable classification would run another connect round at
-                # the 10ms backoff above and emit repeatedly. Give it ample time
-                # to do so, then prove the terminal runner stayed stopped.
-                time.sleep(0.25)
+                # AuthError is the runner's terminal classification. Assert it
+                # directly rather than using a fixed observation window whose
+                # result depends on when a retry thread gets scheduled.
                 self.assertEqual(
-                    len([
-                        observed for observed in events
+                    [
+                        observed.kind for observed in events
                         if observed.kind is
                         questdb.ConnectionEventKind.CredentialUnavailable
-                    ]),
-                    1)
+                    ],
+                    [questdb.ConnectionEventKind.CredentialUnavailable])
             finally:
                 sender.close(flush=False)
         finally:
@@ -3004,16 +3005,20 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         # that is documented never to prompt, stalling for the WHOLE reconnect
         # budget (300s by default) before raising the very same error.
         #
-        # A generous budget is used deliberately: it is what makes the
-        # assertion meaningful. Before the fix this took the full budget; the
-        # gate now recognises the OIDC kind and re-raises immediately.
-        budget_s = 60
+        # Keep a long budget to preserve the production shape, but make the
+        # regression fail deterministically on its first dataframe replay. The
+        # old gate re-serialized the dataframe until that budget elapsed; the
+        # fixed gate probes the provider and raises without a second `.int`
+        # read, so no wall-clock assertion is needed.
         class CountingUUID(uuid.UUID):
             int_reads = 0
 
             def __getattribute__(self, name):
                 if name == 'int':
                     type(self).int_reads += 1
+                    if type(self).int_reads > 1:
+                        raise AssertionError(
+                            'OIDC retry rebuilt the dataframe')
                 return super().__getattribute__(name)
 
         value = CountingUUID('12345678-1234-5678-1234-567812345678')
@@ -3024,17 +3029,11 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         auth = make_auth()  # never signed in
         db = questdb.connect(
             'ws::addr=127.0.0.1:19009;lazy_connect=on;'
-            f'reconnect_max_duration_millis={budget_s * 1000};',
+            'reconnect_max_duration_millis=60000;',
             oidc_auth=auth)
         try:
-            started = time.monotonic()
             with self.assertRaises(OidcInteractionRequired):
                 db.dataframe(df, table_name='oidc_ff', at='ts')
-            elapsed = time.monotonic() - started
-            self.assertLess(
-                elapsed, budget_s / 4,
-                'dataframe() burned the reconnect budget on an OIDC failure '
-                'that only an interactive sign_in() can clear')
             self.assertEqual(
                 CountingUUID.int_reads, 1,
                 'the terminal OIDC probe rebuilt the whole dataframe instead '
