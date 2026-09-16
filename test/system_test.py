@@ -5591,12 +5591,11 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             got_bytes = col.combine_chunks().storage.to_pylist()
         else:
             got_bytes = col.to_pylist()
-        # v2 (all zeros) is the LONG256 null sentinel — server reads
-        # it back as NULL. Document this with the assertion.
+        # All-zero LONG256 is the valid numeric value zero. The null sentinel
+        # is four little-endian Long.MIN_VALUE limbs, not 32 zero bytes.
         self.assertEqual(got_bytes[0], v0)
         self.assertEqual(got_bytes[1], v1)
-        # Index 2 may be None (null sentinel) — pin that contract.
-        self.assertIn(got_bytes[2], (v2, None))
+        self.assertEqual(got_bytes[2], v2)
 
         # Exercise the separate pyarrow-free object decoder. Values are
         # unsigned little-endian 256-bit integers; v1 has its top bit set and
@@ -5607,7 +5606,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(pdf['v'][0], int.from_bytes(v0, 'little'))
         self.assertEqual(pdf['v'][1], int.from_bytes(v1, 'little'))
         self.assertGreaterEqual(pdf['v'][1], 1 << 255)
-        self.assertTrue(pdf['v'].isna()[2])
+        self.assertEqual(pdf['v'][2], 0)
 
     def test_long256_with_nulls_round_trip(self):
         import pyarrow as pa
