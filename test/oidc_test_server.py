@@ -20,6 +20,7 @@ class OidcTestServer:
             *,
             initial_access_token='AT-initial',
             initial_expires_in=300,
+            device_code='DEV-CODE-123',
             device_expires_in=600,
             refresh_token='RT-1',
             refreshed_access_token='AT-refreshed',
@@ -32,6 +33,7 @@ class OidcTestServer:
             settings_config_overrides=None):
         self.initial_access_token = initial_access_token
         self.initial_expires_in = initial_expires_in
+        self.device_code = device_code
         # Device-code lifetime. A cancellation test should pass a short value:
         # if the cancellation it asserts ever regresses, sign_in() blocks for
         # this long before the assertion after it can even run, so the default
@@ -164,7 +166,7 @@ class OidcTestServer:
 
         if handler.command == 'POST' and path == '/device':
             self._json(handler, 200, {
-                'device_code': 'DEV-CODE-123',
+                'device_code': self.device_code,
                 'user_code': 'WXYZ-1234',
                 'verification_uri': self.url + '/verify',
                 'verification_uri_complete': (

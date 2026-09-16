@@ -1110,6 +1110,7 @@ cdef class OidcDeviceAuth:
         cdef uint64_t timeout_ms
         cdef PyThreadState* gs = NULL
         cdef _OidcNativeHandle native
+        cdef questdb_oidc_auth* built_raw = NULL
         cdef size_t provider_id
         cdef bint detach_callbacks_after_build
         from questdb.auth._errors import OidcConfigError
@@ -1265,11 +1266,19 @@ cdef class OidcDeviceAuth:
                         NULL,
                         &err):
                     raise _oidc_err_to_py(err)
+            # Build into a thread-local C pointer while the GIL is released.
+            # Publishing directly into `native.raw` here races the atexit hook:
+            # it can acquire the GIL, snapshot this registered handle, and read
+            # that field while native is writing it. Reacquiring the GIL before
+            # publication makes the field obey the same synchronization as every
+            # reader; the marker check below then self-detaches a build that the
+            # shutdown snapshot observed while its raw field was still NULL.
             _ensure_doesnt_have_gil(&gs)
-            native.raw = questdb_oidc_builder_build(builder, &err)
+            built_raw = questdb_oidc_builder_build(builder, &err)
             _ensure_has_gil(&gs)
-            if native.raw == NULL:
+            if built_raw == NULL:
                 raise _oidc_err_to_py(err)
+            native.raw = built_raw
             with _OIDC_REGISTRY_LOCK:
                 detach_callbacks_after_build = _oidc_callbacks_shutting_down
             if detach_callbacks_after_build:

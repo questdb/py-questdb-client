@@ -2302,6 +2302,86 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertEqual(err.error_description, 'The user denied the request.')
         self.assertEqual(err.status, 400)
 
+    def test_device_poll_reflection_does_not_expose_device_code(self):
+        # Some IdPs, proxies and WAFs reflect the submitted device_code in the
+        # OAuth error fields. Exercise both its exact and form-encoded spellings
+        # through the Python FFI boundary: neither the renderer nor any public
+        # exception surface may turn that credential into display or log text.
+        device_code = 'DEV +/% exact credential'
+        encoded_device_code = 'DEV+%2B%2F%25+exact+credential'
+        renderer = RecordingRenderer()
+        with OidcTestServer(
+                device_code=device_code,
+                device_token_response=(400, {
+                    'error': device_code,
+                    'error_description': (
+                        'safe diagnostic before '
+                        f'{encoded_device_code} after'),
+                }, None)) as server:
+            auth = make_discovered_auth(server, renderer=renderer)
+            with self.assertRaises(OidcDeviceFlowError) as ctx:
+                auth.sign_in()
+            token_requests = server.requests('/token', 'POST')
+
+        self.assertEqual(len(token_requests), 1)
+        self.assertEqual(
+            token_requests[0]['form']['device_code'], [device_code])
+        self.assertIn(
+            f'device_code={encoded_device_code}'.encode('ascii'),
+            token_requests[0]['body'])
+        err = ctx.exception
+        self.assertIn('[redacted credential]', err.error)
+        self.assertIn('[redacted credential]', err.error_description)
+        surfaces = [
+            *renderer.failures,
+            str(err),
+            repr(err),
+            err.error,
+            err.error_description,
+            repr(vars(err)),
+        ]
+        for surface in surfaces:
+            self.assertNotIn(device_code, surface)
+            self.assertNotIn(encoded_device_code, surface)
+
+    def test_refresh_reflection_does_not_expose_refresh_token(self):
+        # The refresh grant has no renderer callback, but it shares the token
+        # endpoint and exception conversion with device polling. Confirm the
+        # request really carried the mutation-discriminating secret and that a
+        # reflected raw/encoded value survives in no Python exception surface.
+        refresh_token = 'RT +/% exact credential'
+        encoded_refresh_token = 'RT+%2B%2F%25+exact+credential'
+        renderer = RecordingRenderer()
+        with OidcTestServer(
+                initial_access_token=EXPIRED_ACCESS_TOKEN,
+                refresh_token=refresh_token,
+                refresh_token_response=(429, {
+                    'error': 'slow_down',
+                    'error_description': (
+                        f'safe diagnostic {refresh_token}; '
+                        f'wire={encoded_refresh_token}'),
+                }, {'Retry-After': '7'})) as server:
+            auth = make_discovered_auth(server, renderer=renderer)
+            auth.sign_in()
+            with self.assertRaises(OidcNetworkError) as ctx:
+                auth.token()
+            token_requests = server.requests('/token', 'POST')
+
+        self.assertEqual(len(token_requests), 2)
+        self.assertEqual(
+            token_requests[1]['form']['refresh_token'], [refresh_token])
+        self.assertIn(
+            f'refresh_token={encoded_refresh_token}'.encode('ascii'),
+            token_requests[1]['body'])
+        err = ctx.exception
+        self.assertEqual(err.status, 429)
+        self.assertEqual(err.retry_after, 7)
+        self.assertEqual(renderer.failures, [])
+        surfaces = [str(err), repr(err), repr(vars(err))]
+        for surface in surfaces:
+            self.assertNotIn(refresh_token, surface)
+            self.assertNotIn(encoded_refresh_token, surface)
+
     def test_oidc_error_strips_control_characters_from_idp_text(self):
         # Regression: OidcError.__init__ sanitizes every message argument
         # because an uncaught traceback reaches a terminal or a notebook, both
@@ -2711,8 +2791,62 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         # No endpoint attribution: nothing was contacted, the credential failed.
         self.assertIsNone(event.host)
         self.assertIsNone(event.port)
+        self.assertIs(
+            event.cause_code, questdb.QuestDBErrorCode.SocketError)
         # The cause must carry the actionable detail, not just a code.
         self.assertIn('sign_in', event.cause_msg)
+
+    def test_closed_provider_is_terminal_credential_unavailable(self):
+        # Attach while the provider is open (the public API correctly rejects an
+        # already-closed provider), then close it before lazy connect performs
+        # its first token pull. close() is monotonic, so native must preserve the
+        # provider's AuthError instead of reclassifying it as retryable and the
+        # QWP runner must stop after narrating one CredentialUnavailable event.
+        events = []
+        auth = make_auth()
+        db = questdb.connect(
+            'ws::addr=127.0.0.1:19009;lazy_connect=true;'
+            'reconnect_initial_backoff_millis=10;'
+            'reconnect_max_backoff_millis=10;',
+            oidc_auth=auth,
+            connection_listener=events.append,
+            connection_event_inbox_capacity=32)
+        auth.close()
+        try:
+            sender = db.sender()
+            try:
+                deadline = time.monotonic() + 5
+                while not events and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(
+                    events, 'the closed provider failure was never narrated')
+                credential_events = [
+                    event for event in events
+                    if event.kind is
+                    questdb.ConnectionEventKind.CredentialUnavailable]
+                self.assertEqual(len(credential_events), 1)
+                event = credential_events[0]
+                self.assertIs(
+                    event.cause_code, questdb.QuestDBErrorCode.AuthError)
+                self.assertIsNone(event.host)
+                self.assertIsNone(event.port)
+                self.assertIn('closed', event.cause_msg.lower())
+
+                # A retryable classification would run another connect round at
+                # the 10ms backoff above and emit repeatedly. Give it ample time
+                # to do so, then prove the terminal runner stayed stopped.
+                time.sleep(0.25)
+                self.assertEqual(
+                    len([
+                        observed for observed in events
+                        if observed.kind is
+                        questdb.ConnectionEventKind.CredentialUnavailable
+                    ]),
+                    1)
+            finally:
+                sender.close(flush=False)
+        finally:
+            db.close()
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_pool_dataframe_fails_fast_when_sign_in_is_required(self):
