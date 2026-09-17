@@ -16,9 +16,11 @@ needs none — it is additive, and an existing listener keeps working.
   canonical big-endian order at every API boundary; the client byte-swaps to
   QWP wire order internally. The wire format is unchanged and still matches the
   Java client, so stored data and round-trips are unaffected — only the bytes
-  your application supplies or receives change. A ``uuid.UUID`` object column
-  needs no change; if you pre-reversed bytes to work around the old layout,
-  remove that workaround — on the **read** path too. The bytes a UUID column
+  your application supplies or receives change. A well-formed ``uuid.UUID``
+  object column needs no byte-order change; malformed or subclassed UUID objects
+  whose integer representation does not produce exactly 16 bytes are rejected.
+  If you pre-reversed bytes to work around the old layout, remove that workaround
+  — on the **read** path too. The bytes a UUID column
   yields changed in the same way and just as silently, on every Arrow-backed
   reader: :meth:`~questdb.QueryResult.to_arrow`,
   :meth:`~questdb.QueryResult.to_polars`,

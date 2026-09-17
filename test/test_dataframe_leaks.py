@@ -267,9 +267,9 @@ class TestPyobjColumnarLeak(unittest.TestCase):
     """Guards the calloc'd ``pyobj_built_t`` builders
     (``_dataframe_columnar_build_{str,int,float,bool,uuid,ipv4,bytes}_pyobj``)
     reached by ``QuestDB.dataframe`` for object-dtype columns: every native
-    buffer (data, validity bitmap, str byte arena) must be freed on the
-    success and all-valid (bitmap-dropped) paths, and the pooled connection
-    must be returned on every call."""
+    buffer (data, validity bitmap, str byte arena) must be freed on success,
+    all-valid (bitmap-dropped), and exceptional paths, and the pooled
+    connection must be returned on every call."""
 
     ROWS = 2048
 
@@ -319,6 +319,40 @@ class TestPyobjColumnarLeak(unittest.TestCase):
             with qi.QuestDB.from_conf(conf) as client:
                 def work():
                     for df in frames:
+                        client.dataframe(
+                            df, table_name='t', at='ts', symbols=False)
+
+                self._assert_stable(work, warmup=150, measure=1800)
+
+    def test_uuid_width_error_path_no_leak(self):
+        """The malformed final row must free data, validity, and the builder."""
+        from qwp_ws_ack_server import QwpAckServer
+
+        class ShortInt(int):
+            def to_bytes(self, length, byteorder, *args, **kwargs):
+                return b'\xAA'
+
+        n = self.ROWS
+        values = [
+            None if i % 7 == 0 else uuid.UUID(int=i)
+            for i in range(n)
+        ]
+        malformed = uuid.uuid4()
+        object.__setattr__(malformed, 'int', ShortInt(0))
+        values[-1] = malformed
+        df = pd.DataFrame({
+            'ts': pd.Series(pd.to_datetime(np.arange(n), unit='s')),
+            'u': pd.Series(values, dtype=object),
+        })
+
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                    'query_pool_min=0;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def work():
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError, 'returned 1 bytes, expected 16'):
                         client.dataframe(
                             df, table_name='t', at='ts', symbols=False)
 

@@ -193,11 +193,19 @@ Both are rejected rather than silently resolved. A path passed straight to
 ``FileTokenStore(...)`` is a Python path, not the shared setting, and is
 expanded and absolutised as usual. The native client writes plaintext JSON
 using atomic replacement and cross-process coordination; on POSIX, directories
-are mode ``0700`` and files mode ``0600``. On other platforms, protection
-depends on the directory's default ACL. Every failed store operation is logged
-at ``WARNING`` on the ``questdb`` logger during normal operation. The binding
-imports ``logging`` before registering its own shutdown hook, so the hook
-detaches OIDC callbacks while logging handlers are still live;
+are mode ``0700`` and files mode ``0600``. Non-POSIX platforms currently reject
+file-store persistence before changing disk state because they lack the durable
+metadata barrier required for safe refresh-token rotation. Python callers must
+use in-memory authentication there; custom keychain-backed stores are currently
+available only through the Rust ``TokenStore`` API. Every failed store operation
+is logged at ``WARNING`` on the ``questdb`` logger during normal operation.
+Persistence-warning handlers must not call ``sign_in()``, ``clear()``, an
+uncached ``token()``, or an attached transport operation that needs a token from
+the same provider; those operations are rejected before they can deadlock.
+Cached token reads,
+``cancel_sign_in()``, and ``close()`` remain callback-safe. The binding imports
+``logging`` before registering its own shutdown hook, so the hook detaches OIDC
+callbacks while logging handlers are still live;
 ``logging.shutdown()`` runs afterwards. Diagnostics produced after the detach
 are deliberately suppressed rather than entering Python during finalization. A
 failed save or automatic clear is otherwise reported only there and leaves the

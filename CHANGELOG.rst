@@ -24,8 +24,10 @@ ingestion and query results**, the other two ``dataframe()`` /
   worked around the old layout by pre-reversing bytes yourself, remove that
   workaround. The bytes on the wire are unchanged and still match the Java
   client, so stored data and round-trips are unaffected — only the bytes your
-  application hands over or receives change. A ``uuid.UUID`` object column
-  needs no change at all.
+  application hands over or receives change. A well-formed ``uuid.UUID`` object
+  column needs no byte-order change. Malformed or subclassed UUID objects whose
+  integer representation does not produce exactly 16 bytes are now rejected
+  instead of serializing invalid or adjacent-memory bytes.
 
   This is **not confined to ingestion**: the raw bytes a UUID column yields on
   the read path changed in the same way, and silently. Anything that
@@ -192,8 +194,10 @@ Highlights:
   interval, matching the complete Java device challenge.
 * Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes plaintext
   credentials atomically and coordinates refresh across processes. Its
-  directories/files are owner-only (``0700``/``0600``) on Unix; on other
-  platforms protection depends on the directory's default ACL.
+  directories/files are owner-only (``0700``/``0600``) on Unix. Non-Unix
+  platforms reject mutation before changing disk state until an equivalent
+  durable metadata barrier is available; in-memory authentication remains
+  available there.
   Its directory is overridable with the
   ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` environment variable, shared with the
   native client. Custom Python token stores are not supported by the native

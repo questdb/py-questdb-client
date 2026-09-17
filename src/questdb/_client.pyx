@@ -9529,6 +9529,38 @@ cdef class PooledReader:
         if handle is not None:
             handle._end_db_use()
 
+    cdef void _release_finalizer_locked(self) noexcept:
+        """Release a GC-owned lease without waiting for a worker cursor."""
+        cdef _ReaderHandle reader = self._reader
+        cdef _CursorHandle last = self._last_cursor
+        cdef QuestDB handle = self._handle
+        cdef int reclaimed = 0
+        if reader is None:
+            return
+        # Clear the lease first so even an unexpected cleanup exception cannot
+        # make a later finalizer repeat active-use accounting.
+        self._reader = None
+        self._last_cursor = None
+        self._handle = None
+        if last is not None:
+            try:
+                reclaimed = last._try_reclaim()
+            except BaseException:
+                reclaimed = -1
+        if reclaimed != -1:
+            # Reclaim owns the cursor lock here, so no operation can still be
+            # using this reader. A busy cursor instead retains `_reader_ref`
+            # until its lock holder finishes; dropping the local references
+            # leaves that cursor responsible for eventual reader teardown.
+            reader._close()
+        if handle is not None:
+            try:
+                handle._end_db_use()
+            except BaseException:
+                # Finalizers cannot propagate. The fields were already cleared,
+                # so retrying would underflow the active-use count.
+                pass
+
     def __enter__(self):
         with self._lock:
             self._check_open('__enter__')
@@ -9617,4 +9649,21 @@ cdef class PooledReader:
     def __dealloc__(self):
         if self._lock is not None:
             with self._lock:
-                self._release_locked()
+                self._release_finalizer_locked()
+
+
+def _debug_new_pooled_reader_finalizer_owner(
+        _CursorHandle cursor_handle, object client=None):
+    """Internal test seam for PooledReader's non-blocking GC path."""
+    cdef PooledReader lease = PooledReader.__new__(PooledReader)
+    cdef _ReaderHandle reader = _ReaderHandle()
+    cdef QuestDB handle
+    cursor_handle._attach(NULL, reader, False)
+    if client is None:
+        lease._attach(None, reader)
+    else:
+        handle = client
+        handle._begin_db_use('_debug_new_pooled_reader_finalizer_owner')
+        lease._attach(handle, reader)
+    lease._last_cursor = cursor_handle
+    return lease

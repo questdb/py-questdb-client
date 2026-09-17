@@ -718,6 +718,23 @@ class NativeOidcTest(unittest.TestCase):
             auth = make_auth(token_store=FileTokenStore.at(directory))
             self.assertEqual(auth.config.client_id, 'questdb')
 
+    @unittest.skipUnless(
+        os.name == 'nt', 'non-Unix file-store durability guard')
+    def test_windows_file_store_rejects_before_device_flow(self):
+        renderer = RecordingRenderer()
+        with tempfile.TemporaryDirectory() as directory:
+            with OidcTestServer() as server:
+                auth = make_discovered_auth(
+                    server,
+                    token_store=FileTokenStore.at(directory),
+                    renderer=renderer)
+                with self.assertRaisesRegex(
+                        OidcConfigError, 'durable directory-entry'):
+                    auth.sign_in()
+                self.assertEqual(server.requests('/device', 'POST'), [])
+                self.assertEqual(renderer.prompts, [])
+                self.assertEqual(os.listdir(directory), [])
+
     def test_exit_hook_silences_diagnostics_without_closing_providers(self):
         self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
         # The atexit hook exists to stop a persistence diagnostic entering a
@@ -733,21 +750,20 @@ class NativeOidcTest(unittest.TestCase):
         #
         # Running the hook and then using the provider is the whole test: a
         # closing hook makes every operation below raise OidcCancelledError.
-        with tempfile.TemporaryDirectory() as directory:
-            auth = make_auth(token_store=FileTokenStore.at(directory))
+        auth = make_auth()
 
-            _client._oidc_detach_diagnostics_at_exit()
+        _client._oidc_detach_diagnostics_at_exit()
 
-            # Still open: a closing hook fails each of these instead.
-            self.assertEqual(auth.config.client_id, 'questdb')
-            auth.clear()
-            with self.assertRaises(OidcInteractionRequired):
-                auth.token()
+        # Still open: a closing hook fails each of these instead.
+        self.assertEqual(auth.config.client_id, 'questdb')
+        auth.clear()
+        with self.assertRaises(OidcInteractionRequired):
+            auth.token()
 
-            # Idempotent, and harmless once the provider really is closed.
-            _client._oidc_detach_diagnostics_at_exit()
-            auth.close()
-            _client._oidc_detach_diagnostics_at_exit()
+        # Idempotent, and harmless once the provider really is closed.
+        _client._oidc_detach_diagnostics_at_exit()
+        auth.close()
+        _client._oidc_detach_diagnostics_at_exit()
 
     def test_exit_hook_silences_renderer_events_without_closing_provider(self):
         self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
@@ -767,6 +783,8 @@ class NativeOidcTest(unittest.TestCase):
             self.assertEqual(renderer.successes, [])
             self.assertEqual(renderer.failures, [])
 
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
     def test_exit_hook_actually_silences_persistence_diagnostics(self):
         self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
         # The companion test above proves detaching does not close providers;
@@ -796,6 +814,8 @@ class NativeOidcTest(unittest.TestCase):
                     auth.sign_in()
                 self.assertEqual(auth.token(), 'AT-initial')
 
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
     def test_exit_hook_does_not_wait_for_parked_persistence_diagnostic(self):
         self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
         diagnostic_entered = threading.Event()
@@ -937,6 +957,8 @@ class NativeOidcTest(unittest.TestCase):
             self.assertEqual(second_renderer.successes, [])
             self.assertEqual(second_renderer.failures, [])
 
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
     def test_persistence_diagnostic_can_close_its_provider(self):
         class SabotageRenderer(RecordingRenderer):
             def __init__(self, directory):
@@ -995,6 +1017,87 @@ class NativeOidcTest(unittest.TestCase):
                         'the persistence diagnostic did not return from close()')
                     if outcome:
                         self.assertIsInstance(outcome[0], OidcCancelledError)
+                finally:
+                    logger.removeHandler(handler)
+                    logger.setLevel(old_level)
+
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
+    def test_persistence_diagnostic_rejects_acquisition_reentry(self):
+        class SabotageRenderer(RecordingRenderer):
+            def __init__(self, directory):
+                super().__init__()
+                self.directory = directory
+
+            def on_prompt(self, challenge):
+                super().on_prompt(challenge)
+                shutil.rmtree(self.directory)
+                with open(self.directory, 'w', encoding='utf-8') as sink:
+                    sink.write('not a directory')
+
+        class ReenteringHandler(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.auth = None
+                self.results = []
+                self.returned = threading.Event()
+
+            def emit(self, record):
+                try:
+                    for operation in (self.auth.clear, self.auth.token):
+                        try:
+                            operation()
+                        except BaseException as exc:
+                            self.results.append(exc)
+                        else:
+                            self.results.append(None)
+                finally:
+                    self.returned.set()
+
+        with tempfile.TemporaryDirectory() as parent:
+            directory = os.path.join(parent, 'store')
+            with OidcTestServer() as server:
+                auth = make_discovered_auth(
+                    server,
+                    token_store=FileTokenStore.at(directory),
+                    renderer=SabotageRenderer(directory))
+                handler = ReenteringHandler()
+                handler.auth = auth
+                logger = logging.getLogger('questdb')
+                old_level = logger.level
+                logger.addHandler(handler)
+                logger.setLevel(logging.WARNING)
+                outcome = []
+
+                def sign_in():
+                    try:
+                        auth.sign_in()
+                    except BaseException as exc:
+                        outcome.append(exc)
+
+                thread = threading.Thread(target=sign_in, daemon=True)
+                try:
+                    thread.start()
+                    thread.join(10)
+                    self.assertFalse(
+                        thread.is_alive(),
+                        'callback acquisition waited for its own diagnostic')
+                    self.assertTrue(handler.returned.is_set())
+                    self.assertEqual(outcome, [])
+                    self.assertEqual(len(handler.results), 2)
+                    clear_error, token_error = handler.results
+                    self.assertIsInstance(clear_error, questdb.QuestDBError)
+                    self.assertEqual(
+                        clear_error.code,
+                        questdb.QuestDBErrorCode.InvalidApiCall)
+                    self.assertIsInstance(
+                        token_error, OidcInteractionRequired)
+                    self.assertEqual(
+                        token_error.code,
+                        questdb.QuestDBErrorCode.SocketError)
+                    for error in handler.results:
+                        self.assertIn(
+                            'persistence diagnostic callback', str(error))
                 finally:
                     logger.removeHandler(handler)
                     logger.setLevel(old_level)
@@ -2119,6 +2222,8 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertIn('WXYZ-1234', rendered)
         self.assertIn('Signed in', rendered)
 
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
     def test_file_store_round_trip_avoids_second_device_flow(self):
         with tempfile.TemporaryDirectory() as directory:
             with OidcTestServer() as server:
@@ -2134,6 +2239,8 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 self.assertEqual(len(server.requests('/token', 'POST')), 1)
                 restored.clear()
 
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
     def test_persistence_failure_logs_warning_and_keeps_token(self):
         class SabotageRenderer(RecordingRenderer):
             def __init__(self, directory):
@@ -2165,6 +2272,8 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 self.assertIn('token store save failed', captured.output[0])
                 self.assertNotIn('AT-initial', captured.output[0])
 
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
     def test_clear_removes_persisted_token(self):
         # clear() must delete the persisted store entry, not only the in-memory
         # copy: a fresh provider over the same store then finds nothing and
@@ -2186,6 +2295,8 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 self.assertEqual(fresh.token(), 'AT-initial')
                 self.assertEqual(len(server.requests('/device', 'POST')), 2)
 
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
     def test_clear_after_close_removes_persisted_token(self):
         # close() drops the in-memory credential but deliberately leaves the
         # persisted entry, and clear() used to refuse on a closed provider --
@@ -2281,6 +2392,8 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             for value in stats['upgrade_authorizations']))
         self.assertEqual(stats['errors'], [])
 
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
     def test_background_token_provider_dispatches_persistence_diagnostic(self):
         # The foreground sign-in diagnostic path starts on a Python thread that
         # already has a thread state. Exercise the other boundary: QWP resolves

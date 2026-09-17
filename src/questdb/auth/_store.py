@@ -76,9 +76,12 @@ class FileTokenStore:
 
     The native client owns all I/O, identity checks, atomic replacement and
     cross-process locking. On POSIX it creates directories with mode ``0700``
-    and token files with mode ``0600``; on other platforms protection depends
-    on the directory's default ACL. This Python object carries only the selected
-    directory into :class:`OidcDeviceAuth`.
+    and token files with mode ``0600``. Non-POSIX platforms currently reject
+    persistence before changing disk state because the durable metadata barrier
+    required for rotating refresh tokens is unavailable. Python callers must
+    use in-memory authentication there; custom ``TokenStore`` implementations
+    are currently available only in the Rust API. This Python object carries
+    only the selected directory into :class:`OidcDeviceAuth`.
 
     ``directory`` is expanded (``~``) and made absolute at construction, so a
     later :func:`os.chdir` cannot move the store; read back the resolved value

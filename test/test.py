@@ -403,10 +403,17 @@ class TestQwpWebSocketApi(unittest.TestCase):
         hasattr(sys, 'getrefcount'), 'requires refcounting finalizers')
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_every_cursor_owner_finalizer_uses_nonblocking_reclaim(self):
-        for kind in ('numpy', 'generator', 'capsule'):
+        for kind in ('numpy', 'generator', 'capsule', 'pooled_reader'):
             with self.subTest(kind=kind):
                 handle = qi._debug_new_cursor_handle()
-                owner = qi._debug_new_cursor_finalizer_owner(kind, handle)
+                client = None
+                if kind == 'pooled_reader':
+                    client = qi.QuestDB.from_conf(
+                        'ws::addr=127.0.0.1:1;lazy_connect=true;')
+                    owner = qi._debug_new_pooled_reader_finalizer_owner(
+                        handle, client)
+                else:
+                    owner = qi._debug_new_cursor_finalizer_owner(kind, handle)
                 entered = threading.Event()
                 release = threading.Event()
                 holder = threading.Thread(
@@ -430,14 +437,36 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 # Deadline covers an unbounded `gc.collect()`; see the note in
                 # the sibling test. The blocked case still cannot finish early.
                 finished_without_release = dropped.wait(10)
+
+                closed_without_release = True
+                closer = None
+                if client is not None:
+                    closed = threading.Event()
+
+                    def close_client():
+                        client.close()
+                        closed.set()
+
+                    closer = threading.Thread(
+                        target=close_client, daemon=True)
+                    closer.start()
+                    closed_without_release = closed.wait(10)
+
                 release.set()
                 holder.join(5)
                 dropper.join(5)
+                if closer is not None:
+                    closer.join(5)
                 self.assertFalse(holder.is_alive())
                 self.assertFalse(dropper.is_alive())
+                if closer is not None:
+                    self.assertFalse(closer.is_alive())
                 self.assertTrue(
                     finished_without_release,
                     f'{kind} finalizer blocked behind the cursor lock')
+                self.assertTrue(
+                    closed_without_release,
+                    f'{kind} finalizer did not end active-use accounting')
 
     def test_pooled_lease_types_exported_from_package(self):
         from questdb import PooledReader, PooledSender
