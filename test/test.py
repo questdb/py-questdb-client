@@ -499,6 +499,37 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['binary_frames'], 1)
 
+    def test_sender_durable_ack_tier_handshake(self):
+        import questdb
+
+        for configured, request, grant in [
+                ('local', 'local', 'local'),
+                ('replicated', 'replicated', 'replicated'),
+                ('local,replicated',
+                 'local,replicated', 'local,replicated'),
+                ('on', 'true', 'enabled')]:
+            with self.subTest(configured=configured):
+                with QwpAckServer(durable_ack_grant=grant) as server:
+                    sender = questdb.Sender.from_conf(
+                        f'ws::addr=127.0.0.1:{server.port};'
+                        f'request_durable_ack={configured};')
+                    sender.establish()
+                    sender.close()
+                    stats = server.snapshot()
+                self.assertEqual(stats['errors'], [])
+                self.assertEqual(stats['durable_ack_requests'], [request])
+
+        with QwpAckServer(durable_ack_grant='replicated') as server:
+            sender = questdb.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};'
+                'request_durable_ack=local,replicated;')
+            with self.assertRaisesRegex(
+                    qi.QuestDBError, 'grant mismatch'):
+                sender.establish()
+            sender.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['durable_ack_requests'], ['local,replicated'])
+
     def test_module_connect_argument_validation(self):
         import questdb
         with self.assertRaisesRegex(TypeError, 'but not both'):
@@ -554,6 +585,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 host='h', password='p;w', sender_pool_max=2, tls=False)
             questdb.connect(
                 'ws::addr=h:9000;', sender_pool_max=2, tls_verify=False)
+            questdb.connect(
+                host='h', request_durable_ack='local,replicated')
         self.assertEqual(built, [
             'ws::addr=localhost:9000;',
             'wss::addr=localhost:9009;',
@@ -561,6 +594,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             'ws::addr=[::1]:1;',
             'ws::addr=h:9000;password=p;;w;sender_pool_max=2;',
             'ws::sender_pool_max=2;tls_verify=unsafe_off;addr=h:9000;',
+            'ws::addr=h:9000;request_durable_ack=local,replicated;',
         ])
 
     def test_module_connect_tls_verify_false_uses_unsafe_off(self):

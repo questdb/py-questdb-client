@@ -22,7 +22,7 @@ class QwpAckServer:
                  close_plan=None, max_batch_size=0,
                  defer_aware_acks=False, record_payloads=False,
                  error_status=None, error_message=b"mock rejection",
-                 tls=False):
+                 durable_ack_grant=None, tls=False):
         """
         `close_plan`: iterable consumed one value per accepted connection;
         a connection with value N is closed after handling its Nth binary
@@ -44,6 +44,9 @@ class QwpAckServer:
         schema-mismatch), every binary frame is answered with an error
         response carrying that status instead of an OK ack.
 
+        `durable_ack_grant`: optional exact value for the
+        `X-QWP-Durable-Ack` upgrade response header.
+
         `tls`: when True, wrap every accepted connection in TLS using the
         self-signed certificate under ``test/certs`` (SAN: 127.0.0.1,
         localhost). Handshake failures are counted in
@@ -57,6 +60,7 @@ class QwpAckServer:
         self.record_payloads = record_payloads
         self.error_status = error_status
         self.error_message = error_message
+        self.durable_ack_grant = durable_ack_grant
         self._tls_context = None
         if tls:
             self._tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -76,6 +80,7 @@ class QwpAckServer:
         self.binary_prefixes = []
         self.binary_payloads = []
         self.control_frame_count = 0
+        self.durable_ack_requests = []
         self.errors = []
 
     def __enter__(self):
@@ -124,6 +129,7 @@ class QwpAckServer:
                 "binary_prefixes": list(self.binary_prefixes),
                 "binary_payloads": list(self.binary_payloads),
                 "control_frames": self.control_frame_count,
+                "durable_ack_requests": list(self.durable_ack_requests),
                 "errors": list(self.errors),
                 "tls_handshake_failures": self.tls_handshake_failures,
             }
@@ -210,6 +216,10 @@ class QwpAckServer:
             conn.settimeout(30)
             request = _read_until(conn, b"\r\n\r\n")
             key = _header(request, "Sec-WebSocket-Key")
+            durable_ack_request = _optional_header(
+                request, "X-QWP-Request-Durable-Ack")
+            with self._lock:
+                self.durable_ack_requests.append(durable_ack_request)
             accept = _compute_accept(key)
             response = (
                 "HTTP/1.1 101 Switching Protocols\r\n"
@@ -219,6 +229,9 @@ class QwpAckServer:
                 "X-QWP-Version: 1\r\n")
             if self.max_batch_size > 0:
                 response += f"X-QWP-Max-Batch-Size: {self.max_batch_size}\r\n"
+            if self.durable_ack_grant is not None:
+                response += (
+                    f"X-QWP-Durable-Ack: {self.durable_ack_grant}\r\n")
             response += "\r\n"
             conn.sendall(response.encode("ascii"))
             if close_after is not None and close_after == 0:
@@ -335,6 +348,13 @@ def _header(request, name):
         if line.lower().startswith(prefix):
             return line.split(":", 1)[1].strip()
     raise ValueError(f"missing HTTP header {name}")
+
+
+def _optional_header(request, name):
+    try:
+        return _header(request, name)
+    except ValueError:
+        return None
 
 
 def _compute_accept(key):
