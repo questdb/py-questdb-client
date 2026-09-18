@@ -1419,16 +1419,11 @@ cdef class OidcDeviceAuth:
 
     @property
     def _sign_in_in_progress(self):
-        """Whether a :meth:`sign_in` is running on this provider, any thread.
+        """Whether this wrapper's local :meth:`sign_in` lock is held.
 
-        Internal. This is what tells a *transient*
-        :class:`~questdb.auth.OidcInteractionRequired` -- one raised because a
-        peer sign-in holds the acquisition lock, or because a renderer callback
-        is being painted -- from the ordinary "nobody has signed in" one. Both
-        reach Python as the same class with the same ``code``, because
-        ``classify_provider_error`` reclassifies every OIDC
-        ``InteractionRequired`` to a retryable ``SocketError``; only the
-        provider knows whether anything is actually in flight.
+        Internal diagnostic/test property. Transport retry classification does
+        not consult this mutable state; it uses the immutable
+        ``_acquisition_busy`` bit captured in the native error instead.
         """
         return self._sign_in_lock.locked()
 

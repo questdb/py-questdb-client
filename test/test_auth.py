@@ -1544,6 +1544,7 @@ class ProviderCycleSafetyTest(unittest.TestCase):
         # collected exhausts every pass and still returns a non-zero count.
         # PyPy's known cross-heap renderer/provider cycle is skipped separately
         # below; no number of collections can reclaim that cpyext shape.
+        shutdown_stderr_marker = '__QDB_BEGIN_INTERPRETER_SHUTDOWN__'
         script = (
             'import gc, sys\n'
             'from questdb._client import OidcDeviceAuth\n'
@@ -1557,6 +1558,13 @@ class ProviderCycleSafetyTest(unittest.TestCase):
             '            break\n'
             '    return count\n'.format(max_passes=_SETTLE_MAX_PASSES)
         ) + body
+        if expect_empty_stderr:
+            # Import/build warnings precede this marker (notably two known PyPy
+            # cpyext/Cython warnings). Only diagnostics emitted by finalization
+            # itself belong to these shutdown tests.
+            script += (
+                f'\nprint({shutdown_stderr_marker!r}, '
+                'file=sys.stderr, flush=True)\n')
         # Resolve `questdb` the way this process did instead of assuming the
         # in-place `src/` build. Under cibuildwheel the package is installed
         # from the wheel and `src/questdb/` holds no compiled `_client`, so
@@ -1579,9 +1587,16 @@ class ProviderCycleSafetyTest(unittest.TestCase):
             '(exit {}): {}{}'.format(
                 proc.returncode, proc.stdout, proc.stderr))
         if expect_empty_stderr:
+            _, marker, shutdown_stderr = proc.stderr.rpartition(
+                shutdown_stderr_marker + '\n')
+            self.assertTrue(
+                marker,
+                'child exited without reaching the shutdown checkpoint: '
+                f'{proc.stderr}')
             self.assertEqual(
-                proc.stderr, '',
-                f'interpreter shutdown emitted diagnostics: {proc.stderr}')
+                shutdown_stderr, '',
+                'interpreter shutdown emitted diagnostics: '
+                f'{shutdown_stderr}')
         return proc.stdout
 
     def test_collected_store_provider_drains_and_exits_cleanly(self):
