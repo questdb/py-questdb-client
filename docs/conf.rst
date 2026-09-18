@@ -194,11 +194,21 @@ walking the ``addr`` server list.
 
   Default: 5000.
 
-* ``request_durable_ack`` - ``'on'`` | ``'off'``: Negotiate durable
-  acknowledgements: the server acknowledges frames only once they are
-  durably stored (e.g. uploaded to object storage on Enterprise
-  deployments). A server without the capability rejects the first
-  operation.
+* ``request_durable_ack`` - ``'off'`` | ``'on'`` | ``'local'`` |
+  ``'replicated'`` | ``'local,replicated'``: Select the durability tier that
+  drives acknowledgement and store-and-forward trimming.
+
+  ``'local'`` waits until the WAL transaction is durable on the server's
+  disk. It survives power loss, but not loss of that disk, and requires WAL
+  tables with ``cairo.commit.mode=adaptive``. ``'replicated'`` waits until the
+  transaction reaches object storage on a replication-capable Enterprise
+  server. ``'on'`` is the legacy alias for ``'replicated'`` and retains its
+  original wire representation. The combined value requests both streams but
+  trims only on the stronger replicated acknowledgement; current servers do
+  not yet grant that combination.
+
+  The server must grant the complete requested set. A missing or partial grant
+  fails the connection rather than silently weakening the guarantee.
 
   Default: ``'off'``.
 

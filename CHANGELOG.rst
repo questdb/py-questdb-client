@@ -7,6 +7,14 @@ Changelog
 5.0.1 (unreleased)
 ------------------
 
+- **QWP durable acknowledgements can target local disk or replicated
+  storage.** ``request_durable_ack`` now accepts ``local``, ``replicated``,
+  and ``local,replicated`` in addition to ``off`` and the legacy ``on`` alias.
+  Local-only mode trims store-and-forward data after the server reports the
+  WAL transaction durable on disk. Requests containing the replicated tier
+  keep trimming on the stronger object-store acknowledgement. Existing
+  ``request_durable_ack=on`` configurations retain their original
+  ``true``/``enabled`` wire exchange and replicated meaning.
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a
