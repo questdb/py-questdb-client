@@ -1180,6 +1180,7 @@ cdef extern from "questdb/oidc.h":
         uint16_t status
         cbool has_retry_after
         uint64_t retry_after_seconds
+        cbool acquisition_busy
 
     bint questdb_error_oidc_get_view(
         const questdb_error* error,

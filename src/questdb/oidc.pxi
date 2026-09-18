@@ -361,6 +361,7 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
     cdef object retry_after = None
     cdef object sender_error = None
     cdef bint in_doubt = False
+    cdef bint acquisition_busy = False
     cdef object code
     cdef object exc
 
@@ -429,6 +430,7 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
         status = view.status if view.has_status else None
         retry_after = (
             view.retry_after_seconds if view.has_retry_after else None)
+        acquisition_busy = view.acquisition_busy
         if view.kind == QUESTDB_OIDC_ERROR_CONFIG:
             exc = OidcConfigError(
                 message, status=status, retry_after=retry_after,
@@ -471,6 +473,10 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
     else:
         exc = OidcError(
             message, in_doubt=in_doubt, code=code, sender_error=sender_error)
+    # Internal transport-retry discriminator. Keeping it on the converted
+    # exception makes the decision describe the native error that actually
+    # occurred, rather than racing a later read of provider state.
+    exc._acquisition_busy = bool(acquisition_busy)
     return exc
 
 

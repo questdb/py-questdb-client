@@ -403,7 +403,9 @@ class TestQwpWebSocketApi(unittest.TestCase):
         hasattr(sys, 'getrefcount'), 'requires refcounting finalizers')
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_every_cursor_owner_finalizer_uses_nonblocking_reclaim(self):
-        for kind in ('numpy', 'generator', 'capsule', 'pooled_reader'):
+        for kind in (
+                'numpy', 'generator', 'capsule', 'query_result',
+                'pooled_reader'):
             with self.subTest(kind=kind):
                 handle = qi._debug_new_cursor_handle()
                 client = None
@@ -467,6 +469,34 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 self.assertTrue(
                     closed_without_release,
                     f'{kind} finalizer did not end active-use accounting')
+
+    def test_query_result_busy_finalizer_keeps_its_handle_attached(self):
+        handle = qi._debug_new_cursor_handle()
+        result = qi._debug_new_cursor_finalizer_owner(
+            'query_result', handle)
+        entered = threading.Event()
+        release = threading.Event()
+        holder = threading.Thread(
+            target=qi._debug_hold_cursor_handle_lock,
+            args=(handle, entered, release), daemon=True)
+        holder.start()
+        self.assertTrue(entered.wait(5))
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            started = time.monotonic()
+            result.__del__()
+            self.assertLess(time.monotonic() - started, 5)
+        self.assertIs(
+            result._cursor_handle, handle,
+            'busy finalization detached the only eventual reclaim owner')
+        self.assertEqual(
+            [item for item in caught if item.category is ResourceWarning], [])
+
+        release.set()
+        holder.join(5)
+        self.assertFalse(holder.is_alive())
+        result.close()
 
     def test_pooled_lease_types_exported_from_package(self):
         from questdb import PooledReader, PooledSender

@@ -1527,7 +1527,7 @@ class ProviderCycleSafetyTest(unittest.TestCase):
     in-process regression would take the whole test run down with it.
     """
 
-    def _run(self, body):
+    def _run(self, body, *, expect_empty_stderr=False):
         # `settle()` collects until the child reaches the state the test is
         # about, rather than until the count stops moving.
         #
@@ -1578,6 +1578,10 @@ class ProviderCycleSafetyTest(unittest.TestCase):
             'provider cycle collection crashed the interpreter '
             '(exit {}): {}{}'.format(
                 proc.returncode, proc.stdout, proc.stderr))
+        if expect_empty_stderr:
+            self.assertEqual(
+                proc.stderr, '',
+                f'interpreter shutdown emitted diagnostics: {proc.stderr}')
         return proc.stdout
 
     def test_collected_store_provider_drains_and_exits_cleanly(self):
@@ -1615,6 +1619,66 @@ class ProviderCycleSafetyTest(unittest.TestCase):
             'del auth\n'
             'print(settle())\n')
         self.assertEqual(out.strip().splitlines()[-1], '0')
+
+    def test_real_shutdown_with_live_stored_provider_and_sender(self):
+        # Leave both objects live: this exercises the registered atexit hook at
+        # Py_Finalize rather than calling it by hand or collecting first.
+        out = self._run(
+            'import tempfile, questdb\n'
+            'from questdb.auth import FileTokenStore\n'
+            'directory = tempfile.mkdtemp()\n'
+            'auth = OidcDeviceAuth(\n'
+            '    "questdb", "https://idp.example/device",\n'
+            '    "https://idp.example/token", interactive=False,\n'
+            '    open_browser=False,\n'
+            '    token_store=FileTokenStore.at(directory))\n'
+            'sender = questdb.Sender(\n'
+            '    questdb.Protocol.Http, "127.0.0.1", 1,\n'
+            '    oidc_auth=auth, auto_flush=False)\n'
+            'print("ready")\n',
+            expect_empty_stderr=True)
+        self.assertIn('ready', out)
+
+    def test_real_shutdown_with_renderer_callback_in_flight(self):
+        # A daemon sign-in is parked inside managed renderer code when the main
+        # thread exits. The atexit hook must publish non-waiting detach and let
+        # Py_Finalize complete rather than draining a callback that cannot
+        # return until after shutdown.
+        out = self._run(
+            'import http.server, json, threading\n'
+            'entered = threading.Event()\n'
+            'block = threading.Event()\n'
+            'class H(http.server.BaseHTTPRequestHandler):\n'
+            '    def log_message(self, *args): pass\n'
+            '    def do_POST(self):\n'
+            '        body = json.dumps({\n'
+            '            "device_code": "dev", "user_code": "CODE",\n'
+            '            "verification_uri": "http://127.0.0.1/verify",\n'
+            '            "expires_in": 60, "interval": 5}).encode()\n'
+            '        self.send_response(200)\n'
+            '        self.send_header("Content-Type", "application/json")\n'
+            '        self.send_header("Content-Length", str(len(body)))\n'
+            '        self.end_headers(); self.wfile.write(body)\n'
+            'server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)\n'
+            'threading.Thread(target=server.serve_forever, daemon=True).start()\n'
+            'class R:\n'
+            '    def on_prompt(self, details): entered.set(); block.wait()\n'
+            '    def on_waiting(self, seconds): pass\n'
+            '    def on_success(self, identity, expires): pass\n'
+            '    def on_failure(self, message): pass\n'
+            'port = server.server_address[1]\n'
+            'auth = OidcDeviceAuth(\n'
+            '    "questdb", f"http://127.0.0.1:{port}/device",\n'
+            '    f"http://127.0.0.1:{port}/token",\n'
+            '    renderer=R(), open_browser=False, timeout=5)\n'
+            'def run():\n'
+            '    try: auth.sign_in()\n'
+            '    except BaseException: pass\n'
+            'threading.Thread(target=run, daemon=True).start()\n'
+            'assert entered.wait(20), "renderer callback did not start"\n'
+            'print("parked")\n',
+            expect_empty_stderr=True)
+        self.assertIn('parked', out)
 
     @unittest.skipIf(
         platform.python_implementation() == 'PyPy',
@@ -1853,19 +1917,29 @@ class NativeOidcIntegrationTest(unittest.TestCase):
 
             thread = threading.Thread(target=sign_in)
             thread.start()
+            busy_error = None
             try:
                 self.assertTrue(
                     waiting.wait(20), 'device flow never reached a poll')
                 self.assertTrue(
                     auth._sign_in_in_progress,
                     'a sign_in() in flight must be visible to the gate')
+                with self.assertRaises(OidcInteractionRequired) as raised:
+                    auth.token()
+                busy_error = raised.exception
+                self.assertTrue(
+                    getattr(busy_error, '_acquisition_busy', False),
+                    'native busy classification was lost in error conversion')
             finally:
                 auth.close()
                 thread.join(20)
             self.assertFalse(thread.is_alive())
-            # And it clears, so a later failure fails fast again rather than
-            # burning the whole reconnect budget.
+            # Provider state has now cleared, but the captured error still says
+            # why that acquisition failed and remains retryable.
             self.assertFalse(auth._sign_in_in_progress)
+            self.assertFalse(
+                _client._debug_is_oidc_terminal_for_foreground(
+                    busy_error, auth))
 
     def test_close_cancels_device_polling_and_is_permanent(self):
         waiting = threading.Event()
@@ -4390,6 +4464,9 @@ class OidcReviewFixTest(unittest.TestCase):
         # and must not be cached.
         half_built = types.ModuleType('questdb.auth._errors')
         self.assertFalse(hasattr(half_built, 'OidcError'))
+        # Build while the real module is available; only native error
+        # conversion belongs inside the simulated half-import window.
+        native_failure_auth = make_auth()
         try:
             _client._debug_oidc_reset_errors_module()
             with mock.patch.dict(
@@ -4399,6 +4476,19 @@ class OidcReviewFixTest(unittest.TestCase):
                 # The importing resolver must not "fix" it by re-importing:
                 # that returns the same partial object out of `sys.modules`.
                 self.assertFalse(_client._debug_oidc_errors_module_resolved())
+                # Drive a real native builder error through the untyped
+                # conversion branch, not just the resolver predicates around
+                # it. It must preserve the native code/message and remain
+                # catchable by the ordinary QuestDBError base.
+                with self.assertRaises(questdb.QuestDBError) as raised:
+                    native_failure_auth.token()
+                self.assertIs(type(raised.exception), questdb.QuestDBError)
+                self.assertEqual(
+                    raised.exception.code,
+                    questdb.QuestDBErrorCode.AuthError)
+                self.assertIn(
+                    'No usable cached or refreshable OIDC token',
+                    str(raised.exception))
             # Nothing was cached, so the finished module is picked up now.
             self.assertTrue(_client._debug_oidc_errors_module_resolved())
             self.assertTrue(_client._debug_oidc_errors_module_ready())
@@ -4428,11 +4518,19 @@ class OidcReviewFixTest(unittest.TestCase):
                 self.assertTrue(
                     _client._debug_is_oidc_terminal_for_foreground(exc, None))
 
-            # The same error is transient while this provider reports a peer
-            # sign-in in progress; a different OIDC class is never gated.
-            busy = types.SimpleNamespace(_sign_in_in_progress=True)
+            # Classification belongs to this native error snapshot, not to a
+            # later read of mutable provider state. A busy provider cannot make
+            # a non-busy error transient, while the structured busy bit remains
+            # transient even after the provider reports idle.
+            busy_provider = types.SimpleNamespace(_sign_in_in_progress=True)
+            self.assertTrue(
+                _client._debug_is_oidc_terminal_for_foreground(
+                    exc, busy_provider))
+            exc._acquisition_busy = True
+            idle_provider = types.SimpleNamespace(_sign_in_in_progress=False)
             self.assertFalse(
-                _client._debug_is_oidc_terminal_for_foreground(exc, busy))
+                _client._debug_is_oidc_terminal_for_foreground(
+                    exc, idle_provider))
             self.assertFalse(_client._debug_is_oidc_terminal_for_foreground(
                 errors.OidcNetworkError('network'), None))
         finally:

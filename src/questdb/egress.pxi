@@ -2404,6 +2404,8 @@ def _debug_new_cursor_finalizer_owner(
         return owner
     if kind == 'capsule':
         return _make_query_stream_capsule(handle)
+    if kind == 'query_result':
+        return QueryResult(handle)
     raise ValueError(f'unknown cursor finalizer owner {kind!r}')
 
 

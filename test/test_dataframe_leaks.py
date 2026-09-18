@@ -158,6 +158,19 @@ class TestOidcNativeLeak(unittest.TestCase):
             self.assertEqual(len(auth.token()), len(self.PAYLOAD))
             _assert_no_leak(self, auth.token, warmup=8, measure=120)
 
+            # The device-flow path allocates a device response, event views and
+            # token response strings that the cache-hit loop above never
+            # touches. Re-authorize the same provider so RSS measures those
+            # native free sites rather than only Python weakref bookkeeping.
+            auth.clear()
+
+            def sign_in_cycle():
+                auth.sign_in()
+                self.assertEqual(len(auth.token()), len(self.PAYLOAD))
+                auth.clear()
+
+            _assert_no_leak(self, sign_in_cycle, warmup=4, measure=60)
+
 
 class TestLeakHarness(unittest.TestCase):
     def test_late_allocator_burst_gets_bounded_settling_window(self):

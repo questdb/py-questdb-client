@@ -585,10 +585,11 @@ cdef inline bint _is_oidc_terminal_for_foreground(object exc, object oidc_auth):
       than terminalize" for the callback case. Retrying here is what the
       native side classified the error for.
 
-    Only the provider knows which it is, so ``oidc_auth`` (the one the sender
-    or pool was built with, or ``None``) is consulted: a sign-in in flight on
-    it means the condition is transient and the existing budget loop should
-    ride it out.
+    Native records which case produced this specific error in its structured
+    OIDC payload. The converted exception carries that immutable classification
+    as ``_acquisition_busy``; consulting the provider's current sign-in state
+    here would race the callback or sign-in finishing between the native return
+    and this Python check.
 
     Every other OIDC failure is already handled by the caller's code check:
     ``classify_provider_error`` exempts ``OidcErrorKind::Config`` from the
@@ -614,13 +615,10 @@ cdef inline bint _is_oidc_terminal_for_foreground(object exc, object oidc_auth):
         return False
     if not isinstance(exc, mod.OidcInteractionRequired):
         return False
-    # Plain attribute access, not a `<OidcDeviceAuth>` cast: this runs inside
-    # an `except` handler, where an unchecked cast on an unexpected object
-    # would be undefined behaviour and a checked one would raise over the error
-    # being reported. `oidc_auth` is type-validated at construction anyway.
-    if oidc_auth is not None and oidc_auth._sign_in_in_progress:
-        return False
-    return True
+    # This is metadata from the native error snapshot, not mutable provider
+    # state. A callback can finish in the gap between native conversion and
+    # this check; the error remains transient even after that happens.
+    return not bool(getattr(exc, '_acquisition_busy', False))
 
 
 def _debug_is_oidc_terminal_for_foreground(exc, oidc_auth):
