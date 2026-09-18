@@ -70,6 +70,39 @@ Sync submodule before building
 
     git submodule update --init --recursive
 
+Changes that span this repo and ``c-questdb-client``
+----------------------------------------------------
+
+A feature that needs a new C-ABI surface lands as a pair: a PR on
+``c-questdb-client`` and a PR here that binds it. While both are open, the
+submodule pin on the Python branch points at the *native PR's head*, which is
+not on the native repo's ``main``. That is normal and expected — it is what
+makes the pair buildable and testable before either side lands. ``.pxd``
+declarations written against the new headers will not compile against the
+current ``main``, and that is the intended state.
+
+The merge order is always:
+
+1. Merge the ``c-questdb-client`` PR first. That repo squash-merges, so the
+   branch head is replaced by a single new commit on ``main``.
+2. Re-point this repo's submodule at that **``main``** commit and push the
+   updated pin.
+3. Merge the Python PR.
+
+Step 2 is not optional: because of the squash, the SHA the Python branch was
+developed against stops being reachable from any branch once the native PR
+merges. Re-pointing is also the moment to confirm the squash did not change
+the tree you tested, which is worth checking explicitly when the native PR
+picked up review fixes late:
+
+.. code-block:: bash
+
+    cd c-questdb-client
+    git fetch origin main
+    # Must be empty: the squashed commit should have the same tree as the
+    # branch head the Python side was built and reviewed against.
+    git diff <native-pr-head> origin/main
+
 Building
 --------
 

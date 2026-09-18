@@ -4,6 +4,7 @@ import select
 import re
 import http.server as hs
 import socketserver
+import sys
 import threading
 import time
 import struct
@@ -127,6 +128,30 @@ class _NoReverseDnsHTTPServer(hs.HTTPServer):
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
+
+class _QuietHTTPServer(_NoReverseDnsHTTPServer):
+    """HTTPServer that stays quiet when a client disconnects abruptly.
+
+    Several tests (e.g. the request-timeout and min-throughput cases) drop the
+    connection mid-request on purpose. The stdlib would otherwise print a
+    harmless but noisy traceback for the resulting connection error -- most
+    visibly on Windows, where the keep-alive read of the next request line
+    raises ConnectionResetError outside of any request handler's try/except.
+    """
+    def handle_error(self, request, client_address):
+        # Suppress ONLY the noise from a client that went away mid-request
+        # (BrokenPipeError on Unix; ConnectionResetError / ConnectionAbortedError
+        # on Windows, incl. the keep-alive read of the next request line, which
+        # raises outside any handler's try/except). Any other error -- including
+        # a ConnectionRefusedError or a genuine handler bug -- still prints, so a
+        # real failure isn't hidden.
+        if isinstance(sys.exc_info()[1],
+                      (BrokenPipeError, ConnectionResetError,
+                       ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
+
+
 class HttpServer:
     def __init__(self, settings=SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3, delay_seconds=0):
         self.delay_seconds = delay_seconds
@@ -168,7 +193,12 @@ class HttpServer:
                         else:
                             self.send_error(404, "Endpoint not found")
                     self.close_connection = False
-                except BrokenPipeError:
+                except ConnectionError:
+                    # The client (sender under test) may disconnect mid-request,
+                    # e.g. in the timeout / min-throughput tests. On Windows this
+                    # surfaces as ConnectionAbortedError/ConnectionResetError
+                    # rather than the BrokenPipeError seen on Unix; both derive
+                    # from ConnectionError.
                     pass
 
             def do_POST(self):
@@ -193,7 +223,12 @@ class HttpServer:
                     if body:
                         self.wfile.write(body)
                     self.close_connection = False
-                except BrokenPipeError:
+                except ConnectionError:
+                    # The client (sender under test) may disconnect mid-request,
+                    # e.g. in the timeout / min-throughput tests. On Windows this
+                    # surfaces as ConnectionAbortedError/ConnectionResetError
+                    # rather than the BrokenPipeError seen on Unix; both derive
+                    # from ConnectionError.
                     pass
 
         return IlpHttpHandler
@@ -201,7 +236,7 @@ class HttpServer:
     def __enter__(self):
         self._stop_event = threading.Event()
         handler_class = self.create_handler()
-        self._http_server = _NoReverseDnsHTTPServer(('', 0), handler_class, bind_and_activate=True)
+        self._http_server = _QuietHTTPServer(('', 0), handler_class, bind_and_activate=True)
         self._http_server.timeout = 30
         self._http_server_thread = threading.Thread(target=self._serve)
         self._http_server_thread.start()

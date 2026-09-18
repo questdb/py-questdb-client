@@ -897,6 +897,311 @@ class TestSchemaOverrides(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_schema_overrides_uuid_swaps_to_wire_order(self):
+        import uuid as uuid_mod
+        value = uuid_mod.UUID('123e4567-e89b-12d3-a456-426614174000')
+        schema = pa.schema([
+            pa.field('u', pa.binary(16)),
+            pa.field('ts', pa.timestamp('us')),
+        ])
+        table = pa.Table.from_pydict({
+            'u': [value.bytes], 'ts': [_ts_us(2025, 1, 1)],
+        }, schema=schema)
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    table,
+                    table_name='uuids',
+                    at='ts',
+                    schema_overrides={'u': 'uuid'})
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(value.bytes[::-1], payload)
+        self.assertNotIn(value.bytes, payload)
+
+    @unittest.skipIf(
+        pa is None or pd is None or not hasattr(pa, 'uuid'),
+        'pandas and pyarrow with arrow.uuid are required')
+    def test_arrow_uuid_extension_uses_the_manual_planner_offline(self):
+        # A pyarrow.Table takes the Rust capsule path, and an all-Arrow pandas
+        # frame can too. Mix in a numpy-backed timestamp so this case reaches
+        # dataframe.pxi and pins its pre-unwrap `arrow.uuid` extension-name gate
+        # as well as the UUID wire byte order.
+        import uuid as uuid_mod
+        value = uuid_mod.UUID('123e4567-e89b-12d3-a456-426614174000')
+        uuid_type = pa.uuid()
+        extension = pa.ExtensionArray.from_storage(
+            uuid_type, pa.array([value.bytes], type=pa.binary(16)))
+        df = pd.DataFrame({
+            'u': pd.array(extension, dtype=pd.ArrowDtype(uuid_type)),
+            'ts': pd.to_datetime([_ts_us(2025, 1, 1)], unit='us'),
+        })
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='uuids_ext', at='ts', symbols=False)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(value.bytes[::-1], payload)
+        self.assertNotIn(value.bytes, payload)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_object_dtype_uuid_column_reaches_the_wire_in_qwp_order(self):
+        # The object-dtype `uuid.UUID` route (_dataframe_columnar_build_uuid_pyobj
+        # -> qwp_numpy_s16) is a DIFFERENT native entry point from the Arrow
+        # routes above, and it was the one changed to hand over canonical RFC
+        # 4122 bytes and rely on native to reverse them. Every other UUID test
+        # drives an Arrow path, so a double reversal or a missed one here would
+        # store every UUID byte-reversed with nothing failing.
+        #
+        # Asserted against concrete bytes rather than a round-trip: a round-trip
+        # through one symmetric transform passes whichever way the bytes run.
+        import uuid as uuid_mod
+        import pandas as pd
+        value = uuid_mod.UUID('123e4567-e89b-12d3-a456-426614174000')
+        df = pd.DataFrame({
+            'u': pd.Series([value], dtype=object),
+            'ts': pd.to_datetime([_ts_us(2025, 1, 1)], unit='us'),
+        })
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='uuids_pyobj', at='ts', symbols=False)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(value.bytes[::-1], payload)
+        self.assertNotIn(value.bytes, payload)
+
+    @unittest.skipIf(pa is None or pd is None, 'pandas and pyarrow required')
+    def test_non_uuid_fsb16_extension_stays_binary(self):
+        # Width 16 plus *any* extension label is not enough to claim UUID. Only
+        # the standard `arrow.uuid` label may trigger the byte reversal; a
+        # third-party fixed-size-binary extension is opaque BINARY.
+        import uuid as uuid_mod
+
+        class Opaque16(pa.ExtensionType):
+            def __init__(self):
+                super().__init__(pa.binary(16), 'example.opaque16')
+
+            def __arrow_ext_serialize__(self):
+                return b''
+
+            @classmethod
+            def __arrow_ext_deserialize__(cls, storage_type, serialized):
+                return cls()
+
+        value = uuid_mod.UUID('123e4567-e89b-12d3-a456-426614174000')
+        opaque_type = Opaque16()
+        extension = pa.ExtensionArray.from_storage(
+            opaque_type, pa.array([value.bytes], type=pa.binary(16)))
+        # Mix in a NumPy timestamp so this reaches dataframe.pxi's manual
+        # planner and directly exercises its extension-name gate.
+        df = pd.DataFrame({
+            'u': pd.array(extension, dtype=pd.ArrowDtype(opaque_type)),
+            'ts': pd.to_datetime([_ts_us(2025, 1, 1)], unit='us'),
+        })
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='opaque_extension', at='ts', symbols=False)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(b'u\x17', payload)
+        self.assertIn(value.bytes, payload)
+        self.assertNotIn(value.bytes[::-1], payload)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_schema_overrides_long256_forwards_verbatim(self):
+        value = bytes(range(32))
+        schema = pa.schema([
+            pa.field('l', pa.binary(32)),
+            pa.field('ts', pa.timestamp('us')),
+        ])
+        table = pa.Table.from_pydict({
+            'l': [value], 'ts': [_ts_us(2025, 1, 1)],
+        }, schema=schema)
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    table,
+                    table_name='long256s',
+                    at='ts',
+                    schema_overrides={'l': 'long256'})
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(value, payload)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_schema_overrides_uuid_rejects_wrong_width(self):
+        schema = pa.schema([
+            pa.field('u', pa.binary(8)),
+            pa.field('ts', pa.timestamp('us')),
+        ])
+        table = pa.Table.from_pydict({
+            'u': [b'\x00' * 8], 'ts': [_ts_us(2025, 1, 1)],
+        }, schema=schema)
+        with QwpAckServer() as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaises(qi.QuestDBError):
+                    client.dataframe(
+                        table,
+                        table_name='t',
+                        at='ts',
+                        schema_overrides={'u': 'uuid'})
+            finally:
+                client.close()
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_unclaimed_fsb16_is_binary_on_the_wire(self):
+        import uuid as uuid_mod
+        value = uuid_mod.UUID('123e4567-e89b-12d3-a456-426614174000')
+        schema = pa.schema([
+            pa.field('u', pa.binary(16)),
+            pa.field('ts', pa.timestamp('us')),
+        ])
+        table = pa.Table.from_pydict({
+            'u': [value.bytes], 'ts': [_ts_us(2025, 1, 1)],
+        }, schema=schema)
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(table, table_name='opaque', at='ts')
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(b'u\x17', payload)
+        self.assertIn(value.bytes, payload)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_unclaimed_fsb32_is_binary_on_the_wire(self):
+        # Width 32 alone claims nothing: without `schema_overrides` the column
+        # is opaque BINARY, not LONG256. Mirrors the FSB(16) case above.
+        value = bytes(range(32))
+        schema = pa.schema([
+            pa.field('l', pa.binary(32)),
+            pa.field('ts', pa.timestamp('us')),
+        ])
+        table = pa.Table.from_pydict({
+            'l': [value], 'ts': [_ts_us(2025, 1, 1)],
+        }, schema=schema)
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(table, table_name='opaque32', at='ts')
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        # column name 'l' followed by the BINARY type byte.
+        self.assertIn(b'l\x17', payload)
+        self.assertIn(value, payload)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_unclaimed_fsb32_is_binary_through_the_manual_planner(self):
+        # Mix in a NumPy timestamp so the column resolves through
+        # dataframe.pxi's manual planner, which is where the width-32
+        # LONG256 auto-claim used to live.
+        value = bytes(range(32, 64))
+        df = pd.DataFrame({
+            'l': pd.array(
+                pa.array([value], type=pa.binary(32)),
+                dtype=pd.ArrowDtype(pa.binary(32))),
+            'ts': pd.to_datetime([_ts_us(2025, 1, 1)], unit='us'),
+        })
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df, table_name='opaque32_mixed', at='ts', symbols=False)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        # column name 'l' followed by the BINARY type byte.
+        self.assertIn(b'l\x17', payload)
+        self.assertIn(value, payload)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_object_dtype_uuid_rejects_a_short_int_to_bytes(self):
+        # `UUID.int` is a plain slot: a subclass or a rebound slot can return
+        # an object whose `to_bytes` is short. The builder memcpys exactly 16
+        # bytes, so the width must be rejected rather than reading adjacent
+        # heap onto the wire. Twin of the query-bind `ShortUuid` guard.
+        import uuid as uuid_mod
+
+        class _ShortInt(int):
+            def to_bytes(self, length, byteorder, *args, **kwargs):
+                return b'\xAA'
+
+        class _NotBytes:
+            def to_bytes(self, length, byteorder, *args, **kwargs):
+                return bytearray(16)
+
+        for bad, expected in ((_ShortInt(0), qi.QuestDBError),
+                              (_NotBytes(), TypeError)):
+            with self.subTest(bad=type(bad).__name__):
+                value = uuid_mod.uuid4()
+                object.__setattr__(value, 'int', bad)
+                df = pd.DataFrame({
+                    'u': pd.Series([value], dtype=object),
+                    'ts': pd.to_datetime([_ts_us(2025, 1, 1)], unit='us'),
+                })
+                with QwpAckServer(record_payloads=True) as server:
+                    client = qi.QuestDB.from_conf(_client_conf(server.port))
+                    try:
+                        with self.assertRaises(expected):
+                            client.dataframe(
+                                df, table_name='bad_uuid', at='ts',
+                                symbols=False)
+                    finally:
+                        client.close()
+                    stats = server.snapshot()
+                for payload in stats['binary_payloads']:
+                    self.assertNotIn(b'\xAA', payload)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_schema_overrides_rejects_unknown_kind(self):
         schema = pa.schema([
             pa.field('x', pa.int64()),

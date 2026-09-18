@@ -26,6 +26,24 @@
 # cython: language_level=3
 # cython: binding=True
 
+# Deliberately NOT `freethreading_compatible=True`. Without it the module
+# declares `Py_MOD_GIL_USED`, so importing it on a free-threaded interpreter
+# re-enables the GIL -- and that is what currently makes parts of this
+# extension safe, notably the OIDC provider's `_renderer`, `_closed` and
+# `_interrupt` slots and the `_WARNED_UNKNOWN_CONNECTION_EVENT`
+# read/modify/write latch, which native callback threads reach without
+# free-threading synchronization. `_OIDC_ERRORS_MOD` is another Python-object
+# read/modify/write cache and likewise relies on the enabled GIL. The paired
+# OIDC registry dictionaries are independently protected by
+# `_OIDC_REGISTRY_LOCK`. Native OIDC raw pointers are published monotonically
+# under the GIL; GIL-released reads are safe only because each caller retains a
+# strong reference to the owning handle/provider until the native call returns.
+# The `cp314t` wheels in the CI matrix are
+# therefore usable but gain no free-threading benefit, and running them under
+# `PYTHON_GIL=0` is unsupported. Making the extension genuinely
+# free-threading safe is a separate piece of work; until then this comment is
+# the record of the decision.
+
 """
 API for fast data ingestion into and querying from QuestDB.
 """
@@ -33,6 +51,7 @@ API for fast data ingestion into and querying from QuestDB.
 __all__ = [
     'ConnectionEvent',
     'ConnectionEventKind',
+    'OidcDeviceAuth',
     'PooledReader',
     'PooledSender',
     'Protocol',
@@ -42,6 +61,7 @@ __all__ = [
     'QuestDBErrorCode',
     'QuestDBServerRejectionError',
     'QwpWsProgress',
+    'SchemaOverride',
     'Sender',
     'SenderError',
     'SenderErrorCategory',
@@ -73,6 +93,7 @@ from cpython.datetime cimport (
 )
 from cpython.bool cimport bool
 from cpython.ref cimport Py_XDECREF
+from cpython.exc cimport PyErr_Clear
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
 from cpython.object cimport PyObject
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
@@ -94,22 +115,45 @@ from ._client_helper cimport *
 ctypedef int void_int
 
 import cython
+
+# Imported before the includes: `oidc.pxi` builds its registry lock and
+# registers its shutdown hook at module scope, and an `include` is a text
+# splice, so anything it evaluates at import time must already be bound here.
+import threading
+import atexit
+# Import logging before oidc.pxi registers its atexit hook. atexit is LIFO:
+# this makes the callback-detach drain run before logging.shutdown(), so a
+# final token-store diagnostic cannot enter an already-closed FileHandler.
+import logging
+
 include "dataframe.pxi"
+include "oidc.pxi"
 include "egress.pxi"
 
 from enum import Enum
-from typing import List, Dict, Union, Any, Optional
+from typing import List, Dict, Literal, Tuple, Union, Any, Optional
+
+#: One ``schema_overrides`` value: a QuestDB column kind to reclassify a
+#: column as. ``'uuid'`` and ``'long256'`` claim binary columns of exactly 16
+#: and 32 bytes respectively; ``('geohash', bits)`` takes 1-60 bits.
+#:
+#: Defined at runtime, not only in `_client.pyi`: it names the type of a public
+#: parameter on three `dataframe()` overloads, so a caller annotating their own
+#: code needs to be able to import it.
+SchemaOverride = Union[
+    Literal['symbol', 'ipv4', 'char', 'uuid', 'long256'],
+    Tuple[Literal['geohash'], int],
+]
 from dataclasses import dataclass
 from cpython.bytes cimport (PyBytes_FromStringAndSize,
                             PyBytes_GET_SIZE, PyBytes_AsString)
 
 import datetime
 import os
-import threading
+import sys
 import time
 import uuid
 import warnings
-import logging
 
 import numpy
 cimport numpy as cnp
@@ -443,7 +487,27 @@ cdef inline object c_err_to_fields(questdb_error* err):
 
 
 cdef inline object c_err_to_py(line_sender_error* err):
-    """Construct a ``QuestDBError`` from a C error, which will be freed."""
+    """Build the Python exception for a C error, which will be freed.
+
+    Returns an ``OidcError`` (from ``questdb.auth``) when the native error has
+    an OIDC failure anywhere in its causal chain -- reachable only on an
+    ``oidc_auth`` transport -- otherwise a plain ``QuestDBError`` subclass.
+
+    Note the native predicate is "caused by", not "is": a transport that
+    re-classifies an error keeps the auth payload attached, so a flush or
+    failover failure whose root cause was a token refresh also lands here, with
+    the transport's own ``code`` and message preserved by
+    ``_oidc_err_to_py``. That is why ``OidcError`` must stay a ``QuestDBError``
+    subclass -- ``except QuestDBError`` keeps catching every such error --
+    while ``except OidcError`` (or a typed subclass) additionally selects the
+    ones an auth failure is behind.
+    """
+    cdef questdb_oidc_error_view oidc_view
+    if err != NULL:
+        memset(&oidc_view, 0, sizeof(questdb_oidc_error_view))
+        oidc_view.struct_size = sizeof(questdb_oidc_error_view)
+        if questdb_error_oidc_get_view(err, &oidc_view):
+            return _oidc_err_to_py(err)
     cdef object tup = c_err_to_fields(err)
     if tup[0] == QuestDBErrorCode.ServerRejection:
         return QuestDBServerRejectionError(
@@ -452,7 +516,41 @@ cdef inline object c_err_to_py(line_sender_error* err):
 
 
 cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
-    """Construct a ``QuestDBError`` from a C error, which will be freed."""
+    """Build the Python exception for a C error, which will be freed.
+
+    Like ``c_err_to_py`` but formats the message through ``fmt`` -- including
+    on the OIDC branch. ``questdb_error_oidc_get_view`` reports an OIDC failure
+    anywhere in the error's *causal chain*, not that the error is one: native
+    keeps the auth payload attached when a transport re-classifies an error on
+    its way out, so a failure whose root cause was a token refresh answers true
+    while its code and message remain the transport's. ``fmt`` is that
+    transport's context, so it applies; the caller cannot tell a pure auth
+    failure from a transport failure an auth error caused, and dropping the
+    context is only ever wrong for the second.
+
+    There are two callers, and the OIDC branch is reachable from one of them:
+
+    * ``Sender.flush`` (in this file) applies ``fmt`` only on the TCP path,
+      where native rejects ``oidc_auth`` outright ("Bearer token providers are
+      supported only for ILP/HTTP(S) and QWP/WebSocket"), so the OIDC branch
+      cannot fire there.
+    * ``_dataframe_handle_auto_flush`` (``dataframe.pxi``) is
+      protocol-agnostic, so an HTTP or QWP sender built with ``oidc_auth=``
+      reaches this with a token failure during an auto-flush, and the
+      ``args`` re-frame below runs in production.
+    """
+    cdef object oidc_exc
+    cdef questdb_oidc_error_view oidc_view
+    if err != NULL:
+        memset(&oidc_view, 0, sizeof(questdb_oidc_error_view))
+        oidc_view.struct_size = sizeof(questdb_oidc_error_view)
+        if questdb_error_oidc_get_view(err, &oidc_view):
+            oidc_exc = _oidc_err_to_py(err)
+            # Re-frame in place: the class and every typed attribute
+            # (.status / .retry_after / .error / .error_description / .code)
+            # must survive, and ``args`` is what ``Exception.__str__`` reads.
+            oidc_exc.args = (fmt.format(str(oidc_exc)),)
+            return oidc_exc
     cdef object tup = c_err_to_fields(err)
     if tup[0] == QuestDBErrorCode.ServerRejection:
         return QuestDBServerRejectionError(
@@ -467,6 +565,65 @@ cdef inline void_int reserve_buffer(
     cdef line_sender_error* err = NULL
     if not line_sender_buffer_reserve(buffer, additional, &err):
         raise c_err_to_py(err)
+
+
+cdef inline bint _is_oidc_terminal_for_foreground(object exc, object oidc_auth):
+    """Whether ``exc`` is an OIDC failure that a foreground retry cannot clear.
+
+    ``OidcInteractionRequired`` alone needs this gate, and it covers three
+    native conditions that are indistinguishable by class *and* by code:
+    ``classify_provider_error`` reclassifies every OIDC ``InteractionRequired``
+    to a retryable ``SocketError``, so ``exc.code`` cannot separate them.
+
+    * Nobody has signed in, and nothing is in flight. Retrying re-polls a
+      provider documented never to prompt, so the call would burn the whole
+      reconnect budget (300s by default) only to raise the same error. Fail
+      fast and let the caller run ``sign_in()``.
+    * A peer ``sign_in()`` holds the acquisition lock, or a renderer callback
+      is mid-paint. Both clear on their own -- the second in milliseconds --
+      and ``oidc.h`` states normatively that a transport "must retry rather
+      than terminalize" for the callback case. Retrying here is what the
+      native side classified the error for.
+
+    Native records which case produced this specific error in its structured
+    OIDC payload. The converted exception carries that immutable classification
+    as ``_acquisition_busy``; consulting the provider's current sign-in state
+    here would race the callback or sign-in finishing between the native return
+    and this Python check.
+
+    Every other OIDC failure is already handled by the caller's code check:
+    ``classify_provider_error`` exempts ``OidcErrorKind::Config`` from the
+    reclassification to ``SocketError``, so an ``OidcConfigError`` arrives with
+    ``ConfigError`` from both native conversion and direct Python construction
+    and is terminal there.
+
+    Resolved without importing: if ``questdb.auth`` was never imported then no
+    OIDC error can exist, so this costs one dict lookup on the ordinary error
+    path, and it cannot re-enter the import of the very module that imports
+    this extension.
+
+    It goes through ``_oidc_errors_module_if_ready`` rather than reading
+    ``sys.modules`` directly so that the class this tests against is the same
+    object the exception was built from. Two independent lookups can disagree
+    after any ``sys.modules`` swap -- leaving ``isinstance`` permanently False
+    and this gate silently disabled -- and a direct read can also observe the
+    module mid-import, where ``OidcInteractionRequired`` does not exist yet and
+    the attribute access would raise over the error being reported.
+    """
+    cdef object mod = _oidc_errors_module_if_ready()
+    if mod is None:
+        return False
+    if not isinstance(exc, mod.OidcInteractionRequired):
+        return False
+    # This is metadata from the native error snapshot, not mutable provider
+    # state. A callback can finish in the gap between native conversion and
+    # this check; the error remains transient even after that happens.
+    return not bool(getattr(exc, '_acquisition_busy', False))
+
+
+def _debug_is_oidc_terminal_for_foreground(exc, oidc_auth):
+    """Internal test hook for the foreground OIDC retry gate."""
+    return bool(_is_oidc_terminal_for_foreground(exc, oidc_auth))
 
 
 cdef object _utf8_decode_error(
@@ -1016,15 +1173,47 @@ cdef class SenderTransaction:
         A commit is also automatic at the end of a successful `with` block.
 
         This will flush the buffer.
+
+        A failed commit still completes the transaction: its rows are
+        discarded, and neither :meth:`commit` nor :meth:`rollback` may be
+        called again.
         """
         if self._complete:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'Transaction already completed, can\'t commit')
         self._sender._in_txn = False
+        # Set before the flush, deliberately: a failed commit is still a
+        # completed transaction. Leaving this False would let a second
+        # commit() -- or `__exit__` on the success path -- find the emptied
+        # buffer and report success for a transaction that never landed.
         self._complete = True
+        # `Sender._close()` drops the buffer without resetting `_in_txn`, so
+        # `close(flush=False)` inside a `with` block leaves `__exit__` to call
+        # commit() on a closed sender. Report that the way row() and
+        # dataframe() already do: an unguarded `len(None)` raises TypeError,
+        # which is not a QuestDBError and so escapes every handler around the
+        # block.
+        if self._sender._buffer is None:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                "commit() can't be called: Sender is closed.")
         if len(self._sender._buffer):
-            self._sender.flush(transactional=True)
+            try:
+                self._sender.flush(transactional=True)
+            except:
+                # Discard the rows here rather than relying on `Sender.flush`
+                # to clear the internal buffer on error. Because the
+                # transaction is already complete, `__exit__` will not roll it
+                # back, so anything left behind would be published by the next
+                # auto-flush, transaction or `close(flush=True)` -- without the
+                # transactional framing this call asked for, and after the
+                # caller was told the commit failed. Keeping the guarantee
+                # local means a future change to flush's error path cannot
+                # silently reintroduce that.
+                if self._sender._buffer is not None:
+                    self._sender._buffer.clear()
+                raise
 
     def rollback(self):
         """
@@ -1337,13 +1526,26 @@ cdef class Buffer:
 
     cdef inline void_int _may_trigger_row_complete(self) except -1:
         cdef PyObject* sender = NULL
+        cdef int got
         if self._row_complete_sender != None:
-            if PyWeakref_GetRef(self._row_complete_sender, &sender):
+            # > 0 (not just truthy): PyWeakref_GetRef returns -1 on error and
+            # leaves the out-pointer NULL, which a truthiness test would enter
+            # the branch on.
+            got = PyWeakref_GetRef(self._row_complete_sender, &sender)
+            if got > 0:
                 try:
                     may_flush_on_row_complete(
                         self, <Sender><object>sender)
                 finally:
                     Py_XDECREF(sender)
+            elif got < 0:
+                # -1 does not just report failure, it *sets* an exception.
+                # Returning 0 from an `except -1` function would leave that
+                # pending on the thread state to surface at some unrelated
+                # later check. Unreachable today -- `_row_complete_sender` is
+                # only ever assigned from `PyWeakref_NewRef` -- so clear it and
+                # carry on rather than failing a row over it.
+                PyErr_Clear()
 
     cdef inline void_int _at_ts_us(self, TimestampMicros ts) except -1:
         cdef line_sender_error* err = NULL
@@ -2147,19 +2349,61 @@ class ConnectionEventKind(TaggedEnum):
     Connection-state transitions observed by the ingress connection pool.
     """
     #: First successful connect of the pool's lifetime.
-    Connected = ('connected', 0)
+    Connected = ('connected', questdb_connection_event_connected)
     #: An active wire connection died.
-    Disconnected = ('disconnected', 1)
+    Disconnected = ('disconnected', questdb_connection_event_disconnected)
     #: Reconnect succeeded against the same endpoint after a failure.
-    Reconnected = ('reconnected', 2)
+    Reconnected = ('reconnected', questdb_connection_event_reconnected)
     #: Reconnect succeeded against a different endpoint.
-    FailedOver = ('failed_over', 3)
+    FailedOver = ('failed_over', questdb_connection_event_failed_over)
     #: One endpoint connect/upgrade attempt failed; the walk moves on.
-    EndpointAttemptFailed = ('endpoint_attempt_failed', 4)
+    EndpointAttemptFailed = (
+        'endpoint_attempt_failed',
+        questdb_connection_event_endpoint_attempt_failed)
     #: Every configured endpoint was attempted and none accepted.
-    AllEndpointsUnreachable = ('all_endpoints_unreachable', 5)
-    #: Terminal: the server rejected credentials.
-    AuthFailed = ('auth_failed', 6)
+    AllEndpointsUnreachable = (
+        'all_endpoints_unreachable',
+        questdb_connection_event_all_endpoints_unreachable)
+    #: Terminal: the server rejected a credential the client presented.
+    #:
+    #: :attr:`ConnectionEvent.host` and :attr:`ConnectionEvent.port` are always
+    #: set, and the owning sender/pool operation raises. A listener may page,
+    #: tear down the pool or exit on this without further qualification.
+    #:
+    #: A credential the client could not *obtain* is
+    #: :attr:`CredentialUnavailable`, never this.
+    AuthFailed = ('auth_failed', questdb_connection_event_auth_failed)
+    #: An ``oidc_auth=`` token provider failed, so no credential was ever
+    #: offered and no endpoint was dialled.
+    #:
+    #: :attr:`ConnectionEvent.host` and :attr:`ConnectionEvent.port` are
+    #: ``None``. Read :attr:`ConnectionEvent.cause_code` to tell a retry from
+    #: a stop:
+    #:
+    #: * ``SocketError`` — the ordinary case, and retryable. The sender keeps
+    #:   reconnecting so queued rows survive while the identity provider
+    #:   recovers or a human signs in, and nothing is raised to the caller.
+    #:   Only a foreground call such as :meth:`QuestDB.dataframe` fails fast,
+    #:   because a credential problem there is the caller's to see.
+    #: * ``AuthError`` or ``ConfigError`` — the provider cannot recover in
+    #:   this process, so the reconnect is **terminal** and the sender stops.
+    #:   Reached by a permanently closed provider
+    #:   (:meth:`~questdb.auth.OidcDeviceAuth.close` is one-way; cancelling one
+    #:   :meth:`~questdb.auth.OidcDeviceAuth.sign_in` attempt does not close it)
+    #:   and by a scope that cannot yield the required token kind, such as
+    #:   ``groups_in_token=True`` against an identity provider that returns no
+    #:   ID token. Queued rows are not deleted — a disk-backed
+    #:   store-and-forward slot stays drainable by a later process — but this
+    #:   process will not send them.
+    #:
+    #: A listener that pages on a permanent stop must therefore qualify on
+    #: ``cause_code``, not on the kind alone.
+    #:
+    #: Counterpart of the Java client's ``QwpCredentialUnavailableException``,
+    #: which is likewise distinct from its terminal ``QwpAuthFailedException``.
+    CredentialUnavailable = (
+        'credential_unavailable',
+        questdb_connection_event_credential_unavailable)
 
 
 @dataclass(frozen=True)
@@ -2244,18 +2488,41 @@ cdef bint _on_dispatch_thread_for(object handler, object listener):
     return False
 
 
+# Latches the first unrecognised connection-event ordinal so a native version
+# emitting one in a loop cannot flood the log.
+cdef bint _WARNED_UNKNOWN_CONNECTION_EVENT = False
+
+
 cdef void _connection_event_dispatch(
         void* user_data,
         const questdb_connection_event* event) noexcept with gil:
+    global _WARNED_UNKNOWN_CONNECTION_EVENT
     listener = <object>user_data
     stack = _dispatch_target_stack()
     stack.append(listener)
     try:
-        kind = ConnectionEventKind.Connected
+        kind = None
         for entry in ConnectionEventKind:
             if entry.c_value == <int>event.kind:
                 kind = entry
                 break
+        if kind is None:
+            # Previously this defaulted to `Connected` and was only overwritten
+            # on a match, so an ordinal this build does not know was delivered
+            # to the listener as a *successful connect* -- inverting the
+            # meaning of, say, a future credential or endpoint failure, and
+            # handing it a cause_code on an event that claims success. Dropping
+            # it is the honest option. The Python enum now binds the header's
+            # constants directly, so only a native newer than this extension can
+            # produce one (impossible at the pinned, statically linked commit,
+            # but possible if packaging ever moves to dynamic linkage).
+            if not _WARNED_UNKNOWN_CONNECTION_EVENT:
+                _WARNED_UNKNOWN_CONNECTION_EVENT = True
+                logging.getLogger('questdb').warning(
+                    'dropping connection event with unrecognised kind %d; '
+                    'the native client is newer than this questdb package',
+                    <int>event.kind)
+            return
         listener(ConnectionEvent(
             kind=kind,
             host=_conn_event_str(event.host, event.host_len),
@@ -2278,6 +2545,18 @@ cdef void _connection_event_dispatch(
         stack.pop()
 
 
+def _debug_connection_event_dispatch(
+        uint32_t kind_ordinal, object listener, bint reset_warning=False):
+    """Internal test seam for forward-compatible event-ordinal handling."""
+    global _WARNED_UNKNOWN_CONNECTION_EVENT
+    cdef questdb_connection_event event
+    if reset_warning:
+        _WARNED_UNKNOWN_CONNECTION_EVENT = False
+    memset(&event, 0, sizeof(questdb_connection_event))
+    event.kind = kind_ordinal
+    _connection_event_dispatch(<void*>listener, &event)
+
+
 cdef void _connection_event_trampoline(
         void* user_data,
         const questdb_connection_event* event) noexcept nogil:
@@ -2292,13 +2571,13 @@ class ServerRole(TaggedEnum):
     """
     Cluster role advertised by the server's ``SERVER_INFO`` handshake.
     """
-    Standalone = ('standalone', 0)
-    Primary = ('primary', 1)
-    Replica = ('replica', 2)
-    PrimaryCatchup = ('primary_catchup', 3)
+    Standalone = ('standalone', qwp_reader_server_role_standalone)
+    Primary = ('primary', qwp_reader_server_role_primary)
+    Replica = ('replica', qwp_reader_server_role_replica)
+    PrimaryCatchup = ('primary_catchup', qwp_reader_server_role_primary_catchup)
     #: Forward-compat: a role byte this client doesn't recognise. The raw
     #: byte is available via :attr:`ServerInfo.role_byte`.
-    Other = ('other', 0xFF)
+    Other = ('other', qwp_reader_server_role_other)
 
 
 @dataclass(frozen=True)
@@ -2936,7 +3215,6 @@ cdef object _dataframe_columnar_plan_failures(
                 col_target_t.col_target_column_i32,
                 col_target_t.col_target_column_f32,
                 col_target_t.col_target_column_uuid,
-                col_target_t.col_target_column_long256,
                 col_target_t.col_target_column_ipv4,
                 col_target_t.col_target_column_binary,
                 col_target_t.col_target_column_arrow):
@@ -3362,7 +3640,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
     cdef size_t buf_bytes = row_count * 16 if row_count > 0 else 16
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
-    cdef object le_bytes
+    cdef bytes be_bytes
     cdef object uuid_cls = _uuid.UUID
 
     try:
@@ -3377,12 +3655,25 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
         for i in range(row_count):
             cell = access[i]
             if isinstance(<object>cell, uuid_cls):
-                # `.int.to_bytes(16, 'little')` produces exactly the
-                # QuestDB UUID wire layout: bytes 0..8 = lo half LE,
-                # bytes 8..16 = hi half LE. One C-implemented call +
-                # one 16-byte memcpy per row.
-                le_bytes = (<object>cell).int.to_bytes(16, 'little')
-                memcpy(buf + i * 16, PyBytes_AsString(le_bytes), 16)
+                # `qwp_numpy_s16` reads canonical RFC 4122 big-endian
+                # rows and byte-swaps them into QWP wire order itself.
+                # `.int.to_bytes(16, 'big')` is what `UUID.bytes`
+                # returns, reached in one C-implemented call + one
+                # 16-byte memcpy per row.
+                #
+                # `int` is a plain slot a subclass can override and a
+                # caller can rebind, so the width is checked before the
+                # memcpy reads exactly 16 bytes: a short result would
+                # otherwise copy adjacent heap onto the wire. Same guard
+                # as the query-bind twin in `egress.pxi`.
+                be_bytes = (<object>cell).int.to_bytes(16, 'big')
+                if PyBytes_GET_SIZE(be_bytes) != 16:
+                    raise QuestDBError(
+                        QuestDBErrorCode.BadDataFrame,
+                        f'Bad column {df_col_name!r} at row {i}: '
+                        f'uuid.UUID.int.to_bytes returned '
+                        f'{PyBytes_GET_SIZE(be_bytes)} bytes, expected 16.')
+                memcpy(buf + i * 16, PyBytes_AsString(be_bytes), 16)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
             elif _dataframe_is_null_pyobj(cell):
@@ -4083,8 +4374,7 @@ cdef void_int _dataframe_columnar_append_field(
             col_target_t.col_target_column_i8,
             col_target_t.col_target_column_i16,
             col_target_t.col_target_column_i32,
-            col_target_t.col_target_column_f32,
-            col_target_t.col_target_column_long256):
+            col_target_t.col_target_column_f32):
         _dataframe_columnar_call_arrow_append(
             chunk, col, row_offset, row_count)
         return 0
@@ -4388,7 +4678,6 @@ cdef void_int _dataframe_columnar_populate_chunk(
                 col_target_t.col_target_column_i32,
                 col_target_t.col_target_column_f32,
                 col_target_t.col_target_column_uuid,
-                col_target_t.col_target_column_long256,
                 col_target_t.col_target_column_ipv4,
                 col_target_t.col_target_column_binary,
                 col_target_t.col_target_column_arrow,
@@ -5023,7 +5312,8 @@ cdef object _validate_schema_overrides(object schema_overrides):
     if not isinstance(schema_overrides, dict):
         raise TypeError(
             'schema_overrides must be a dict mapping column name to '
-            "one of: 'symbol', 'ipv4', 'char', or ('geohash', bits).")
+            "one of: 'symbol', 'ipv4', 'char', 'uuid', 'long256', or "
+            "('geohash', bits).")
     cdef list out = []
     cdef object name, override, kind, value
     cdef int kind_int
@@ -5049,6 +5339,10 @@ cdef object _validate_schema_overrides(object schema_overrides):
             kind_int = <int>qwp_arrow_override_ipv4
         elif kind == 'char':
             kind_int = <int>qwp_arrow_override_char
+        elif kind == 'uuid':
+            kind_int = <int>qwp_arrow_override_uuid
+        elif kind == 'long256':
+            kind_int = <int>qwp_arrow_override_long256
         elif kind == 'geohash':
             if not isinstance(value, int) or value < 1 or value > 60:
                 raise ValueError(
@@ -5059,7 +5353,20 @@ cdef object _validate_schema_overrides(object schema_overrides):
         else:
             raise ValueError(
                 f'schema_overrides[{name!r}] kind {kind!r} not '
-                "in {'symbol', 'ipv4', 'char', 'geohash'}.")
+                "in {'symbol', 'ipv4', 'char', 'uuid', 'long256', "
+                "'geohash'}.")
+        # Only 'geohash' reads the tuple's second element, but the (kind,
+        # value) shape is accepted for every kind -- so ('long256', 32) or
+        # ('uuid', 16) silently dropped the width and worked, which is worse
+        # than failing: the docs print those kinds next to ('geohash', bits),
+        # so writing a width by analogy is the natural mistake and it would
+        # teach an API shape that breaks the moment the argument means
+        # anything. Checked after the dispatch so an unrecognised kind still
+        # gets its own diagnostic.
+        if kind != 'geohash' and value is not None:
+            raise ValueError(
+                f'schema_overrides[{name!r}]: kind {kind!r} takes no '
+                "argument; only 'geohash' does (e.g. ('geohash', 30)).")
         out.append((name.encode('utf-8'), kind_int, arg_int))
     return out
 
@@ -5819,12 +6126,14 @@ cdef void_int _direct_dataframe_run(
         object symbols,
         object at,
         size_t max_rows_per_batch,
-        object schema_overrides) except -1:
+        object schema_overrides,
+        object oidc_auth) except -1:
     cdef uint64_t budget_ms = 0
     cdef double deadline = 0.0
     cdef double remaining = 0.0
     cdef bint committed_prefix = False
     cdef bint nonreplayable_consumed = False
+    cdef bint oidc_terminal_probe_used = False
     cdef object validated_overrides = _validate_schema_overrides(
         schema_overrides)
     if max_rows_per_batch <= 0:
@@ -5892,29 +6201,90 @@ cdef void_int _direct_dataframe_run(
                 &committed_prefix)
             return 0
         except QuestDBError as exc:
+            # An OIDC failure that needs a human is not a transport blip: the
+            # native side classifies it as a retryable SocketError so an
+            # attached transport's background drainer keeps queued frames
+            # alive while someone signs in. A foreground dataframe() call has
+            # no such reason to wait -- retrying re-polls a provider that is
+            # documented never to prompt, so the call would stall for the whole
+            # reconnect budget (300s by default) only to raise the same error.
+            # Usually fail fast and let the caller run sign_in(). One immediate
+            # TOKEN probe closes the race where the error was produced while a
+            # peer sign-in held the lock but Python observes that lock only
+            # after it has completed. Probe the provider directly rather than
+            # rebuilding/re-exporting the whole dataframe just to discover the
+            # same InteractionRequired result. Only a newly available token
+            # justifies replaying data preparation once.
+            if _is_oidc_terminal_for_foreground(exc, oidc_auth):
+                if (oidc_terminal_probe_used or exc.in_doubt
+                        or committed_prefix or nonreplayable_consumed
+                        or oidc_auth is None):
+                    raise
+                oidc_terminal_probe_used = True
+                try:
+                    oidc_auth.token()
+                except QuestDBError as probe_exc:
+                    if _is_oidc_terminal_for_foreground(
+                            probe_exc, oidc_auth):
+                        raise exc
+                    # A different transient provider failure belongs in the
+                    # ordinary bounded-retry path below, with its own type and
+                    # structured OIDC detail preserved.
+                    #
+                    # Every exit below therefore says `raise exc`, never a bare
+                    # `raise`: a bare one re-raises whatever the ENCLOSING
+                    # `except` is handling, and this nested handler completes
+                    # normally, so CPython restores the outer exception state
+                    # before control reaches them. The rebinding above then
+                    # steered the retry decision while the caller still got the
+                    # original error -- an `OidcCancelledError` from a provider
+                    # closed on another thread (AuthError, so it fails the code
+                    # check below) surfaced as the original
+                    # `OidcInteractionRequired`, telling the caller to run
+                    # `sign_in()` on a provider that is closed for good and can
+                    # never produce a token. `raise exc` re-raises the same
+                    # object when nothing was rebound, and keeps the original as
+                    # `__context__` when it was.
+                    exc = probe_exc
+                else:
+                    budget_ms = 0
+                    continue
             # FailoverRetry = transient flush/sync; SocketError = a
             # re-borrow that has not reached a live primary yet.
             if exc.code not in (
                     QuestDBErrorCode.FailoverRetry,
                     QuestDBErrorCode.SocketError):
-                raise
+                raise exc
             # The native operation may have committed a split prefix, or an
             # explicit intermediate sync already committed one. Restarting
             # from row 0 would duplicate it.
             if exc.in_doubt or committed_prefix:
-                raise
+                raise exc
             # A drained one-shot stream has no rows left to replay: retrying
             # would report success while writing nothing.
             if nonreplayable_consumed:
-                raise QuestDBError(
-                    exc.code,
+                # Re-raise the original exception with an appended note rather
+                # than rebuilding it as a bare QuestDBError. Rebuilding dropped
+                # the class: an OIDC token failure reaching here is an
+                # OidcNetworkError / OidcDeviceFlowError / OidcTimeoutError
+                # (each carries a retryable code by design, so it clears both
+                # the terminal-OIDC gate above and the code check below), and
+                # flattening it stopped `except OidcError` from matching and
+                # discarded .status / .retry_after / .error /
+                # .error_description -- the very attributes c_err_to_py
+                # promises are catchable. `args` is what Exception.__str__
+                # reads, and every field lives on the instance, so mutating it
+                # preserves code, in_doubt and sender_error for free. The
+                # f-string is evaluated before the assignment, so it still
+                # interpolates the original message.
+                exc.args = (
                     f'{exc} The input stream was already partially '
                     f'consumed and cannot be replayed; retry with a '
-                    f'fresh reader.',
-                    in_doubt=exc.in_doubt) from exc
+                    f'fresh reader.',)
+                raise exc
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
-                raise
+                raise exc
             budget_ms = <uint64_t>(remaining * 1000.0)
 
 
@@ -5964,8 +6334,17 @@ cdef void_int _capsule_consume_stream_with_hint(
                     f'Materialise to a `pa.Table` '
                     f'(`pa.Table.from_batches(reader)`) or re-batch '
                     f'at the source before passing.')
-            raise QuestDBError(
-                exc.code, f'{exc}\nHint: {hint}') from exc
+            # Append the hint in place rather than rebuilding as a bare
+            # QuestDBError, for the same reason `_direct_dataframe_run` does
+            # (see the note there): rebuilding drops the concrete class -- so
+            # `except QuestDBServerRejectionError` and `except OidcError` stop
+            # matching, along with .sender_error / .status / .retry_after --
+            # and silently resets .in_doubt to False, which the caller above
+            # reads to decide whether replaying could duplicate a landed write.
+            # The f-string is evaluated before the assignment, so it still
+            # interpolates the original message.
+            exc.args = (f'{exc}\nHint: {hint}',)
+            raise
         raise
 
 
@@ -6005,6 +6384,7 @@ cdef class QuestDB:
     cdef bint _closing
     cdef object _connection_listener
     cdef object _error_handler
+    cdef object _oidc_auth
     cdef size_t _cb_refs_key
     cdef auto_flush_mode_t _auto_flush_mode
     cdef bint _auto_flush_bytes_dynamic
@@ -6017,6 +6397,7 @@ cdef class QuestDB:
         self._closing = False
         self._connection_listener = None
         self._error_handler = None
+        self._oidc_auth = None
         self._cb_refs_key = 0
         self._auto_flush_mode.enabled = False
         self._auto_flush_mode.interval = -1
@@ -6053,6 +6434,7 @@ cdef class QuestDB:
     def from_conf(
             str conf_str,
             *,
+            oidc_auth=None,
             connection_listener=None,
             connection_event_inbox_capacity=0,
             error_handler=None,
@@ -6084,9 +6466,14 @@ cdef class QuestDB:
         when the first row enters an empty lease buffer. Auto-triggered
         publishes do not wait for server acknowledgement.
 
-        The underlying connection pool is opened by
-        `questdb_db_connect_with_handlers`.
-        Dataframe ingestion always uses the direct (non-store-and-forward)
+        ``oidc_auth`` attaches a native rotating OIDC token provider. Call its
+        :meth:`~questdb.auth.OidcDeviceAuth.sign_in` method before constructing
+        the pool; connection and reconnect paths never start an interactive
+        device flow.
+
+        The connection pool is opened eagerly unless configuration selects a
+        lazy connection. Dataframe ingestion always uses the direct
+        (non-store-and-forward)
         QWP/WebSocket column sender, independent of ``sf_dir``. On a transient
         connection failure the frame is re-sent from the caller's DataFrame
         only when the failed operation is provably not delivered. A
@@ -6102,7 +6489,10 @@ cdef class QuestDB:
         failures, failover, terminal auth rejection). It runs on a
         dedicated dispatcher thread fed by a bounded inbox
         (``connection_event_inbox_capacity``; ``0`` selects the default
-        of 64) with a drop-oldest overflow policy, so a slow listener
+        of 64 and 65536 is the maximum — a larger value raises
+        :class:`QuestDBError` with ``code`` set to
+        ``QuestDBErrorCode.InvalidApiCall``) with a drop-oldest overflow
+        policy, so a slow listener
         cannot stall ingest or reconnects. Exceptions it raises are
         logged and swallowed. Dropped/delivered totals are available via
         :attr:`connection_events_dropped` /
@@ -6116,7 +6506,10 @@ cdef class QuestDB:
         rows published through a :class:`PooledSender` that was already
         closed. It runs on its own dedicated dispatcher thread fed by a
         bounded inbox (``error_event_inbox_capacity``; ``0`` selects the
-        default of 64, overflow drops the oldest event). Exceptions it
+        default of 64 and 65536 is the maximum — a larger value raises
+        :class:`QuestDBError` with ``code`` set to
+        ``QuestDBErrorCode.InvalidApiCall`` — overflow drops the oldest
+        event). Exceptions it
         raises are logged and swallowed. Without a handler every rejection
         is logged through the ``questdb`` logger instead — ``ERROR`` for
         terminal rejections, ``WARNING`` for retriable ones (the affected
@@ -6156,6 +6549,7 @@ cdef class QuestDB:
         cdef questdb_connection_event_cb connection_event_cb = NULL
         cdef size_t c_event_inbox_capacity
         cdef size_t c_error_inbox_capacity
+        cdef questdb_db_connect_options connect_options
         try:
             protocol, params = parse_conf_str(b, conf_str)
             if protocol not in (Protocol.Ws, Protocol.Wss):
@@ -6203,6 +6597,38 @@ cdef class QuestDB:
                 raise TypeError(
                     '"error_handler" must be callable or None, '
                     f'not {_fqn(type(error_handler))}')
+            if oidc_auth is not None and not isinstance(
+                    oidc_auth, OidcDeviceAuth):
+                raise TypeError(
+                    '"oidc_auth" must be an OidcDeviceAuth or None, '
+                    f'not {_fqn(type(oidc_auth))}')
+            if oidc_auth is not None:
+                # Distinguish the two states the way `_require_open` does: a
+                # NULL handle is a provider whose construction never completed,
+                # which "is closed" misdescribes and sends the caller looking
+                # for a close() they never made.
+                if (<OidcDeviceAuth>oidc_auth)._raw == NULL:
+                    raise ValueError('"oidc_auth" is not initialized')
+                if (<OidcDeviceAuth>oidc_auth)._closed:
+                    raise ValueError('"oidc_auth" is closed')
+            if oidc_auth is not None:
+                # Same conflict as the Sender path, but the fixed credential
+                # arrives as a configuration key here. Name the keys the caller
+                # wrote rather than letting native report the internal provider
+                # key, which exists in no public API.
+                conflicting = [
+                    key for key in ('token', 'username', 'password')
+                    if params.get(key) is not None]
+                if conflicting:
+                    raise QuestDBError(
+                        QuestDBErrorCode.ConfigError,
+                        '"oidc_auth" is mutually exclusive with the '
+                        + ', '.join(f'"{key}"' for key in conflicting)
+                        + ' configuration '
+                        + ('key' if len(conflicting) == 1 else 'keys')
+                        + '. An OIDC provider supplies the credential itself; '
+                        'remove it from the configuration string, or drop '
+                        '"oidc_auth" to keep using it.')
             str_to_utf8(b, <PyObject*>native_conf_str, &c_conf)
             if connection_listener is not None:
                 # Register as part of pool construction so recovery senders
@@ -6220,18 +6646,48 @@ cdef class QuestDB:
             db._error_handler = error_handler
             # Convert to C integers while still holding the GIL: a bad
             # value must raise here, not inside the nogil region below.
+            #
+            # Native validates `event_inbox_capacity` only when an event
+            # callback is installed, and one is installed only for a caller who
+            # passed `connection_listener` -- whereas the rejection callback is
+            # unconditional, so its capacity is always checked. That left the
+            # two keyword arguments the docstring, CHANGELOG and migration
+            # guide describe identically behaving differently. Enforce the
+            # documented cap here so it holds either way.
+            #
+            # Only the upper bound: a negative or non-integral value is left to
+            # the `c_event_inbox_capacity` conversion below, which rejects it
+            # exactly as it already does for `error_event_inbox_capacity`.
+            # Intercepting those here too would make the two keywords raise
+            # different types for the same bad input, which is the asymmetry
+            # this check exists to remove.
+            if (isinstance(connection_event_inbox_capacity, int)
+                    and connection_event_inbox_capacity
+                    > QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY):
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    '"connection_event_inbox_capacity" must be between 0 and '
+                    f'{QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY}, not '
+                    f'{connection_event_inbox_capacity!r}.')
             c_event_inbox_capacity = connection_event_inbox_capacity
             c_error_inbox_capacity = error_event_inbox_capacity
+            questdb_db_connect_options_init(
+                &connect_options, sizeof(questdb_db_connect_options))
+            connect_options.oidc_auth = (
+                (<OidcDeviceAuth>oidc_auth)._raw
+                if oidc_auth is not None else NULL)
+            connect_options.event_callback = connection_event_cb
+            connect_options.event_user_data = connection_listener_data
+            connect_options.event_inbox_capacity = c_event_inbox_capacity
+            connect_options.rejection_callback = _sender_error_trampoline
+            connect_options.rejection_user_data = <void*>db._error_handler
+            connect_options.rejection_inbox_capacity = c_error_inbox_capacity
+            db._oidc_auth = oidc_auth
             _ensure_doesnt_have_gil(&gs)
-            db._db = questdb_db_connect_with_handlers(
+            db._db = questdb_db_connect_ex(
                 c_conf.buf,
                 c_conf.len,
-                connection_event_cb,
-                connection_listener_data,
-                c_event_inbox_capacity,
-                _sender_error_trampoline,
-                <void*>db._error_handler,
-                c_error_inbox_capacity,
+                &connect_options,
                 &err)
             _ensure_has_gil(&gs)
             if db._db == NULL:
@@ -6239,6 +6695,7 @@ cdef class QuestDB:
                 # returning, so the callback targets are now safe to release.
                 db._connection_listener = None
                 db._error_handler = None
+                db._oidc_auth = None
                 raise c_err_to_py(err)
             db._conf_str = conf_str
             db._cb_refs_key = _retain_callback_refs(
@@ -6312,7 +6769,7 @@ cdef class QuestDB:
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
             at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
             max_rows_per_batch: int = DEFAULT_MAX_CHUNK_ROWS,
-            schema_overrides: Optional[Dict[str, object]] = None):
+            schema_overrides: Optional[Dict[str, SchemaOverride]] = None):
         """
         Ingest a dataframe through the pooled columnar QWP path.
 
@@ -6407,14 +6864,25 @@ cdef class QuestDB:
           ``numpy.ndarray`` cells (any rank; requires pyarrow). Both land as
           QuestDB ``ARRAY(DOUBLE)``. Null rows are allowed; null *elements*
           inside an array are not.
-        - **UUID**: ``pa.fixed_size_binary(16)`` and the ``arrow.uuid``
-          extension type. Bytes are forwarded verbatim as **QuestDB's
-          UUID wire layout** ("bytes 0..8 lo half LE, bytes 8..16 hi
-          half LE"), matching the convention shared across the
-          c-questdb-client family (Rust direct, Polars). Round-trip is
-          byte-identity at this layout; users who want
-          ``uuid.UUID.bytes`` (RFC 4122 big-endian) round-trip must
-          convert at their boundary.
+        - **UUID**: object-dtype columns of ``uuid.UUID``, the
+          ``arrow.uuid`` extension type over ``pa.fixed_size_binary(16)``,
+          or any 16-byte binary column claimed with
+          ``schema_overrides={'col': 'uuid'}``. Bytes are **canonical
+          RFC 4122 big-endian** — exactly ``uuid.UUID.bytes`` — and the
+          client byte-swaps them into QWP wire order. Round-trip through
+          :meth:`query <questdb.QuestDB.query>` is byte-identity.
+        - **LONG256**: 32-byte binary columns claimed with
+          ``schema_overrides={'col': 'long256'}``. Bytes are
+          little-endian limbs, least-significant limb first, forwarded
+          verbatim.
+        - **Binary**: object-dtype columns of ``bytes``, ``bytearray``, or
+          C-contiguous one-byte-item ``memoryview`` cells land as BINARY,
+          the same value types :func:`Buffer.row <questdb.ingress.Buffer.row>`
+          accepts. Arrow ``pa.binary()``, ``pa.large_binary()``, and
+          ``pa.fixed_size_binary(n)`` columns also land as BINARY: a
+          16- or 32-byte width on its own claims nothing, so an
+          unlabeled fixed-size column is opaque bytes rather than a
+          UUID or a LONG256. Requires QuestDB 10 or newer.
 
         Server-side coercion handles cross-type writes (e.g. ``pa.string()``
         UUIDs landing in a UUID column are parsed server-side; narrow ints
@@ -6422,11 +6890,16 @@ cdef class QuestDB:
         ``QuestDBError`` from the ``flush()``.
 
         ``schema_overrides`` reclassifies columns by name, mapping each to
-        ``'symbol'``, ``'ipv4'``, ``'char'``, or ``'geohash'`` (e.g.
+        ``'symbol'``, ``'ipv4'``, ``'char'``, ``'uuid'``, ``'long256'``, or
+        ``('geohash', bits)`` (e.g.
         ``{'venue': 'symbol', 'src_ip': 'ipv4'}``). Unknown column names are
-        rejected. It requires the Arrow columnar path (fully Arrow-backed
-        input without ``table_name_col``); on input that falls back to the
-        NumPy planner it raises :class:`UnsupportedDataFrameShapeError`.
+        rejected. An override wins over any Arrow field metadata on its
+        column. ``'uuid'`` and ``'long256'`` apply to fixed-size and
+        variable-length binary columns alike, and every non-null value must
+        be exactly 16 or 32 bytes respectively. It requires the Arrow
+        columnar path (fully Arrow-backed input without ``table_name_col``);
+        on input that falls back to the NumPy planner it raises
+        :class:`UnsupportedDataFrameShapeError`.
         ``max_rows_per_batch`` sets the pipelining granularity, not a
         safety limit: any batch exceeding the negotiated per-batch byte
         cap is split regardless of it, and a single row is never bounded
@@ -6461,7 +6934,8 @@ cdef class QuestDB:
                 symbols,
                 at,
                 max_rows_per_batch,
-                schema_overrides)
+                schema_overrides,
+                self._oidc_auth)
             return self
         finally:
             qdb_pystr_buf_free(b)
@@ -6769,6 +7243,7 @@ cdef class QuestDB:
             with self._state_cond:
                 if closed:
                     self._conf_str = None
+                    self._oidc_auth = None
                 else:
                     self._db = db
                 self._closing = False
@@ -6815,6 +7290,7 @@ cdef class Sender:
     cdef Buffer _buffer
     cdef object _error_handler
     cdef object _connection_listener
+    cdef object _oidc_auth
     cdef auto_flush_mode_t _auto_flush_mode
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
@@ -6834,6 +7310,7 @@ cdef class Sender:
             str username,
             str password,
             str token,
+            object oidc_auth,
             str token_x,
             str token_y,
             object auth_timeout,
@@ -6970,6 +7447,24 @@ cdef class Sender:
                 self._error_handler = None
                 raise c_err_to_py(err)
 
+        # Native validates this capacity only when an event callback is
+        # installed, and one is installed only for a caller who also passed
+        # `connection_listener` -- so without a listener an out-of-range value
+        # was silently discarded, and with one it surfaced as a native
+        # `ConfigError`. Both contradict the documented contract (CHANGELOG
+        # "Callback inbox capacities are capped"), which promises rejection at
+        # connect time with `InvalidApiCall`. Enforce it here so the keyword
+        # behaves the same on `Sender`, `from_conf`, `from_env` and the pool,
+        # listener or not. Upper bound only, for the reason given at the pool's
+        # copy of this check.
+        if (isinstance(connection_event_inbox_capacity, int)
+                and connection_event_inbox_capacity
+                > QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY):
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                '"connection_event_inbox_capacity" must be between 0 and '
+                f'{QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY}, not '
+                f'{connection_event_inbox_capacity!r}.')
         if connection_listener is not None and not callable(
                 connection_listener):
             raise TypeError(
@@ -7009,6 +7504,44 @@ cdef class Sender:
             str_to_utf8(b, <PyObject*>token, &c_token)
             if not line_sender_opts_token(self._opts, c_token, &err):
                 raise c_err_to_py(err)
+
+        if oidc_auth is not None:
+            if not isinstance(oidc_auth, OidcDeviceAuth):
+                raise TypeError(
+                    '"oidc_auth" must be an OidcDeviceAuth or None, '
+                    f'not {_fqn(type(oidc_auth))}')
+            # Distinguish the two states the way `_require_open` does: a NULL
+            # handle is a provider whose construction never completed, which
+            # "is closed" misdescribes and sends the caller looking for a
+            # close() they never made.
+            if (<OidcDeviceAuth>oidc_auth)._raw == NULL:
+                raise ValueError('"oidc_auth" is not initialized')
+            if (<OidcDeviceAuth>oidc_auth)._closed:
+                raise ValueError('"oidc_auth" is closed')
+            # Reject the conflict here, in terms of the parameters the caller
+            # actually wrote. Native enforces it too, but reports the internal
+            # config key it knows -- "qwp_ws_token_provider" or
+            # "http_token_provider" -- which exists in no public API, so a user
+            # who passed oidc_auth= and token= was told about a symbol they
+            # cannot find.
+            _conflicting = [
+                name for name, value in (
+                    ('token', token),
+                    ('username', username),
+                    ('password', password))
+                if value is not None]
+            if _conflicting:
+                raise QuestDBError(
+                    QuestDBErrorCode.ConfigError,
+                    '"oidc_auth" is mutually exclusive with '
+                    + ', '.join(f'"{name}"' for name in _conflicting)
+                    + '. An OIDC provider supplies the credential itself; '
+                    'remove the fixed credential, or drop "oidc_auth" to keep '
+                    'using it.')
+            if not line_sender_opts_oidc_auth(
+                    self._opts, (<OidcDeviceAuth>oidc_auth)._raw, &err):
+                raise c_err_to_py(err)
+            self._oidc_auth = oidc_auth
 
         if token_x is not None:
             str_to_utf8(b, <PyObject*>token_x, &c_token_x)
@@ -7191,6 +7724,7 @@ cdef class Sender:
         self._buffer = None
         self._error_handler = None
         self._connection_listener = None
+        self._oidc_auth = None
         self._auto_flush_mode.enabled = False
         self._last_flush_ms = NULL
         self._init_buf_size = 0
@@ -7208,6 +7742,7 @@ cdef class Sender:
             str username=None,
             str password=None,
             str token=None,
+            object oidc_auth=None,
             str token_x=None,
             str token_y=None,
             object auth_timeout=None,  # default: 15000 milliseconds
@@ -7270,6 +7805,7 @@ cdef class Sender:
                 username,
                 password,
                 token,
+                oidc_auth,
                 token_x,
                 token_y,
                 auth_timeout,
@@ -7306,6 +7842,7 @@ cdef class Sender:
             str username=None,
             str password=None,
             str token=None,
+            object oidc_auth=None,
             str token_x=None,
             str token_y=None,
             object auth_timeout=None,  # default: 15000 milliseconds
@@ -7339,6 +7876,15 @@ cdef class Sender:
 
         Note that any parameters already present in the configuration string
         cannot be overridden.
+
+        ``oidc_auth`` attaches a native rotating OIDC token provider — see
+        :class:`questdb.auth.OidcDeviceAuth` and the :ref:`oidc_auth` guide. It
+        is a Python argument only, with no configuration-string equivalent, and
+        is mutually exclusive with ``token``, ``username`` and ``password``.
+        Call :meth:`~questdb.auth.OidcDeviceAuth.sign_in` before the first
+        flush: connect and reconnect load or silently refresh a token but never
+        start an interactive device flow. Supported on HTTP(S) and
+        QWP/WebSocket; TCP is rejected.
         """
 
         cdef line_sender_error* err = NULL
@@ -7447,6 +7993,7 @@ cdef class Sender:
                 params.get('username'),
                 params.get('password'),
                 params.get('token'),
+                oidc_auth,
                 params.get('token_x'),
                 params.get('token_y'),
                 params.get('auth_timeout'),
@@ -7484,6 +8031,7 @@ cdef class Sender:
             str username=None,
             str password=None,
             str token=None,
+            object oidc_auth=None,
             str token_x=None,
             str token_y=None,
             object auth_timeout=None,  # default: 15000 milliseconds
@@ -7520,6 +8068,13 @@ cdef class Sender:
 
         Note that any parameters already present in the configuration string
         cannot be overridden.
+
+        ``oidc_auth`` attaches a native rotating OIDC token provider — see
+        :class:`questdb.auth.OidcDeviceAuth` and the :ref:`oidc_auth` guide.
+        Because it has no configuration-string equivalent, it is the one
+        credential that must be supplied here rather than through
+        ``QDB_CLIENT_CONF``, and it is mutually exclusive with ``token``,
+        ``username`` and ``password``.
         """
         cdef str conf_str = os.environ.get('QDB_CLIENT_CONF')
         if conf_str is None:
@@ -7532,6 +8087,7 @@ cdef class Sender:
             username=username,
             password=password,
             token=token,
+            oidc_auth=oidc_auth,
             token_x=token_x,
             token_y=token_y,
             auth_timeout=auth_timeout,
@@ -7823,7 +8379,7 @@ cdef class Sender:
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
             at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
             max_rows_per_batch: int = DEFAULT_MAX_CHUNK_ROWS,
-            schema_overrides: Optional[Dict[str, object]] = None):
+            schema_overrides: Optional[Dict[str, SchemaOverride]] = None):
         """
         Write a Pandas DataFrame to QuestDB.
 
@@ -7901,7 +8457,8 @@ cdef class Sender:
                     symbols,
                     at,
                     max_rows_per_batch,
-                    schema_overrides)
+                    schema_overrides,
+                    self._oidc_auth)
                 return self
             finally:
                 qdb_pystr_buf_free(ws_b)
@@ -8029,7 +8586,20 @@ cdef class Sender:
                 # Prevent a follow-up call to `.close(flush=True)` (as is
                 # usually called from `__exit__`) to raise after the sender
                 # entered an error state following a failed call to `.flush()`.
-                # Note: In this case `clear` is always `True`.
+                #
+                # Cleared for every failure, with no carve-out. The internal
+                # buffer is shared state that `may_flush_on_row_complete`,
+                # `SenderTransaction.__enter__` / `.commit()` and
+                # `close(flush=True)` all read as "unflushed rows, publish at
+                # the next opportunity", so rows left here do not wait for the
+                # caller: an auto-flush discards them, a transaction publishes
+                # them without its own transactional framing, and `__exit__`
+                # re-raises. A caller who wants to republish a failed batch
+                # after recovering owns the buffer instead --
+                # `buf = sender.new_buffer()` then `sender.flush(buf,
+                # clear=False)`, which keeps `buf` intact on ANY error and is
+                # invisible to all of the above.
+                # Note: For the internal buffer `clear` is always `True`.
                 line_sender_buffer_clear(c_buf)
             if _is_tcp_protocol(self._c_protocol):
                 # Provide further context pointing to the logs.
@@ -8340,6 +8910,7 @@ cdef class Sender:
         self._buffer = None
         self._error_handler = None
         self._connection_listener = None
+        self._oidc_auth = None
         if self._slot_id != -1:
             qdb_active_senders_track_closed(<uint32_t>self._slot_id)
             self._slot_id = -1
@@ -8617,7 +9188,7 @@ cdef class PooledSender:
             at: Union[ServerTimestampType, int, str, TimestampNanos,
                       datetime.datetime],
             max_rows_per_batch: int = DEFAULT_MAX_CHUNK_ROWS,
-            schema_overrides: Optional[Dict[str, object]] = None):
+            schema_overrides: Optional[Dict[str, SchemaOverride]] = None):
         """
         Bulk-load a whole DataFrame over a direct columnar connection
         borrowed from the pool for the duration of this call.
@@ -8956,6 +9527,38 @@ cdef class PooledReader:
         if handle is not None:
             handle._end_db_use()
 
+    cdef void _release_finalizer_locked(self) noexcept:
+        """Release a GC-owned lease without waiting for a worker cursor."""
+        cdef _ReaderHandle reader = self._reader
+        cdef _CursorHandle last = self._last_cursor
+        cdef QuestDB handle = self._handle
+        cdef int reclaimed = 0
+        if reader is None:
+            return
+        # Clear the lease first so even an unexpected cleanup exception cannot
+        # make a later finalizer repeat active-use accounting.
+        self._reader = None
+        self._last_cursor = None
+        self._handle = None
+        if last is not None:
+            try:
+                reclaimed = last._try_reclaim()
+            except BaseException:
+                reclaimed = -1
+        if reclaimed != -1:
+            # Reclaim owns the cursor lock here, so no operation can still be
+            # using this reader. A busy cursor instead retains `_reader_ref`
+            # until its lock holder finishes; dropping the local references
+            # leaves that cursor responsible for eventual reader teardown.
+            reader._close()
+        if handle is not None:
+            try:
+                handle._end_db_use()
+            except BaseException:
+                # Finalizers cannot propagate. The fields were already cleared,
+                # so retrying would underflow the active-use count.
+                pass
+
     def __enter__(self):
         with self._lock:
             self._check_open('__enter__')
@@ -9044,4 +9647,21 @@ cdef class PooledReader:
     def __dealloc__(self):
         if self._lock is not None:
             with self._lock:
-                self._release_locked()
+                self._release_finalizer_locked()
+
+
+def _debug_new_pooled_reader_finalizer_owner(
+        _CursorHandle cursor_handle, object client=None):
+    """Internal test seam for PooledReader's non-blocking GC path."""
+    cdef PooledReader lease = PooledReader.__new__(PooledReader)
+    cdef _ReaderHandle reader = _ReaderHandle()
+    cdef QuestDB handle
+    cursor_handle._attach(NULL, reader, False)
+    if client is None:
+        lease._attach(None, reader)
+    else:
+        handle = client
+        handle._begin_db_use('_debug_new_pooled_reader_finalizer_owner')
+        lease._attach(handle, reader)
+    lease._last_cursor = cursor_handle
+    return lease
