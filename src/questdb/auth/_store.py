@@ -77,11 +77,20 @@ class FileTokenStore:
     The native client owns all I/O, identity checks, atomic replacement and
     cross-process locking. On POSIX it creates directories with mode ``0700``
     and token files with mode ``0600``. Non-POSIX platforms currently reject
-    persistence before changing disk state because the durable metadata barrier
-    required for rotating refresh tokens is unavailable. Python callers must
-    use in-memory authentication there; custom ``TokenStore`` implementations
-    are currently available only in the Rust API. This Python object carries
-    only the selected directory into :class:`OidcDeviceAuth`.
+    every *credential mutation* (persist, clear) before changing the stored
+    entry, because the durable metadata barrier required for rotating refresh
+    tokens is unavailable; reads stay available so a credential written by
+    another client can still be recovered. Python callers must use in-memory
+    authentication there; custom ``TokenStore`` implementations are currently
+    available only in the Rust API. This Python object carries only the
+    selected directory into :class:`OidcDeviceAuth`.
+
+    A read is coordinated, so the store directory may hold empty lock files
+    (``.store.lock`` and one ``<identity>.lock`` per identity) on every
+    platform, including one where persistence itself is rejected. They are part
+    of the cross-process protocol shared with the Java and native clients --
+    released in place rather than unlinked, so a departing holder cannot delete
+    a successor's lock -- and they never contain credential material.
 
     ``directory`` is expanded (``~``) and made absolute at construction, so a
     later :func:`os.chdir` cannot move the store; read back the resolved value

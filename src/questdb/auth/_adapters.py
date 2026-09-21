@@ -56,6 +56,24 @@ _DEFAULT_PG_PORT = 8812
 _DEFAULT_DATABASE = 'qdb'
 _AUTO_SSLMODE = 'auto'
 
+# libpq / driver parameters that decide WHERE the connection goes -- and
+# therefore WHO receives the bearer token these adapters inject as the password.
+# The adapter owns the destination: it validates `url` / `host=` / `pg_port=`
+# (see `_require_host`) and then hands the token to exactly that peer. A
+# destination parameter smuggled in through the driver passthrough would be
+# applied AFTER that validation -- SQLAlchemy merges `connect_args` over the
+# dialect's own arguments (`cparams.update(connect_args)` in `create_engine`) --
+# so `connect_args={'host': 'other.example'}` would send the token to a host the
+# adapter never vetted. sslmode is deliberately NOT in this set: overriding the
+# TLS policy is a documented escape hatch, and it cannot redirect the token.
+#
+#   * host / hostaddr  -- the peer (hostaddr bypasses name resolution entirely);
+#   * port             -- the peer's port;
+#   * service          -- a pg_service.conf entry that can supply host/hostaddr;
+#   * dsn / conninfo   -- a whole connection string, i.e. all of the above.
+_DESTINATION_PARAMS = frozenset({
+    'host', 'hostaddr', 'port', 'service', 'dsn', 'conninfo'})
+
 
 def _safe_urlparse(url: str) -> urllib.parse.ParseResult:
     try:
@@ -192,6 +210,62 @@ def _coerce_port(pg_port: Any) -> int:
     return port
 
 
+def _destination_overrides(params: Any) -> list:
+    """The destination-changing keys present in a driver passthrough mapping."""
+    if not params:
+        return []
+    try:
+        keys = list(params)
+    except TypeError:
+        # Not a mapping/iterable: leave it to the driver, which will report it
+        # far more precisely than a guess here could.
+        return []
+    return sorted(
+        str(key) for key in keys
+        if isinstance(key, str) and key.lower() in _DESTINATION_PARAMS)
+
+
+def _reject_destination_overrides(params: Any, passthrough: str) -> None:
+    """Refuse a driver passthrough that re-points the connection.
+
+    Raised BEFORE any token is acquired, so a redirected connection never even
+    reaches the point where the credential would be attached.
+    """
+    offending = _destination_overrides(params)
+    if not offending:
+        return
+    raise OidcConfigError(
+        f'{passthrough} must not set the connection destination '
+        f'({", ".join(offending)}). The token these adapters inject is a '
+        'bearer credential, so the destination is validated up front from '
+        '`url` / `host=` / `pg_port=` and a passthrough value applied after '
+        'that check could send the token to an unvetted peer. Pass '
+        '`host=` and `pg_port=` to the adapter instead.')
+
+
+def _require_expected_destination(
+        cparams: Any, host: str, port: int) -> None:
+    """Fail closed if the driver arguments no longer name the vetted peer.
+
+    Defence in depth for SQLAlchemy: `connect_args` is rejected up front, but
+    the final ``do_connect`` arguments are what the driver actually dials, and
+    they can also be rewritten by an application's own ``do_connect`` listener
+    registered before this one. Checked on every physical connection, just
+    before the token is attached.
+    """
+    offending = _destination_overrides(cparams)
+    for key in offending:
+        value = cparams[key]
+        if key.lower() == 'host' and value == host:
+            continue
+        if key.lower() == 'port' and str(value) == str(port):
+            continue
+        raise OidcConfigError(
+            f'refusing to send the OIDC token: the connection arguments set '
+            f'{key}={value!r}, which does not match the destination this '
+            f'adapter validated ({host}:{port}).')
+
+
 def _is_numeric_loopback_host(host: str) -> bool:
     """Whether ``host`` is a numeric loopback IP literal."""
     bare = host[:-1] if host.endswith('.') else host
@@ -252,10 +326,18 @@ def sqlalchemy_engine(
         to override this policy, or ``None`` to manage TLS entirely through
         ``connect_args`` / the environment. An ``sslmode`` in ``connect_args``
         always wins.
-    :param engine_kwargs: Forwarded to ``create_engine``.
+    :param engine_kwargs: Forwarded to ``create_engine``. ``connect_args`` must
+        not carry a connection *destination* (``host``, ``hostaddr``, ``port``,
+        ``service``, ``dsn``, ``conninfo``): SQLAlchemy merges ``connect_args``
+        over the arguments built from the validated URL, so such a value would
+        re-point the connection — and the bearer token travelling as its
+        password — at a peer this adapter never vetted. Use ``host=`` and
+        ``pg_port=`` instead.
     :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
         has no host; if the resolved host carries connection-string
-        metacharacters; or if ``pg_port`` is not a valid TCP port.
+        metacharacters; if ``pg_port`` is not a valid TCP port; or if
+        ``connect_args`` (or a foreign ``do_connect`` listener) sets a
+        connection destination other than the validated one.
     :raises OidcError: if token acquisition fails while SQLAlchemy opens a
         connection.
     :raises ImportError: if SQLAlchemy or a PostgreSQL driver is unavailable.
@@ -265,6 +347,10 @@ def sqlalchemy_engine(
     resolved_host = _require_host(url, host)
     sslmode = _effective_sslmode(resolved_host, sslmode)
     pg_port = _coerce_port(pg_port)
+    # Before the engine exists and long before a token is acquired: the URL is
+    # validated, so the passthrough must not be able to move the destination.
+    _reject_destination_overrides(
+        engine_kwargs.get('connect_args'), 'connect_args')
     try:
         from sqlalchemy import create_engine, event
         from sqlalchemy.engine import URL
@@ -291,6 +377,11 @@ def sqlalchemy_engine(
 
     @event.listens_for(engine, 'do_connect')
     def _provide_token(dialect, conn_rec, cargs, cparams):  # noqa: ANN001
+        # These are the arguments the driver will actually dial. Confirm they
+        # still name the vetted peer BEFORE the bearer token is attached, so
+        # neither a passthrough nor an earlier do_connect listener can turn a
+        # validated destination into an unvetted one.
+        _require_expected_destination(cparams, resolved_host, pg_port)
         # Non-interactive: reuse / silently refresh the up-front token, but never
         # run an interactive device flow from a pool thread (it would block the
         # pool). Raises OidcInteractionRequired if no token was acquired first.
@@ -338,10 +429,15 @@ def psycopg_connect(
         to override this policy, or ``None`` to manage TLS entirely through
         ``connect_kwargs`` / the environment. An ``sslmode`` in
         ``connect_kwargs`` always wins.
-    :param connect_kwargs: Forwarded to the driver's ``connect()``.
+    :param connect_kwargs: Forwarded to the driver's ``connect()``. As with
+        :func:`sqlalchemy_engine`, a connection *destination* (``host``,
+        ``hostaddr``, ``port``, ``service``, ``dsn``, ``conninfo``) is rejected:
+        the token is a bearer credential and only the validated peer may
+        receive it. Use ``host=`` and ``pg_port=`` instead.
     :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
         has no host; if the resolved host carries connection-string
-        metacharacters; or if ``pg_port`` is not a valid TCP port.
+        metacharacters; if ``pg_port`` is not a valid TCP port; or if
+        ``connect_kwargs`` sets a connection destination.
     :raises OidcError: if token acquisition fails.
     :raises ImportError: if neither psycopg nor psycopg2 is installed.
         Driver connection, TLS and server-authentication exceptions otherwise
@@ -350,6 +446,10 @@ def psycopg_connect(
     resolved_host = _require_host(url, host)
     sslmode = _effective_sslmode(resolved_host, sslmode)
     pg_port = _coerce_port(pg_port)
+    # `host=`/`port=` here would be a bare TypeError (duplicate keyword), but
+    # `hostaddr` / `service` / `dsn` / `conninfo` would silently redirect the
+    # connection. Rejected together, as one typed error, before `auth.token()`.
+    _reject_destination_overrides(connect_kwargs, 'connect_kwargs')
     mod = _pg_module()
     token = auth.token()
     if sslmode is not None:

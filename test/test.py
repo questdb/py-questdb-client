@@ -2582,16 +2582,22 @@ class TestQwpWebSocketApi(unittest.TestCase):
         df = pd.DataFrame({'x': ['a']})
         sender = qi.Sender(qi.Protocol.Ws, '127.0.0.1', 1)
         try:
+            # The tuple SHAPE is what 'geohash' reserves, so a second element
+            # of None is rejected exactly like a width: `('uuid', None)` is the
+            # same documented-invalid shape, and accepting it left the rule in
+            # `SchemaOverride` / the changelog true of one spelling only.
             for kind in ('symbol', 'long256', 'uuid'):
-                with self.assertRaisesRegex(
-                        ValueError,
-                        rf"schema_overrides\['x'\]: kind {kind!r} takes no "
-                        r"argument; only 'geohash' does"):
-                    sender.dataframe(
-                        df,
-                        table_name='t',
-                        at=qi.ServerTimestamp,
-                        schema_overrides={'x': (kind, 16)})
+                for argument in (16, None):
+                    with self.subTest(kind=kind, argument=argument):
+                        with self.assertRaisesRegex(
+                                ValueError,
+                                rf"schema_overrides\['x'\]: kind {kind!r} "
+                                r"takes no argument; only 'geohash' does"):
+                            sender.dataframe(
+                                df,
+                                table_name='t',
+                                at=qi.ServerTimestamp,
+                                schema_overrides={'x': (kind, argument)})
             # 'geohash' still takes its argument, and an unrecognised kind
             # still gets the dispatch diagnostic, not the one above.
             with self.assertRaisesRegex(ValueError, 'nonsense'):

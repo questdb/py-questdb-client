@@ -194,8 +194,10 @@ Both are rejected rather than silently resolved. A path passed straight to
 expanded and absolutised as usual. The native client writes plaintext JSON
 using atomic replacement and cross-process coordination; on POSIX, directories
 are mode ``0700`` and files mode ``0600``. Non-POSIX platforms currently reject
-file-store persistence before changing disk state because they lack the durable
-metadata barrier required for safe refresh-token rotation. Python callers must
+file-store *mutations* before changing the stored entry because they lack the
+durable metadata barrier required for safe refresh-token rotation; reads remain
+available, so the coordination protocol may still leave empty ``.lock`` files
+(never credential material) in the store directory there. Python callers must
 use in-memory authentication there; custom keychain-backed stores are currently
 available only through the Rust ``TokenStore`` API. Every failed store operation
 is logged at ``WARNING`` on the ``questdb`` logger during normal operation.
@@ -249,6 +251,13 @@ so local QuestDB is accepted with or without TLS. ``localhost`` retains
 
 Pass ``sslmode=None`` to set nothing and manage TLS through the environment or
 a service file; an ``sslmode`` you supply yourself always wins.
+
+The adapters own the connection *destination*: it comes from the validated URL
+or from ``host=`` / ``pg_port=``. A destination in the driver passthrough
+(``host``, ``hostaddr``, ``port``, ``service``, ``dsn`` or ``conninfo`` in
+``connect_args`` / ``connect_kwargs``) is rejected with ``OidcConfigError``
+before any token is acquired, because the token is a bearer credential and
+SQLAlchemy applies ``connect_args`` *after* the arguments built from that URL.
 
 Missing SQLAlchemy or PostgreSQL-driver dependencies raise ``ImportError``.
 Token acquisition failures from either adapter raise ``OidcError``; SQLAlchemy,

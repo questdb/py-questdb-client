@@ -55,9 +55,13 @@ class OidcError(QuestDBError):
     ``ConfigError`` for a misconfiguration. Retry logic that keys on ``code``
     therefore treats an OIDC failure exactly as it treats any other.
 
-    ``status`` is the HTTP status behind a non-JSON IdP response when known,
-    otherwise ``None``. ``retry_after`` is the parsed ``Retry-After`` delay in
-    seconds for a non-JSON 429/503 response when present, otherwise ``None``.
+    ``status`` is the HTTP status of the failing IdP response when known,
+    otherwise ``None`` (a failure with no HTTP exchange behind it — a transport
+    error, a cancellation, a misconfiguration). ``retry_after`` is the parsed
+    ``Retry-After`` delay in seconds when the response carried one, otherwise
+    ``None``. Both are populated whether or not the IdP answered with a JSON
+    OAuth error body: a JSON ``429 slow_down`` with ``Retry-After: 7`` reports
+    ``status == 429`` and ``retry_after == 7``, just as an HTML error page does.
     """
 
     #: Code reported when a raise site does not supply one. Native-built
@@ -115,12 +119,13 @@ class OidcError(QuestDBError):
             sender_error,
             in_doubt=in_doubt)
         self.args = args
-        #: HTTP status behind a non-JSON HTTP response, otherwise ``None``.
-        #: This lets a poll or silent-refresh caller distinguish a terminal 4xx
-        #: response (for example, a WAF page) from a transient 5xx/429 failure.
+        #: HTTP status of the failing IdP response, otherwise ``None``. Set for
+        #: a JSON OAuth error body as well as for a non-JSON one (an HTML WAF
+        #: page), so a poll or silent-refresh caller can distinguish a terminal
+        #: 4xx from a transient 5xx/429 in both shapes.
         self.status = status
-        #: Parsed ``Retry-After`` delta-seconds from a non-JSON 429/503 response,
-        #: otherwise ``None``.
+        #: Parsed ``Retry-After`` delta-seconds when the failing response
+        #: carried the header (typically 429/503), otherwise ``None``.
         self.retry_after = retry_after
 
 

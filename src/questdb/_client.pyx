@@ -5318,6 +5318,7 @@ cdef object _validate_schema_overrides(object schema_overrides):
     cdef object name, override, kind, value
     cdef int kind_int
     cdef int arg_int
+    cdef bint is_tuple
     for name, override in schema_overrides.items():
         if not isinstance(name, str):
             raise TypeError(
@@ -5326,8 +5327,10 @@ cdef object _validate_schema_overrides(object schema_overrides):
         if isinstance(override, str):
             kind = override
             value = None
+            is_tuple = False
         elif isinstance(override, tuple) and len(override) == 2:
             kind, value = override
+            is_tuple = True
         else:
             raise TypeError(
                 f'schema_overrides[{name!r}] has invalid shape '
@@ -5363,10 +5366,17 @@ cdef object _validate_schema_overrides(object schema_overrides):
         # teach an API shape that breaks the moment the argument means
         # anything. Checked after the dispatch so an unrecognised kind still
         # gets its own diagnostic.
-        if kind != 'geohash' and value is not None:
+        #
+        # Keyed on the SHAPE, not on the argument's value: `('uuid', None)`
+        # carries no width either, so a `value is not None` test accepted it
+        # and let exactly the tuple form the public `SchemaOverride` type and
+        # the changelog reserve for 'geohash' through unchecked -- leaving the
+        # documented rule true of `('uuid', 16)` but not of its `None` twin.
+        if is_tuple and kind != 'geohash':
             raise ValueError(
                 f'schema_overrides[{name!r}]: kind {kind!r} takes no '
-                "argument; only 'geohash' does (e.g. ('geohash', 30)).")
+                "argument; only 'geohash' does (e.g. ('geohash', 30)). "
+                f'Write {kind!r} on its own.')
         out.append((name.encode('utf-8'), kind_int, arg_int))
     return out
 

@@ -1223,6 +1223,42 @@ class TestSchemaOverrides(unittest.TestCase):
                 client.close()
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_schema_overrides_rejects_a_tuple_for_a_plain_kind(self):
+        # On the Arrow path -- the only path that APPLIES schema_overrides --
+        # the (kind, value) tuple belongs to 'geohash' alone. A `None` second
+        # element is the same invalid shape as a width: accepting it sent the
+        # column happily and taught an API shape the public `SchemaOverride`
+        # type and the changelog both rule out.
+        schema = pa.schema([
+            pa.field('u', pa.binary(16)),
+            pa.field('ts', pa.timestamp('us')),
+        ])
+        table = pa.Table.from_pydict({
+            'u': [b'\x00' * 16, b'\x11' * 16],
+            'ts': [_ts_us(2025, 1, 1), _ts_us(2025, 1, 2)],
+        }, schema=schema)
+        with QwpAckServer() as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                for override in (('uuid', None), ('uuid', 16)):
+                    with self.subTest(override=override):
+                        with self.assertRaisesRegex(
+                                ValueError, 'takes no argument'):
+                            client.dataframe(
+                                table,
+                                table_name='t',
+                                at='ts',
+                                schema_overrides={'u': override})
+                # The plain spelling still works.
+                client.dataframe(
+                    table, table_name='t', at='ts',
+                    schema_overrides={'u': 'uuid'})
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_schema_overrides_rejects_bad_geohash_bits(self):
         schema = pa.schema([
             pa.field('loc', pa.int32()),

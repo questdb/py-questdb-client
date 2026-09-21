@@ -195,9 +195,10 @@ Highlights:
 * Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes plaintext
   credentials atomically and coordinates refresh across processes. Its
   directories/files are owner-only (``0700``/``0600``) on Unix. Non-Unix
-  platforms reject mutation before changing disk state until an equivalent
-  durable metadata barrier is available; in-memory authentication remains
-  available there.
+  platforms reject mutation before changing the stored entry until an
+  equivalent durable metadata barrier is available; reads, and therefore the
+  empty ``.lock`` files of the shared coordination protocol, remain available,
+  as does in-memory authentication.
   Its directory is overridable with the
   ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` environment variable, shared with the
   native client. Custom Python token stores are not supported by the native
@@ -224,7 +225,12 @@ Highlights:
   ``prefer`` instead, so a local QuestDB without TLS still works; the name
   ``localhost`` does **not** — it keeps ``verify-full``, because its resolved
   addresses are not pinned. Use a numeric literal for local development, or
-  pass an explicit ``sslmode``.
+  pass an explicit ``sslmode``. Both adapters own the connection destination:
+  a ``host``, ``hostaddr``, ``port``, ``service``, ``dsn`` or ``conninfo`` in
+  the driver passthrough (``connect_args`` / ``connect_kwargs``) raises
+  ``OidcConfigError`` before any token is acquired, because the token is a
+  bearer credential and SQLAlchemy merges ``connect_args`` over the arguments
+  built from the validated URL. Pass ``host=`` / ``pg_port=`` instead.
 * :meth:`~questdb.auth.OidcDeviceAuth.close` permanently closes a provider and
   cancels a device flow, silent-refresh coordination, or token-store lock wait
   running on another thread; ``OidcDeviceAuth`` is also a context manager.

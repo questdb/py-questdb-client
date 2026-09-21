@@ -733,7 +733,19 @@ class NativeOidcTest(unittest.TestCase):
                     auth.sign_in()
                 self.assertEqual(server.requests('/device', 'POST'), [])
                 self.assertEqual(renderer.prompts, [])
-                self.assertEqual(os.listdir(directory), [])
+                # No CREDENTIAL may be written: durability is exactly what
+                # this platform cannot provide. The empty `.lock` files of the
+                # cross-process protocol (`.store.lock`, `<identity>.lock`)
+                # belong to the READS that deliberately stay available here;
+                # they are released in place rather than unlinked (so a
+                # departing holder cannot delete a successor's lock) and never
+                # hold credential material. Assert on the entries, not on an
+                # empty directory.
+                entries = os.listdir(directory)
+                self.assertEqual(
+                    [name for name in entries if not name.endswith('.lock')],
+                    [],
+                    f'the rejected store wrote a non-lock entry: {entries}')
 
     def test_exit_hook_silences_diagnostics_without_closing_providers(self):
         self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
@@ -4424,6 +4436,116 @@ class AdapterTest(unittest.TestCase):
                     _adapters.psycopg_connect(auth, url)
             auth.token.assert_not_called()
             driver.connect.assert_not_called()
+
+    def test_adapters_reject_a_destination_in_the_driver_passthrough(self):
+        # The token is a bearer credential, so only the peer validated from
+        # `url` / `host=` / `pg_port=` may receive it. SQLAlchemy merges
+        # `connect_args` OVER the arguments built from that URL
+        # (`cparams.update(connect_args)` in `create_engine`), so a destination
+        # smuggled in there would redirect the connection -- and the password
+        # -- to an unvetted host. Rejected up front, before any token exists.
+        sqlalchemy = types.ModuleType('sqlalchemy')
+        sqlalchemy.create_engine = mock.Mock()
+        sqlalchemy.event = mock.Mock()
+        sqlalchemy_engine_module = types.ModuleType('sqlalchemy.engine')
+        sqlalchemy_engine_module.URL = mock.Mock()
+        modules = {
+            'sqlalchemy': sqlalchemy,
+            'sqlalchemy.engine': sqlalchemy_engine_module,
+        }
+        url = 'https://questdb.example.com:9000'
+        for key, value in (
+                ('host', 'other.example'),
+                ('hostaddr', '203.0.113.9'),
+                ('port', 5432),
+                ('service', 'elsewhere'),
+                ('dsn', 'host=other.example'),
+                ('conninfo', 'host=other.example'),
+                ('HOST', 'other.example')):  # libpq keys are case-insensitive
+            with self.subTest(key=key):
+                auth = mock.Mock()
+                with mock.patch.dict(sys.modules, modules):
+                    with self.assertRaisesRegex(
+                            OidcConfigError, 'connection destination'):
+                        _adapters.sqlalchemy_engine(
+                            auth, url, connect_args={key: value})
+                auth.token.assert_not_called()
+                sqlalchemy.create_engine.assert_not_called()
+
+                if key == 'host':
+                    # `host=` is psycopg_connect's OWN parameter (the
+                    # documented, validated override), not a passthrough.
+                    continue
+                auth = mock.Mock()
+                driver = mock.Mock()
+                with mock.patch.object(
+                        _adapters, '_pg_module', return_value=driver):
+                    with self.assertRaisesRegex(
+                            OidcConfigError, 'connection destination'):
+                        _adapters.psycopg_connect(auth, url, **{key: value})
+                auth.token.assert_not_called()
+                driver.connect.assert_not_called()
+
+        # A non-destination passthrough (the documented TLS escape hatch) is
+        # untouched by the guard.
+        auth = mock.Mock()
+        auth.token.return_value = 'TOKEN'
+        driver = mock.Mock()
+        with mock.patch.object(_adapters, '_pg_module', return_value=driver):
+            _adapters.psycopg_connect(
+                auth, url, sslrootcert='/etc/ssl/questdb-ca.pem')
+        self.assertEqual(
+            driver.connect.call_args.kwargs['host'], 'questdb.example.com')
+        self.assertEqual(
+            driver.connect.call_args.kwargs['sslrootcert'],
+            '/etc/ssl/questdb-ca.pem')
+
+    def test_sqlalchemy_listener_refuses_to_token_a_redirected_connection(self):
+        # Defence in depth for the arguments the driver actually dials: an
+        # application's own `do_connect` listener registered before this one can
+        # rewrite cparams after `connect_args` was vetted. The token must not be
+        # attached to a destination that no longer matches the validated peer.
+        engine = types.SimpleNamespace(listeners={})
+        sqlalchemy = types.ModuleType('sqlalchemy')
+        sqlalchemy.create_engine = mock.Mock(return_value=engine)
+
+        class Event:
+            @staticmethod
+            def listens_for(target, name):
+                def register(listener):
+                    target.listeners[name] = listener
+                    return listener
+                return register
+
+        class URL:
+            create = mock.Mock(return_value='postgresql-url')
+
+        sqlalchemy.event = Event
+        sqlalchemy_engine_module = types.ModuleType('sqlalchemy.engine')
+        sqlalchemy_engine_module.URL = URL
+        modules = {
+            'sqlalchemy': sqlalchemy,
+            'sqlalchemy.engine': sqlalchemy_engine_module,
+        }
+        auth = mock.Mock()
+        auth.token.return_value = 'SECRET-BEARER'
+        with mock.patch.dict(sys.modules, modules):
+            returned = _adapters.sqlalchemy_engine(
+                auth,
+                'https://questdb.example.com:9000',
+                drivername='postgresql+test')
+        listener = returned.listeners['do_connect']
+
+        redirected = {'host': 'other.example', 'port': 8812}
+        with self.assertRaisesRegex(OidcConfigError, 'refusing to send'):
+            listener(None, None, [], redirected)
+        auth.token.assert_not_called()
+        self.assertNotIn('password', redirected)
+
+        # The validated destination still gets its token.
+        expected = {'host': 'questdb.example.com', 'port': 8812}
+        listener(None, None, [], expected)
+        self.assertEqual(expected['password'], 'SECRET-BEARER')
 
     def test_sqlalchemy_rejects_unsafe_url_before_token_or_engine(self):
         sqlalchemy = types.ModuleType('sqlalchemy')
