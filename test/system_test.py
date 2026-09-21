@@ -3818,6 +3818,42 @@ class TestEgressQwpRowTypes(unittest.TestCase):
                 except Exception:
                     pass
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_numpy_egress_keeps_byte_aligned_geohash_max(self):
+        """The all-ones value of a byte-aligned GEOHASH is not NULL in
+        the native NumPy reader path."""
+        table_name = 't_gh_max_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, gh GEOHASH(8b)) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                with client.sender() as sender:
+                    sender.row(
+                        table_name,
+                        columns={'gh': qi.Geohash(0xff, 8)},
+                        at=qi.TimestampMicros(1))
+                    sender.row(
+                        table_name,
+                        columns={'gh': qi.Geohash(0, 8)},
+                        at=qi.TimestampMicros(2))
+                    sender.flush(wait=True)
+                self.qdb_plain.retry_check_table(table_name, min_rows=2)
+                frame = client.query(
+                    f'SELECT gh FROM {table_name} ORDER BY ts').to_pandas()
+
+            self.assertEqual(frame['gh'].dtype, np.dtype(np.int16))
+            self.assertEqual(frame['gh'].tolist(), [255, 0])
+            self.assertEqual(
+                frame.attrs['questdb']['columns']['gh'],
+                {'kind': 'geohash', 'precision_bits': 8})
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def test_geohash_claim_survives_convert_dtypes_to_pyarrow(self):
         """A GEOHASH column keeps its type through
         ``to_pandas()`` followed by
