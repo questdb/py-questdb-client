@@ -81,8 +81,11 @@ from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
 from cpython.object cimport PyObject, PyTypeObject, PyObject_TypeCheck
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
     PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
-from cpython.pycapsule cimport (PyCapsule_GetPointer, PyCapsule_IsValid,
+from cpython.pycapsule cimport (PyCapsule_Destructor,
+                                PyCapsule_GetPointer, PyCapsule_IsValid,
                                 PyCapsule_New)
+from cpython.pythread cimport (PyThread_tss_create, PyThread_tss_get,
+                               PyThread_tss_set)
 from cpython.ref cimport Py_INCREF, Py_DECREF
 
 from .line_sender cimport *
@@ -2994,38 +2997,151 @@ cdef bint _dispatching_for(object owner_token):
     return depths.get(owner_token, 0) != 0
 
 
-cdef dict _call_depths(bint create):
-    cdef object depths = getattr(_THREAD_OWNER_STATE, 'call_depths', None)
-    if depths is None and create:
-        depths = {}
-        _THREAD_OWNER_STATE.call_depths = depths
-    return depths
+# Scoped call depths live in native thread-local storage, keyed by owner
+# token identity, because `row()` raises and lowers one on every row: the
+# whole table is reached through a single `PyThread_tss_get`, and the
+# per-owner entry through a scan of the handful of owners a thread has
+# calls in progress on. The key is process-wide -- OS TLS keys are a
+# capped process resource, so one per handle exhausts them -- and holds a
+# table per thread rather than a single count, which is what keeps the
+# per-handle identity the dispatch registry also needs.
+cdef Py_tss_t _SCOPED_DEPTH_KEY
+
+if PyThread_tss_create(&_SCOPED_DEPTH_KEY) != 0:
+    raise RuntimeError('Could not create the QuestDB thread-state key.')
+
+cdef enum:
+    _SCOPED_TABLE_INIT_SLOTS = 4
+
+
+ctypedef struct scoped_slot_t:
+    # Borrowed identity only, never dereferenced: the owning handle keeps
+    # its token alive for as long as it can have calls in progress, and an
+    # entry is dropped the moment its depth reaches zero, so an address a
+    # later token reuses is never already in the table.
+    void* owner
+    uintptr_t depth
+
+
+ctypedef struct scoped_table_t:
+    size_t used
+    size_t cap
+    scoped_slot_t* slots
+
+
+cdef const char* _SCOPED_TABLE_CAPSULE_NAME = b'questdb._client.scoped_table'
+
+
+cdef void _scoped_table_free(object capsule) noexcept:
+    cdef scoped_table_t* table = <scoped_table_t*>PyCapsule_GetPointer(
+        capsule, _SCOPED_TABLE_CAPSULE_NAME)
+    if table == NULL:
+        return
+    free(table.slots)
+    free(table)
+
+
+cdef inline scoped_table_t* _scoped_table() noexcept:
+    return <scoped_table_t*>PyThread_tss_get(&_SCOPED_DEPTH_KEY)
+
+
+cdef scoped_table_t* _scoped_table_ensure() except NULL:
+    """This thread's table, created on its first scoped call.
+
+    The capsule in `_THREAD_OWNER_STATE` owns the table: it is what frees
+    it when the thread ends. The native key caches the same pointer so the
+    per-row path never reaches the Python thread-local again.
+    """
+    cdef scoped_table_t* table = _scoped_table()
+    if table != NULL:
+        return table
+    table = <scoped_table_t*>calloc(1, sizeof(scoped_table_t))
+    if table == NULL:
+        raise MemoryError('Could not allocate QuestDB thread-use counters.')
+    table.slots = <scoped_slot_t*>malloc(
+        _SCOPED_TABLE_INIT_SLOTS * sizeof(scoped_slot_t))
+    if table.slots == NULL:
+        free(table)
+        raise MemoryError('Could not allocate QuestDB thread-use counters.')
+    table.cap = _SCOPED_TABLE_INIT_SLOTS
+    try:
+        capsule = PyCapsule_New(
+            table, _SCOPED_TABLE_CAPSULE_NAME,
+            <PyCapsule_Destructor>_scoped_table_free)
+    except:
+        free(table.slots)
+        free(table)
+        raise
+    # From here the capsule owns the table, so every later failure hands
+    # the cleanup to it by letting it go out of scope.
+    if PyThread_tss_set(&_SCOPED_DEPTH_KEY, <void*>table) != 0:
+        raise RuntimeError('Could not record a QuestDB thread-use counter.')
+    try:
+        _THREAD_OWNER_STATE.scoped_table = capsule
+    except:
+        PyThread_tss_set(&_SCOPED_DEPTH_KEY, NULL)
+        raise
+    return table
+
+
+cdef inline scoped_slot_t* _scoped_slot(
+        scoped_table_t* table, void* owner) noexcept:
+    cdef size_t i
+    cdef scoped_slot_t* slots = table.slots
+    for i in range(table.used):
+        if slots[i].owner == owner:
+            return &slots[i]
+    return NULL
 
 
 cdef uintptr_t _scoped_depth_for(object owner_token) except? <uintptr_t>-1:
-    cdef dict depths = _call_depths(False)
-    if depths is None:
+    cdef scoped_table_t* table = _scoped_table()
+    cdef scoped_slot_t* slot
+    if table == NULL:
         return 0
-    return <uintptr_t>depths.get(owner_token, 0)
+    slot = _scoped_slot(table, <void*>owner_token)
+    if slot == NULL:
+        return 0
+    return slot.depth
 
 
 cdef void _enter_scoped_for(object owner_token) except *:
-    cdef dict depths = _call_depths(True)
-    depths[owner_token] = depths.get(owner_token, 0) + 1
+    cdef scoped_table_t* table = _scoped_table_ensure()
+    cdef void* owner = <void*>owner_token
+    cdef scoped_slot_t* slot = _scoped_slot(table, owner)
+    cdef size_t cap
+    cdef scoped_slot_t* grown
+    if slot != NULL:
+        slot.depth += 1
+        return
+    if table.used == table.cap:
+        cap = table.cap * 2
+        grown = <scoped_slot_t*>realloc(
+            table.slots, cap * sizeof(scoped_slot_t))
+        if grown == NULL:
+            raise MemoryError(
+                'Could not allocate QuestDB thread-use counters.')
+        table.slots = grown
+        table.cap = cap
+    table.slots[table.used].owner = owner
+    table.slots[table.used].depth = 1
+    table.used += 1
 
 
 cdef void _exit_scoped_for(object owner_token) except *:
-    cdef dict depths = _call_depths(False)
-    cdef object depth
-    if depths is None:
+    cdef scoped_table_t* table = _scoped_table()
+    cdef scoped_slot_t* slot
+    if table == NULL:
         raise RuntimeError('QuestDB thread-use counter underflow.')
-    depth = depths.get(owner_token, 0)
-    if depth == 0:
+    slot = _scoped_slot(table, <void*>owner_token)
+    if slot == NULL:
         raise RuntimeError('QuestDB thread-use counter underflow.')
-    if depth == 1:
-        del depths[owner_token]
-    else:
-        depths[owner_token] = depth - 1
+    slot.depth -= 1
+    if slot.depth == 0:
+        # Vacated by moving the last entry down, which keeps the scan over
+        # `used` dense and drops the borrowed owner address.
+        table.used -= 1
+        slot[0] = table.slots[table.used]
 
 
 cdef void _connection_event_dispatch(

@@ -7360,6 +7360,44 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         handles = [qi.QuestDB() for _ in range(2048)]
         self.assertEqual(len(handles), 2048)
 
+    def test_a_threads_scoped_call_state_is_released_when_it_exits(self):
+        """The per-thread table of scoped call depths belongs to the
+        thread that created it, and the thread ending is what frees it. A
+        handle whose calls all ran on threads that have since exited
+        carries no depth on any surviving thread, so `close()` sees an
+        idle handle rather than refusing as if it were called from inside
+        one of its own calls.
+        """
+        errors = []
+
+        with QwpAckServer() as server:
+            with qi.QuestDB.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=0;query_pool_min=0;'
+                    'pool_reap=manual;') as db:
+
+                def use_a_lease():
+                    try:
+                        lease = db.sender()
+                        try:
+                            lease.row(
+                                'events', columns={'value': 1},
+                                at=qi.ServerTimestamp)
+                        finally:
+                            lease.close()
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                for _ in range(64):
+                    worker = threading.Thread(target=use_a_lease)
+                    worker.start()
+                    worker.join()
+
+                self.assertEqual(errors, [])
+                # Leaving the `with` closes the handle. A depth stranded by
+                # an exited thread, or a table shared between threads,
+                # would surface here as a refusal.
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_closing_a_handle_from_inside_its_own_call_is_refused(self):
         """`QuestDB.close()` waits for outstanding uses to be released.
