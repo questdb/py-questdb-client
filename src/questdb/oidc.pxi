@@ -27,6 +27,50 @@
 # Python retains presentation and adapter conveniences only.
 
 
+cdef extern from *:
+    """
+    /* PyPy's cpyext does not implement PyErr_SetInterrupt(): its Python.h
+       rewrites the name to PyPyErr_SetInterrupt(), which no PyPy build
+       exports, so a *compiled* call fails the extension build outright --
+       guarding the call at runtime is not enough.  Keep the C-API call on
+       CPython, where it re-arms the tripped-signal flag without touching
+       the error indicator, and let the Python fallback below handle the
+       rest. */
+    #if defined(PYPY_VERSION)
+    #define QUESTDB_HAS_SET_INTERRUPT 0
+    static void questdb_set_interrupt(void) {}
+    #else
+    #define QUESTDB_HAS_SET_INTERRUPT 1
+    static void questdb_set_interrupt(void) { PyErr_SetInterrupt(); }
+    #endif
+    """
+    int QUESTDB_HAS_SET_INTERRUPT
+    void questdb_set_interrupt()
+
+
+cdef void _oidc_rearm_keyboard_interrupt() noexcept:
+    """Re-arm a swallowed Ctrl-C so the main thread raises it again.
+
+    Must not raise: every caller is on the error path of a ``noexcept``
+    callback.
+    """
+    try:
+        if QUESTDB_HAS_SET_INTERRUPT:
+            questdb_set_interrupt()
+        else:
+            # PyPy: `_thread.interrupt_main()` is the documented equivalent
+            # and, like the C API call, only sets a pending interrupt -- it
+            # does not raise here, where the surrounding handler would
+            # swallow it. `signal.raise_signal()` is not a substitute: it
+            # runs the handler synchronously (so the KeyboardInterrupt would
+            # be raised and discarded inside this callback) and it kills the
+            # process outright when SIGINT is left at SIG_DFL.
+            import _thread
+            _thread.interrupt_main()
+    except BaseException:
+        pass
+
+
 # Live providers, keyed by the opaque integer handed to native as `user_data`.
 #
 # Native is given a key rather than a `PyObject*` so that the release callback
@@ -747,7 +791,7 @@ cdef void _oidc_park_foreground_interrupt(object exc) noexcept:
             # tripped-signal flag, so re-arm it; the interpreter raises it at
             # the first bytecode after that native call returns, exactly where
             # an uncaught Ctrl-C during a blocking call would surface.
-            PyErr_SetInterrupt()
+            _oidc_rearm_keyboard_interrupt()
         # Anywhere else this is a native worker thread, where signals are never
         # delivered and there is no caller to hand an exception to.
     except BaseException:

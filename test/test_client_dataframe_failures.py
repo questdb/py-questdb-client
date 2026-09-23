@@ -259,18 +259,32 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         # `.sender_error` and `.in_doubt` -- the flag the caller reads to decide
         # whether replaying could duplicate a landed write. It must mutate the
         # caught exception's args and re-raise that same object instead.
+        #
+        # The two cases also pin the two sites that append the hint. A
+        # rejection is asynchronous, so which one sees it is a pure race
+        # unless the scenario forces an ordering: `ack_delay_s` holds the
+        # rejection back until every frame has been handed to the socket, so
+        # it can only surface on the trailing sync, while the oversize single
+        # row fails locally on the batch send before any sync. Both orderings
+        # must hint, and each keeps the `in_doubt` the native error carried:
+        # true once frames are in flight (replaying could duplicate a landed
+        # write), false for a row rejected before it was sent.
         cases = (
-            # A server rejection whose message trips the textual fallback.
+            # A server rejection whose message trips the textual fallback,
+            # delivered late enough to land on the sync.
             ('rejection',
-             dict(error_status=0x03, error_message=b'batch too large'),
+             dict(error_status=0x03, error_message=b'batch too large',
+                  ack_delay_s=0.5),
              _table(40), 1,
-             'Hint: reduce `max_rows_per_batch` (current: 1) and retry.'),
+             'Hint: reduce `max_rows_per_batch` (current: 1) and retry.',
+             True),
             # One row larger than the advertised per-batch cap.
             ('single_row', dict(max_batch_size=1024),
              _table(1, str_len=4000), 16,
-             'Hint: a single row exceeds the server per-batch cap'),
+             'Hint: a single row exceeds the server per-batch cap',
+             False),
         )
-        for label, server_kwargs, table, max_rows, hint in cases:
+        for label, server_kwargs, table, max_rows, hint, in_doubt in cases:
             with self.subTest(label):
                 with QwpAckServer(**server_kwargs) as server:
                     with qi.QuestDB.from_conf(_conf(server.port)) as client:
@@ -291,7 +305,9 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
                 self.assertIsNone(exc.__context__)
                 self.assertIsNone(exc.__cause__)
                 self.assertIs(type(exc), qi.QuestDBError)
-                self.assertFalse(exc.in_doubt)
+                # A rebuilt `QuestDBError(exc.code, msg)` would report False
+                # here whatever the native error said.
+                self.assertEqual(exc.in_doubt, in_doubt)
                 self.assertIsNone(exc.sender_error)
 
     def test_reconnect_budget_exhaustion_raises(self):

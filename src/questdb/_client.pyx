@@ -93,7 +93,7 @@ from cpython.datetime cimport (
 )
 from cpython.bool cimport bool
 from cpython.ref cimport Py_XDECREF
-from cpython.exc cimport PyErr_CheckSignals, PyErr_Clear, PyErr_SetInterrupt
+from cpython.exc cimport PyErr_CheckSignals, PyErr_Clear
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
 from cpython.object cimport PyObject
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
@@ -6014,7 +6014,19 @@ cdef bint _dataframe_client_try_capsule_path(
                         committed_prefix, max_rows_per_batch, True)
                     offset += chunk_rows
             if any_flushed:
-                _dataframe_columnar_sync(conn)
+                # The same hint applies here. A rejection for an oversize
+                # batch is asynchronous: the server writes it while the
+                # client is still streaming, so it surfaces either on a
+                # later `_capsule_consume_stream` (hinted above) or, if
+                # every frame was handed to the socket first, only on this
+                # trailing sync. Whichever side wins that race, the caller
+                # must get the same remediation.
+                try:
+                    _dataframe_columnar_sync(conn)
+                except QuestDBError as exc:
+                    _append_batch_too_large_hint(
+                        exc, max_rows_per_batch, can_slice)
+                    raise
         except:
             force_drop_conn = _dataframe_columnar_force_drop_after_error(
                 conn, any_flushed)
@@ -6337,7 +6349,6 @@ cdef void_int _capsule_consume_stream_with_hint(
         bint* committed_prefix,
         size_t max_rows_per_batch,
         bint can_slice) except -1:
-    cdef str hint
     try:
         _capsule_consume_stream(
             conn, stream_owner, c_table_name, c_ts_column_ptr,
@@ -6345,11 +6356,29 @@ cdef void_int _capsule_consume_stream_with_hint(
             c_overrides, c_overrides_len, any_flushed,
             deferred_since_sync, committed_prefix)
     except QuestDBError as exc:
-        if _is_batch_too_large_error(exc):
+        _append_batch_too_large_hint(exc, max_rows_per_batch, can_slice)
+        raise
+
+
+cdef void_int _append_batch_too_large_hint(
+        object exc,
+        size_t max_rows_per_batch,
+        bint can_slice) except -1:
+    """
+    Append a remediation hint to a batch-too-large failure, in place.
+
+    A no-op for any other error, and idempotent: the same exception object
+    can pass more than one hint site on its way out (a failed batch send
+    and then the trailing sync) and must still carry exactly one hint.
+    """
+    cdef str hint
+    if _is_batch_too_large_error(exc):
+        if '\nHint: ' not in str(exc):
             if exc.code == QuestDBErrorCode.BatchTooLarge:
-                # The core already split the chunk as far as it can: a single
-                # row (table schema plus one row's values) still exceeds the
-                # server's per-batch cap, so a smaller batch cannot help.
+                # The core already split the chunk as far as it can: a
+                # single row (table schema plus one row's values) still
+                # exceeds the server's per-batch cap, so a smaller batch
+                # cannot help.
                 hint = (
                     'a single row exceeds the server per-batch cap '
                     '(max_buf_size / the server X-QWP-Max-Batch-Size); reduce '
@@ -6378,8 +6407,7 @@ cdef void_int _capsule_consume_stream_with_hint(
             # The f-string is evaluated before the assignment, so it still
             # interpolates the original message.
             exc.args = (f'{exc}\nHint: {hint}',)
-            raise
-        raise
+    return 0
 
 
 cdef bint _is_batch_too_large_error(object exc):
