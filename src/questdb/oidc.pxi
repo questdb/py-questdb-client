@@ -47,6 +47,32 @@ cdef extern from *:
     int QUESTDB_HAS_SET_INTERRUPT
     void questdb_set_interrupt()
 
+    # Defined by every Cython-generated module.
+    int CYTHON_COMPILING_IN_PYPY
+
+
+# A genuinely *interpreted* no-op, used to give PyPy a bytecode boundary at
+# which to deliver a pending signal (see `_oidc_signal_tick`). It has to be
+# built with exec(): a `def` in this file is compiled to C like everything
+# else here, and C frames are exactly what PyPy will not interrupt. The
+# backward jump is the boundary PyPy's periodic-action check is tied to.
+_OIDC_SIGNAL_TICK_NS = {}
+exec(
+    'def _oidc_signal_tick_py():\n'
+    '    for _ in range(2):\n'
+    '        pass\n',
+    _OIDC_SIGNAL_TICK_NS)
+_OIDC_SIGNAL_TICK = _OIDC_SIGNAL_TICK_NS['_oidc_signal_tick_py']
+
+
+cdef void_int _oidc_signal_tick() except -1:
+    """Run any Python signal handler PyPy has left pending.
+
+    A no-op on CPython, where ``PyErr_CheckSignals()`` has already done it.
+    """
+    _OIDC_SIGNAL_TICK()
+    return 0
+
 
 cdef void _oidc_rearm_keyboard_interrupt() noexcept:
     """Re-arm a swallowed Ctrl-C so the main thread raises it again.
@@ -825,6 +851,16 @@ cdef void _oidc_event_dispatch(
         # attributed their exception to the renderer, which logged it and let
         # sign_in() poll on until the device code expired.
         PyErr_CheckSignals()
+        if CYTHON_COMPILING_IN_PYPY:
+            # PyPy's cpyext does NOT run pending handlers from
+            # PyErr_CheckSignals(); it delivers a signal only while
+            # interpreting bytecode, and every frame from the C signal
+            # handler to here is compiled C. Without a boundary of our own
+            # the first bytecode is renderer code, where an ordinary
+            # `Exception` raised by a SIGALRM handler is indistinguishable
+            # from a renderer bug -- logged, swallowed, and sign_in() polls
+            # to the device-code deadline.
+            _oidc_signal_tick()
     except BaseException as exc:
         _oidc_park_event_interrupt(<OidcDeviceAuth>provider, exc, event.kind)
         return
