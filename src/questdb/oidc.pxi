@@ -771,6 +771,19 @@ cdef void _oidc_event_dispatch(
         # nobody should answer.
         _oidc_cancel_sign_in_from_callback(<OidcDeviceAuth>provider)
         return
+    try:
+        # sign_in() runs with the GIL released, so this callback is where
+        # CPython runs Python signal handlers for the caller's thread. Run the
+        # pending ones HERE, before any renderer code: whatever they raise --
+        # KeyboardInterrupt, but equally a SIGALRM timeout or pytest-timeout's
+        # BaseException -- is an interruption of sign_in(), not a renderer
+        # failure. Letting the first renderer bytecode run them instead
+        # attributed their exception to the renderer, which logged it and let
+        # sign_in() poll on until the device code expired.
+        PyErr_CheckSignals()
+    except BaseException as exc:
+        _oidc_park_event_interrupt(<OidcDeviceAuth>provider, exc, event.kind)
+        return
     renderer = (<OidcDeviceAuth>provider)._renderer
     if renderer is None:
         return
@@ -814,24 +827,49 @@ cdef void _oidc_event_dispatch(
             renderer.on_failure(
                 _oidc_text(event.message, event.message_len) or
                 'OIDC sign-in failed.')
-    except (KeyboardInterrupt, SystemExit) as exc:
-        # sign_in() releases the GIL for the whole native flow, so this callback
-        # -- and the persistence diagnostic, see `_OidcForegroundCall` -- is
-        # where Python bytecode runs on the caller's thread, and therefore
-        # where CPython delivers a pending SIGINT. Swallowing it here
-        # made Ctrl-C print a traceback and change nothing, leaving sign_in()
-        # polling until the device code expired, with every later Ctrl-C eaten
-        # the same way. Stash it for sign_in() to re-raise, and cancel the flow
-        # so it actually stops.
-        (<OidcDeviceAuth>provider)._interrupt = exc
-        if event.kind in (
-                QUESTDB_OIDC_EVENT_PROMPT, QUESTDB_OIDC_EVENT_WAITING):
+    except BaseException as exc:
+        if not isinstance(exc, Exception):
+            # KeyboardInterrupt, SystemExit and other BaseException subclasses
+            # (pytest-timeout's Failed, for one) are interruptions, not renderer
+            # bugs: a signal can still land inside renderer code.
+            _oidc_park_event_interrupt(
+                <OidcDeviceAuth>provider, exc, event.kind)
+            return
+        try:
+            logging.getLogger('questdb').exception(
+                'OIDC renderer callback failed')
+        except BaseException as log_exc:
+            # The logging call runs bytecode too, so a pending Ctrl-C can be
+            # delivered inside it, and handlers are user code. An interruption
+            # raised there must still stop sign_in(); escaping this `noexcept`
+            # function would only report it as unraisable and lose it.
+            if not isinstance(log_exc, Exception):
+                _oidc_park_event_interrupt(
+                    <OidcDeviceAuth>provider, log_exc, event.kind)
+
+
+cdef void _oidc_park_event_interrupt(
+        OidcDeviceAuth provider, object exc, int kind) noexcept:
+    """Stash an interruption raised in a renderer event for sign_in() to
+    re-raise, and cancel the device flow so it actually stops.
+
+    sign_in() releases the GIL for the whole native flow, so the event callback
+    -- and the persistence diagnostic, see `_OidcForegroundCall` -- is where
+    Python bytecode, and therefore Python signal handling, runs on the caller's
+    thread. Swallowing an interruption there made Ctrl-C print a traceback and
+    change nothing, leaving sign_in() polling until the device code expired.
+    Must not raise: it runs on the error path of a ``noexcept`` callback.
+    """
+    try:
+        if provider._interrupt is None:
+            provider._interrupt = exc
+        if kind in (QUESTDB_OIDC_EVENT_PROMPT, QUESTDB_OIDC_EVENT_WAITING):
             # Only the waiting phase needs cancelling. On SUCCESS/FAILURE the
             # flow is already ending; in particular, SUCCESS has already
             # committed the token that the interrupt must not discard.
-            _oidc_cancel_sign_in_from_callback(<OidcDeviceAuth>provider)
+            _oidc_cancel_sign_in_from_callback(provider)
     except BaseException:
-        logging.getLogger('questdb').exception('OIDC renderer callback failed')
+        pass
 
 
 cdef void _oidc_diagnostic_dispatch(
@@ -842,7 +880,12 @@ cdef void _oidc_diagnostic_dispatch(
                 'OIDC %s',
                 _oidc_text(diagnostic.message, diagnostic.message_len) or
                 'token-store persistence operation failed')
-    except (KeyboardInterrupt, SystemExit) as exc:
+    except BaseException as exc:
+        if isinstance(exc, Exception):
+            # Logging handlers are user code. Diagnostics are best-effort and
+            # must never unwind through C/Rust or turn a usable token into a
+            # failure.
+            return
         # Not an ordinary handler failure. On the thread running sign_in(),
         # token() or clear() this is where CPython delivers a pending Ctrl-C
         # (warn_persistence runs inside those calls with the GIL released), and
@@ -850,10 +893,6 @@ cdef void _oidc_diagnostic_dispatch(
         # sign_in() polling to the device-code deadline with the interrupt
         # gone. Hand it to that call instead.
         _oidc_park_foreground_interrupt(exc)
-    except BaseException:
-        # Logging handlers are user code. Diagnostics are best-effort and must
-        # never unwind through C/Rust or turn a usable token into a failure.
-        pass
 
 
 cdef void _oidc_diagnostic_trampoline(

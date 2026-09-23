@@ -31,6 +31,8 @@ import logging
 import os
 import platform
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -2105,6 +2107,76 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         with self.assertRaises(OidcInteractionRequired):
             auth.token()
 
+    @unittest.skipUnless(
+        hasattr(signal, 'setitimer'), 'needs signal.setitimer')
+    def test_signal_handler_exception_interrupts_sign_in(self):
+        # A signal-driven timeout (a SIGALRM handler, pytest-timeout's signal
+        # method) raises from whatever Python bytecode runs next on the main
+        # thread -- during sign_in() that is a renderer callback. Its exception
+        # was taken for a renderer bug, logged, and swallowed: the timeout
+        # never fired and sign_in() polled until the device code expired.
+        class Timeout(Exception):
+            pass
+
+        def on_alarm(signum, frame):
+            raise Timeout('deadline')
+
+        pending = (400, {'error': 'authorization_pending'}, None)
+        previous = signal.signal(signal.SIGALRM, on_alarm)
+        try:
+            with OidcTestServer(
+                    device_token_response=pending, device_expires_in=20,
+                    device_interval=1) as server:
+                auth = make_discovered_auth(
+                    server, renderer=RecordingRenderer())
+                try:
+                    started = time.monotonic()
+                    signal.setitimer(signal.ITIMER_REAL, 0.5)
+                    with self.assertRaises(Timeout):
+                        auth.sign_in()
+                    self.assertLess(time.monotonic() - started, 10)
+                    # The attempt ended; the provider did not.
+                    with self.assertRaises(OidcInteractionRequired):
+                        auth.token()
+                finally:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                    auth.close()
+        finally:
+            signal.signal(signal.SIGALRM, previous)
+
+    def test_interrupt_raised_while_logging_a_renderer_failure_aborts_sign_in(
+            self):
+        # A failing renderer is logged, and the logging call is bytecode too:
+        # a Ctrl-C delivered inside it (or raised by a handler) escaped the
+        # `noexcept` callback as an unraisable exception and was lost.
+        class FailingRenderer(RecordingRenderer):
+            def on_waiting(self, seconds_left):
+                super().on_waiting(seconds_left)
+                raise TypeError('renderer bug')
+
+        class InterruptingHandler(logging.Handler):
+            def emit(self, record):
+                raise KeyboardInterrupt
+
+        pending = (400, {'error': 'authorization_pending'}, None)
+        logger = logging.getLogger('questdb')
+        handler = InterruptingHandler()
+        logger.addHandler(handler)
+        try:
+            with OidcTestServer(
+                    device_token_response=pending, device_expires_in=20,
+                    device_interval=1) as server:
+                auth = make_discovered_auth(server, renderer=FailingRenderer())
+                try:
+                    started = time.monotonic()
+                    with self.assertRaises(KeyboardInterrupt):
+                        auth.sign_in()
+                    self.assertLess(time.monotonic() - started, 10)
+                finally:
+                    auth.close()
+        finally:
+            logger.removeHandler(handler)
+
     def test_concurrent_sign_in_cannot_steal_callback_interrupt(self):
         # The steal window opens when the renderer's KeyboardInterrupt is parked
         # on the provider and closes when the first sign_in() -- after native
@@ -2117,10 +2189,19 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         # must still get its own interrupt back.
         callback_entered = threading.Event()
         second_attempted = threading.Event()
+        # Set when the second thread's sign_in() legitimately got in: the
+        # first call had already released its lock and returned. That is not a
+        # steal, so the loop stops there instead of recording it.
+        late_entry = threading.Event()
+        first_ident = []
 
         class InterruptingRenderer(RecordingRenderer):
             def on_waiting(self, seconds_left):
                 super().on_waiting(seconds_left)
+                if threading.get_ident() != first_ident[0]:
+                    late_entry.set()
+                    auth.cancel_sign_in()
+                    return
                 callback_entered.set()
                 if not second_attempted.wait(5):
                     raise AssertionError('concurrent sign-in was never attempted')
@@ -2137,6 +2218,7 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 server, renderer=InterruptingRenderer())
 
             def first_sign_in():
+                first_ident.append(threading.get_ident())
                 try:
                     auth.sign_in()
                 except BaseException as exc:
@@ -2151,6 +2233,8 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                     try:
                         auth.sign_in()
                     except OidcError as exc:
+                        if late_entry.is_set():
+                            return
                         # The expected refusal. Keep only the anomalies: this
                         # loop can run many thousands of times.
                         if 'already in progress' not in str(exc):
@@ -3485,6 +3569,115 @@ class NativeTransportAttachmentTest(unittest.TestCase):
             db.close()
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_pool_dataframe_retry_fails_fast_when_the_credential_lapses(self):
+        # The gate above only saw the FIRST attempt. After an ordinary
+        # transport failure the retry went to the native `*_with_retry`
+        # borrow, which classifies a non-busy InteractionRequired as a
+        # retryable SocketError and polled the provider for the whole
+        # remaining budget before Python could fail fast. Here the first
+        # connect is refused (not OIDC), and the token then lapses with its
+        # refresh rejected: the call must raise OidcInteractionRequired well
+        # inside the 60s budget.
+        probe = socket.socket()
+        probe.bind(('127.0.0.1', 0))
+        closed_port = probe.getsockname()[1]
+        probe.close()
+        df = pd.DataFrame({
+            'value': [1], 'ts': pd.to_datetime([1700000000], unit='s')})
+        with OidcTestServer(
+                initial_expires_in=4,
+                refresh_token_response=(
+                    400, {'error': 'invalid_grant'}, None)) as server:
+            auth = make_discovered_auth(server)
+            auth.sign_in()
+            db = questdb.connect(
+                f'ws::addr=127.0.0.1:{closed_port};lazy_connect=on;'
+                'reconnect_initial_backoff_millis=50;'
+                'reconnect_max_backoff_millis=200;'
+                'reconnect_max_duration_millis=60000;',
+                oidc_auth=auth)
+            try:
+                started = time.monotonic()
+                with self.assertRaises(OidcInteractionRequired) as caught:
+                    db.dataframe(df, table_name='oidc_lapse', at='ts')
+                elapsed = time.monotonic() - started
+            finally:
+                db.close()
+                auth.close()
+        self.assertFalse(caught.exception._acquisition_busy)
+        self.assertLess(
+            elapsed, 30.0,
+            'the native re-borrow polled a lapsed provider for the whole '
+            'reconnect budget')
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_pool_dataframe_waits_behind_a_peer_sign_in_found_by_the_probe(self):
+        # The single probe can land while a peer sign_in() sits between
+        # device-flow polls. A direct token() refusal there is busy but carries
+        # AuthError -- only a transport's own pull is reclassified to
+        # SocketError -- and the retryable-code check raised it at once, although
+        # the gate documents a peer sign-in as transient. The call must instead
+        # wait inside its budget and succeed once the sign-in completes.
+        pending = (400, {'error': 'authorization_pending'}, None)
+        polled = threading.Event()
+        probe_errors = []
+        peer = []
+
+        class _Renderer(Renderer):
+            def on_waiting(self, seconds_left):
+                polled.set()
+
+        class _PeerSignInBeforeProbe(OidcDeviceAuth):
+            probes = 0
+
+            def token(self):
+                type(self).probes += 1
+                if type(self).probes == 1:
+                    def run():
+                        try:
+                            self.sign_in()
+                            peer.append('ok')
+                        except BaseException as e:  # pragma: no cover
+                            peer.append(e)
+                    threading.Thread(target=run, daemon=True).start()
+                    polled.wait(20)
+                    # on_waiting returned: native is now in its poll sleep.
+                    time.sleep(0.3)
+                try:
+                    return super().token()
+                except questdb.QuestDBError as e:
+                    probe_errors.append(
+                        (e.code, getattr(e, '_acquisition_busy', None)))
+                    raise
+
+        df = pd.DataFrame({
+            'value': [1], 'ts': pd.to_datetime([1700000000], unit='s')})
+        with OidcTestServer(
+                device_token_responses=[pending], device_interval=2,
+                device_expires_in=30) as server:
+            cfg = make_discovered_auth(server).config
+            auth = _PeerSignInBeforeProbe(
+                cfg.client_id, cfg.device_authorization_endpoint,
+                cfg.token_endpoint, scope=cfg.scope, audience=cfg.audience,
+                issuer=cfg.issuer, interactive=True, open_browser=False,
+                renderer=_Renderer())
+            with QwpAckServer(
+                    required_authorization='Bearer AT-initial') as qwp:
+                db = questdb.connect(
+                    f'ws::addr=127.0.0.1:{qwp.port};lazy_connect=true;'
+                    'reconnect_initial_backoff_millis=50;'
+                    'reconnect_max_backoff_millis=200;'
+                    'reconnect_max_duration_millis=20000;',
+                    oidc_auth=auth)
+                try:
+                    db.dataframe(df, table_name='busy_probe', at='ts')
+                finally:
+                    db.close()
+                    auth.close()
+        self.assertEqual(peer, ['ok'])
+        self.assertIn((questdb.QuestDBErrorCode.AuthError, True), probe_errors)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_pool_dataframe_surfaces_the_probe_failure_not_the_original(self):
         # The foreground gate probes the provider once before deciding, and
         # rebinds `exc` to the probe's error so "its own type and structured
@@ -4452,11 +4645,11 @@ class RenderSanitizerTest(unittest.TestCase):
                 self.data = data
 
         class _FakeHandle:
-            def update(self, obj):
-                captured.append(obj.data)
+            def update(self, obj, raw=False):
+                captured.append(obj['text/html'])
 
-        def _fake_display(obj, display_id=None):
-            captured.append(obj.data)
+        def _fake_display(obj, display_id=None, raw=False):
+            captured.append(obj['text/html'])
             return _FakeHandle()
 
         ipython = types.ModuleType('IPython')
@@ -4482,6 +4675,47 @@ class RenderSanitizerTest(unittest.TestCase):
         self.assertIn('&lt;img', html)                # message markup escaped
         self.assertNotIn('href="javascript:', html)   # dangerous scheme inert
 
+    def test_jupyter_renderer_publishes_the_code_as_plain_text(self):
+        # A kernel cannot tell what its frontend renders. `jupyter console`,
+        # qtconsole and Spyder show only text/plain for display_data, which for
+        # an IPython HTML object is the placeholder repr -- the user never saw
+        # the URL or the code, and with the browser off by default in a kernel
+        # sign_in() waited out the whole device code. Every render must carry a
+        # plain-text twin with both.
+        bundles = []
+
+        class _FakeHandle:
+            def update(self, obj, raw=False):
+                self.raw = raw
+                bundles.append((raw, dict(obj)))
+
+        def _fake_display(obj, display_id=None, raw=False):
+            bundles.append((raw, dict(obj)))
+            return _FakeHandle()
+
+        ipython = types.ModuleType('IPython')
+        display_mod = types.ModuleType('IPython.display')
+        display_mod.display = _fake_display
+        ipython.display = display_mod
+        with mock.patch.dict(
+                sys.modules,
+                {'IPython': ipython, 'IPython.display': display_mod}):
+            renderer = _render.JupyterRenderer(qr=False)
+            renderer.on_prompt({
+                'user_code': 'WXYZ-1234',
+                'verification_uri': 'https://idp.example.com/verify'})
+            renderer.on_waiting(90)
+            renderer.on_success('alice', 600)
+        self.assertEqual(len(bundles), 3)
+        for raw, bundle in bundles:
+            self.assertTrue(raw, 'bundle must be published as raw MIME data')
+            self.assertEqual(set(bundle), {'text/html', 'text/plain'})
+            plain = bundle['text/plain']
+            self.assertIn('WXYZ-1234', plain)
+            self.assertIn('idp.example.com/verify', plain)
+            self.assertNotIn('<', plain)
+        self.assertIn('Signed in as alice', bundles[-1][1]['text/plain'])
+
     def test_status_only_render_before_prompt_omits_prompt_scaffold(self):
         # A terminal event without a preceding prompt has no URL and no user
         # code, so the panel must carry the status alone rather than an empty
@@ -4493,11 +4727,11 @@ class RenderSanitizerTest(unittest.TestCase):
                 self.data = data
 
         class _FakeHandle:
-            def update(self, obj):
-                captured.append(obj.data)
+            def update(self, obj, raw=False):
+                captured.append(obj['text/html'])
 
-        def _fake_display(obj, display_id=None):
-            captured.append(obj.data)
+        def _fake_display(obj, display_id=None, raw=False):
+            captured.append(obj['text/html'])
             return _FakeHandle()
 
         ipython = types.ModuleType('IPython')
@@ -4580,6 +4814,24 @@ class AdapterTest(unittest.TestCase):
                     _adapters.psycopg_connect(auth, url)
                 self.assertEqual(
                     driver.connect.call_args.kwargs['sslmode'], 'verify-full')
+
+    def test_adapters_require_tls_for_trailing_dot_loopback_spellings(self):
+        # `127.0.0.1.` is resolved through DNS by libpq's getaddrinfo, not
+        # parsed as a literal, so it must not get the numeric-loopback
+        # `prefer` downgrade that would send the token in cleartext.
+        for host in ('127.0.0.1.', '::1.'):
+            with self.subTest(host=host):
+                auth = mock.Mock()
+                auth.token.return_value = 'TOKEN'
+                driver = mock.Mock()
+                with mock.patch.object(
+                        _adapters, '_pg_module', return_value=driver):
+                    _adapters.psycopg_connect(
+                        auth, 'https://questdb.example.com:9000', host=host)
+                self.assertEqual(
+                    driver.connect.call_args.kwargs['sslmode'], 'verify-full')
+        self.assertEqual(
+            _adapters._effective_sslmode('127.0.0.1.', 'auto'), 'verify-full')
 
     def test_adapters_accept_numeric_loopback_without_tls(self):
         for url in (

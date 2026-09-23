@@ -267,10 +267,19 @@ def _require_expected_destination(
 
 
 def _is_numeric_loopback_host(host: str) -> bool:
-    """Whether ``host`` is a numeric loopback IP literal."""
-    bare = host[:-1] if host.endswith('.') else host
+    """Whether ``host`` is a numeric loopback IP literal, exactly as libpq will
+    receive it.
+
+    The spelling is checked verbatim. A trailing-dot form such as
+    ``127.0.0.1.`` is *not* a numeric literal to ``getaddrinfo`` (glibc, musl
+    and macOS all refuse it with ``AI_NUMERICHOST``), so libpq resolves it
+    through DNS/NSS like any name -- to whatever address a resolver answers.
+    Stripping the dot here classified it as loopback and downgraded it to
+    ``sslmode=prefer``, which sends the token as a cleartext password to a peer
+    that declines TLS.
+    """
     try:
-        return ipaddress.ip_address(bare).is_loopback
+        return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
 

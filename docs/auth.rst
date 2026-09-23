@@ -100,21 +100,34 @@ sign-in has lapsed) as well as an ordinary data / server / transport
 ``query()``, or :func:`questdb.connect` call. Because ``OidcError`` is a
 ``QuestDBError``, an existing ``except QuestDBError`` retry or dead-letter
 handler keeps catching auth failures; to react to them specifically, catch
-``OidcError`` (or a typed subclass) *before* ``QuestDBError``:
+``OidcError`` (or a typed subclass) *before* ``QuestDBError``.
+
+A failed ``flush()`` of the sender's internal buffer **discards those rows**,
+exactly as for any other flush failure (see
+:meth:`Sender.flush <questdb.Sender.flush>`), so signing in again does not
+resend them. To retry a batch after re-authenticating, build it in a
+caller-owned buffer and flush it with ``clear=False``, which keeps the rows in
+the buffer when the flush fails:
 
 .. code-block:: python
 
+    import questdb
     from questdb import QuestDBError
     from questdb.auth import OidcError, OidcInteractionRequired
 
+    buf = sender.new_buffer()
+    buf.row('trades', symbols={'sym': 'ETH-USD'}, columns={'px': 2615.54},
+            at=questdb.ServerTimestamp)
     try:
-        sender.flush()
+        sender.flush(buf, clear=False)
     except OidcInteractionRequired:
         auth.sign_in()      # token lapsed; re-authenticate interactively
+        sender.flush(buf, clear=False)   # the rows are still in `buf`
     except OidcError:
         raise               # other auth failure — not a retriable data error
     except QuestDBError:
         ...                 # data / server / transport failure
+    buf.clear()
 
 .. note::
 

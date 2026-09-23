@@ -93,7 +93,7 @@ from cpython.datetime cimport (
 )
 from cpython.bool cimport bool
 from cpython.ref cimport Py_XDECREF
-from cpython.exc cimport PyErr_Clear, PyErr_SetInterrupt
+from cpython.exc cimport PyErr_CheckSignals, PyErr_Clear, PyErr_SetInterrupt
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
 from cpython.object cimport PyObject
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
@@ -565,6 +565,11 @@ cdef inline void_int reserve_buffer(
     cdef line_sender_error* err = NULL
     if not line_sender_buffer_reserve(buffer, additional, &err):
         raise c_err_to_py(err)
+
+
+# Longest native connect retry `_direct_dataframe_run` runs between checks of
+# its terminal-OIDC gate when a provider is attached.
+cdef uint64_t _OIDC_FOREGROUND_RETRY_SLICE_MS = 2000
 
 
 cdef inline bint _is_oidc_terminal_for_foreground(object exc, object oidc_auth):
@@ -6260,10 +6265,17 @@ cdef void_int _direct_dataframe_run(
                     budget_ms = 0
                     continue
             # FailoverRetry = transient flush/sync; SocketError = a
-            # re-borrow that has not reached a live primary yet.
+            # re-borrow that has not reached a live primary yet. A *busy*
+            # OIDC refusal is transient whatever its code: a direct
+            # `oidc_auth.token()` probe made while a peer sign_in() is between
+            # device-flow polls carries AuthError (only the transport's own pull
+            # is reclassified to SocketError), yet it clears as soon as that
+            # sign-in finishes. Raising it here failed the call at once instead
+            # of waiting behind the sign-in, as the gate above promises.
             if exc.code not in (
                     QuestDBErrorCode.FailoverRetry,
-                    QuestDBErrorCode.SocketError):
+                    QuestDBErrorCode.SocketError) and not bool(
+                        getattr(exc, '_acquisition_busy', False)):
                 raise exc
             # The native operation may have committed a split prefix, or an
             # explicit intermediate sync already committed one. Restarting
@@ -6296,6 +6308,18 @@ cdef void_int _direct_dataframe_run(
             if remaining <= 0.0:
                 raise exc
             budget_ms = <uint64_t>(remaining * 1000.0)
+            # With a provider attached, retry the connect in short slices so
+            # the terminal-OIDC gate above sees each outcome. The native
+            # `*_with_retry` borrow classifies a non-busy InteractionRequired
+            # as a retryable SocketError (right for background drainers) and
+            # would otherwise poll the provider for the whole remaining budget
+            # -- 300s by default -- before this gate ever saw the error it
+            # exists to fail fast on. A slice only ever covers acquiring the
+            # attempt's connection, before any row is sent, so it cannot cut a
+            # committed prefix short.
+            if (oidc_auth is not None
+                    and budget_ms > _OIDC_FOREGROUND_RETRY_SLICE_MS):
+                budget_ms = _OIDC_FOREGROUND_RETRY_SLICE_MS
 
 
 cdef void_int _capsule_consume_stream_with_hint(

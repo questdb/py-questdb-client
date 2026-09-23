@@ -898,12 +898,23 @@ class JupyterRenderer(Renderer):
         # instead of dropping it, and the PNG isn't regenerated each tick.
         self._qr_html: Optional[str] = None
 
-    def _display(self, html_str: str):
-        from IPython.display import HTML, display  # type: ignore
+    def _display(self, html_str: str, text: str):
+        """Publish one render as a ``text/html`` + ``text/plain`` bundle.
+
+        The plain-text half is not a courtesy. A kernel cannot tell what its
+        frontend renders, and the text-only ones -- ``jupyter console``,
+        qtconsole, and Spyder's IPython console built on it -- show only
+        ``text/plain`` for this output. With ``IPython.display.HTML`` that was
+        the placeholder ``<IPython.core.display.HTML object>``: no URL and no
+        code, while ``open_browser`` defaults off in a kernel, so ``sign_in()``
+        sat until the device code expired with nothing the user could act on.
+        """
+        from IPython.display import display  # type: ignore
+        bundle = {'text/html': html_str, 'text/plain': text}
         if self._handle is None:
-            self._handle = display(HTML(html_str), display_id=True)
+            self._handle = display(bundle, raw=True, display_id=True)
         else:
-            self._handle.update(HTML(html_str))
+            self._handle.update(bundle, raw=True)
 
     def _panel(self, body: str) -> str:
         return (
@@ -1001,32 +1012,47 @@ class JupyterRenderer(Renderer):
         body.append(
             '<div id="qdb-oidc-status" style="color:#888;margin-top:8px">'
             '⏳ waiting for authorization…</div>')
-        self._display(self._panel(''.join(body)))
+        self._display(
+            self._panel(''.join(body)),
+            self._prompt_text('⏳ waiting for authorization…'))
 
     def on_waiting(self, seconds_left: float) -> None:
         # Re-render the whole panel (cheap) with an updated countdown.
         if not self._resp:
             return
         self._resp = dict(self._resp)
-        self._render_with_status(
-            f'⏳ waiting for authorization… ({_fmt_mmss(seconds_left)} left)',
-            color='#888')
+        status = (
+            f'⏳ waiting for authorization… ({_fmt_mmss(seconds_left)} left)')
+        self._render_with_status(status, status, color='#888')
 
     def on_success(self, identity: Optional[str], expires_in: float) -> None:
         # identity comes from untrusted JWT claims: strip then html-escape.
-        who = html.escape(_strip_control(identity)) if identity else ''
+        plain_who = _strip_control(identity) if identity else ''
+        who = html.escape(plain_who)
         mins = _fmt_minutes(expires_in)
         suffix = f' as <b>{who}</b>' if who else ''
+        plain_suffix = f' as {plain_who}' if plain_who else ''
         self._render_with_status(
             f'✅ Signed in{suffix} — token cached, expires in {mins} min',
+            f'✅ Signed in{plain_suffix} — token cached, expires in {mins} min',
             color='#2e7d32')
 
     def on_failure(self, message: str) -> None:
         # message may interpolate the IdP's untrusted error_description.
+        plain = _strip_control(message)
         self._render_with_status(
-            '❌ ' + html.escape(_strip_control(message)), color='#c62828')
+            '❌ ' + html.escape(plain), '❌ ' + plain, color='#c62828')
 
-    def _render_with_status(self, status_html: str, color: str) -> None:
+    def _prompt_text(self, status_text: str) -> str:
+        """The ``text/plain`` twin of a render: the terminal prompt (URL and
+        code, vetted and defanged exactly as :class:`TerminalRenderer` prints
+        them) followed by the status line."""
+        if not self._resp:
+            return status_text
+        return format_prompt(self._resp) + '\n' + status_text
+
+    def _render_with_status(
+            self, status_html: str, status_text: str, color: str) -> None:
         # A terminal event can arrive without a preceding prompt (a driver
         # that reports failure before the device code was issued). Without
         # a prompt there is no URL and no user code, so emitting the prompt
@@ -1034,7 +1060,8 @@ class JupyterRenderer(Renderer):
         body = self._prompt_head() if self._resp else []
         body.append(
             f'<div style="color:{color};margin-top:8px">{status_html}</div>')
-        self._display(self._panel(''.join(body)))
+        self._display(
+            self._panel(''.join(body)), self._prompt_text(status_text))
 
 
 def make_renderer(qr: bool = False) -> Renderer:
