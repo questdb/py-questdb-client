@@ -85,6 +85,17 @@ def _debug_oidc_registry_snapshot():
                 frozenset(_OIDC_NATIVE_HANDLES))
 
 
+def _debug_oidc_last_provider_id():
+    """Internal test hook: the most recently allocated provider id.
+
+    Ids are monotonic and never reused, so every provider built after a reading
+    has a larger id. That lets a test track exactly the providers it created,
+    regardless of what earlier tests left for the collector to finalize.
+    """
+    with _OIDC_REGISTRY_LOCK:
+        return _oidc_last_provider_id
+
+
 def _debug_oidc_callbacks_shutting_down():
     """Internal test hook: has the callback-detach atexit phase started?"""
     with _OIDC_REGISTRY_LOCK:
@@ -233,23 +244,77 @@ cdef inline object _oidc_text(const char* buf, size_t length):
     return PyUnicode_FromStringAndSize(buf, <Py_ssize_t>length)
 
 
-cdef inline bint _oidc_error_view_is_full(size_t struct_size):
+cdef inline size_t _oidc_error_view_v1_size() noexcept nogil:
+    # Mirrors native's `QUESTDB_OIDC_ERROR_VIEW_V1_SIZE`: the prefix through
+    # `retry_after_seconds`. `acquisition_busy` was appended after v1, and
+    # `questdb_error_oidc_get_view` accepts -- and reports -- any capacity from
+    # this size up. Computed from the declared layout rather than hardcoded, so
+    # it tracks the header on every ABI the extension is compiled for.
+    cdef questdb_oidc_error_view layout
+    return (<size_t>(<char*>&layout.retry_after_seconds - <char*>&layout)
+            + sizeof(uint64_t))
+
+
+cdef inline bint _oidc_error_view_has_v1(size_t struct_size) noexcept nogil:
+    # kind, idp_error, idp_error_description, status and retry_after.
+    return struct_size >= _oidc_error_view_v1_size()
+
+
+cdef inline bint _oidc_error_view_has_acquisition_busy(
+        size_t struct_size) noexcept nogil:
+    # The appended tail. Gated separately: a library that predates it still
+    # reports a complete, classifiable v1 prefix, and collapsing that to a bare
+    # OidcError would drop the kind the foreground fail-fast gate and every
+    # `except OidcInteractionRequired` / `except OidcTimeoutError` key on.
     return struct_size >= sizeof(questdb_oidc_error_view)
 
 
 cdef inline bint _oidc_config_view_is_full(size_t struct_size):
+    # Native's config-view v1 ends at `issuer_len`, which is also the last
+    # declared field, so v1 and the full struct coincide today.
     return struct_size >= sizeof(questdb_oidc_config_view)
 
 
 def _debug_oidc_view_prefix_support(size_t error_size, size_t config_size):
-    """Internal test hook for config/error view write-back gates."""
-    return (_oidc_error_view_is_full(error_size),
+    """Internal test hook for config/error view write-back gates.
+
+    Returns ``(error_has_v1, error_has_acquisition_busy, config_is_full)``.
+    """
+    return (_oidc_error_view_has_v1(error_size),
+            _oidc_error_view_has_acquisition_busy(error_size),
             _oidc_config_view_is_full(config_size))
 
 
 def _debug_oidc_view_sizes():
-    return (sizeof(questdb_oidc_error_view),
+    """Internal test hook: ``(error_v1, error_full, config_full)`` sizes."""
+    return (_oidc_error_view_v1_size(),
+            sizeof(questdb_oidc_error_view),
             sizeof(questdb_oidc_config_view))
+
+
+def _debug_oidc_error_from_view_prefix(
+        size_t struct_size, int kind, bint acquisition_busy):
+    """Internal test hook: convert a synthetic error view of a given prefix.
+
+    Drives the same classification an older shared library's write-back would,
+    so the per-tier gates are tested through the real conversion rather than
+    only through the predicates.
+    """
+    cdef questdb_oidc_error_view view
+    errors = _oidc_errors_module()
+    if errors is None:
+        raise RuntimeError('questdb.auth._errors is unavailable')
+    memset(&view, 0, sizeof(questdb_oidc_error_view))
+    view.struct_size = struct_size
+    view.kind = <questdb_oidc_error_kind>kind
+    view.has_status = True
+    view.status = 400
+    view.has_retry_after = True
+    view.retry_after_seconds = 7
+    view.acquisition_busy = acquisition_busy
+    return _oidc_exc_from_view(
+        errors, 'synthetic OIDC error', &view, False,
+        QuestDBErrorCode.AuthError, None)
 
 
 # Resolved on first use and cached. See `_oidc_errors_module`.
@@ -355,13 +420,8 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
     cdef questdb_oidc_error_view view
     cdef line_sender_qwpws_error_view qwp_ws_view
     cdef object message
-    cdef object idp_error = None
-    cdef object description = None
-    cdef object status = None
-    cdef object retry_after = None
     cdef object sender_error = None
     cdef bint in_doubt = False
-    cdef bint acquisition_busy = False
     cdef object code
     cdef object exc
 
@@ -381,16 +441,9 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
             _oidc_text(msg_buf, msg_len) or 'Unknown native OIDC error.',
             sender_error,
             in_doubt=questdb_error_in_doubt(err))
-    OidcConfigError = errors.OidcConfigError
-    OidcCancelledError = errors.OidcCancelledError
-    OidcDeviceFlowError = errors.OidcDeviceFlowError
-    OidcError = errors.OidcError
-    OidcInteractionRequired = errors.OidcInteractionRequired
-    OidcNetworkError = errors.OidcNetworkError
-    OidcTimeoutError = errors.OidcTimeoutError
 
     if err == NULL:
-        return OidcError('Unknown native OIDC error.')
+        return errors.OidcError('Unknown native OIDC error.')
     msg_buf = questdb_error_msg(err, &msg_len)
     message = _oidc_text(msg_buf, msg_len) or 'Unknown native OIDC error.'
     # Carry the native in-doubt flag through the OIDC error path the same way
@@ -419,18 +472,53 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
         sender_error = c_sender_error_view_to_raw(qwp_ws_view)
     memset(&view, 0, sizeof(questdb_oidc_error_view))
     view.struct_size = sizeof(questdb_oidc_error_view)
-    if (questdb_error_oidc_get_view(err, &view)
-            and _oidc_error_view_is_full(view.struct_size)):
-        # The function writes back the prefix it populated. Re-read it before
-        # touching fields so a future dynamically linked older library cannot
-        # leave us reading beyond that prefix.
+    if questdb_error_oidc_get_view(err, &view):
+        return _oidc_exc_from_view(
+            errors, message, &view, in_doubt, code, sender_error)
+    exc = errors.OidcError(
+        message, in_doubt=in_doubt, code=code, sender_error=sender_error)
+    exc._acquisition_busy = False
+    return exc
+
+
+cdef object _oidc_exc_from_view(
+        object errors,
+        object message,
+        const questdb_oidc_error_view* view,
+        bint in_doubt,
+        object code,
+        object sender_error):
+    """Build the typed exception a populated error view describes.
+
+    ``view.struct_size`` is the prefix the library wrote back, which an older
+    shared library reports as its own (smaller) size. Each field is read only
+    when that prefix covers it, in the same two tiers as the native contract:
+    the v1 prefix (kind, IdP fields, status, retry-after) and the appended
+    ``acquisition_busy`` tail. An unwritten tail keeps its zero default.
+    """
+    cdef object idp_error = None
+    cdef object description = None
+    cdef object status = None
+    cdef object retry_after = None
+    cdef bint acquisition_busy = False
+    cdef object exc
+    OidcConfigError = errors.OidcConfigError
+    OidcCancelledError = errors.OidcCancelledError
+    OidcDeviceFlowError = errors.OidcDeviceFlowError
+    OidcError = errors.OidcError
+    OidcInteractionRequired = errors.OidcInteractionRequired
+    OidcNetworkError = errors.OidcNetworkError
+    OidcTimeoutError = errors.OidcTimeoutError
+
+    if _oidc_error_view_has_v1(view.struct_size):
         idp_error = _oidc_text(view.idp_error, view.idp_error_len)
         description = _oidc_text(
             view.idp_error_description, view.idp_error_description_len)
         status = view.status if view.has_status else None
         retry_after = (
             view.retry_after_seconds if view.has_retry_after else None)
-        acquisition_busy = view.acquisition_busy
+        if _oidc_error_view_has_acquisition_busy(view.struct_size):
+            acquisition_busy = view.acquisition_busy
         if view.kind == QUESTDB_OIDC_ERROR_CONFIG:
             exc = OidcConfigError(
                 message, status=status, retry_after=retry_after,
@@ -578,6 +666,94 @@ def _debug_oidc_event_tail_sizes():
             sizeof(questdb_oidc_event))
 
 
+cdef class _OidcForegroundCall:
+    """One ``sign_in()`` / ``token()`` / ``clear()`` running on this thread.
+
+    Those calls release the GIL for the whole native operation, so the only
+    Python bytecode that runs on the caller's thread meanwhile is a callback
+    native makes from inside it -- a renderer event, or a persistence
+    diagnostic -- and CPython delivers a pending signal at the first bytecode
+    it runs. A ``KeyboardInterrupt`` (or ``SystemExit``) raised there must not
+    unwind through native, so the callback parks it here for the call to
+    re-raise once native returns.
+    """
+    # The provider whose `sign_in()` this is, or None for token() / clear().
+    # A sign-in parks on the provider's own `_interrupt` slot, which the event
+    # dispatcher also reads, and is additionally cancelled.
+    cdef object provider
+    cdef object interrupt
+    # The record this one shadows: a renderer callback may itself call token().
+    cdef object previous
+
+
+# Per-thread stack of `_OidcForegroundCall` records. The diagnostic callback's
+# `user_data` is NULL -- it is shared by background token-provider workers,
+# which must never be handed a Python object -- so the current thread is the
+# only thing that can associate a diagnostic with the call it interrupted.
+# `with gil` on a thread that released the GIL through `PyEval_SaveThread`
+# resumes that thread's own state, so this sees the caller's record. A native
+# worker thread gets a fresh state and correctly sees none.
+cdef object _OIDC_FOREGROUND = threading.local()
+
+
+cdef _OidcForegroundCall _oidc_foreground_enter(object provider):
+    cdef _OidcForegroundCall call = _OidcForegroundCall.__new__(
+        _OidcForegroundCall)
+    call.provider = provider
+    call.interrupt = None
+    call.previous = getattr(_OIDC_FOREGROUND, 'call', None)
+    _OIDC_FOREGROUND.call = call
+    return call
+
+
+cdef object _oidc_foreground_exit(_OidcForegroundCall call):
+    """Pop ``call`` and return the interrupt a callback parked on it."""
+    _OIDC_FOREGROUND.call = call.previous
+    call.previous = None
+    return call.interrupt
+
+
+cdef void _oidc_park_foreground_interrupt(object exc) noexcept:
+    """Hand an interrupt raised inside a diagnostic to the call it stopped.
+
+    Must not raise: it runs on the error path of a ``noexcept`` callback.
+    """
+    cdef _OidcForegroundCall call
+    cdef OidcDeviceAuth provider
+    try:
+        record = getattr(_OIDC_FOREGROUND, 'call', None)
+        if record is not None:
+            call = <_OidcForegroundCall>record
+            if call.provider is not None:
+                # A sign-in. Park where the renderer path parks, so sign_in()
+                # has one slot to read, and cancel the device flow so the call
+                # actually returns. A diagnostic can also fire before the flow
+                # starts (a failed store read, or the save after a refresh that
+                # did not yield a servable token), when there is nothing to
+                # cancel yet; `_oidc_event_dispatch` then cancels at the first
+                # prompt instead of painting it.
+                provider = <OidcDeviceAuth>call.provider
+                if provider._interrupt is None:
+                    provider._interrupt = exc
+                _oidc_cancel_sign_in_from_callback(provider)
+            elif call.interrupt is None:
+                call.interrupt = exc
+            return
+        if (isinstance(exc, KeyboardInterrupt)
+                and threading.get_ident() == threading.main_thread().ident):
+            # No foreground call to re-raise it, yet this is the main thread:
+            # an attached transport pulled a token on the caller's thread with
+            # the GIL released. Catching the exception cleared CPython's
+            # tripped-signal flag, so re-arm it; the interpreter raises it at
+            # the first bytecode after that native call returns, exactly where
+            # an uncaught Ctrl-C during a blocking call would surface.
+            PyErr_SetInterrupt()
+        # Anywhere else this is a native worker thread, where signals are never
+        # delivered and there is no caller to hand an exception to.
+    except BaseException:
+        pass
+
+
 cdef void _oidc_event_dispatch(
         void* user_data,
         const questdb_oidc_event* event) noexcept with gil:
@@ -585,6 +761,15 @@ cdef void _oidc_event_dispatch(
     cdef uint64_t interval_seconds = 0
     provider = _oidc_provider_from_user_data(user_data)
     if provider is None:
+        return
+    if ((<OidcDeviceAuth>provider)._interrupt is not None
+            and event.kind in (
+                QUESTDB_OIDC_EVENT_PROMPT, QUESTDB_OIDC_EVENT_WAITING)):
+        # An interrupt was parked before the device flow could be cancelled --
+        # by a persistence diagnostic ahead of the prompt, or by an earlier
+        # event racing the cancellation. Stop instead of painting a prompt
+        # nobody should answer.
+        _oidc_cancel_sign_in_from_callback(<OidcDeviceAuth>provider)
         return
     renderer = (<OidcDeviceAuth>provider)._renderer
     if renderer is None:
@@ -631,8 +816,9 @@ cdef void _oidc_event_dispatch(
                 'OIDC sign-in failed.')
     except (KeyboardInterrupt, SystemExit) as exc:
         # sign_in() releases the GIL for the whole native flow, so this callback
-        # is the only place Python bytecode runs on the caller's thread -- and
-        # therefore where CPython delivers a pending SIGINT. Swallowing it here
+        # -- and the persistence diagnostic, see `_OidcForegroundCall` -- is
+        # where Python bytecode runs on the caller's thread, and therefore
+        # where CPython delivers a pending SIGINT. Swallowing it here
         # made Ctrl-C print a traceback and change nothing, leaving sign_in()
         # polling until the device code expired, with every later Ctrl-C eaten
         # the same way. Stash it for sign_in() to re-raise, and cancel the flow
@@ -656,6 +842,14 @@ cdef void _oidc_diagnostic_dispatch(
                 'OIDC %s',
                 _oidc_text(diagnostic.message, diagnostic.message_len) or
                 'token-store persistence operation failed')
+    except (KeyboardInterrupt, SystemExit) as exc:
+        # Not an ordinary handler failure. On the thread running sign_in(),
+        # token() or clear() this is where CPython delivers a pending Ctrl-C
+        # (warn_persistence runs inside those calls with the GIL released), and
+        # catching it clears the tripped-signal flag: discarding it left
+        # sign_in() polling to the device-code deadline with the interrupt
+        # gone. Hand it to that call instead.
+        _oidc_park_foreground_interrupt(exc)
     except BaseException:
         # Logging handlers are user code. Diagnostics are best-effort and must
         # never unwind through C/Rust or turn a usable token into a failure.
@@ -1367,6 +1561,7 @@ cdef class OidcDeviceAuth:
         cdef questdb_error* err = NULL
         cdef bint ok
         cdef PyThreadState* gs = NULL
+        cdef _OidcForegroundCall call
         self._require_open()
         if not self._sign_in_lock.acquire(False):
             from questdb.auth._errors import OidcError
@@ -1377,9 +1572,13 @@ cdef class OidcDeviceAuth:
             # non-blocking lock above prevents another sign_in() from entering
             # native and winning the race to consume the provider field.
             self._interrupt = None
+            # Lets a persistence diagnostic on this thread find this provider:
+            # its callback carries no user_data.
+            call = _oidc_foreground_enter(self)
             _ensure_doesnt_have_gil(&gs)
             ok = questdb_oidc_auth_sign_in(self._raw, &err)
             _ensure_has_gil(&gs)
+            _oidc_foreground_exit(call)
             interrupt = self._interrupt
             self._interrupt = None
             if interrupt is not None:
@@ -1441,10 +1640,21 @@ cdef class OidcDeviceAuth:
         cdef const char* data = NULL
         cdef size_t length = 0
         cdef PyThreadState* gs = NULL
+        cdef _OidcForegroundCall call
         self._require_open()
+        call = _oidc_foreground_enter(None)
         _ensure_doesnt_have_gil(&gs)
         token = questdb_oidc_auth_token(self._raw, &err)
         _ensure_has_gil(&gs)
+        interrupt = _oidc_foreground_exit(call)
+        if interrupt is not None:
+            # Ctrl-C landed in a persistence diagnostic during a refresh. The
+            # user asked to stop; the outcome of the call is moot.
+            if token != NULL:
+                questdb_oidc_token_free(token)
+            if err != NULL:
+                questdb_error_free(err)
+            raise interrupt
         if token == NULL:
             raise _oidc_err_to_py(err)
         try:
@@ -1477,15 +1687,29 @@ cdef class OidcDeviceAuth:
         available afterwards -- otherwise the ``with`` form, whose exit closes
         the provider, would leave a long-lived plaintext refresh token on disk
         with no supported way to remove it.
+
+        Never waits behind an interactive :meth:`sign_in` running on another
+        thread, which can hold the provider for the device code's whole
+        lifetime (the GIL is released for the call, so it would not even see
+        ``Ctrl-C``). It raises :class:`~questdb.QuestDBError` with code
+        ``InvalidApiCall`` instead and clears **nothing**: call
+        :meth:`cancel_sign_in` first, or retry once the sign-in completes.
         """
         cdef questdb_error* err = NULL
         cdef bint ok
         cdef PyThreadState* gs = NULL
+        cdef _OidcForegroundCall call
         if self._raw == NULL:
             return
+        call = _oidc_foreground_enter(None)
         _ensure_doesnt_have_gil(&gs)
         ok = questdb_oidc_auth_clear(self._raw, &err)
         _ensure_has_gil(&gs)
+        interrupt = _oidc_foreground_exit(call)
+        if interrupt is not None:
+            if err != NULL:
+                questdb_error_free(err)
+            raise interrupt
         if not ok:
             raise _oidc_err_to_py(err)
 

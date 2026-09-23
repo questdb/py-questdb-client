@@ -245,6 +245,11 @@ Highlights:
   ``Sender``/pool/reader instances remain usable, and a later ``sign_in()`` can
   retry on the same provider. Custom UIs can invoke the new attempt-scoped
   ``cancel_sign_in()`` method directly. Only ``close()`` is permanent.
+  :meth:`~questdb.auth.OidcDeviceAuth.clear` never waits behind a
+  ``sign_in()`` running on another thread: it raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.InvalidApiCall`` and clears nothing, so cancel the sign-in
+  first or retry once it completes.
 * Renderer prompts receive the device code's bounded lifetime and polling
   interval (``expires_in`` / ``interval``) plus ``browser_target``, the single
   natively vetted URL that built-in renderers use for links and QR codes.
@@ -337,6 +342,11 @@ Other changes
   ``in_flight_window``, remove it. These options are no longer supported and now
   raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.ConfigError`` during startup.
+- The ILP/HTTP sender now ignores the ``HTTP_PROXY``, ``HTTPS_PROXY`` and
+  ``ALL_PROXY`` environment variables (in either case) and always connects
+  directly. Previously, setting any of them made every flush fail with a
+  misleading ``Connection refused`` without contacting anything, because the
+  proxy was read but never dialled. HTTP proxies remain unsupported.
 
 5.0.0 (2026-07-27)
 ------------------

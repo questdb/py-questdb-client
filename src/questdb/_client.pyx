@@ -93,7 +93,7 @@ from cpython.datetime cimport (
 )
 from cpython.bool cimport bool
 from cpython.ref cimport Py_XDECREF
-from cpython.exc cimport PyErr_Clear
+from cpython.exc cimport PyErr_Clear, PyErr_SetInterrupt
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
 from cpython.object cimport PyObject
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \

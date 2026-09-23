@@ -65,7 +65,6 @@ from questdb.auth import (
     sqlalchemy_engine,
 )
 from questdb import _client
-from questdb._client import _debug_oidc_registry_size
 from questdb.auth import _adapters
 from questdb.auth import _render
 from questdb.auth._render import (
@@ -74,6 +73,7 @@ from questdb.auth._render import (
     in_ipython_kernel,
     make_renderer,
 )
+import pg_capture_server
 from oidc_test_server import OidcTestServer
 from qwp_ws_ack_server import QwpAckServer
 
@@ -101,60 +101,62 @@ def make_discovered_auth(server, **kwargs):
     return OidcDeviceAuth.from_questdb(server.url, **options)
 
 
-# How many CONSECUTIVE unchanged readings make a count trustworthy.
-#
-# One repeat is not enough. PyPy does not refcount and stages cpyext
-# finalization across several collections, so the registry size can plateau for
-# a pass and then drop again -- `_settled_registry_size` took such a plateau for
-# a settled value, over-counted the baseline by two, and failed
-# `test_registry_drains_when_init_is_retried_after_failed_build` with
-# `3 != 5` on the linux_x64_pypy wheel job. CPython settles on the first
-# repeat, so the extra passes there cost microseconds on an empty generation.
-_SETTLE_STABLE_PASSES = 4
+# Upper bound on collections while waiting for a target state. CPython reaches
+# it on the first pass; PyPy does not refcount and stages cpyext finalization
+# across several collections.
 _SETTLE_MAX_PASSES = 60
 
 
-def _settle(measure):
-    """``measure()`` once collection has stopped changing it.
+def _settle_until(done):
+    """Collect until ``done()`` holds; return whether it ever did.
 
-    Returns the last reading, which is the settled one whenever the loop broke
-    early and the best available estimate if it did not.
+    Target-directed, never a plateau detector. "The reading stopped changing"
+    is not evidence of anything on PyPy, whose staged finalization can hold a
+    value for several passes and then move again -- and nothing bounds how long
+    such a plateau lasts. Waiting for the state the assertion is about cannot
+    be fooled that way, and an unreachable target still fails, after the last
+    pass.
     """
-    prev = None
-    stable = 0
-    count = None
     for _ in range(_SETTLE_MAX_PASSES):
         gc.collect()
-        count = measure()
-        if count == prev:
-            stable += 1
-            if stable >= _SETTLE_STABLE_PASSES:
-                break
-        else:
-            stable = 0
-        prev = count
-    return count
+        if done():
+            return True
+    return False
 
 
-def _settled_registry_size():
-    """``_debug_oidc_registry_size()`` once pending finalizers have drained.
+def _provider_id_watermark():
+    """Every provider built after this call has an id above the returned one."""
+    return _client._debug_oidc_last_provider_id()
 
-    Entries are dropped by the provider weakref callback, which also releases
-    the separately registered native-handle owner. CPython runs that at the last
-    decref, so an immediate reading is already settled;
-    PyPy does not refcount and stages cpyext finalization across several collections, so a
-    bare reading still counts providers that are unreachable -- and counts them
-    in the *baseline* too, which is why this drifted in both directions on PyPy
-    (``3 != 4`` as well as ``5 != 10``). Collect until the count stops moving. A
-    live provider is never collected, so settling is equally correct for the
-    readings that expect one.
 
-    Settling requires several consecutive unchanged readings, not one repeat:
-    see :data:`_SETTLE_STABLE_PASSES` for the PyPy failure that taught us the
-    difference. This reading is compared for exact equality, so it has no
-    tolerance to absorb a premature settle.
+def _registered_ids_since(watermark):
+    """Registry ids of providers built after ``watermark``.
+
+    Scoping to the test's own providers is what makes an exact assertion
+    possible. The whole-registry size also counts whatever earlier tests left
+    unreachable but not yet finalized, and on PyPy that count drifts while the
+    test runs -- including under the *baseline* reading, which then poisoned
+    every comparison against it (``3 != 5`` on the linux_x64_pypy wheel job).
     """
-    return _settle(_debug_oidc_registry_size)
+    providers, handles = _client._debug_oidc_registry_snapshot()
+    if providers != handles:
+        raise AssertionError(
+            f'OIDC provider/native registries are out of sync: '
+            f'{sorted(providers ^ handles)}')
+    return {provider_id for provider_id in providers
+            if provider_id > watermark}
+
+
+def _settled_registered_ids_since(watermark, expected=frozenset()):
+    """Collect until exactly ``expected`` of the post-``watermark`` providers
+    remain registered, then return the ids that do.
+
+    Callers assert the result equals ``expected``: a leaked entry never
+    leaves, so it exhausts the passes and fails that assertion.
+    """
+    expected = set(expected)
+    _settle_until(lambda: _registered_ids_since(watermark) == expected)
+    return _registered_ids_since(watermark)
 
 
 class RecordingRenderer(Renderer):
@@ -1313,7 +1315,7 @@ class NativeOidcTest(unittest.TestCase):
         'test_close_detaches_renderer (deterministic release) and '
         'test_registry_weakref_released_on_success (acyclic collection).')
     def test_renderer_provider_cycle_is_collected(self):
-        baseline = _settled_registry_size()
+        watermark = _provider_id_watermark()
         renderer = Renderer()
         auth = make_auth(renderer=renderer)
         renderer.auth = auth
@@ -1325,14 +1327,12 @@ class NativeOidcTest(unittest.TestCase):
         # a separate registry entry removed by the provider's weakref callback.
         # That keeps the cycle free of finalized C-extension edges, so CPython's
         # cyclic GC reclaims it and the native handle with it.
-        for _ in range(_SETTLE_MAX_PASSES):
-            gc.collect()
-            if renderer_ref() is None and auth_ref() is None:
-                break
+        _settle_until(
+            lambda: renderer_ref() is None and auth_ref() is None)
 
         self.assertIsNone(renderer_ref())
         self.assertIsNone(auth_ref())
-        self.assertEqual(_settled_registry_size(), baseline)
+        self.assertEqual(_settled_registered_ids_since(watermark), set())
 
     def test_close_detaches_renderer(self):
         renderer = Renderer()
@@ -1342,7 +1342,10 @@ class NativeOidcTest(unittest.TestCase):
         self.assertIsNotNone(renderer_ref())
 
         auth.close()
-        _settle(lambda: renderer_ref() is not None)
+        # Wait for the state asserted below. The old plateau detector was fed
+        # this as a boolean, so it "settled" on consecutive True readings --
+        # renderer not yet collected -- and the assertion then failed.
+        _settle_until(lambda: renderer_ref() is None)
         self.assertIsNone(renderer_ref())
 
     # Native build() is ~100ms, so keep repeated construction tests modest.
@@ -1355,18 +1358,18 @@ class NativeOidcTest(unittest.TestCase):
         # callback removes both registry entries, and a missed callback strands
         # the weakref plus native-handle owner in module-global dictionaries.
         make_auth(renderer=Renderer())  # warm one-time module state
-        baseline = _settled_registry_size()
+        watermark = _provider_id_watermark()
         refs = []
         for _ in range(self._LEAK_ITERS):
             auth = make_auth(renderer=Renderer())
             refs.append(weakref.ref(auth))
             del auth
-        size = _settled_registry_size()
+        remaining = _settled_registered_ids_since(watermark)
         self.assertTrue(
             all(ref() is None for ref in refs),
             'a provider remained alive after its strong references were dropped')
         self.assertEqual(
-            size, baseline,
+            remaining, set(),
             f'the provider registry grew over {self._LEAK_ITERS} constructions')
 
     def test_registry_lock_keeps_concurrent_provider_builds_paired(self):
@@ -1386,9 +1389,7 @@ class NativeOidcTest(unittest.TestCase):
             except BaseException as exc:
                 failures.append(exc)
 
-        baseline_providers, baseline_handles = (
-            _client._debug_oidc_registry_snapshot())
-        self.assertEqual(baseline_providers, baseline_handles)
+        watermark = _provider_id_watermark()
         threads = [
             threading.Thread(target=build, args=(index,), daemon=True)
             for index in range(workers)]
@@ -1400,14 +1401,12 @@ class NativeOidcTest(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertTrue(all(provider is not None for provider in providers))
 
-        provider_ids, handle_ids = _client._debug_oidc_registry_snapshot()
-        self.assertEqual(provider_ids, handle_ids)
-        new_ids = provider_ids - baseline_providers
+        # `_registered_ids_since` also asserts the two maps stay paired.
+        new_ids = _registered_ids_since(watermark)
         self.assertEqual(len(new_ids), workers)
-        self.assertTrue(new_ids.isdisjoint(baseline_providers))
 
         providers.clear()
-        self.assertEqual(_settled_registry_size(), len(baseline_providers))
+        self.assertEqual(_settled_registered_ids_since(watermark), set())
 
     # A path that reaches native build() rather than a Python pre-check: the
     # setter only stores it, and build() is what opens it. Anything rejected
@@ -1476,35 +1475,43 @@ class NativeOidcTest(unittest.TestCase):
         # nothing because its weakref callback cleans up then. Holding the
         # half-built object alive is what makes this discriminate.
         self._construct_and_fail_in_build()  # warm one-time module state
-        baseline = _settled_registry_size()
+        watermark = _provider_id_watermark()
         auth = OidcDeviceAuth.__new__(OidcDeviceAuth)
         self._construct_and_fail_in_build(target=auth)
+        # No collection needed or wanted: `auth` is alive, so an entry left
+        # behind here can only be the unwind's fault.
         self.assertEqual(
-            _settled_registry_size(), baseline,
+            _registered_ids_since(watermark), set(),
             'a failed native build() left its `_OIDC_PROVIDERS` entry behind; '
             'the registry must not hold an entry for a provider that was '
             'never built')
         del auth
-        self.assertEqual(_settled_registry_size(), baseline)
+        self.assertEqual(_settled_registered_ids_since(watermark), set())
 
     def test_registry_drains_when_init_is_retried_after_failed_build(self):
         # A failed build leaves the provider's borrowed raw handle NULL, so the
         # already-initialized guard does not fire on a retry. Without the unwind,
         # a second `__init__` would overwrite its provider id and strand both old
         # registry entries for the life of the process.
-        baseline = _settled_registry_size()
+        watermark = _provider_id_watermark()
         for _ in range(self._LEAK_ITERS):
             auth = OidcDeviceAuth.__new__(OidcDeviceAuth)
             self._construct_and_fail_in_build(target=auth)
             # The retry succeeds, so the object ends up live and built.
+            before_retry = _provider_id_watermark()
             auth.__init__(
                 'questdb', 'https://idp.example/device',
                 'https://idp.example/token',
                 interactive=False, open_browser=False, renderer=Renderer())
-            self.assertEqual(_settled_registry_size(), baseline + 1)
+            # Exactly the live retry is registered: every earlier iteration's
+            # provider and this iteration's failed build are gone.
+            live_id = _registered_ids_since(before_retry)
+            self.assertEqual(len(live_id), 1)
+            self.assertEqual(
+                _settled_registered_ids_since(watermark, live_id), live_id)
             del auth
         self.assertEqual(
-            _settled_registry_size(), baseline,
+            _settled_registered_ids_since(watermark), set(),
             f'the provider registry grew over {self._LEAK_ITERS} '
             f'failed-then-retried initializations')
 
@@ -2099,20 +2106,30 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             auth.token()
 
     def test_concurrent_sign_in_cannot_steal_callback_interrupt(self):
+        # The steal window opens when the renderer's KeyboardInterrupt is parked
+        # on the provider and closes when the first sign_in() -- after native
+        # has unwound the cancelled flow and it has re-taken the GIL -- reads
+        # it back. A second sign_in() that entered native in between would
+        # reset or consume that slot. The window cannot be entered on cue (no
+        # user code runs inside it), so the second thread keeps attempting
+        # sign_in() from before the interrupt is raised until the first thread
+        # has finished: each attempt must be refused outright, and the first
+        # must still get its own interrupt back.
         callback_entered = threading.Event()
-        release_callback = threading.Event()
+        second_attempted = threading.Event()
 
         class InterruptingRenderer(RecordingRenderer):
             def on_waiting(self, seconds_left):
                 super().on_waiting(seconds_left)
                 callback_entered.set()
-                if not release_callback.wait(5):
+                if not second_attempted.wait(5):
                     raise AssertionError('concurrent sign-in was never attempted')
                 raise KeyboardInterrupt
 
         pending = (400, {'error': 'authorization_pending'}, None)
         first_result = []
-        second_result = []
+        second_results = []
+        attempts_after_interrupt = [0]
         with OidcTestServer(
                 device_token_response=pending,
                 device_expires_in=20) as server:
@@ -2125,29 +2142,238 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 except BaseException as exc:
                     first_result.append(exc)
 
-            def second_sign_in():
-                try:
-                    auth.sign_in()
-                except BaseException as exc:
-                    second_result.append(exc)
-
             first = threading.Thread(target=first_sign_in, daemon=True)
+
+            def second_sign_in():
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    interrupted = second_attempted.is_set()
+                    try:
+                        auth.sign_in()
+                    except OidcError as exc:
+                        # The expected refusal. Keep only the anomalies: this
+                        # loop can run many thousands of times.
+                        if 'already in progress' not in str(exc):
+                            second_results.append(exc)
+                    except BaseException as exc:
+                        second_results.append(exc)
+                    else:
+                        second_results.append(None)
+                    if interrupted:
+                        attempts_after_interrupt[0] += 1
+                    second_attempted.set()
+                    if not first.is_alive():
+                        return
+
             first.start()
             self.assertTrue(
                 callback_entered.wait(5), 'first sign-in did not render')
             second = threading.Thread(target=second_sign_in, daemon=True)
             second.start()
-            second.join(2)
-            release_callback.set()
-            first.join(2)
+            first.join(10)
+            second.join(10)
 
         self.assertFalse(first.is_alive())
         self.assertFalse(second.is_alive())
         self.assertEqual(len(first_result), 1)
         self.assertIsInstance(first_result[0], KeyboardInterrupt)
-        self.assertEqual(len(second_result), 1)
-        self.assertIsInstance(second_result[0], OidcError)
-        self.assertIn('already in progress', str(second_result[0]))
+        # Some attempts ran while the interrupt was being raised, parked and
+        # handed back, not merely before it.
+        self.assertGreater(attempts_after_interrupt[0], 0)
+        self.assertEqual(
+            second_results, [],
+            'a concurrent sign_in() was not refused outright')
+
+    def test_default_interval_reaches_native_when_idp_omits_interval(self):
+        # Validation alone was covered, and every /device response carried an
+        # `interval`, which takes precedence -- so deleting the native setter
+        # call left the suite green. The prompt reports the interval the
+        # polling loop will actually use; cancel from it rather than wait one.
+        class CancellingRenderer(RecordingRenderer):
+            auth = None
+
+            def on_prompt(self, response):
+                super().on_prompt(response)
+                self.auth.cancel_sign_in()
+
+        cases = (
+            # (advertised by the IdP, default_interval=, used)
+            (None, 11, 11),
+            (None, 29, 29),
+            (7, 29, 7),
+        )
+        for advertised, configured, expected in cases:
+            with self.subTest(advertised=advertised, configured=configured):
+                with OidcTestServer(device_interval=advertised) as server:
+                    renderer = CancellingRenderer()
+                    auth = make_discovered_auth(
+                        server, renderer=renderer,
+                        default_interval=configured)
+                    renderer.auth = auth
+                    try:
+                        with self.assertRaises(OidcCancelledError):
+                            auth.sign_in()
+                    finally:
+                        auth.close()
+                self.assertEqual(len(renderer.prompts), 1)
+                self.assertEqual(renderer.prompts[0]['interval'], expected)
+
+    def _sabotaging_renderer(self, directory):
+        class SabotageRenderer(RecordingRenderer):
+            def on_prompt(self, challenge):
+                super().on_prompt(challenge)
+                # Replace the preflighted store directory with a regular file,
+                # so the durable save after the device flow fails.
+                shutil.rmtree(directory)
+                with open(directory, 'w', encoding='utf-8') as sink:
+                    sink.write('not a directory')
+        return SabotageRenderer()
+
+    class _RaisingHandler(logging.Handler):
+        def __init__(self, exc):
+            super().__init__()
+            self.exc = exc
+            self.fired = 0
+
+        def emit(self, record):
+            self.fired += 1
+            raise self.exc
+
+    def _with_questdb_handler(self, handler):
+        logger = logging.getLogger('questdb')
+        old_level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.WARNING)
+
+        def restore():
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+        self.addCleanup(restore)
+
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
+    def test_interrupt_in_persistence_diagnostic_reaches_sign_in(self):
+        # The persistence diagnostic runs `logging` -- Python bytecode -- on
+        # the sign_in() thread while the GIL is otherwise released, so it is
+        # where CPython delivers a pending Ctrl-C. Its `except BaseException:
+        # pass` swallowed that and cleared the tripped-signal flag. A handler
+        # raising the interrupt stands in for the signal deterministically.
+        for exc in (KeyboardInterrupt(), SystemExit(4)):
+            with self.subTest(exc=type(exc).__name__):
+                with tempfile.TemporaryDirectory() as parent:
+                    directory = os.path.join(parent, 'store')
+                    with OidcTestServer() as server:
+                        auth = make_discovered_auth(
+                            server,
+                            token_store=FileTokenStore.at(directory),
+                            renderer=self._sabotaging_renderer(directory))
+                        handler = self._RaisingHandler(exc)
+                        self._with_questdb_handler(handler)
+                        with self.assertRaises(type(exc)) as ctx:
+                            auth.sign_in()
+                        logging.getLogger('questdb').removeHandler(handler)
+                        self.assertIs(ctx.exception, exc)
+                        self.assertEqual(handler.fired, 1)
+                        # The save failed after the token was committed; the
+                        # interrupt reports the Ctrl-C, it does not undo that.
+                        self.assertEqual(
+                            auth.token(), server.initial_access_token)
+
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
+    def test_interrupt_in_persistence_diagnostic_reaches_token(self):
+        # Same as above for the other foreground call a diagnostic can run
+        # inside: a synchronous refresh in token() whose save fails.
+        credential_path = None
+        sabotaged = threading.Event()
+
+        def sabotage_after_refresh_request():
+            # See test_background_token_provider_dispatches_persistence_
+            # diagnostic: turning the credential into a directory makes the
+            # atomic replace that persists the refreshed token fail.
+            if not sabotaged.is_set():
+                if os.path.isfile(credential_path):
+                    os.remove(credential_path)
+                os.mkdir(credential_path)
+                sabotaged.set()
+
+        with tempfile.TemporaryDirectory() as directory:
+            with OidcTestServer(
+                    initial_expires_in=4,
+                    refresh_request_hook=sabotage_after_refresh_request
+                    ) as server:
+                auth = make_discovered_auth(
+                    server, token_store=FileTokenStore.at(directory))
+                auth.sign_in()
+                credential_files = [
+                    name for name in os.listdir(directory)
+                    if name.endswith('.json')]
+                self.assertEqual(len(credential_files), 1)
+                credential_path = os.path.join(
+                    directory, credential_files[0])
+                handler = self._RaisingHandler(KeyboardInterrupt())
+                self._with_questdb_handler(handler)
+                # Serve the initial token until it crosses the refresh
+                # threshold; the refreshing call must raise, not return the
+                # refreshed token with the interrupt thrown away.
+                deadline = time.monotonic() + 15
+                with self.assertRaises(KeyboardInterrupt):
+                    while time.monotonic() < deadline:
+                        if auth.token() != server.initial_access_token:
+                            break
+                        time.sleep(0.05)
+                self.assertTrue(sabotaged.is_set())
+                self.assertEqual(handler.fired, 1)
+
+    def test_clear_does_not_wait_behind_interactive_sign_in(self):
+        # sign_in() holds the provider for the whole device flow. clear()
+        # waited for all of it with the GIL released -- up to the device-code
+        # lifetime, with Ctrl-C undeliverable -- whenever it landed between
+        # polls rather than during a renderer callback, which was already
+        # refused.
+        waiting = threading.Event()
+
+        class WaitingRenderer(RecordingRenderer):
+            def on_waiting(self, seconds_left):
+                super().on_waiting(seconds_left)
+                waiting.set()
+
+        pending = (400, {'error': 'authorization_pending'}, None)
+        outcome = []
+        with OidcTestServer(
+                device_token_response=pending,
+                device_expires_in=15) as server:
+            auth = make_discovered_auth(server, renderer=WaitingRenderer())
+
+            def sign_in():
+                try:
+                    auth.sign_in()
+                except BaseException as exc:
+                    outcome.append(exc)
+
+            signer = threading.Thread(target=sign_in, daemon=True)
+            signer.start()
+            self.assertTrue(waiting.wait(5), 'sign-in did not start polling')
+            # Let the callback return, so this lands in the poll wait (5s)
+            # that the old code blocked through, not the callback window.
+            time.sleep(0.2)
+            started = time.monotonic()
+            with self.assertRaises(questdb.QuestDBError) as ctx:
+                auth.clear()
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertIs(
+                ctx.exception.code, questdb.QuestDBErrorCode.InvalidApiCall)
+            self.assertIn('Nothing was cleared', str(ctx.exception))
+
+            # The refused clear left the sign-in running; cancel it, and
+            # clear now proceeds.
+            self.assertTrue(signer.is_alive())
+            auth.cancel_sign_in()
+            signer.join(5)
+            self.assertFalse(signer.is_alive())
+            self.assertEqual(len(outcome), 1)
+            self.assertIsInstance(outcome[0], OidcCancelledError)
+            auth.clear()
 
     def test_renderer_can_cancel_sign_in_without_closing_provider(self):
         outcome = []
@@ -2814,7 +3040,7 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         # would accumulate.
         with OidcTestServer() as server:
             make_discovered_auth(server).sign_in()  # warm
-            baseline = _settled_registry_size()
+            watermark = _provider_id_watermark()
             refs = []
             for _ in range(12):
                 auth = make_discovered_auth(server)
@@ -2822,12 +3048,12 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 self.assertEqual(auth.token(), 'AT-initial')
                 refs.append(weakref.ref(auth))
                 del auth
-            size = _settled_registry_size()
+            remaining = _settled_registered_ids_since(watermark)
         self.assertTrue(
             all(ref() is None for ref in refs),
             'a provider remained alive after a full sign-in/token lifecycle')
         self.assertEqual(
-            size, baseline,
+            remaining, set(),
             'the provider registry grew over 12 sign-in/token lifecycles')
 
 
@@ -3090,28 +3316,28 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         # callback drops the registry entries and native owner on a managed
         # thread; a stale entry would be a slow leak that no ordinary weakref
         # assertion catches.
-        baseline = _settled_registry_size()
+        watermark = _provider_id_watermark()
         provider = make_auth()
-        self.assertEqual(_settled_registry_size(), baseline + 1)
+        self.assertEqual(len(_registered_ids_since(watermark)), 1)
         weak = weakref.ref(provider)
         del provider
-        # Draining the weakref callback pops both entries, so take the size first
-        # and assert on both afterwards.
-        size = _settled_registry_size()
+        # Draining the weakref callback pops both entries, so take the reading
+        # first and assert on both afterwards.
+        remaining = _settled_registered_ids_since(watermark)
         self.assertIsNone(weak(), 'the registry must not keep a provider alive')
         self.assertEqual(
-            size, baseline, 'the registry entry outlived its provider')
+            remaining, set(), 'the registry entry outlived its provider')
 
     def test_provider_registry_does_not_grow_across_churn(self):
-        baseline = _settled_registry_size()
+        watermark = _provider_id_watermark()
         refs = []
         for _ in range(200):
             provider = make_auth()
             refs.append(weakref.ref(provider))
             del provider
-        size = _settled_registry_size()
+        remaining = _settled_registered_ids_since(watermark)
         self.assertTrue(all(ref() is None for ref in refs))
-        self.assertEqual(size, baseline)
+        self.assertEqual(remaining, set())
 
     def test_token_provider_failure_is_narrated_to_the_listener(self):
         # Regression: the Bearer header is resolved ABOVE the endpoint loop, so
@@ -4571,6 +4797,152 @@ class AdapterTest(unittest.TestCase):
 ACCESS_TOKEN_WITH_SUB = 'e30.eyJzdWIiOiJhbGljZUBleGFtcGxlLmNvbSJ9.'
 
 
+def _real_pg_driver_stack():
+    """``(sqlalchemy, psycopg)`` if both really import, else ``None``.
+
+    psycopg raises ImportError when it has no usable libpq, as does a missing
+    package, so an importable module is a usable driver.
+    """
+    try:
+        import psycopg
+        import sqlalchemy
+    except ImportError:
+        return None
+    return sqlalchemy, psycopg
+
+
+class _TokenSequence:
+    """An ``auth`` stand-in serving successive tokens, to observe rotation."""
+
+    def __init__(self, *tokens):
+        self._tokens = iter(tokens)
+        self.calls = 0
+
+    def token(self):
+        self.calls += 1
+        return next(self._tokens)
+
+
+@unittest.skipIf(
+    _real_pg_driver_stack() is None,
+    'SQLAlchemy and psycopg (with libpq) are not both installed')
+class AdapterRealDriverTest(unittest.TestCase):
+    """The PG-wire adapters against a real SQLAlchemy and psycopg.
+
+    `AdapterTest` drives the adapters through injected stand-in modules and
+    calls the ``do_connect`` listener by hand, so neither SQLAlchemy's real
+    ``(dialect, conn_rec, cargs, cparams)`` contract and its
+    ``cparams.update(connect_args)`` merge order, nor what libpq actually puts
+    on the wire, is exercised there. Here the real stack dials a loopback
+    endpoint that records the startup message and the cleartext password and
+    then refuses the login.
+    """
+
+    URL = 'http://127.0.0.1:9000'
+
+    def _refused(self, connect):
+        import psycopg
+        import sqlalchemy.exc
+        with self.assertRaises(
+                (psycopg.OperationalError,
+                 sqlalchemy.exc.OperationalError)) as ctx:
+            connect()
+        self.assertIn(pg_capture_server.REJECTION_MESSAGE, str(ctx.exception))
+
+    def test_psycopg_connect_sends_a_real_token_to_the_vetted_peer(self):
+        # End to end: the token a real provider signed in for is what libpq
+        # sends, as `_sso`, to the host from the URL and the given pg_port.
+        with OidcTestServer() as oidc_server, \
+                pg_capture_server.PgCaptureServer() as pg:
+            auth = make_discovered_auth(oidc_server)
+            auth.sign_in()
+            self._refused(lambda: psycopg_connect(
+                auth, self.URL, pg_port=pg.port,
+                application_name='qdb-oidc-test'))
+        self.assertEqual(pg.errors, [])
+        (login,) = pg.logins
+        self.assertEqual(login['password'], oidc_server.initial_access_token)
+        self.assertEqual(login['params']['user'], '_sso')
+        self.assertEqual(login['params']['database'], 'qdb')
+        # A passthrough kwarg reaches the wire.
+        self.assertEqual(
+            login['params']['application_name'], 'qdb-oidc-test')
+        # sslmode "auto" on a numeric loopback resolves to "prefer": TLS is
+        # attempted first, then plaintext is accepted.
+        self.assertIn('ssl', login['encryption_requests'])
+
+    def test_sqlalchemy_engine_injects_a_fresh_token_per_connection(self):
+        from sqlalchemy.pool import NullPool
+        auth = _TokenSequence('TOKEN-1', 'TOKEN-2')
+        with pg_capture_server.PgCaptureServer() as pg:
+            engine = sqlalchemy_engine(
+                auth, self.URL, pg_port=pg.port, poolclass=NullPool)
+            try:
+                self._refused(engine.connect)
+                self._refused(engine.connect)
+            finally:
+                engine.dispose()
+        self.assertEqual(pg.errors, [])
+        self.assertEqual(
+            [login['password'] for login in pg.logins],
+            ['TOKEN-1', 'TOKEN-2'])
+        self.assertEqual(auth.calls, 2)
+        for login in pg.logins:
+            self.assertEqual(login['params']['user'], '_sso')
+            self.assertEqual(login['params']['database'], 'qdb')
+            self.assertIn('ssl', login['encryption_requests'])
+
+    def test_sqlalchemy_connect_args_merge_over_the_adapter_defaults(self):
+        # SQLAlchemy merges `connect_args` into cparams before the do_connect
+        # listener runs, and the listener only `setdefault`s sslmode -- so an
+        # explicit sslmode wins, and other passthrough arguments survive to
+        # the driver alongside the injected password.
+        auth = _TokenSequence('TOKEN-1')
+        with pg_capture_server.PgCaptureServer() as pg:
+            engine = sqlalchemy_engine(
+                auth, self.URL, pg_port=pg.port,
+                connect_args={
+                    'sslmode': 'disable',
+                    'application_name': 'qdb-merge-test'})
+            try:
+                self._refused(engine.connect)
+            finally:
+                engine.dispose()
+        self.assertEqual(pg.errors, [])
+        (login,) = pg.logins
+        self.assertEqual(login['password'], 'TOKEN-1')
+        self.assertEqual(
+            login['params']['application_name'], 'qdb-merge-test')
+        # `disable`, not the adapter's `prefer`: no TLS negotiation at all.
+        self.assertNotIn('ssl', login['encryption_requests'])
+
+    def test_sqlalchemy_refuses_a_listener_that_redirects_the_connection(self):
+        # A `do_connect` listener registered for every engine runs ahead of
+        # the adapter's own. If it re-points the dial, the adapter must refuse
+        # before attaching the token -- and nothing may reach any server.
+        import sqlalchemy
+        from sqlalchemy import event
+        auth = _TokenSequence('TOKEN-1')
+
+        def redirect(dialect, conn_rec, cargs, cparams):
+            cparams['host'] = '127.0.0.2'
+
+        event.listen(sqlalchemy.engine.Engine, 'do_connect', redirect)
+        try:
+            with pg_capture_server.PgCaptureServer() as pg:
+                engine = sqlalchemy_engine(auth, self.URL, pg_port=pg.port)
+                try:
+                    with self.assertRaises(OidcConfigError) as ctx:
+                        engine.connect()
+                finally:
+                    engine.dispose()
+        finally:
+            event.remove(sqlalchemy.engine.Engine, 'do_connect', redirect)
+        self.assertIn('refusing to send the OIDC token', str(ctx.exception))
+        self.assertEqual(auth.calls, 0)
+        self.assertEqual(pg.logins, [])
+
+
 class OidcReviewFixTest(unittest.TestCase):
     def test_success_event_carries_the_jwt_subject_as_identity(self):
         # `on_success`'s first argument is `event.identity`, which native fills
@@ -4698,15 +5070,64 @@ class OidcReviewFixTest(unittest.TestCase):
             client_source.index('include "oidc.pxi"'))
 
     def test_config_and_error_views_recheck_written_prefix(self):
-        error_size, config_size = _client._debug_oidc_view_sizes()
+        # The error view has two tiers, like the event struct: native's v1
+        # prefix ends at `retry_after_seconds` and `acquisition_busy` was
+        # appended after it. `questdb_error_oidc_get_view` accepts any capacity
+        # from the v1 size up and writes back the prefix it knows, so a v1-only
+        # library answers with exactly the v1 size.
+        error_v1, error_full, config_size = _client._debug_oidc_view_sizes()
+        self.assertLess(error_v1, error_full)
         self.assertEqual(
             _client._debug_oidc_view_prefix_support(
-                error_size - 1, config_size - 1),
-            (False, False))
+                error_v1 - 1, config_size - 1),
+            (False, False, False))
+        self.assertEqual(
+            _client._debug_oidc_view_prefix_support(error_v1, config_size),
+            (True, False, True))
         self.assertEqual(
             _client._debug_oidc_view_prefix_support(
-                error_size, config_size),
-            (True, True))
+                error_full - 1, config_size),
+            (True, False, True))
+        self.assertEqual(
+            _client._debug_oidc_view_prefix_support(error_full, config_size),
+            (True, True, True))
+
+    def test_v1_error_view_keeps_its_classification(self):
+        # A library that predates `acquisition_busy` reports a complete v1
+        # prefix. Everything the typed exception needs is inside it, so the
+        # conversion must keep the class and fields -- collapsing it to a bare
+        # OidcError disabled `QuestDB.dataframe()`'s OidcInteractionRequired
+        # fail-fast gate and every `except OidcTimeoutError` / `except
+        # OidcConfigError`. Only the missing tail defaults.
+        error_v1, error_full, _ = _client._debug_oidc_view_sizes()
+        kinds = (
+            (0, OidcConfigError),
+            (1, OidcNetworkError),
+            (2, OidcDeviceFlowError),
+            (3, OidcTimeoutError),
+            (4, OidcInteractionRequired),
+            (5, OidcCancelledError),
+        )
+        for kind, cls in kinds:
+            with self.subTest(kind=kind):
+                exc = _client._debug_oidc_error_from_view_prefix(
+                    error_v1, kind, True)
+                self.assertIs(type(exc), cls)
+                self.assertEqual(exc.status, 400)
+                self.assertEqual(exc.retry_after, 7)
+                # The unwritten tail is not read.
+                self.assertFalse(exc._acquisition_busy)
+
+        full = _client._debug_oidc_error_from_view_prefix(error_full, 4, True)
+        self.assertIs(type(full), OidcInteractionRequired)
+        self.assertTrue(full._acquisition_busy)
+
+        # Shorter than v1: nothing is readable, so only the untyped base class.
+        short = _client._debug_oidc_error_from_view_prefix(
+            error_v1 - 1, 4, True)
+        self.assertIs(type(short), OidcError)
+        self.assertIsNone(short.status)
+        self.assertFalse(short._acquisition_busy)
 
     def test_event_tail_fields_are_gated_by_struct_size(self):
         # A callback from an older shared library can provide the pre-interval

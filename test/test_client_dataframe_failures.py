@@ -252,6 +252,48 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
                 self.assertEqual(stats['binary_frames'], 140)
                 self.assertEqual(stats['errors'], [])
 
+    def test_capsule_hint_is_appended_to_the_original_exception(self):
+        # `_capsule_consume_stream_with_hint` appends a remediation hint to a
+        # batch-too-large failure. It used to do so by raising a fresh
+        # `QuestDBError(exc.code, msg)`, which drops the concrete class,
+        # `.sender_error` and `.in_doubt` -- the flag the caller reads to decide
+        # whether replaying could duplicate a landed write. It must mutate the
+        # caught exception's args and re-raise that same object instead.
+        cases = (
+            # A server rejection whose message trips the textual fallback.
+            ('rejection',
+             dict(error_status=0x03, error_message=b'batch too large'),
+             _table(40), 1,
+             'Hint: reduce `max_rows_per_batch` (current: 1) and retry.'),
+            # One row larger than the advertised per-batch cap.
+            ('single_row', dict(max_batch_size=1024),
+             _table(1, str_len=4000), 16,
+             'Hint: a single row exceeds the server per-batch cap'),
+        )
+        for label, server_kwargs, table, max_rows, hint in cases:
+            with self.subTest(label):
+                with QwpAckServer(**server_kwargs) as server:
+                    with qi.QuestDB.from_conf(_conf(server.port)) as client:
+                        with self.assertRaises(qi.QuestDBError) as raised:
+                            client.dataframe(
+                                table, table_name='t_hint', at='ts',
+                                max_rows_per_batch=max_rows)
+                exc = raised.exception
+                message = str(exc)
+                self.assertIn('\n' + hint, message)
+                # Appended once, to the native message rather than replacing it.
+                self.assertEqual(message.count('Hint:'), 1)
+                self.assertFalse(message.startswith('Hint:'))
+                # The same object the native error path raised. A rebuilt
+                # exception raised inside the `except` would chain the
+                # original as its implicit context -- and would carry only
+                # the fields the rebuild remembered to copy.
+                self.assertIsNone(exc.__context__)
+                self.assertIsNone(exc.__cause__)
+                self.assertIs(type(exc), qi.QuestDBError)
+                self.assertFalse(exc.in_doubt)
+                self.assertIsNone(exc.sender_error)
+
     def test_reconnect_budget_exhaustion_raises(self):
         # A bound-but-non-listening local port never completes the TCP
         # handshake before publication, so the native reconnect loop

@@ -30,7 +30,8 @@ class OidcTestServer:
             device_token_response=None,
             device_token_responses=(),
             refresh_token_response=None,
-            settings_config_overrides=None):
+            settings_config_overrides=None,
+            device_interval=5):
         self.initial_access_token = initial_access_token
         self.initial_expires_in = initial_expires_in
         self.device_code = device_code
@@ -40,6 +41,10 @@ class OidcTestServer:
         # turns a failure into a ten-minute stall that the CI watchdog re-arms
         # past rather than a visible test failure.
         self.device_expires_in = device_expires_in
+        # The ``interval`` the device-authorization response advertises, or
+        # ``None`` to omit the field -- the only case in which the client's
+        # own ``default_interval`` applies (RFC 8628 section 3.2).
+        self.device_interval = device_interval
         self.refresh_token = refresh_token
         self.refreshed_access_token = refreshed_access_token
         self.refreshed_expires_in = refreshed_expires_in
@@ -165,15 +170,17 @@ class OidcTestServer:
             return
 
         if handler.command == 'POST' and path == '/device':
-            self._json(handler, 200, {
+            body = {
                 'device_code': self.device_code,
                 'user_code': 'WXYZ-1234',
                 'verification_uri': self.url + '/verify',
                 'verification_uri_complete': (
                     self.url + '/verify?user_code=WXYZ-1234'),
                 'expires_in': self.device_expires_in,
-                'interval': 5,
-            })
+            }
+            if self.device_interval is not None:
+                body['interval'] = self.device_interval
+            self._json(handler, 200, body)
             return
 
         if handler.command == 'POST' and path == '/token':

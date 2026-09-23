@@ -128,6 +128,15 @@ def main(args):
     # Pillow costs the Jupyter QR test only.
     try_pip_install('qrcode')
     try_pip_install('pillow')
+    # The PG-wire OIDC adapters (`questdb.auth.sqlalchemy_engine` /
+    # `psycopg_connect`). Without a real SQLAlchemy and driver their tests can
+    # only inject stand-in modules, which never runs SQLAlchemy's actual
+    # `do_connect` contract or libpq's handshake; `AdapterRealDriverTest`
+    # skips itself when either is missing. `psycopg[binary]` bundles libpq, so
+    # a platform without a binary wheel (PyPy, 32-bit) fails the install as a
+    # unit and is skipped rather than left with a driver that cannot import.
+    try_pip_install('sqlalchemy>=2')
+    try_pip_install('psycopg[binary]')
 
     on_linux_is_glibc = (
             (not platform.system() == 'Linux') or

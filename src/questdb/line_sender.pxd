@@ -898,7 +898,9 @@ cdef extern from "questdb/ingress/qwp_sender.h":
 # binding relies on that for declaration/layout agreement. Runtime reads still
 # honour every versioned struct's `struct_size` prefix, including event tails
 # and the config/error views: static linkage is not an excuse to turn a future
-# packaging change into an out-of-prefix read.
+# packaging change into an out-of-prefix read. Each appended field is gated on
+# its own tier -- a library that predates a tail still reports a usable v1
+# prefix, which must be read rather than discarded.
 cdef extern from "questdb/oidc.h":
     cdef struct questdb_oidc_builder:
         pass

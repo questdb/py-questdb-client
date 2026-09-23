@@ -61,6 +61,7 @@ from fixture import _parse_version
 # extension in place. They are imported here so ``unittest.main()`` picks them
 # up in the aggregated CI run alongside the ingress tests.
 from test_auth import (
+    AdapterRealDriverTest,
     AdapterTest,
     NativeOidcIntegrationTest,
     NativeOidcTest,
