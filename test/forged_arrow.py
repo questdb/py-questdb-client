@@ -674,8 +674,8 @@ def _utf8_null_offset_slot():
 
 @_case(
     'metadata_oversized_key_length',
-    message=('Arrow schema root.children[0]: metadata blob exceeds '
-             '1048576 bytes'),
+    message=('Arrow schema root.children[0]: schema metadata exceeds '
+             '67108864 bytes'),
     at='server')
 def _metadata_oversized_key_length():
     column = dict(
@@ -686,8 +686,8 @@ def _metadata_oversized_key_length():
 
 @_case(
     'metadata_oversized_value_length',
-    message=('Arrow schema root.children[0]: metadata blob exceeds '
-             '1048576 bytes'),
+    message=('Arrow schema root.children[0]: schema metadata exceeds '
+             '67108864 bytes'),
     at='server')
 def _metadata_oversized_value_length():
     column = dict(

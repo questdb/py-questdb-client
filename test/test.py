@@ -7854,8 +7854,8 @@ print('OK')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_large_geohash_metadata_uses_the_native_importer(self):
         # Python no longer duplicates the importer's metadata parser or
-        # walks the values. Large metadata below the 1 MiB safety cap is
-        # handled natively and wide values are forwarded under the same
+        # walks the values. Large metadata within the 64 MiB schema budget
+        # is handled natively and wide values are forwarded under the same
         # unchecked contract.
         padding = {f'pad.{i}'.encode(): b'x' for i in range(5000)}
         md = dict(padding)
@@ -7874,22 +7874,21 @@ print('OK')
                 table_name='geo_md_long', at='ts')['gh'],
             0x05)
 
-        # The native bounded parser rejects an individual blob above 1 MiB,
-        # independently of whether it carries a QuestDB type claim.
-        too_large = {b'pad.big': b'x' * (2 << 20)}
-        for claim in (False, True):
-            with self.subTest(above_blob_cap=True, claim=claim):
-                oversized = dict(too_large)
+        # A single field blob above 1 MiB (polars stores every Enum category
+        # in one) is accepted within the schema budget, and a QuestDB type
+        # claim inside it still applies.
+        large = {b'pad.big': b'x' * (2 << 20)}
+        for claim, expected_type in ((False, 0x05), (True, 0x0E)):
+            with self.subTest(large_blob=True, claim=claim):
+                md = dict(large)
                 if claim:
-                    oversized[b'questdb.column_type'] = b'geohash'
-                    oversized[b'questdb.geohash_bits'] = b'20'
-                with self.assertRaisesRegex(
-                        qi.QuestDBError,
-                        r'Arrow schema root\.children\[0\]: metadata blob '
-                        r'exceeds 1048576 bytes'):
-                    self._dataframe_wire_payload(
-                        self._geohash_arrow_table([2 ** 21], md=oversized),
-                        table_name='geo_md_too_large', at='ts')
+                    md[b'questdb.column_type'] = b'geohash'
+                    md[b'questdb.geohash_bits'] = b'20'
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        self._geohash_arrow_table([2 ** 21], md=md),
+                        table_name='geo_md_large', at='ts')['gh'],
+                    expected_type)
         # `schema_overrides` still outranks field metadata.
         md = dict(padding)
         md[b'questdb.column_type'] = b'geohash'
