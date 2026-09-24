@@ -303,6 +303,10 @@ or from ``host=`` / ``pg_port=``. A destination in the driver passthrough
 ``connect_args`` / ``connect_kwargs``) is rejected with ``OidcConfigError``
 before any token is acquired, because the token is a bearer credential and
 SQLAlchemy applies ``connect_args`` *after* the arguments built from that URL.
+A ``do_connect`` listener registered ahead of the adapter must also leave
+``host`` and ``port`` in the driver's keyword arguments and supply no positional
+connection arguments; the adapter refuses to attach a token if it cannot verify
+those final arguments still name the validated destination.
 
 Missing SQLAlchemy or PostgreSQL-driver dependencies raise ``ImportError``.
 Token acquisition failures from either adapter raise ``OidcError``; SQLAlchemy,

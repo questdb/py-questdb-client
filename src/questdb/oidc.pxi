@@ -104,21 +104,17 @@ cdef void_int _oidc_signal_tick() except -1:
 
 
 cdef object _oidc_signal_handler_codes():
-    """Snapshot Python signal handlers before entering user callback code.
+    """Snapshot handler code AND signum, without reading handler properties.
 
-    A SIGALRM handler can raise an ordinary ``Exception`` *inside* a renderer
-    or logging handler, after ``PyErr_CheckSignals`` has run. Its type alone
-    cannot distinguish it from an ordinary callback error, which must remain
-    best-effort. Its traceback, however, includes the signal handler's code.
-    Snapshotting also covers a one-shot handler that unregisters itself before
-    raising. Signal handlers only run on the main Python thread; do no work on
-    the other threads on which callbacks can arrive.
+    The pre-callback snapshot covers a one-shot handler that unregisters
+    before raising. Only the main thread can run Python signal handlers.
     """
     if questdb_thread_ident() != _OIDC_MAIN_THREAD_IDENT:
-        return frozenset()
+        return {}
     import functools
     import signal
-    codes = set()
+    import types
+    codes = {}
     for signum in signal.valid_signals():
         try:
             handler = signal.getsignal(signum)
@@ -126,35 +122,70 @@ cdef object _oidc_signal_handler_codes():
             continue  # valid_signals includes OS-reserved signal numbers
         while isinstance(handler, functools.partial):
             handler = handler.func
-        code = getattr(handler, '__code__', None)
-        if code is None:
-            code = getattr(getattr(handler, '__func__', None), '__code__', None)
-        if code is None and callable(handler):
-            code = getattr(getattr(type(handler), '__call__', None),
-                           '__code__', None)
+        if isinstance(handler, types.MethodType):
+            handler = handler.__func__
+        if isinstance(handler, types.FunctionType):
+            code = handler.__code__
+        elif callable(handler):
+            # Inspect the class dictionary, not the handler instance: an
+            # unrelated callable signal handler may define a __code__ property
+            # with side effects or one that raises on access.
+            code = None
+            for cls in type(handler).__mro__:
+                call = cls.__dict__.get('__call__')
+                if isinstance(call, types.FunctionType):
+                    code = call.__code__
+                    break
+        else:
+            code = None
         if code is not None:
-            codes.add(code)
-    return frozenset(codes)
+            codes.setdefault(code, set()).add(signum)
+    return codes
+
+
+cdef bint _oidc_traceback_has_signal_call(
+        object tb, object codes) except -1:
+    """Check the actual (signum, interrupted frame) handler arguments.
+
+    Code identity alone is insufficient: separate closures from one factory
+    share __code__, and a renderer may call its installed handler as an
+    ordinary helper without a signal. Python invokes a handler with the
+    signal number followed by the interrupted Python frame; require both.
+    """
+    import inspect
+    while tb is not None:
+        frame = tb.tb_frame
+        code = frame.f_code
+        signums = codes.get(code)
+        if signums:
+            frame_locals = frame.f_locals
+            args = [frame_locals[name]
+                    for name in code.co_varnames[:code.co_argcount]
+                    if name in frame_locals]
+            if code.co_flags & inspect.CO_VARARGS:
+                varargs_name = code.co_varnames[
+                    code.co_argcount + code.co_kwonlyargcount]
+                rest = frame_locals.get(varargs_name)
+                if isinstance(rest, tuple):
+                    args.extend(rest)
+            for idx in range(len(args) - 1):
+                if (type(args[idx]) is int and args[idx] in signums
+                        and args[idx + 1] is frame.f_back):
+                    return True
+        tb = tb.tb_next
+    return False
 
 
 cdef bint _oidc_raised_in_signal_handler(
         object exc, object installed_codes) except -1:
-    """Identify a signal exception without treating all callback errors alike."""
-    cdef object tb = exc.__traceback__
-    while tb is not None:
-        if tb.tb_frame.f_code in installed_codes:
-            return True
-        tb = tb.tb_next
+    """Identify a delivered signal, not an ordinary renderer/logger error."""
+    if _oidc_traceback_has_signal_call(exc.__traceback__, installed_codes):
+        return True
     # A callback may install a new handler after the snapshot. Also check the
     # handlers still installed at the point of failure; the snapshot above
     # remains necessary for one-shot handlers that removed themselves.
-    codes = _oidc_signal_handler_codes()
-    tb = exc.__traceback__
-    while tb is not None:
-        if tb.tb_frame.f_code in codes:
-            return True
-        tb = tb.tb_next
-    return False
+    return _oidc_traceback_has_signal_call(
+        exc.__traceback__, _oidc_signal_handler_codes())
 
 
 # An exception a Python signal handler raised on the MAIN thread inside a
@@ -1883,9 +1914,6 @@ cdef class OidcDeviceAuth:
         cdef PyThreadState* gs = NULL
         cdef _OidcForegroundCall call
         self._require_open()
-        if _oidc_callbacks_shutting_down and not self._opens_browser:
-            self._sign_in_without_renderer()
-            return
         if not self._sign_in_lock.acquire(False):
             from questdb.auth._errors import OidcError
             # InvalidApiCall, as native reports every other refusal to enter
@@ -1897,6 +1925,9 @@ cdef class OidcDeviceAuth:
                 'OIDC sign_in() is already in progress on this provider.',
                 code=QuestDBErrorCode.InvalidApiCall)
         try:
+            if _oidc_callbacks_shutting_down and not self._opens_browser:
+                self._sign_in_without_renderer()
+                return
             # A callback may park an interrupt only for this invocation: the
             # non-blocking lock above prevents another sign_in() from entering
             # native and winning the race to consume the provider field.

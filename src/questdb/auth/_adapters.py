@@ -256,7 +256,7 @@ def _reject_destination_overrides(params: Any, passthrough: str) -> None:
 
 
 def _require_expected_destination(
-        cparams: Any, host: str, port: int) -> None:
+        cargs: Any, cparams: Any, host: str, port: int) -> None:
     """Fail closed if the driver arguments no longer name the vetted peer.
 
     Defence in depth for SQLAlchemy: `connect_args` is rejected up front, but
@@ -265,6 +265,15 @@ def _require_expected_destination(
     registered before this one. Checked on every physical connection, just
     before the token is attached.
     """
+    # SQLAlchemy passes both positional and keyword arguments to the driver.
+    # A prior do_connect listener can put a whole conninfo string in cargs,
+    # removing host/port from cparams so libpq dials an unvetted peer. The
+    # dialects used here normally supply no positional arguments; fail closed
+    # rather than trying to parse every driver's positional connection syntax.
+    if cargs or cparams.get('host') != host or str(cparams.get('port')) != str(port):
+        raise OidcConfigError(
+            'refusing to send the OIDC token: the connection arguments no '
+            f'longer name the validated destination ({host}:{port}).')
     offending = _destination_overrides(cparams)
     for key in offending:
         value = cparams[key]
@@ -384,7 +393,10 @@ def sqlalchemy_engine(
         over the arguments built from the validated URL, so such a value would
         re-point the connection — and the bearer token travelling as its
         password — at a peer this adapter never vetted. Use ``host=`` and
-        ``pg_port=`` instead.
+        ``pg_port=`` instead. A preceding SQLAlchemy ``do_connect`` listener
+        must leave ``host`` and ``port`` in the driver keyword arguments and
+        must not add positional connection arguments: otherwise the adapter
+        refuses to fetch or attach the bearer token.
     :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
         has no host; if the resolved host carries connection-string
         metacharacters; if ``pg_port`` is not a valid TCP port; if
@@ -436,7 +448,7 @@ def sqlalchemy_engine(
         # still name the vetted peer BEFORE the bearer token is attached, so
         # neither a passthrough nor an earlier do_connect listener can turn a
         # validated destination into an unvetted one.
-        _require_expected_destination(cparams, resolved_host, pg_port)
+        _require_expected_destination(cargs, cparams, resolved_host, pg_port)
         # Non-interactive: reuse / silently refresh the up-front token, but never
         # run an interactive device flow from a pool thread (it would block the
         # pool). Raises OidcInteractionRequired if no token was acquired first.

@@ -828,6 +828,51 @@ class NativeOidcTest(unittest.TestCase):
             with self.assertRaises(OidcInteractionRequired):
                 auth.token()
 
+    def test_sign_in_after_exit_hook_still_rejects_a_concurrent_sign_in(self):
+        self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
+        prompt_entered = threading.Event()
+        release_prompt = threading.Event()
+        sign_in_errors = []
+
+        class BlockingRenderer(RecordingRenderer):
+            def on_prompt(self, challenge):
+                prompt_entered.set()
+                release_prompt.wait()
+                super().on_prompt(challenge)
+
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(
+                server, renderer=BlockingRenderer(), open_browser=False)
+
+            def sign_in():
+                try:
+                    auth.sign_in()
+                except BaseException as exc:
+                    sign_in_errors.append(exc)
+
+            signer = threading.Thread(target=sign_in, daemon=True)
+            hook = threading.Thread(
+                target=_client._oidc_detach_diagnostics_at_exit, daemon=True)
+            try:
+                signer.start()
+                self.assertTrue(prompt_entered.wait(5))
+                hook.start()
+                hook.join(2)
+                if hook.is_alive():
+                    self.fail('exit hook waited for a parked renderer callback')
+                with self.assertRaises(OidcError) as raised:
+                    auth.sign_in()
+                self.assertEqual(
+                    raised.exception.code,
+                    questdb.QuestDBErrorCode.InvalidApiCall)
+            finally:
+                release_prompt.set()
+                hook.join(5)
+                signer.join(10)
+                auth.close()
+            self.assertFalse(signer.is_alive())
+            self.assertEqual(sign_in_errors, [])
+
     def test_sign_in_after_exit_hook_is_served_from_the_cache(self):
         # A credential that needs no prompt still satisfies sign_in().
         self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
@@ -2228,6 +2273,106 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 finally:
                     signal.signal(signal.SIGALRM, previous)
 
+    @unittest.skipUnless(hasattr(signal, 'SIGUSR1'), 'SIGUSR1 required')
+    def test_renderer_sharing_signal_handler_code_does_not_cancel_sign_in(self):
+        # Two callbacks from the same factory share __code__, but invoking
+        # one as a renderer callback does not deliver a signal to the other.
+        def make_callback():
+            def callback(*args):
+                raise TimeoutError('ordinary renderer failure; no signal')
+            return callback
+
+        installed_handler = make_callback()
+        renderer = RecordingRenderer()
+        renderer.on_prompt = make_callback()
+        self.assertIs(
+            installed_handler.__code__, renderer.on_prompt.__code__)
+        previous = signal.signal(signal.SIGUSR1, installed_handler)
+        try:
+            with OidcTestServer() as server:
+                auth = make_discovered_auth(server, renderer=renderer)
+                try:
+                    with self.assertLogs('questdb', level='ERROR'):
+                        auth.sign_in()
+                    self.assertEqual(auth.token(), 'AT-initial')
+                finally:
+                    auth.close()
+        finally:
+            signal.signal(signal.SIGUSR1, previous)
+
+    @unittest.skipUnless(hasattr(signal, 'SIGUSR1'), 'SIGUSR1 required')
+    def test_sign_in_does_not_inspect_unrelated_handler_properties(self):
+        class SignalHandler:
+            def __init__(self):
+                self.lookups = 0
+                self.called = False
+
+            @property
+            def __code__(self):
+                self.lookups += 1
+                raise RuntimeError('unrelated signal handler was inspected')
+
+            def __call__(self, signum, frame):
+                self.called = True
+                raise TimeoutError('actual signal reached callable handler')
+
+        class AlarmRenderer(RecordingRenderer):
+            def on_prompt(self, response):
+                signal.raise_signal(signal.SIGUSR1)
+
+        handler = SignalHandler()
+        previous = signal.signal(signal.SIGUSR1, handler)
+        try:
+            with OidcTestServer() as server:
+                auth = make_discovered_auth(server)
+                try:
+                    auth.sign_in()
+                    self.assertEqual(auth.token(), 'AT-initial')
+                    self.assertFalse(handler.called)
+                    self.assertEqual(handler.lookups, 0)
+                finally:
+                    auth.close()
+            # Avoiding instance-property access must not hide a real signal
+            # delivered to the same callable handler on another sign-in.
+            with OidcTestServer() as server:
+                auth = make_discovered_auth(
+                    server, renderer=AlarmRenderer())
+                try:
+                    with self.assertRaisesRegex(
+                            TimeoutError, 'actual signal reached'):
+                        auth.sign_in()
+                    self.assertTrue(handler.called)
+                    self.assertEqual(handler.lookups, 0)
+                finally:
+                    auth.close()
+        finally:
+            signal.signal(signal.SIGUSR1, previous)
+
+    @unittest.skipUnless(hasattr(signal, 'SIGUSR1'), 'SIGUSR1 required')
+    def test_varargs_signal_handler_still_interrupts_sign_in(self):
+        class AlarmRenderer(RecordingRenderer):
+            def on_prompt(self, response):
+                signal.raise_signal(signal.SIGUSR1)
+
+        def on_alarm(*args):
+            raise TimeoutError('actual signal delivered inside renderer')
+
+        previous = signal.signal(signal.SIGUSR1, on_alarm)
+        try:
+            with OidcTestServer() as server:
+                auth = make_discovered_auth(
+                    server, renderer=AlarmRenderer())
+                try:
+                    with self.assertRaisesRegex(
+                            TimeoutError, 'actual signal delivered'):
+                        auth.sign_in()
+                    with self.assertRaises(OidcInteractionRequired):
+                        auth.token()
+                finally:
+                    auth.close()
+        finally:
+            signal.signal(signal.SIGUSR1, previous)
+
     def test_interrupt_raised_while_logging_a_renderer_failure_aborts_sign_in(
             self):
         # A failing renderer is logged, and the logging call is bytecode too:
@@ -3081,7 +3226,9 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                     auth,
                     server.url,
                     drivername='postgresql+psycopg')
-            params = {}
+            # SQLAlchemy's dialect supplies the validated destination in
+            # cparams; the mock listener must model those real driver args.
+            params = {'host': '127.0.0.1', 'port': 8812}
             returned.listeners['do_connect'](None, None, [], params)
             token_requests = server.requests('/token', 'POST')
 
@@ -5179,6 +5326,18 @@ class AdapterTest(unittest.TestCase):
         auth.token.assert_not_called()
         self.assertNotIn('password', redirected)
 
+        for cargs, cparams in (
+                ([], {'port': 8812}),
+                ([], {'host': 'questdb.example.com'}),
+                (['host=other.example port=5432'], {
+                    'host': 'questdb.example.com', 'port': 8812})):
+            with self.subTest(cargs=cargs, cparams=cparams):
+                with self.assertRaisesRegex(
+                        OidcConfigError, 'refusing to send the OIDC token'):
+                    listener(None, None, cargs, cparams)
+                auth.token.assert_not_called()
+                self.assertNotIn('password', cparams)
+
         # The validated destination still gets its token.
         expected = {'host': 'questdb.example.com', 'port': 8812}
         listener(None, None, [], expected)
@@ -5372,6 +5531,37 @@ class AdapterRealDriverTest(unittest.TestCase):
             login['params']['application_name'], 'qdb-merge-test')
         # `disable`, not the adapter's `prefer`: no TLS negotiation at all.
         self.assertNotIn('ssl', login['encryption_requests'])
+
+    def test_sqlalchemy_rejects_positional_connection_redirection(self):
+        # An earlier listener can move host/port from cparams into cargs. The
+        # destination check must run before auth.token(), even if a positional
+        # conninfo string would otherwise send the bearer to a different peer.
+        import sqlalchemy
+        from sqlalchemy import event
+        auth = _TokenSequence('SECRET-BEARER')
+
+        with pg_capture_server.PgCaptureServer() as vetted, \
+                pg_capture_server.PgCaptureServer() as other:
+            def redirect(dialect, conn_rec, cargs, cparams):
+                cparams.pop('host', None)
+                cparams.pop('port', None)
+                cargs[:] = [f'host=127.0.0.1 port={other.port}']
+
+            event.listen(sqlalchemy.engine.Engine, 'do_connect', redirect)
+            try:
+                engine = sqlalchemy_engine(
+                    auth, self.URL, pg_port=vetted.port)
+                try:
+                    with self.assertRaisesRegex(
+                            OidcConfigError, 'refusing to send the OIDC token'):
+                        engine.connect()
+                finally:
+                    engine.dispose()
+            finally:
+                event.remove(sqlalchemy.engine.Engine, 'do_connect', redirect)
+        self.assertEqual(auth.calls, 0)
+        self.assertEqual(vetted.logins, [])
+        self.assertEqual(other.logins, [])
 
     def test_sqlalchemy_refuses_a_listener_that_redirects_the_connection(self):
         # A `do_connect` listener registered for every engine runs ahead of
