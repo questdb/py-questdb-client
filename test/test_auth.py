@@ -5414,5 +5414,264 @@ class OidcReviewFixTest(unittest.TestCase):
             interval_size), (True, True))
 
 
+
+try:
+    import pyarrow as _pa
+except ImportError:
+    _pa = None
+
+
+class _RolePolicyServer(QwpAckServer):
+    """QWP/WS server answering each upgrade per ``policy(index, t)``:
+    ``'503'``, ``'421'`` (with ``X-QuestDB-Role: REPLICA``) or ``'serve'``."""
+
+    def __init__(self, policy, **kwargs):
+        super().__init__(**kwargs)
+        self._policy = policy
+        self._t0 = None
+        self._upgrades = 0
+
+    def _handle_connection(self, conn, close_after):
+        import qwp_ws_ack_server
+        now = time.monotonic()
+        with self._lock:
+            if self._t0 is None:
+                self._t0 = now
+            index = self._upgrades
+            self._upgrades += 1
+        action = self._policy(index, now - self._t0)
+        if action == 'serve':
+            return super()._handle_connection(conn, close_after)
+        try:
+            conn.settimeout(5)
+            qwp_ws_ack_server._read_until(conn, b'\r\n\r\n')
+            if action == '503':
+                conn.sendall(b'HTTP/1.1 503 Service Unavailable\r\n'
+                             b'Content-Length: 0\r\nConnection: close\r\n\r\n')
+            else:
+                conn.sendall(b'HTTP/1.1 421 Misdirected Request\r\n'
+                             b'X-QuestDB-Role: REPLICA\r\n'
+                             b'Content-Length: 0\r\nConnection: close\r\n\r\n')
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+            with self._lock:
+                self.finished_count += 1
+
+
+class _CountingArrowArray:
+    """An ``__arrow_c_array__`` producer that counts its exports: one per
+    prepared dataframe attempt."""
+
+    def __init__(self, batch):
+        self._batch = batch
+        self.exports = 0
+
+    def __arrow_c_array__(self, requested_schema=None):
+        self.exports += 1
+        return self._batch.__arrow_c_array__(requested_schema)
+
+
+@unittest.skipIf(_pa is None, 'pyarrow not installed')
+class OidcPoolDataframeFailoverTest(unittest.TestCase):
+    """An OIDC-authenticated pool rides out failover like any other pool."""
+
+    CONF = ('ws::addr=127.0.0.1:{port};lazy_connect=true;'
+            'reconnect_max_duration_millis=20000;'
+            'reconnect_initial_backoff_millis=100;'
+            'reconnect_max_backoff_millis=5000;')
+
+    def _run(self, policy):
+        frame = _CountingArrowArray(
+            _pa.record_batch({'v': _pa.array([1, 2, 3], _pa.int64())}))
+        with OidcTestServer() as idp:
+            auth = make_discovered_auth(idp)
+            auth.sign_in()
+            with _RolePolicyServer(policy) as server:
+                with questdb.connect(
+                        self.CONF.format(port=server.port),
+                        oidc_auth=auth) as db:
+                    db.dataframe(
+                        frame, table_name='t', at=questdb.ServerTimestamp)
+        return frame
+
+    def test_role_election_longer_than_a_retry_slice_is_ridden_out(self):
+        # The first attempt fails with a retryable 503; the reconnect then sees
+        # every endpoint answer as a replica for longer than the 2s slice the
+        # foreground OIDC gate retries in. That slice used to hand the
+        # RoleMismatch back to Python, which raised it -- a pool without
+        # `oidc_auth` waits for the promotion instead.
+        def policy(index, t):
+            if index == 0:
+                return '503'
+            return '421' if t < 3.5 else 'serve'
+
+        self._run(policy)
+
+    def test_outage_prepares_the_frame_once_per_attempt(self):
+        # Slicing the reconnect must not re-run dataframe preparation (an
+        # Arrow export, a LazyFrame collect) for every slice of an outage.
+        def policy(index, t):
+            return '503' if t < 4.5 else 'serve'
+
+        frame = self._run(policy)
+        self.assertEqual(frame.exports, 2)
+
+
+@unittest.skipUnless(
+    hasattr(signal, 'pthread_kill') and hasattr(signal, 'SIGALRM'),
+    'POSIX signals required')
+@unittest.skipIf(
+    platform.python_implementation() == 'PyPy',
+    'PyPy has no pending-call re-delivery; only Ctrl-C is re-armed there')
+class OidcDiagnosticSignalTest(unittest.TestCase):
+    """A signal handled while a persistence diagnostic runs on the main thread
+    inside an attached transport's flush behaves as it would after the flush:
+    its exception reaches the caller, and the handler runs once."""
+
+    def _flush_with_signal(self, signum, handler):
+        previous = signal.signal(signum, handler)
+        sabotaged = threading.Event()
+        credential = [None]
+
+        def hook():
+            # Make the refreshed token's save fail, so native reports a
+            # persistence diagnostic during the flush, and deliver the signal
+            # while that refresh is in flight. It targets this (server)
+            # thread so the main thread's socket read is not interrupted;
+            # CPython runs the Python handler on the main thread at its next
+            # bytecode -- inside the diagnostic callback.
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential[0]):
+                os.remove(credential[0])
+            os.mkdir(credential[0])
+            sabotaged.set()
+            signal.pthread_kill(threading.get_ident(), signum)
+
+        try:
+            with tempfile.TemporaryDirectory() as store_dir, \
+                    OidcTestServer(
+                        initial_expires_in=4,
+                        refresh_request_hook=hook) as server:
+                auth = make_discovered_auth(
+                    server, token_store=FileTokenStore.at(store_dir))
+                auth.sign_in()
+                credential[0] = os.path.join(store_dir, next(
+                    n for n in os.listdir(store_dir) if n.endswith('.json')))
+                sender = questdb.Sender.from_conf(
+                    f'http::addr=127.0.0.1:{server.port};',
+                    oidc_auth=auth, auto_flush=False)
+                sender.establish()
+                try:
+                    deadline = time.monotonic() + 20
+                    while not sabotaged.is_set():
+                        self.assertLess(time.monotonic(), deadline)
+                        sender.row(
+                            't', columns={'v': 1},
+                            at=questdb.ServerTimestamp)
+                        sender.flush()
+                        if not sabotaged.is_set():
+                            time.sleep(0.05)
+                    # A bytecode boundary after the flush that ran the refresh.
+                    for _ in range(3):
+                        pass
+                finally:
+                    sender.close(flush=False)
+        finally:
+            signal.signal(signum, previous)
+
+    def test_exception_from_a_signal_handler_reaches_the_flush_caller(self):
+        def on_alarm(signum, frame):
+            raise TimeoutError('deadline')
+
+        with self.assertRaises(TimeoutError):
+            self._flush_with_signal(signal.SIGALRM, on_alarm)
+
+    def test_system_exit_from_a_signal_handler_reaches_the_flush_caller(self):
+        def on_term(signum, frame):
+            sys.exit(5)
+
+        with self.assertRaises(SystemExit) as raised:
+            self._flush_with_signal(signal.SIGTERM, on_term)
+        self.assertEqual(raised.exception.code, 5)
+
+    def test_custom_sigint_handler_runs_once(self):
+        calls = []
+
+        def on_int(signum, frame):
+            calls.append(signum)
+            raise KeyboardInterrupt('user handler')
+
+        with self.assertRaises(KeyboardInterrupt):
+            self._flush_with_signal(signal.SIGINT, on_int)
+        # Let any re-delivered signal run before counting.
+        for _ in range(3):
+            time.sleep(0.05)
+        self.assertEqual(calls, [signal.SIGINT])
+
+
+class OidcApiContractTest(unittest.TestCase):
+    def test_concurrent_sign_in_reports_invalid_api_call(self):
+        # A second sign_in() while one runs is a busy refusal, not a terminal
+        # auth failure: the provider stays open and the first call continues.
+        # It reports InvalidApiCall, as a clear() refused under the same
+        # condition does.
+        waiting = threading.Event()
+
+        class _Renderer(Renderer):
+            def on_waiting(self, seconds_left):
+                waiting.set()
+
+        pending = (400, {'error': 'authorization_pending'}, None)
+        with OidcTestServer(
+                device_token_response=pending, device_expires_in=15,
+                device_interval=1) as server:
+            auth = make_discovered_auth(server, renderer=_Renderer())
+            first = threading.Thread(
+                target=lambda: self.assertRaises(
+                    OidcCancelledError, auth.sign_in))
+            first.start()
+            try:
+                self.assertTrue(waiting.wait(20))
+                with self.assertRaises(OidcError) as raised:
+                    auth.sign_in()
+                self.assertEqual(
+                    raised.exception.code,
+                    questdb.QuestDBErrorCode.InvalidApiCall)
+            finally:
+                auth.cancel_sign_in()
+                first.join(20)
+            self.assertFalse(first.is_alive())
+
+    def test_config_strings_over_1_mib_are_rejected_before_parsing(self):
+        padding = 'a' * (1 << 20)
+        for conf in (
+                f'http::addr=localhost:9000;username={padding};password=p;',
+                f'ws::addr=localhost:9000;token={padding};'):
+            with self.subTest(protocol=conf.split('::')[0]):
+                with self.assertRaises(questdb.QuestDBError) as raised:
+                    questdb.Sender.from_conf(conf)
+                self.assertEqual(
+                    raised.exception.code,
+                    questdb.QuestDBErrorCode.InvalidApiCall)
+                self.assertIn('1 MiB', str(raised.exception))
+        with mock.patch.dict(os.environ, {
+                'QDB_CLIENT_CONF':
+                    f'http::addr=localhost:9000;username={padding};'}):
+            with self.assertRaises(questdb.QuestDBError):
+                questdb.Sender.from_env()
+        # Exactly at the cap is still accepted by the length check.
+        head = 'http::addr=localhost:9000;username='
+        tail = ';password=p;'
+        exact = head + 'a' * ((1 << 20) - len(head) - len(tail)) + tail
+        self.assertEqual(len(exact.encode()), 1 << 20)
+        questdb.Sender.from_conf(exact)
+
+
 if __name__ == '__main__':
     unittest.main()

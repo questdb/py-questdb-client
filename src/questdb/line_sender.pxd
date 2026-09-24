@@ -44,6 +44,10 @@ cdef extern from "questdb/ingress/line_sender.h":
         questdb_connection_event_auth_failed
         questdb_connection_event_credential_unavailable
 
+    # `((size_t)(1 << 20))`: the byte cap every native config-string entry
+    # point enforces before parsing.
+    const size_t QUESTDB_CONFIG_MAX_BYTES
+
     cdef struct line_sender_error:
         pass
 

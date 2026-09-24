@@ -76,19 +76,17 @@ needs none — it is additive, and an existing listener keeps working.
   buffering.
 
 * **Config strings are capped at 1 MiB.** This applies to
-  :meth:`Sender.from_conf <questdb.Sender.from_conf>`, :func:`questdb.connect`,
-  :meth:`QuestDB.from_conf <questdb.QuestDB.from_conf>` and
-  ``QDB_CLIENT_CONF``. Remove accidentally duplicated or attacker-controlled
+  :meth:`Sender.from_conf <questdb.Sender.from_conf>`,
+  :meth:`Sender.from_env <questdb.Sender.from_env>` (``QDB_CLIENT_CONF``),
+  :func:`questdb.connect` and :meth:`QuestDB.from_conf
+  <questdb.QuestDB.from_conf>`, which raise ``QuestDBError(InvalidApiCall)``
+  for a longer string. Remove accidentally duplicated or attacker-controlled
   content from any string above that bound.
 
-* **A failed** :meth:`SenderTransaction.commit
-  <questdb.SenderTransaction.commit>` **now clears the sender's local buffer.**
-  The transaction was already completed before the flush in 5.0, so a
-  subsequent ``rollback()`` continues to raise
-  ``QuestDBError(InvalidApiCall)``. The new local clear prevents a retry from
-  resending rows whose delivery may already be uncertain. ``commit()`` after
-  the owning sender was closed now also raises
-  ``QuestDBError(InvalidApiCall)`` instead of an internal ``TypeError``.
+* :meth:`SenderTransaction.commit <questdb.SenderTransaction.commit>` **after
+  the owning sender was closed now raises** ``QuestDBError(InvalidApiCall)``
+  instead of an internal ``TypeError``. A commit whose flush fails leaves the
+  sender's buffer empty and the transaction completed, exactly as in 5.0.
 
 * **An abandoned** :class:`~questdb.QueryResult` **now reports its**
   ``ResourceWarning``. The finalizer previously swallowed it; it is now routed

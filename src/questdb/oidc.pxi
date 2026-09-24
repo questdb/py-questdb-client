@@ -43,9 +43,31 @@ cdef extern from *:
     #define QUESTDB_HAS_SET_INTERRUPT 1
     static void questdb_set_interrupt(void) { PyErr_SetInterrupt(); }
     #endif
+
+    /* Re-raise an exception on the main thread at its next bytecode.
+       CPython runs a pending call exactly where it runs Python signal
+       handlers, and an exception the call sets propagates from there, so a
+       parked exception surfaces as if the handler had raised it after the
+       native call returned -- without running that handler a second time, as
+       re-arming the signal did. PyPy's cpyext declares the function but
+       never delivers the call (measured on PyPy 7.3.19), so PyPy keeps the
+       interrupt_main() fallback, which re-delivers Ctrl-C only. */
+    #if defined(PYPY_VERSION)
+    #define QUESTDB_HAS_PENDING_RERAISE 0
+    static int questdb_add_pending_call(int (*func)(void*), void* arg) {
+        (void)func; (void)arg; return -1;
+    }
+    #else
+    #define QUESTDB_HAS_PENDING_RERAISE 1
+    static int questdb_add_pending_call(int (*func)(void*), void* arg) {
+        return Py_AddPendingCall(func, arg);
+    }
+    #endif
     """
     int QUESTDB_HAS_SET_INTERRUPT
     void questdb_set_interrupt()
+    int QUESTDB_HAS_PENDING_RERAISE
+    int questdb_add_pending_call(int (*func)(void*) noexcept, void* arg)
 
     # Defined by every Cython-generated module.
     int CYTHON_COMPILING_IN_PYPY
@@ -72,6 +94,44 @@ cdef void_int _oidc_signal_tick() except -1:
     """
     _OIDC_SIGNAL_TICK()
     return 0
+
+
+# An exception a Python signal handler raised on the MAIN thread inside a
+# persistence diagnostic that no foreground sign_in()/token()/clear() record
+# can re-raise -- an attached transport (an ILP/HTTP flush, say) pulled the
+# token on the caller's thread with the GIL released. Catching it inside the
+# callback already cleared CPython's tripped-signal state, so it is handed back
+# to the main thread through a pending call (`_oidc_raise_parked_main`).
+# Touched only with the GIL held.
+cdef object _OIDC_MAIN_PARKED = None
+cdef bint _OIDC_MAIN_PARK_SCHEDULED = False
+# Diagnostic dispatches currently running Python code. A pending call that
+# fires inside one (the logging call runs bytecode) must not raise there,
+# where the dispatcher would take the exception for a logging-handler
+# failure; it defers, and the dispatcher reschedules on its way out.
+cdef int _OIDC_DIAGNOSTIC_DEPTH = 0
+
+
+cdef int _oidc_raise_parked_main(void* unused) noexcept:
+    """Pending-call body: raise the parked exception on the main thread."""
+    global _OIDC_MAIN_PARKED, _OIDC_MAIN_PARK_SCHEDULED
+    _OIDC_MAIN_PARK_SCHEDULED = False
+    if _OIDC_DIAGNOSTIC_DEPTH > 0:
+        return 0
+    exc = _OIDC_MAIN_PARKED
+    _OIDC_MAIN_PARKED = None
+    if exc is None:
+        return 0
+    PyErr_SetObject(type(exc), exc)
+    return -1
+
+
+cdef void _oidc_schedule_parked_main() noexcept:
+    global _OIDC_MAIN_PARK_SCHEDULED
+    if _OIDC_MAIN_PARKED is None or _OIDC_MAIN_PARK_SCHEDULED:
+        return
+    if questdb_add_pending_call(_oidc_raise_parked_main, NULL) == 0:
+        _OIDC_MAIN_PARK_SCHEDULED = True
 
 
 cdef void _oidc_rearm_keyboard_interrupt() noexcept:
@@ -788,6 +848,7 @@ cdef void _oidc_park_foreground_interrupt(object exc) noexcept:
 
     Must not raise: it runs on the error path of a ``noexcept`` callback.
     """
+    global _OIDC_MAIN_PARKED
     cdef _OidcForegroundCall call
     cdef OidcDeviceAuth provider
     try:
@@ -809,17 +870,28 @@ cdef void _oidc_park_foreground_interrupt(object exc) noexcept:
             elif call.interrupt is None:
                 call.interrupt = exc
             return
-        if (isinstance(exc, KeyboardInterrupt)
-                and threading.get_ident() == threading.main_thread().ident):
-            # No foreground call to re-raise it, yet this is the main thread:
-            # an attached transport pulled a token on the caller's thread with
-            # the GIL released. Catching the exception cleared CPython's
-            # tripped-signal flag, so re-arm it; the interpreter raises it at
-            # the first bytecode after that native call returns, exactly where
-            # an uncaught Ctrl-C during a blocking call would surface.
+        if threading.get_ident() != threading.main_thread().ident:
+            # A native worker thread: signals are never delivered here and
+            # there is no caller to hand an exception to.
+            return
+        # No foreground call to re-raise it, yet this is the main thread: an
+        # attached transport pulled a token on the caller's thread with the
+        # GIL released. Catching the exception cleared CPython's
+        # tripped-signal state, so hand the SAME exception back to the main
+        # thread; it surfaces at the first bytecode after that native call
+        # returns, exactly where an uncaught one would have. This covers every
+        # class a handler can raise -- a SIGTERM handler's SystemExit and a
+        # SIGALRM deadline's TimeoutError were discarded before -- and runs
+        # the user's handler once. Re-arming SIGINT instead ran a custom
+        # handler a second time for one Ctrl-C.
+        if QUESTDB_HAS_PENDING_RERAISE:
+            if _OIDC_MAIN_PARKED is None:
+                _OIDC_MAIN_PARKED = exc
+            # Scheduled by the dispatcher on its way out, once no more Python
+            # code of this callback remains to run.
+        elif isinstance(exc, KeyboardInterrupt):
+            # PyPy: the only portable re-delivery is a simulated SIGINT.
             _oidc_rearm_keyboard_interrupt()
-        # Anywhere else this is a native worker thread, where signals are never
-        # delivered and there is no caller to hand an exception to.
     except BaseException:
         pass
 
@@ -954,25 +1026,47 @@ cdef void _oidc_park_event_interrupt(
 
 cdef void _oidc_diagnostic_dispatch(
         const questdb_oidc_diagnostic* diagnostic) noexcept with gil:
+    global _OIDC_DIAGNOSTIC_DEPTH
+    _OIDC_DIAGNOSTIC_DEPTH += 1
     try:
-        if diagnostic.kind == QUESTDB_OIDC_DIAGNOSTIC_PERSISTENCE_WARNING:
-            logging.getLogger('questdb').warning(
-                'OIDC %s',
-                _oidc_text(diagnostic.message, diagnostic.message_len) or
-                'token-store persistence operation failed')
-    except BaseException as exc:
-        if isinstance(exc, Exception):
-            # Logging handlers are user code. Diagnostics are best-effort and
-            # must never unwind through C/Rust or turn a usable token into a
-            # failure.
+        try:
+            # On the thread running sign_in(), token(), clear() or an attached
+            # transport's token pull, this callback is where CPython runs the
+            # Python signal handlers that became pending while native ran with
+            # the GIL released. Run them HERE, before any logging code, exactly
+            # as the renderer event path does: whatever they raise -- Ctrl-C,
+            # a SIGTERM handler's SystemExit, but equally a SIGALRM deadline's
+            # ordinary TimeoutError -- interrupts the call this diagnostic runs
+            # inside, and must not be mistaken for a logging-handler failure
+            # and swallowed.
+            PyErr_CheckSignals()
+            if CYTHON_COMPILING_IN_PYPY:
+                # See `_oidc_event_dispatch`: cpyext delivers signals only at
+                # bytecode boundaries.
+                _oidc_signal_tick()
+        except BaseException as exc:
+            _oidc_park_foreground_interrupt(exc)
             return
-        # Not an ordinary handler failure. On the thread running sign_in(),
-        # token() or clear() this is where CPython delivers a pending Ctrl-C
-        # (warn_persistence runs inside those calls with the GIL released), and
-        # catching it clears the tripped-signal flag: discarding it left
-        # sign_in() polling to the device-code deadline with the interrupt
-        # gone. Hand it to that call instead.
-        _oidc_park_foreground_interrupt(exc)
+        try:
+            if diagnostic.kind == QUESTDB_OIDC_DIAGNOSTIC_PERSISTENCE_WARNING:
+                logging.getLogger('questdb').warning(
+                    'OIDC %s',
+                    _oidc_text(diagnostic.message, diagnostic.message_len) or
+                    'token-store persistence operation failed')
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                # Logging handlers are user code. Diagnostics are best-effort
+                # and must never unwind through C/Rust or turn a usable token
+                # into a failure.
+                return
+            # Not an ordinary handler failure: a signal can still land inside
+            # the logging call. Catching it cleared the tripped-signal flag, so
+            # hand it to the call it interrupted instead of discarding it.
+            _oidc_park_foreground_interrupt(exc)
+    finally:
+        _OIDC_DIAGNOSTIC_DEPTH -= 1
+        if _OIDC_DIAGNOSTIC_DEPTH == 0:
+            _oidc_schedule_parked_main()
 
 
 cdef void _oidc_diagnostic_trampoline(
@@ -1674,8 +1768,9 @@ cdef class OidcDeviceAuth:
         remain usable, and a later ``sign_in()`` on the same provider can retry.
 
         Only one ``sign_in()`` call may run on a provider at a time. A concurrent
-        call raises :class:`~questdb.auth.OidcError` instead of waiting behind
-        the interactive flow.
+        call raises :class:`~questdb.auth.OidcError` with code
+        ``InvalidApiCall`` instead of waiting behind the interactive flow; the
+        provider and the running sign-in are unaffected.
         """
         cdef questdb_error* err = NULL
         cdef bint ok
@@ -1684,8 +1779,14 @@ cdef class OidcDeviceAuth:
         self._require_open()
         if not self._sign_in_lock.acquire(False):
             from questdb.auth._errors import OidcError
+            # InvalidApiCall, as native reports every other refusal to enter
+            # a busy provider (a clear() behind a sign-in, or a call made from
+            # a callback). The class default, AuthError, is documented as a
+            # terminal auth failure, and this is neither: the provider stays
+            # open and the running sign-in continues.
             raise OidcError(
-                'OIDC sign_in() is already in progress on this provider.')
+                'OIDC sign_in() is already in progress on this provider.',
+                code=QuestDBErrorCode.InvalidApiCall)
         try:
             # A callback may park an interrupt only for this invocation: the
             # non-blocking lock above prevents another sign_in() from entering

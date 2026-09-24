@@ -11,6 +11,7 @@ loop), so it is not part of the automated example suite.
 """
 
 import contextlib
+import os
 import sys
 import urllib.parse
 
@@ -61,8 +62,12 @@ def pg_wire(url: str = QUESTDB_URL):
 
     # SQLAlchemy: a fresh token is injected as the password on every new
     # (pooled) connection, so the engine keeps working as the token rotates.
+    # A remote host defaults to sslmode="verify-full", which needs a trust
+    # root: libpq does not consult the system store unless told to. Point
+    # sslrootcert at your CA file, or use "system" with libpq 16 or later.
+    tls = {'sslrootcert': os.environ.get('PGSSLROOTCERT', 'system')}
     from sqlalchemy import text
-    engine = sqlalchemy_engine(auth, url)
+    engine = sqlalchemy_engine(auth, url, connect_args=tls)
     with engine.connect() as conn:
         for row in conn.execute(text('SELECT * FROM trades LIMIT 10')):
             print(row)
@@ -72,7 +77,7 @@ def pg_wire(url: str = QUESTDB_URL):
     # psycopg (v3) closes when its `with` block exits, but psycopg2's connection
     # context manager only commits / rolls back the transaction and leaves the
     # connection itself open.
-    with contextlib.closing(psycopg_connect(auth, url)) as conn:
+    with contextlib.closing(psycopg_connect(auth, url, **tls)) as conn:
         with conn.cursor() as cur:
             cur.execute('SELECT count() FROM trades')
             print(cur.fetchone())

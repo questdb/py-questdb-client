@@ -24,7 +24,7 @@ _limit_malloc_arenas()
 import patch_path
 
 import questdb._client as qi
-from questdb.auth import OidcConfigError, OidcDeviceAuth, Renderer
+from questdb.auth import OidcConfigError, OidcDeviceAuth, OidcError, Renderer
 from oidc_test_server import OidcTestServer
 
 try:
@@ -102,7 +102,15 @@ def _assert_no_leak(test, work, warmup, measure):
 
 @unittest.skipUnless(psutil is not None, 'psutil not installed')
 class TestOidcNativeLeak(unittest.TestCase):
-    """Mutation-discriminating coverage for every OIDC native free site."""
+    """RSS coverage for the OIDC native free sites a leak loop can reach.
+
+    Covered: the builder free (both constructors), the auth free, the token
+    free on success, and the ``questdb_error`` free in ``_oidc_err_to_py`` --
+    driven with a native error whose message carries the large payload, so a
+    dropped free is visible to the RSS harness. Not covered: the interrupt and
+    callback-cancel error frees, which need a signal or a renderer callback
+    landing mid-call on every iteration.
+    """
 
     # Each native object owns a copy of this field. Twenty leaked objects in one
     # RSS window exceed the harness's 3 MiB allocator-retention allowance while
@@ -133,9 +141,26 @@ class TestOidcNativeLeak(unittest.TestCase):
             except OidcConfigError:
                 pass
 
+        def native_error():
+            try:
+                # Rejected by the native builder (an unexpanded leading `~`),
+                # whose error message quotes the whole path -- so each
+                # iteration allocates a large `questdb_error` that only
+                # `_oidc_err_to_py` frees. Every other loop here succeeds, or
+                # fails in Python before any native error exists.
+                OidcDeviceAuth(
+                    'questdb',
+                    'https://idp.example/device',
+                    'https://idp.example/token',
+                    ca_bundle='~' + self.PAYLOAD,
+                    interactive=False, open_browser=False)
+            except OidcError as exc:
+                assert len(str(exc)) > len(self.PAYLOAD), str(exc)[:200]
+
         for name, work in (
                 ('direct builder/auth success', direct_success),
-                ('direct builder exception', direct_failure)):
+                ('direct builder exception', direct_failure),
+                ('native error free', native_error)):
             with self.subTest(path=name):
                 _assert_no_leak(self, work, warmup=8, measure=120)
 

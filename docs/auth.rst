@@ -244,8 +244,13 @@ before creating a pool:
     from questdb.auth import sqlalchemy_engine, psycopg_connect
 
     auth.sign_in()
-    engine = sqlalchemy_engine(auth, "https://questdb.example.com:9000")
-    conn = psycopg_connect(auth, "https://questdb.example.com:9000")
+    # verify-full needs a trust root; see below.
+    engine = sqlalchemy_engine(
+        auth, "https://questdb.example.com:9000",
+        connect_args={"sslrootcert": "/etc/ssl/questdb-ca.pem"})
+    conn = psycopg_connect(
+        auth, "https://questdb.example.com:9000",
+        sslrootcert="/etc/ssl/questdb-ca.pem")
 
 SQLAlchemy calls non-interactive ``token()`` for every new pooled connection,
 so it follows rotation and silent refresh. ``psycopg_connect`` captures one
@@ -256,11 +261,26 @@ Because the token travels as the PG password, both adapters default to
 well as encrypting the connection. Numeric loopback IPs instead use ``prefer``,
 so local QuestDB is accepted with or without TLS. ``localhost`` retains
 ``verify-full`` because its resolved addresses are not pinned; use
-``127.0.0.1`` or ``::1`` for automatic local plaintext fallback::
+``127.0.0.1`` or ``::1`` for automatic local plaintext fallback.
+
+``verify-full`` needs a **trust root**, and libpq does not use the operating
+system's certificate store by default: with no ``sslrootcert``, no
+``PGSSLROOTCERT`` and no ``~/.postgresql/root.crt``, the connection fails with
+``root certificate file ... does not exist`` before any TLS handshake -- even
+for a server whose certificate a browser would trust. Supply one of:
+
+* ``sslrootcert="/path/to/ca.pem"`` -- the CA that signed the server
+  certificate (a private CA, or a public CA bundle);
+* ``sslrootcert="system"`` -- the system trust store; requires libpq 16 or
+  later (``psycopg.pq.version()`` reports it);
+* the ``PGSSLROOTCERT`` environment variable or ``~/.postgresql/root.crt``.
+
+Pass it through ``connect_args`` for ``sqlalchemy_engine``, or as a keyword
+argument to ``psycopg_connect``::
 
     engine = sqlalchemy_engine(
         auth, "https://questdb.example.com:9000",
-        connect_args={"sslrootcert": "/etc/ssl/questdb-ca.pem"})
+        connect_args={"sslrootcert": "system"})
 
 Pass ``sslmode=None`` to set nothing and manage TLS through the environment or
 a service file; an ``sslmode`` you supply yourself always wins.

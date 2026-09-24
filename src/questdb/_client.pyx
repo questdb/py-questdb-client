@@ -93,7 +93,7 @@ from cpython.datetime cimport (
 )
 from cpython.bool cimport bool
 from cpython.ref cimport Py_XDECREF
-from cpython.exc cimport PyErr_CheckSignals, PyErr_Clear
+from cpython.exc cimport PyErr_CheckSignals, PyErr_Clear, PyErr_SetObject
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
 from cpython.object cimport PyObject
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
@@ -567,8 +567,9 @@ cdef inline void_int reserve_buffer(
         raise c_err_to_py(err)
 
 
-# Longest native connect retry `_direct_dataframe_run` runs between checks of
-# its terminal-OIDC gate when a provider is attached.
+# First native connect-retry slice `_direct_conn_open_checked` runs between
+# checks of the terminal-OIDC gate when a provider is attached. Later slices
+# double, up to the remaining budget.
 cdef uint64_t _OIDC_FOREGROUND_RETRY_SLICE_MS = 2000
 
 
@@ -2735,6 +2736,17 @@ cdef object parse_conf_str(
     cdef questdb_conf_str_parse_err* err
     cdef questdb_conf_str* c_conf_str
     str_to_utf8(b, <PyObject*>conf_str, &c_conf_str_utf8)
+    # The cap the native config-string entry points enforce. This parser is
+    # the first to see the caller's whole string: `Sender.from_conf` hands
+    # native only a synthetic string rebuilt from the parsed keys, so a string
+    # padded in `username`, `password` or `token` never reached the native
+    # check at all, despite the documented 1 MiB limit on `Sender.from_conf`,
+    # `Sender.from_env` and `QDB_CLIENT_CONF`.
+    if c_conf_str_utf8.len > QUESTDB_CONFIG_MAX_BYTES:
+        raise QuestDBError(
+            QuestDBErrorCode.InvalidApiCall,
+            f'configuration string is {c_conf_str_utf8.len} bytes, '
+            f'maximum is {QUESTDB_CONFIG_MAX_BYTES} bytes (1 MiB)')
     c_conf_str = questdb_conf_str_parse(
         c_conf_str_utf8.buf,
         c_conf_str_utf8.len,
@@ -5817,6 +5829,10 @@ cdef struct direct_conn_source_t:
     # connection opened from ``opts`` per call.
     questdb_db* db
     const line_sender_opts* opts
+    # An OIDC provider is attached: split a retried connect into slices so the
+    # foreground terminal-OIDC gate sees each outcome (see
+    # `_direct_conn_open_checked`).
+    bint slice_for_oidc
 
 
 cdef qwp_direct_sender* _direct_conn_open(
@@ -5829,6 +5845,65 @@ cdef qwp_direct_sender* _direct_conn_open(
         return questdb_db_borrow_direct_sender_with_retry(
             src.db, budget_ms, err)
     return qwp_direct_sender_from_opts(src.opts, err)
+
+
+cdef qwp_direct_sender* _direct_conn_open_checked(
+        direct_conn_source_t* src,
+        uint64_t budget_ms) except NULL:
+    """Open (or borrow) the attempt's connection, raising on failure.
+
+    With an OIDC provider attached the native ``*_with_retry`` borrow is run
+    in slices. The native side classifies a non-busy ``InteractionRequired``
+    as a retryable ``SocketError`` -- right for background drainers, which
+    keep queued frames alive while someone signs in -- so one call spanning
+    the whole budget would poll the provider for up to 300s before the
+    foreground gate ever saw the error it exists to fail fast on.
+
+    Between slices only that terminal OIDC case ends the wait early. Every
+    other failure keeps retrying until the caller's budget is spent, exactly
+    as the single native call does without a provider: a primary election
+    (``RoleMismatch``) or pool contention (``InvalidApiCall`` "pool
+    exhausted") that outlasts one slice must not fail an OIDC-authenticated
+    call that the same call without a provider rides out. The slicing lives
+    here, inside one attempt, so the frame is prepared once per attempt rather
+    than once per slice, and slices double so a long outage restarts the
+    native reconnect backoff only a logarithmic number of times.
+    """
+    cdef line_sender_error* err = NULL
+    cdef qwp_direct_sender* conn = NULL
+    cdef PyThreadState* gs = NULL
+    cdef uint64_t slice_ms = budget_ms
+    cdef double deadline = 0.0
+    cdef double remaining = 0.0
+    cdef uint64_t remaining_ms = 0
+    cdef bint last_slice = True
+    cdef object exc
+    if src.slice_for_oidc and budget_ms > _OIDC_FOREGROUND_RETRY_SLICE_MS:
+        slice_ms = _OIDC_FOREGROUND_RETRY_SLICE_MS
+        last_slice = False
+        deadline = time.monotonic() + budget_ms / 1000.0
+    while True:
+        _ensure_doesnt_have_gil(&gs)
+        conn = _direct_conn_open(src, slice_ms, &err)
+        _ensure_has_gil(&gs)
+        if conn != NULL:
+            return conn
+        exc = c_err_to_py(err)
+        err = NULL
+        if last_slice or _is_oidc_terminal_for_foreground(exc, None):
+            raise exc
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            raise exc
+        remaining_ms = <uint64_t>(remaining * 1000.0)
+        if remaining_ms == 0:
+            raise exc
+        slice_ms = slice_ms * 2
+        if slice_ms >= remaining_ms:
+            # The final slice spans the rest of the budget, so its error is
+            # the one a single native call would have returned.
+            slice_ms = remaining_ms
+            last_slice = True
 
 
 cdef void _direct_conn_close(
@@ -5980,11 +6055,7 @@ cdef bint _dataframe_client_try_capsule_path(
                 c_overrides[i].kind = <uint32_t>kind_int
                 c_overrides[i].arg = <uint32_t>arg_int
 
-        _ensure_doesnt_have_gil(&gs)
-        conn = _direct_conn_open(src, budget_ms, &err)
-        _ensure_has_gil(&gs)
-        if conn == NULL:
-            raise c_err_to_py(err)
+        conn = _direct_conn_open_checked(src, budget_ms)
 
         try:
             if not can_slice:
@@ -6089,11 +6160,7 @@ cdef void_int _dataframe_numpy_publish(
         rows_per_chunk = _dataframe_columnar_rows_per_chunk(
             plan, max_rows_per_batch)
 
-        _ensure_doesnt_have_gil(&gs)
-        conn = _direct_conn_open(src, budget_ms, &err)
-        _ensure_has_gil(&gs)
-        if conn == NULL:
-            raise c_err_to_py(err)
+        conn = _direct_conn_open_checked(src, budget_ms)
 
         chunk = qwp_chunk_new(
             plan.c_table_name.buf,
@@ -6165,6 +6232,7 @@ cdef void_int _direct_dataframe_run(
         schema_overrides)
     if max_rows_per_batch <= 0:
         raise ValueError('max_rows_per_batch must be >= 1.')
+    src.slice_for_oidc = oidc_auth is not None
     if isinstance(at, datetime.datetime):
         if at != at:
             raise QuestDBError(
@@ -6319,19 +6387,11 @@ cdef void_int _direct_dataframe_run(
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 raise exc
+            # The whole remaining budget goes to the next attempt's connect.
+            # With a provider attached, `_direct_conn_open_checked` slices it
+            # so the terminal-OIDC gate still fails fast, without cutting the
+            # retry of any other failure short.
             budget_ms = <uint64_t>(remaining * 1000.0)
-            # With a provider attached, retry the connect in short slices so
-            # the terminal-OIDC gate above sees each outcome. The native
-            # `*_with_retry` borrow classifies a non-busy InteractionRequired
-            # as a retryable SocketError (right for background drainers) and
-            # would otherwise poll the provider for the whole remaining budget
-            # -- 300s by default -- before this gate ever saw the error it
-            # exists to fail fast on. A slice only ever covers acquiring the
-            # attempt's connection, before any row is sent, so it cannot cut a
-            # committed prefix short.
-            if (oidc_auth is not None
-                    and budget_ms > _OIDC_FOREGROUND_RETRY_SLICE_MS):
-                budget_ms = _OIDC_FOREGROUND_RETRY_SLICE_MS
 
 
 cdef void_int _capsule_consume_stream_with_hint(

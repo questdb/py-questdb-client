@@ -35,6 +35,11 @@ loopback IP. Numeric loopback addresses deliberately use ``prefer`` so a local
 QuestDB remains usable with or without TLS. A hostname such as ``localhost``
 still requires TLS because its resolved addresses are outside this function's
 control.
+
+``verify-full`` needs a trust root, and libpq does not consult the operating
+system's certificate store by default: without ``sslrootcert`` (a CA file, or
+``"system"`` on libpq 16+), ``PGSSLROOTCERT`` or ``~/.postgresql/root.crt`` the
+connection fails with ``root certificate file ... does not exist``.
 """
 
 from __future__ import annotations
@@ -334,7 +339,10 @@ def sqlalchemy_engine(
         resolved addresses are not pinned. Pass another libpq mode explicitly
         to override this policy, or ``None`` to manage TLS entirely through
         ``connect_args`` / the environment. An ``sslmode`` in ``connect_args``
-        always wins.
+        always wins. ``verify-full`` needs a trust root: pass
+        ``connect_args={"sslrootcert": ...}`` (a CA file, or ``"system"`` on
+        libpq 16+) unless ``PGSSLROOTCERT`` or ``~/.postgresql/root.crt``
+        provides one.
     :param engine_kwargs: Forwarded to ``create_engine``. ``connect_args`` must
         not carry a connection *destination* (``host``, ``hostaddr``, ``port``,
         ``service``, ``dsn``, ``conninfo``): SQLAlchemy merges ``connect_args``
@@ -437,7 +445,9 @@ def psycopg_connect(
         resolved addresses are not pinned. Pass another libpq mode explicitly
         to override this policy, or ``None`` to manage TLS entirely through
         ``connect_kwargs`` / the environment. An ``sslmode`` in
-        ``connect_kwargs`` always wins.
+        ``connect_kwargs`` always wins. ``verify-full`` needs a trust root:
+        pass ``sslrootcert=...`` (a CA file, or ``"system"`` on libpq 16+)
+        unless ``PGSSLROOTCERT`` or ``~/.postgresql/root.crt`` provides one.
     :param connect_kwargs: Forwarded to the driver's ``connect()``. As with
         :func:`sqlalchemy_engine`, a connection *destination* (``host``,
         ``hostaddr``, ``port``, ``service``, ``dsn``, ``conninfo``) is rejected:

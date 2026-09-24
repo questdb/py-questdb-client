@@ -116,11 +116,13 @@ selects the default of 64.
 Config strings are capped at 1 MiB
 **********************************
 
-Every native config-string entry point now rejects an input longer than 1 MiB
-before parsing it, including :meth:`Sender.from_conf <questdb.Sender.from_conf>`,
-:func:`questdb.connect`, :meth:`QuestDB.from_conf <questdb.QuestDB.from_conf>`
-and the ``QDB_CLIENT_CONF`` environment path. A larger string was previously
-accepted. Real connection strings are many orders of magnitude smaller; remove
+Every config-string entry point now rejects an input longer than 1 MiB
+(measured in UTF-8 bytes) before parsing it, including
+:meth:`Sender.from_conf <questdb.Sender.from_conf>`,
+:meth:`Sender.from_env <questdb.Sender.from_env>` (and so ``QDB_CLIENT_CONF``),
+:func:`questdb.connect` and :meth:`QuestDB.from_conf <questdb.QuestDB.from_conf>`.
+It raises :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+``QuestDBErrorCode.InvalidApiCall``. A larger string was previously accepted. Real connection strings are many orders of magnitude smaller; remove
 accidentally duplicated or attacker-controlled content rather than trying to
 raise this safety bound.
 
@@ -213,15 +215,24 @@ Highlights:
   with no token store is unaffected. Transient write failures (a full disk, an
   NFS blip) warn through the ``questdb`` logger and keep the in-process
   credential working.
-* A ``FileTokenStore`` directory beginning with ``~`` is refused rather than
-  creating a directory literally named ``~`` under the working directory and
-  leaving a plaintext refresh token in it.
+* A ``FileTokenStore`` directory is expanded with :func:`os.path.expanduser`
+  and made absolute at construction; one whose leading ``~`` cannot be
+  expanded (an unknown ``~user``, or no resolvable home directory) is refused
+  rather than creating a directory literally named ``~`` under the working
+  directory and leaving a plaintext refresh token in it. The
+  ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` override must already be absolute.
 * Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
   :func:`~questdb.auth.psycopg_connect`) that wire the token into PG-wire as the
   ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
   token on every new pooled connection, ``psycopg_connect`` captures it at
   connect time. They authenticate remote PG servers with ``verify-full`` by
-  default. Numeric loopback literals (``127.0.0.1``, ``::1``) resolve to
+  default, which needs a trust root: libpq does **not** consult the operating
+  system's certificate store unless told to, so without
+  ``~/.postgresql/root.crt`` or ``PGSSLROOTCERT`` the connection fails with
+  ``root certificate file ... does not exist``. Pass ``sslrootcert`` -- a CA
+  file, or ``"system"`` with libpq 16 or later -- through ``connect_args``
+  (``sqlalchemy_engine``) or as a keyword argument (``psycopg_connect``), as
+  ``docs/auth.rst`` shows. Numeric loopback literals (``127.0.0.1``, ``::1``) resolve to
   ``prefer`` instead, so a local QuestDB without TLS still works; the name
   ``localhost`` does **not** — it keeps ``verify-full``, because its resolved
   addresses are not pinned. Use a numeric literal for local development, or
@@ -301,12 +312,8 @@ opts in by handling the new kind.
 Other changes
 ~~~~~~~~~~~~~
 
-- A failed :meth:`SenderTransaction.commit
-  <questdb.SenderTransaction.commit>` now clears the sender's local buffer,
-  rather than leaving rows that the failed flush may already have delivered.
-  The transaction was already completed before the flush in 5.0, so a
-  following ``rollback()`` continues to raise ``InvalidApiCall``. Calling
-  ``commit()`` after its sender was closed now raises
+- Calling :meth:`SenderTransaction.commit
+  <questdb.SenderTransaction.commit>` after its sender was closed now raises
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.InvalidApiCall`` instead of leaking an internal
   ``TypeError``.

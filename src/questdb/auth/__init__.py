@@ -46,8 +46,13 @@ current token once at connect time::
 
     from questdb.auth import sqlalchemy_engine, psycopg_connect
 
-    engine = sqlalchemy_engine(auth, "https://questdb.example.com:9000")
-    conn = psycopg_connect(auth, "https://questdb.example.com:9000")
+    # Remote hosts default to sslmode="verify-full", which needs a trust root:
+    # libpq does not use the system store unless sslrootcert="system" (16+).
+    engine = sqlalchemy_engine(
+        auth, "https://questdb.example.com:9000",
+        connect_args={"sslrootcert": "system"})
+    conn = psycopg_connect(
+        auth, "https://questdb.example.com:9000", sslrootcert="system")
 
 Optional deps (``sqlalchemy``/``psycopg``, ``qrcode``, ``IPython``) are imported
 lazily, only when used.
