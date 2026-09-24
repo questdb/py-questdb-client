@@ -7398,6 +7398,74 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 # an exited thread, or a table shared between threads,
                 # would surface here as a refusal.
 
+    _NATIVE_THREAD_SCOPED_CALL_SCRIPT = """
+import time
+import questdb._client as qi
+from qwp_ws_ack_server import QwpAckServer
+
+events = []
+held = {}
+
+def listener(event):
+    # Runs on the handle's native dispatcher thread, in a fresh Python
+    # thread state each time, on the same OS thread.
+    held['lease'].row('t2', columns={'v': 1}, at=qi.TimestampNanos(1))
+    events.append(event.kind.name)
+
+# Closing every connection after its first frame keeps reconnect events,
+# and so listener calls, arriving on that one dispatcher thread.
+with QwpAckServer(close_plan=[1] * 1000) as server:
+    conf = (f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+            'sender_pool_min=1;sender_pool_max=2;')
+    other = qi.QuestDB.from_conf(conf)
+    held['lease'] = other.sender()
+    db = qi.QuestDB.from_conf(conf, connection_listener=listener)
+    lease = db.sender()
+    deadline = time.monotonic() + 20
+    i = 0
+    while len(events) < 5 and time.monotonic() < deadline:
+        try:
+            lease.row('t', columns={'v': i}, at=qi.TimestampNanos(1 + i))
+            lease.flush()
+        except qi.QuestDBError:
+            pass
+        i += 1
+        time.sleep(0.05)
+    lease.close(flush=False)
+    held['lease'].close(flush=False)
+    db.close()
+    other.close()
+assert len(events) >= 5, events
+print('OK')
+"""
+
+    def test_scoped_calls_from_repeated_native_dispatcher_callbacks(self):
+        """A connection listener runs on the handle's native dispatcher
+        thread, and each call into it gets a fresh Python thread state on
+        that same OS thread. The per-thread table of scoped call depths
+        goes with each thread state, so a pooled-sender call from every
+        one of those callbacks starts from a valid table.
+
+        Runs in a child interpreter: a table that outlives its thread
+        state is a use-after-free, which there reads as a failed return
+        code instead of taking the suite down.
+        """
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [str(pathlib.Path(qi.__file__).parent.parent),
+             str(pathlib.Path(__file__).parent)]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        env['PYTHONWARNINGS'] = 'ignore'
+        try:
+            child = subprocess.run(
+                [sys.executable, '-X', 'faulthandler', '-c',
+                 self._NATIVE_THREAD_SCOPED_CALL_SCRIPT],
+                capture_output=True, text=True, env=env, timeout=120)
+        except subprocess.TimeoutExpired as exc:
+            self.fail(f'child timed out after {exc.timeout} seconds')
+        self.assertEqual(child.returncode, 0, child.stderr[-4000:])
+        self.assertIn('OK', child.stdout)
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_closing_a_handle_from_inside_its_own_call_is_refused(self):
         """`QuestDB.close()` waits for outstanding uses to be released.

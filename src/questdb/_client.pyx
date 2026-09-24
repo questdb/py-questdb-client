@@ -3037,6 +3037,13 @@ cdef void _scoped_table_free(object capsule) noexcept:
         capsule, _SCOPED_TABLE_CAPSULE_NAME)
     if table == NULL:
         return
+    # A thread's Python state can end while its OS thread lives on: every
+    # call into Python from a native thread gets a fresh one, and module
+    # teardown drops `_THREAD_OWNER_STATE` on the main thread. This runs on
+    # the owning thread in both cases, so the native slot is cleared here
+    # and the next scoped call on that thread builds a new table.
+    if <scoped_table_t*>PyThread_tss_get(&_SCOPED_DEPTH_KEY) == table:
+        PyThread_tss_set(&_SCOPED_DEPTH_KEY, NULL)
     free(table.slots)
     free(table)
 
