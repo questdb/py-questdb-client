@@ -285,6 +285,13 @@ argument to ``psycopg_connect``::
 Pass ``sslmode=None`` to set nothing and manage TLS through the environment or
 a service file; an ``sslmode`` you supply yourself always wins.
 
+``sslmode`` is a libpq parameter, so ``sqlalchemy_engine`` accepts only libpq
+drivers (``postgresql+psycopg``, ``postgresql+psycopg2``) while it is set. A
+driver such as ``postgresql+pg8000`` raises ``OidcConfigError`` at construction
+instead of failing every connection; to use one, pass ``sslmode=None`` and
+configure that driver's own TLS through ``connect_args`` (``ssl_context`` for
+pg8000), or the token travels unencrypted.
+
 The adapters own the connection *destination*: it comes from the validated URL
 or from ``host=`` / ``pg_port=``. A destination in the driver passthrough
 (``host``, ``hostaddr``, ``port``, ``service``, ``dsn`` or ``conninfo`` in
@@ -312,7 +319,12 @@ verification URLs, ``expires_in`` and ``interval`` in seconds, plus the vetted
 shutdown suppresses later callbacks without waiting for one already running, so
 work left unfinished in a renderer is abandoned. Run ``sign_in()`` on a daemon
 thread if a callback can block for a long time, because a non-daemon worker is
-joined before the shutdown hook runs and would delay process exit.
+joined before the shutdown hook runs and would delay process exit. For the same
+reason a ``sign_in()`` started after that hook, from an ``atexit`` handler
+registered before ``questdb`` was imported, cannot show a prompt: it succeeds
+from a cached or silently refreshable credential, and otherwise raises
+:class:`~questdb.auth.OidcInteractionRequired` at once unless the provider opens
+a browser.
 
 ``sign_in()`` prompts by default, wherever it is called from: a missing TTY is
 not evidence of a missing human, so there is no terminal detection to refuse a

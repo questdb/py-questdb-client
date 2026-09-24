@@ -572,6 +572,11 @@ cdef inline void_int reserve_buffer(
 # double, up to the remaining budget.
 cdef uint64_t _OIDC_FOREGROUND_RETRY_SLICE_MS = 2000
 
+# A native slice that failed this much before its deadline gave up on an error
+# the native reconnect loop treats as terminal; see `_direct_conn_open_checked`.
+# Must stay well below `_OIDC_FOREGROUND_RETRY_SLICE_MS`.
+cdef uint64_t _OIDC_FOREGROUND_SLICE_EARLY_MARGIN_MS = 100
+
 
 cdef inline bint _is_oidc_terminal_for_foreground(object exc, object oidc_auth):
     """Whether ``exc`` is an OIDC failure that a foreground retry cannot clear.
@@ -5859,9 +5864,15 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
     the whole budget would poll the provider for up to 300s before the
     foreground gate ever saw the error it exists to fail fast on.
 
-    Between slices only that terminal OIDC case ends the wait early. Every
-    other failure keeps retrying until the caller's budget is spent, exactly
-    as the single native call does without a provider: a primary election
+    Between slices that terminal OIDC case ends the wait early, and so does
+    any error the native call returned *before* its slice ran out: native
+    only returns early for an error its reconnect loop treats as terminal
+    (``AuthError`` from a 401/403 upgrade, ``ProtocolVersionError``, ...), so
+    that is the error, and the moment, at which the single native call would
+    have returned too. Re-dialling it would re-present a rejected credential
+    and repeat terminal connection events. Every other failure keeps retrying
+    until the caller's budget is spent, exactly as the single native call
+    does without a provider: a primary election
     (``RoleMismatch``) or pool contention (``InvalidApiCall`` "pool
     exhausted") that outlasts one slice must not fail an OIDC-authenticated
     call that the same call without a provider rides out. The slicing lives
@@ -5874,6 +5885,8 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
     cdef PyThreadState* gs = NULL
     cdef uint64_t slice_ms = budget_ms
     cdef double deadline = 0.0
+    cdef double slice_start = 0.0
+    cdef double now = 0.0
     cdef double remaining = 0.0
     cdef uint64_t remaining_ms = 0
     cdef bint last_slice = True
@@ -5883,6 +5896,8 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
         last_slice = False
         deadline = time.monotonic() + budget_ms / 1000.0
     while True:
+        if not last_slice:
+            slice_start = time.monotonic()
         _ensure_doesnt_have_gil(&gs)
         conn = _direct_conn_open(src, slice_ms, &err)
         _ensure_has_gil(&gs)
@@ -5892,7 +5907,16 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
         err = NULL
         if last_slice or _is_oidc_terminal_for_foreground(exc, None):
             raise exc
-        remaining = deadline - time.monotonic()
+        now = time.monotonic()
+        # Native started its slice deadline after `slice_start`, and returns
+        # a retryable error only once that deadline has passed. Returning
+        # earlier means native gave up on a terminal error. The margin
+        # absorbs a coarse monotonic clock; a terminal error inside it costs
+        # at most one more slice.
+        if now < slice_start + (
+                slice_ms - _OIDC_FOREGROUND_SLICE_EARLY_MARGIN_MS) / 1000.0:
+            raise exc
+        remaining = deadline - now
         if remaining <= 0.0:
             raise exc
         remaining_ms = <uint64_t>(remaining * 1000.0)
@@ -6734,23 +6758,23 @@ cdef class QuestDB:
                 if (<OidcDeviceAuth>oidc_auth)._closed:
                     raise ValueError('"oidc_auth" is closed')
             if oidc_auth is not None:
-                # Same conflict as the Sender path, but the fixed credential
-                # arrives as a configuration key here. Name the keys the caller
+                # Same conflict as the Sender path. Name the keys the caller
                 # wrote rather than letting native report the internal provider
-                # key, which exists in no public API.
+                # key, which exists in no public API. The wording must not
+                # assume where they were written: `questdb.connect()` folds its
+                # keyword arguments into this configuration string, so a
+                # caller who passed `username=` has no string to edit.
                 conflicting = [
                     key for key in ('token', 'username', 'password')
                     if params.get(key) is not None]
                 if conflicting:
                     raise QuestDBError(
                         QuestDBErrorCode.ConfigError,
-                        '"oidc_auth" is mutually exclusive with the '
+                        '"oidc_auth" is mutually exclusive with '
                         + ', '.join(f'"{key}"' for key in conflicting)
-                        + ' configuration '
-                        + ('key' if len(conflicting) == 1 else 'keys')
                         + '. An OIDC provider supplies the credential itself; '
-                        'remove it from the configuration string, or drop '
-                        '"oidc_auth" to keep using it.')
+                        'remove the fixed credential, or drop "oidc_auth" to '
+                        'keep using it.')
             str_to_utf8(b, <PyObject*>native_conf_str, &c_conf)
             if connection_listener is not None:
                 # Register as part of pool construction so recovery senders

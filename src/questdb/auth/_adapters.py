@@ -289,6 +289,30 @@ def _is_numeric_loopback_host(host: str) -> bool:
         return False
 
 
+# SQLAlchemy PostgreSQL drivers built on libpq, the only ones that take a
+# `sslmode` connect argument. A bare `postgresql` URL selects psycopg2.
+_LIBPQ_DRIVERS = frozenset(('psycopg', 'psycopg2', 'psycopg2cffi'))
+
+
+def _require_libpq_driver(drivername: str) -> None:
+    """Refuse a non-libpq driver while an ``sslmode`` would be injected.
+
+    Any other driver (pg8000, asyncpg, ...) rejects the unknown keyword on
+    every connection with a bare ``TypeError``, and has its own TLS setting,
+    so the adapter cannot enforce its TLS default there.
+    """
+    _, _, driver = drivername.partition('+')
+    if not driver or driver in _LIBPQ_DRIVERS:
+        return
+    raise OidcConfigError(
+        f'drivername {drivername!r} is not a libpq driver, so it does not '
+        f'accept the libpq "sslmode" this adapter sets to protect the bearer '
+        f'token sent as the PG password. Use postgresql+psycopg or '
+        f'postgresql+psycopg2, or pass sslmode=None and configure TLS for '
+        f'this driver through connect_args (for pg8000, "ssl_context"); '
+        f'without it the token may travel unencrypted.')
+
+
 def _effective_sslmode(host: str, sslmode: Optional[str]) -> Optional[str]:
     """Resolve the adapter-only ``auto`` mode before calling libpq."""
     if sslmode != _AUTO_SSLMODE:
@@ -330,7 +354,11 @@ def sqlalchemy_engine(
     :param pg_port: PG-wire port (default ``8812``).
     :param database: Database name (default ``"qdb"``).
     :param drivername: SQLAlchemy driver; defaults to ``postgresql+psycopg``
-        (v3) or ``postgresql+psycopg2`` depending on what is installed.
+        (v3) or ``postgresql+psycopg2`` depending on what is installed. A
+        driver not built on libpq (``postgresql+pg8000``, say) takes no
+        ``sslmode``: pass ``sslmode=None`` with it and configure its own TLS
+        through ``connect_args``, or construction raises
+        :class:`OidcConfigError`.
     :param sslmode: libpq ``sslmode`` for the connection. The default ``"auto"``
         resolves to ``"verify-full"`` for remote hosts, authenticating the
         server before sending the token as the PG password. Numeric loopback
@@ -352,7 +380,8 @@ def sqlalchemy_engine(
         ``pg_port=`` instead.
     :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
         has no host; if the resolved host carries connection-string
-        metacharacters; if ``pg_port`` is not a valid TCP port; or if
+        metacharacters; if ``pg_port`` is not a valid TCP port; if
+        ``drivername`` is not a libpq driver while ``sslmode`` is set; or if
         ``connect_args`` (or a foreign ``do_connect`` listener) sets a
         connection destination other than the validated one.
     :raises OidcError: if token acquisition fails while SQLAlchemy opens a
@@ -382,6 +411,8 @@ def sqlalchemy_engine(
             'postgresql+psycopg'
             if mod.__name__ == 'psycopg'
             else 'postgresql+psycopg2')
+    elif sslmode is not None:
+        _require_libpq_driver(drivername)
 
     engine = create_engine(
         URL.create(

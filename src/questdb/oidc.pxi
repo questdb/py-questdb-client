@@ -73,6 +73,13 @@ cdef extern from *:
     int CYTHON_COMPILING_IN_PYPY
 
 
+cdef extern from "pythread.h":
+    # A plain C call. Asking `threading` instead runs bytecode, and CPython
+    # runs pending signal handlers at bytecode boundaries -- inside a callback
+    # that must first catch them with PyErr_CheckSignals().
+    unsigned long questdb_thread_ident "PyThread_get_thread_ident" () nogil
+
+
 # A genuinely *interpreted* no-op, used to give PyPy a bytecode boundary at
 # which to deliver a pending signal (see `_oidc_signal_tick`). It has to be
 # built with exec(): a `def` in this file is compiled to C like everything
@@ -105,18 +112,25 @@ cdef void_int _oidc_signal_tick() except -1:
 # Touched only with the GIL held.
 cdef object _OIDC_MAIN_PARKED = None
 cdef bint _OIDC_MAIN_PARK_SCHEDULED = False
-# Diagnostic dispatches currently running Python code. A pending call that
-# fires inside one (the logging call runs bytecode) must not raise there,
-# where the dispatcher would take the exception for a logging-handler
-# failure; it defers, and the dispatcher reschedules on its way out.
-cdef int _OIDC_DIAGNOSTIC_DEPTH = 0
+# Diagnostic dispatches currently running Python code ON THE MAIN THREAD. A
+# pending call that fires inside one (the logging call runs bytecode) must not
+# raise there, where the dispatcher would take the exception for a
+# logging-handler failure; it defers, and the dispatcher reschedules on its way
+# out. Pending calls only ever run on the main thread, so dispatches on other
+# threads are not counted: counting them let an unrelated worker's slow
+# logging handler hold back the main thread's interrupt for as long as that
+# handler ran, while the main thread kept executing user code.
+cdef int _OIDC_MAIN_DIAGNOSTIC_DEPTH = 0
+# `threading.main_thread()` is the interpreter's main thread whichever thread
+# imports this module.
+cdef unsigned long _OIDC_MAIN_THREAD_IDENT = threading.main_thread().ident
 
 
 cdef int _oidc_raise_parked_main(void* unused) noexcept:
     """Pending-call body: raise the parked exception on the main thread."""
     global _OIDC_MAIN_PARKED, _OIDC_MAIN_PARK_SCHEDULED
     _OIDC_MAIN_PARK_SCHEDULED = False
-    if _OIDC_DIAGNOSTIC_DEPTH > 0:
+    if _OIDC_MAIN_DIAGNOSTIC_DEPTH > 0:
         return 0
     exc = _OIDC_MAIN_PARKED
     _OIDC_MAIN_PARKED = None
@@ -1026,8 +1040,10 @@ cdef void _oidc_park_event_interrupt(
 
 cdef void _oidc_diagnostic_dispatch(
         const questdb_oidc_diagnostic* diagnostic) noexcept with gil:
-    global _OIDC_DIAGNOSTIC_DEPTH
-    _OIDC_DIAGNOSTIC_DEPTH += 1
+    global _OIDC_MAIN_DIAGNOSTIC_DEPTH
+    cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
+    if on_main:
+        _OIDC_MAIN_DIAGNOSTIC_DEPTH += 1
     try:
         try:
             # On the thread running sign_in(), token(), clear() or an attached
@@ -1064,9 +1080,10 @@ cdef void _oidc_diagnostic_dispatch(
             # hand it to the call it interrupted instead of discarding it.
             _oidc_park_foreground_interrupt(exc)
     finally:
-        _OIDC_DIAGNOSTIC_DEPTH -= 1
-        if _OIDC_DIAGNOSTIC_DEPTH == 0:
-            _oidc_schedule_parked_main()
+        if on_main:
+            _OIDC_MAIN_DIAGNOSTIC_DEPTH -= 1
+            if _OIDC_MAIN_DIAGNOSTIC_DEPTH == 0:
+                _oidc_schedule_parked_main()
 
 
 cdef void _oidc_diagnostic_trampoline(
@@ -1291,6 +1308,9 @@ cdef class OidcDeviceAuth:
     # GIL before the callback-owning call and steal `_interrupt`. Reject it
     # before releasing the GIL so callback exceptions remain invocation-owned.
     cdef object _sign_in_lock
+    # The resolved `open_browser` setting handed to native: whether a sign-in
+    # can still reach the user once interpreter shutdown detached the renderer.
+    cdef bint _opens_browser
 
     def __cinit__(self):
         self._native = None
@@ -1300,6 +1320,7 @@ cdef class OidcDeviceAuth:
         self._closed = False
         self._interrupt = None
         self._sign_in_lock = threading.Lock()
+        self._opens_browser = False
 
     cdef void _require_open(self) except *:
         if self._raw == NULL:
@@ -1586,6 +1607,7 @@ cdef class OidcDeviceAuth:
                 open_browser is True,
                 &err):
             raise _oidc_err_to_py(err)
+        self._opens_browser = open_browser is True
         if interactive is None:
             interactive = detect_interactive()
         if not questdb_oidc_builder_interactive(
@@ -1771,12 +1793,22 @@ cdef class OidcDeviceAuth:
         call raises :class:`~questdb.auth.OidcError` with code
         ``InvalidApiCall`` instead of waiting behind the interactive flow; the
         provider and the running sign-in are unaffected.
+
+        Once interpreter shutdown has begun (from an ``atexit`` handler that
+        runs after this module's own), renderer callbacks are detached. A
+        sign-in that would need to prompt then raises
+        :class:`~questdb.auth.OidcInteractionRequired` at once unless the
+        provider opens a browser, rather than waiting for a device code nobody
+        can see.
         """
         cdef questdb_error* err = NULL
         cdef bint ok
         cdef PyThreadState* gs = NULL
         cdef _OidcForegroundCall call
         self._require_open()
+        if _oidc_callbacks_shutting_down and not self._opens_browser:
+            self._sign_in_without_renderer()
+            return
         if not self._sign_in_lock.acquire(False):
             from questdb.auth._errors import OidcError
             # InvalidApiCall, as native reports every other refusal to enter
@@ -1811,6 +1843,28 @@ cdef class OidcDeviceAuth:
                 raise _oidc_err_to_py(err)
         finally:
             self._sign_in_lock.release()
+
+    def _sign_in_without_renderer(self):
+        """``sign_in()`` once interpreter shutdown has detached the renderer.
+
+        The atexit hook suppresses every callback into Python, so a device-code
+        prompt can no longer be shown, and this provider opens no browser: an
+        interactive flow would poll silently until the code expired. A cached
+        or silently refreshable credential still satisfies ``sign_in()``;
+        anything that needs the user fails fast instead.
+        """
+        from questdb.auth._errors import OidcInteractionRequired
+        try:
+            self.token()
+        except OidcInteractionRequired as exc:
+            if getattr(exc, '_acquisition_busy', False):
+                raise
+            raise OidcInteractionRequired(
+                'OIDC sign_in() cannot prompt during interpreter shutdown: '
+                'renderer callbacks are detached and this provider does not '
+                'open a browser, so nobody could see the device code. Sign '
+                'in before the interpreter starts exiting.',
+                code=exc.code) from exc
 
     def cancel_sign_in(self):
         """Cancel the current interactive sign-in without closing the provider.

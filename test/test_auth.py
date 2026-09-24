@@ -787,6 +787,10 @@ class NativeOidcTest(unittest.TestCase):
         with OidcTestServer() as server:
             auth = make_discovered_auth(server, renderer=renderer)
             _client._oidc_detach_diagnostics_at_exit()
+            # Clear only the Python shutdown flag, which makes sign_in() refuse
+            # to prompt; the native handles stay detached, and that is what
+            # this test drives through the native device flow.
+            _client._debug_oidc_reset_callback_shutdown()
 
             # The hook suppresses every callback that would enter Python, but
             # deliberately keeps the provider usable for transports draining
@@ -798,6 +802,39 @@ class NativeOidcTest(unittest.TestCase):
             self.assertEqual(renderer.waiting, [])
             self.assertEqual(renderer.successes, [])
             self.assertEqual(renderer.failures, [])
+
+    def test_sign_in_after_exit_hook_fails_fast_instead_of_prompting(self):
+        # A sign-in started after the exit hook (an atexit handler registered
+        # before questdb was imported) cannot show its device code: it used to
+        # poll silently until the code expired.
+        self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
+        renderer = RecordingRenderer()
+        pending = (400, {'error': 'authorization_pending'}, None)
+        with OidcTestServer(
+                device_token_response=pending, device_expires_in=30,
+                device_interval=1) as server:
+            auth = make_discovered_auth(server, renderer=renderer)
+            _client._oidc_detach_diagnostics_at_exit()
+            started = time.monotonic()
+            with self.assertRaises(OidcInteractionRequired) as raised:
+                auth.sign_in()
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertIn('interpreter shutdown', str(raised.exception))
+            self.assertEqual(renderer.prompts, [])
+            # Nothing was closed: the provider is still usable.
+            self.assertEqual(auth.config.client_id, 'discovered-client')
+            with self.assertRaises(OidcInteractionRequired):
+                auth.token()
+
+    def test_sign_in_after_exit_hook_is_served_from_the_cache(self):
+        # A credential that needs no prompt still satisfies sign_in().
+        self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
+        with OidcTestServer() as server:
+            auth = make_discovered_auth(server)
+            auth.sign_in()
+            _client._oidc_detach_diagnostics_at_exit()
+            auth.sign_in()
+            self.assertEqual(auth.token(), 'AT-initial')
 
     @unittest.skipUnless(
         os.name == 'posix', 'durable file token store requires POSIX')
@@ -826,6 +863,9 @@ class NativeOidcTest(unittest.TestCase):
                     token_store=FileTokenStore.at(directory),
                     renderer=SabotageRenderer(directory))
                 _client._oidc_detach_diagnostics_at_exit()
+                # See test_exit_hook_silences_renderer_events_without_closing_
+                # provider: keep native detached, let sign_in() reach it.
+                _client._debug_oidc_reset_callback_shutdown()
                 with self.assertNoLogs('questdb', level='WARNING'):
                     auth.sign_in()
                 self.assertEqual(auth.token(), 'AT-initial')
@@ -966,6 +1006,9 @@ class NativeOidcTest(unittest.TestCase):
             self.assertFalse(signer.is_alive())
             self.assertEqual(sign_in_errors, [])
 
+            # Keep native detached, let sign_in() reach it (see
+            # test_exit_hook_silences_renderer_events_without_closing_provider).
+            _client._debug_oidc_reset_callback_shutdown()
             late.sign_in()
             self.assertEqual(late.token(), 'AT-initial')
             self.assertEqual(second_renderer.prompts, [])
@@ -2965,7 +3008,7 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 returned = _adapters.sqlalchemy_engine(
                     auth,
                     server.url,
-                    drivername='postgresql+test')
+                    drivername='postgresql+psycopg')
             params = {}
             returned.listeners['do_connect'](None, None, [], params)
             token_requests = server.requests('/token', 'POST')
@@ -3285,6 +3328,26 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         self.assertIn('password', message)
         self.assertNotIn('token_provider', message)
 
+    def test_pool_conflict_from_keywords_does_not_blame_a_conf_string(self):
+        # connect() folds keyword credentials into the configuration string
+        # it builds, so a caller who never wrote one must not be told to edit
+        # it.
+        for args, kwargs in (
+                ((), {'host': 'localhost', 'username': 'u', 'password': 'p'}),
+                (('ws::addr=localhost:9000;lazy_connect=true;',),
+                 {'token': 'fixed'})):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(questdb.QuestDBError) as ctx:
+                    questdb.connect(*args, oidc_auth=self.auth, **kwargs)
+                self.assertEqual(
+                    ctx.exception.code, questdb.QuestDBErrorCode.ConfigError)
+                message = str(ctx.exception)
+                self.assertNotIn('configuration string', message)
+                self.assertIn('remove the fixed credential', message)
+                for key in kwargs:
+                    if key != 'host':
+                        self.assertIn(key, message)
+
     def test_token_conflict_names_the_parameters_the_caller_wrote(self):
         # Regression: only native enforced this, and it reports the internal
         # config key it knows -- "qwp_ws_token_provider" / "http_token_provider"
@@ -3524,9 +3587,14 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 self.assertIsNone(event.port)
                 self.assertIn('closed', event.cause_msg.lower())
 
-                # AuthError is the runner's terminal classification. Assert it
-                # directly rather than using a fixed observation window whose
-                # result depends on when a retry thread gets scheduled.
+                # The cause code above pins the classification; this pins that
+                # the runner acts on it and stops. A runner that kept retrying
+                # at the 10ms backoff would narrate dozens more events in this
+                # window, while a correct one narrates none, so the window can
+                # only miss a regression, never fail a correct runner. Checking
+                # the count the moment the first event arrived caught a
+                # retrying runner only about half the time.
+                time.sleep(0.5)
                 self.assertEqual(
                     [
                         observed.kind for observed in events
@@ -5027,7 +5095,7 @@ class AdapterTest(unittest.TestCase):
             returned = _adapters.sqlalchemy_engine(
                 auth,
                 'https://questdb.example.com:9000',
-                drivername='postgresql+test')
+                drivername='postgresql+psycopg')
         listener = returned.listeners['do_connect']
 
         redirected = {'host': 'other.example', 'port': 8812}
@@ -5058,6 +5126,52 @@ class AdapterTest(unittest.TestCase):
                     _adapters.sqlalchemy_engine(auth, url)
             auth.token.assert_not_called()
             sqlalchemy.create_engine.assert_not_called()
+
+    def test_sqlalchemy_rejects_non_libpq_driver_while_sslmode_is_set(self):
+        # pg8000 and other non-libpq drivers take no `sslmode`: injecting it
+        # failed every pooled connection with a bare TypeError. Refuse at
+        # construction, and accept the driver once TLS is left to connect_args.
+        engine = types.SimpleNamespace(listeners={})
+        sqlalchemy = types.ModuleType('sqlalchemy')
+        sqlalchemy.create_engine = mock.Mock(return_value=engine)
+
+        class Event:
+            @staticmethod
+            def listens_for(target, name):
+                def register(listener):
+                    target.listeners[name] = listener
+                    return listener
+                return register
+
+        sqlalchemy.event = Event
+        sqlalchemy_engine = types.ModuleType('sqlalchemy.engine')
+        sqlalchemy_engine.URL = mock.Mock()
+        modules = {
+            'sqlalchemy': sqlalchemy,
+            'sqlalchemy.engine': sqlalchemy_engine,
+        }
+        url = 'https://questdb.example.com:9000'
+        auth = mock.Mock()
+        auth.token.return_value = 'SECRET-BEARER'
+        with mock.patch.dict(sys.modules, modules):
+            for sslmode in ('auto', 'require'):
+                with self.subTest(sslmode=sslmode):
+                    with self.assertRaisesRegex(
+                            OidcConfigError, 'not a libpq driver'):
+                        _adapters.sqlalchemy_engine(
+                            auth, url, drivername='postgresql+pg8000',
+                            sslmode=sslmode)
+            sqlalchemy.create_engine.assert_not_called()
+            auth.token.assert_not_called()
+
+            # A bare `postgresql` URL selects psycopg2, a libpq driver.
+            _adapters.sqlalchemy_engine(auth, url, drivername='postgresql')
+            returned = _adapters.sqlalchemy_engine(
+                auth, url, drivername='postgresql+pg8000', sslmode=None)
+        params = {'host': 'questdb.example.com', 'port': 8812}
+        returned.listeners['do_connect'](None, None, [], params)
+        self.assertEqual(params['password'], 'SECRET-BEARER')
+        self.assertNotIn('sslmode', params)
 
 
 # A JWT (unsigned; native does not verify) whose payload carries only `sub`.
@@ -5423,7 +5537,8 @@ except ImportError:
 
 class _RolePolicyServer(QwpAckServer):
     """QWP/WS server answering each upgrade per ``policy(index, t)``:
-    ``'503'``, ``'421'`` (with ``X-QuestDB-Role: REPLICA``) or ``'serve'``."""
+    ``'503'``, ``'401'``, ``'421'`` (with ``X-QuestDB-Role: REPLICA``) or
+    ``'serve'``."""
 
     def __init__(self, policy, **kwargs):
         super().__init__(**kwargs)
@@ -5447,6 +5562,9 @@ class _RolePolicyServer(QwpAckServer):
             qwp_ws_ack_server._read_until(conn, b'\r\n\r\n')
             if action == '503':
                 conn.sendall(b'HTTP/1.1 503 Service Unavailable\r\n'
+                             b'Content-Length: 0\r\nConnection: close\r\n\r\n')
+            elif action == '401':
+                conn.sendall(b'HTTP/1.1 401 Unauthorized\r\n'
                              b'Content-Length: 0\r\nConnection: close\r\n\r\n')
             else:
                 conn.sendall(b'HTTP/1.1 421 Misdirected Request\r\n'
@@ -5485,19 +5603,44 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
             'reconnect_initial_backoff_millis=100;'
             'reconnect_max_backoff_millis=5000;')
 
-    def _run(self, policy):
+    def _run(self, policy, server_out=None, **connect_kwargs):
         frame = _CountingArrowArray(
             _pa.record_batch({'v': _pa.array([1, 2, 3], _pa.int64())}))
         with OidcTestServer() as idp:
             auth = make_discovered_auth(idp)
             auth.sign_in()
             with _RolePolicyServer(policy) as server:
+                if server_out is not None:
+                    server_out.append(server)
                 with questdb.connect(
                         self.CONF.format(port=server.port),
-                        oidc_auth=auth) as db:
+                        oidc_auth=auth, **connect_kwargs) as db:
                     db.dataframe(
                         frame, table_name='t', at=questdb.ServerTimestamp)
         return frame
+
+    def test_terminal_rejection_between_slices_is_not_redialled(self):
+        # The first attempt fails with a retryable 503, so the retry runs in
+        # slices. Native returns the 401 at once as terminal; the slice ladder
+        # used to re-dial it with a doubled slice until the budget ran out,
+        # re-presenting the rejected token and emitting one terminal
+        # AuthFailed event per slice. Without a provider the same call dials
+        # once and emits one.
+        def policy(index, t):
+            return '503' if index == 0 else '401'
+
+        events = []
+        servers = []
+        with self.assertRaises(questdb.QuestDBError) as cm:
+            self._run(
+                policy, servers, connection_listener=events.append,
+                connection_event_inbox_capacity=256)
+        self.assertEqual(cm.exception.code, questdb.QuestDBErrorCode.AuthError)
+        self.assertEqual(servers[0]._upgrades, 2)
+        auth_failed = [
+            e for e in events
+            if e.kind is questdb.ConnectionEventKind.AuthFailed]
+        self.assertEqual(len(auth_failed), 1, events)
 
     def test_role_election_longer_than_a_retry_slice_is_ridden_out(self):
         # The first attempt fails with a retryable 503; the reconnect then sees
@@ -5533,10 +5676,26 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
     inside an attached transport's flush behaves as it would after the flush:
     its exception reaches the caller, and the handler runs once."""
 
-    def _flush_with_signal(self, signum, handler):
+    def _flush_with_signal(self, signum, handler, busy_worker=False):
+        self._surfaced_after_flush = False
         previous = signal.signal(signum, handler)
         sabotaged = threading.Event()
         credential = [None]
+        worker_in_handler = threading.Event()
+        release_worker = threading.Event()
+        main = threading.main_thread()
+
+        class _BlockingWorkerHandler(logging.Handler):
+            # A slow handler (network, NFS) serving another thread's
+            # diagnostic. It must not hold back the main thread's interrupt.
+            def emit(self, record):
+                if threading.current_thread() is not main:
+                    worker_in_handler.set()
+                    release_worker.wait(30)
+
+        questdb_logger = logging.getLogger('questdb')
+        blocking_handler = _BlockingWorkerHandler()
+        worker = None
 
         def hook():
             # Make the refreshed token's save fail, so native reports a
@@ -5555,14 +5714,37 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
 
         try:
             with tempfile.TemporaryDirectory() as store_dir, \
+                    tempfile.TemporaryDirectory() as worker_tmp, \
                     OidcTestServer(
                         initial_expires_in=4,
-                        refresh_request_hook=hook) as server:
+                        refresh_request_hook=hook) as server, \
+                    OidcTestServer() as worker_server:
                 auth = make_discovered_auth(
                     server, token_store=FileTokenStore.at(store_dir))
                 auth.sign_in()
                 credential[0] = os.path.join(store_dir, next(
                     n for n in os.listdir(store_dir) if n.endswith('.json')))
+                if busy_worker:
+                    worker_store = os.path.join(worker_tmp, 'store')
+
+                    class _SabotagingRenderer(RecordingRenderer):
+                        # Replace the store directory with a file, so the
+                        # worker's save fails and emits a diagnostic.
+                        def on_prompt(self, challenge):
+                            super().on_prompt(challenge)
+                            shutil.rmtree(worker_store)
+                            with open(worker_store, 'w') as f:
+                                f.write('not a directory')
+
+                    worker_auth = make_discovered_auth(
+                        worker_server,
+                        token_store=FileTokenStore.at(worker_store),
+                        renderer=_SabotagingRenderer())
+                    questdb_logger.addHandler(blocking_handler)
+                    worker = threading.Thread(
+                        target=worker_auth.sign_in, daemon=True)
+                    worker.start()
+                    self.assertTrue(worker_in_handler.wait(15))
                 sender = questdb.Sender.from_conf(
                     f'http::addr=127.0.0.1:{server.port};',
                     oidc_auth=auth, auto_flush=False)
@@ -5580,9 +5762,18 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
                     # A bytecode boundary after the flush that ran the refresh.
                     for _ in range(3):
                         pass
+                except BaseException:
+                    # Where it surfaced: here, right after the flush, or only
+                    # later -- e.g. once the busy worker below is released.
+                    self._surfaced_after_flush = True
+                    raise
                 finally:
                     sender.close(flush=False)
         finally:
+            release_worker.set()
+            if worker is not None:
+                worker.join(15)
+            questdb_logger.removeHandler(blocking_handler)
             signal.signal(signum, previous)
 
     def test_exception_from_a_signal_handler_reaches_the_flush_caller(self):
@@ -5591,6 +5782,22 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
 
         with self.assertRaises(TimeoutError):
             self._flush_with_signal(signal.SIGALRM, on_alarm)
+
+    def test_other_threads_diagnostic_does_not_delay_the_exception(self):
+        # Another thread is inside its own persistence diagnostic, blocked in
+        # a slow logging handler, while the main thread's flush parks the
+        # handler's exception. It must still surface right after the flush,
+        # not when the unrelated handler eventually returns.
+        def on_alarm(signum, frame):
+            raise TimeoutError('deadline')
+
+        with self.assertRaises(TimeoutError):
+            self._flush_with_signal(
+                signal.SIGALRM, on_alarm, busy_worker=True)
+        self.assertTrue(
+            self._surfaced_after_flush,
+            'the exception was held back until the other thread\'s logging '
+            'handler returned')
 
     def test_system_exit_from_a_signal_handler_reaches_the_flush_caller(self):
         def on_term(signum, frame):
