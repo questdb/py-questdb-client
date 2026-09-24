@@ -25,6 +25,8 @@
 """Python binding tests for the native OIDC implementation."""
 
 import dataclasses
+from decimal import Decimal
+from fractions import Fraction
 import gc
 import io
 import logging
@@ -2187,6 +2189,45 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         finally:
             signal.signal(signal.SIGALRM, previous)
 
+    @unittest.skipUnless(hasattr(signal, 'SIGALRM'), 'SIGALRM required')
+    def test_signal_raised_inside_renderer_is_not_a_renderer_failure(self):
+        # A signal arriving *after* PyErr_CheckSignals, during user renderer
+        # bytecode, must cancel sign-in even when its handler raises a regular
+        # Exception. One-shot handlers may unregister themselves before raising.
+        class Deadline(Exception):
+            pass
+
+        class AlarmRenderer(RecordingRenderer):
+            def on_prompt(self, response):
+                signal.raise_signal(signal.SIGALRM)
+                super().on_prompt(response)
+
+        for exc_type in (TimeoutError, Deadline):
+            with self.subTest(exc_type=exc_type.__name__):
+                previous = signal.getsignal(signal.SIGALRM)
+
+                def on_alarm(signum, frame):
+                    if exc_type is Deadline:
+                        signal.signal(signum, signal.SIG_IGN)
+                    raise exc_type('deadline inside renderer')
+
+                signal.signal(signal.SIGALRM, on_alarm)
+                try:
+                    with OidcTestServer(device_expires_in=8) as server:
+                        auth = make_discovered_auth(
+                            server, renderer=AlarmRenderer())
+                        try:
+                            started = time.monotonic()
+                            with self.assertRaises(exc_type):
+                                auth.sign_in()
+                            self.assertLess(time.monotonic() - started, 6)
+                            with self.assertRaises(OidcInteractionRequired):
+                                auth.token()
+                        finally:
+                            auth.close()
+                finally:
+                    signal.signal(signal.SIGALRM, previous)
+
     def test_interrupt_raised_while_logging_a_renderer_failure_aborts_sign_in(
             self):
         # A failing renderer is logged, and the logging call is bytecode too:
@@ -2219,6 +2260,35 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                     auth.close()
         finally:
             logger.removeHandler(handler)
+
+    @unittest.skipUnless(hasattr(signal, 'SIGALRM'), 'SIGALRM required')
+    def test_signal_inside_renderer_failure_logging_aborts_sign_in(self):
+        class FailingRenderer(RecordingRenderer):
+            def on_prompt(self, response):
+                raise TypeError('renderer bug')
+
+        class AlarmHandler(logging.Handler):
+            def emit(self, record):
+                signal.raise_signal(signal.SIGALRM)
+
+        def on_alarm(signum, frame):
+            raise TimeoutError('deadline during renderer logging')
+
+        logger = logging.getLogger('questdb')
+        handler = AlarmHandler()
+        previous = signal.signal(signal.SIGALRM, on_alarm)
+        logger.addHandler(handler)
+        try:
+            with OidcTestServer(device_expires_in=8) as server:
+                auth = make_discovered_auth(server, renderer=FailingRenderer())
+                try:
+                    with self.assertRaises(TimeoutError):
+                        auth.sign_in()
+                finally:
+                    auth.close()
+        finally:
+            logger.removeHandler(handler)
+            signal.signal(signal.SIGALRM, previous)
 
     def test_concurrent_sign_in_cannot_steal_callback_interrupt(self):
         # The steal window opens when the renderer's KeyboardInterrupt is parked
@@ -2641,7 +2711,9 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         # the 'questdb' logger instead.
         class RaisingRenderer(Renderer):
             def on_prompt(self, response):
-                raise RuntimeError('boom-prompt')
+                # Same class a signal handler commonly raises, but no signal
+                # handler frame: ordinary renderer errors remain best-effort.
+                raise TimeoutError('boom-prompt')
 
             def on_waiting(self, seconds_left):
                 raise RuntimeError('boom-waiting')
@@ -4937,10 +5009,11 @@ class AdapterTest(unittest.TestCase):
             _adapters._require_host('https://host:invalid')
 
     def test_coerce_port_rejects_invalid(self):
-        # bool (True/False is never a port), non-integral / non-finite float,
+        # bool (True/False is never a port), fractional/non-finite numerics,
         # non-numeric, and out-of-range must all raise the typed error rather
         # than reach the driver as a bare ValueError / silently truncate.
-        for bad in (True, False, 8812.9, float('inf'), float('nan'),
+        for bad in (True, False, 8812.9, Decimal('8812.5'),
+                    Fraction(17625, 2), float('inf'), float('nan'),
                     0, -1, 65536, 70000, 10 ** 100, 'x', None):
             with self.subTest(bad=bad), self.assertRaises(OidcConfigError):
                 _adapters._coerce_port(bad)
@@ -4949,6 +5022,8 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(_adapters._coerce_port(8812), 8812)
         self.assertEqual(_adapters._coerce_port('8812'), 8812)  # e.g. from env
         self.assertEqual(_adapters._coerce_port(8812.0), 8812)  # integral float
+        self.assertEqual(_adapters._coerce_port(Decimal('8812.0')), 8812)
+        self.assertEqual(_adapters._coerce_port(Fraction(8812, 1)), 8812)
         self.assertEqual(_adapters._coerce_port(1), 1)
         self.assertEqual(_adapters._coerce_port(65535), 65535)
 
@@ -5676,8 +5751,12 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
     inside an attached transport's flush behaves as it would after the flush:
     its exception reaches the caller, and the handler runs once."""
 
-    def _flush_with_signal(self, signum, handler, busy_worker=False):
+    def _flush_with_signal(
+            self, signum, handler, busy_worker=False,
+            inside_logging=False, handler_failure=False):
         self._surfaced_after_flush = False
+        self._handler_called = threading.Event()
+        outer = self
         previous = signal.signal(signum, handler)
         sabotaged = threading.Event()
         credential = [None]
@@ -5689,7 +5768,13 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
             # A slow handler (network, NFS) serving another thread's
             # diagnostic. It must not hold back the main thread's interrupt.
             def emit(self, record):
-                if threading.current_thread() is not main:
+                if threading.current_thread() is main:
+                    outer._handler_called.set()
+                    if inside_logging:
+                        signal.raise_signal(signum)
+                    if handler_failure:
+                        raise TimeoutError('ordinary logging handler bug')
+                else:
                     worker_in_handler.set()
                     release_worker.wait(30)
 
@@ -5710,7 +5795,8 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
                 os.remove(credential[0])
             os.mkdir(credential[0])
             sabotaged.set()
-            signal.pthread_kill(threading.get_ident(), signum)
+            if not inside_logging and not handler_failure:
+                signal.pthread_kill(threading.get_ident(), signum)
 
         try:
             with tempfile.TemporaryDirectory() as store_dir, \
@@ -5745,6 +5831,8 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
                         target=worker_auth.sign_in, daemon=True)
                     worker.start()
                     self.assertTrue(worker_in_handler.wait(15))
+                elif inside_logging or handler_failure:
+                    questdb_logger.addHandler(blocking_handler)
                 sender = questdb.Sender.from_conf(
                     f'http::addr=127.0.0.1:{server.port};',
                     oidc_auth=auth, auto_flush=False)
@@ -5782,6 +5870,29 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
 
         with self.assertRaises(TimeoutError):
             self._flush_with_signal(signal.SIGALRM, on_alarm)
+
+    def test_signal_raised_inside_diagnostic_logging_reaches_flush(self):
+        class Deadline(Exception):
+            pass
+
+        for exc_type in (TimeoutError, Deadline):
+            with self.subTest(exc_type=exc_type.__name__):
+                def on_alarm(signum, frame):
+                    raise exc_type('deadline inside logging')
+
+                with self.assertRaises(exc_type):
+                    self._flush_with_signal(
+                        signal.SIGALRM, on_alarm, inside_logging=True)
+                self.assertTrue(self._handler_called.is_set())
+                self.assertTrue(self._surfaced_after_flush)
+
+    def test_ordinary_logging_handler_failure_is_still_best_effort(self):
+        def on_alarm(signum, frame):
+            raise TimeoutError('unused alarm handler')
+
+        self._flush_with_signal(
+            signal.SIGALRM, on_alarm, handler_failure=True)
+        self.assertTrue(self._handler_called.is_set())
 
     def test_other_threads_diagnostic_does_not_delay_the_exception(self):
         # Another thread is inside its own persistence diagnostic, blocked in

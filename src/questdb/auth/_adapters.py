@@ -209,6 +209,13 @@ def _coerce_port(pg_port: Any) -> int:
         # contract as a bare OverflowError (mirrors _validate_positive_number).
         raise OidcConfigError(
             f'pg_port must be an integer port number, got {pg_port!r}.') from e
+    # int() also truncates Decimal and Fraction, not just float. Textual
+    # integer ports are intentional (e.g. an env var), but a numeric value
+    # must equal the integer we would pass to the driver: silently connecting
+    # to a different port could send the bearer token to the wrong service.
+    if not isinstance(pg_port, (str, bytes, bytearray)) and pg_port != port:
+        raise OidcConfigError(
+            f'pg_port must be an integer port number, got {pg_port!r}.')
     if not 1 <= port <= 65535:
         raise OidcConfigError(
             f'pg_port must be a valid TCP port (1-65535), got {port}.')

@@ -92,22 +92,27 @@ failure, ``SocketError`` for one treated as retryable (a transient token pull on
 a reconnect), and ``ConfigError`` for a misconfiguration — so retry logic that
 keys on ``code`` handles an OIDC failure exactly as it handles any other.
 
-Because a token is fetched on every connect, reconnect, and flush, a
-transport attached with ``oidc_auth=`` can raise a token failure (an
-``OidcError``, e.g. :class:`~questdb.auth.OidcInteractionRequired` when
-sign-in has lapsed) as well as an ordinary data / server / transport
-``QuestDBError`` from the same ``flush()``, ``dataframe()``, ``row()``,
-``query()``, or :func:`questdb.connect` call. Because ``OidcError`` is a
-``QuestDBError``, an existing ``except QuestDBError`` retry or dead-letter
-handler keeps catching auth failures; to react to them specifically, catch
-``OidcError`` (or a typed subclass) *before* ``QuestDBError``.
+HTTP senders fetch a token on each flush; QWP/WebSocket senders and readers
+fetch one on connect/reconnect (and may retry after a handshake 401), **not**
+on every flush of an already-connected sender. A token pull can raise an
+``OidcError`` (e.g. :class:`~questdb.auth.OidcInteractionRequired` when
+sign-in has lapsed) alongside ordinary data / server / transport
+``QuestDBError`` from ``flush()`` (HTTP), ``dataframe()``, ``row()``,
+``query()``, or :func:`questdb.connect`. A background QWP/WebSocket reconnect
+may instead report the failure through a connection event. Because
+``OidcError`` is a ``QuestDBError``, an existing ``except QuestDBError`` retry
+or dead-letter handler keeps catching auth failures; to react to them
+specifically, catch ``OidcError`` (or a typed subclass) *before*
+``QuestDBError``.
 
 A failed ``flush()`` of the sender's internal buffer **discards those rows**,
 exactly as for any other flush failure (see
 :meth:`Sender.flush <questdb.Sender.flush>`), so signing in again does not
 resend them. To retry a batch after re-authenticating, build it in a
 caller-owned buffer and flush it with ``clear=False``, which keeps the rows in
-the buffer when the flush fails:
+the buffer when the flush fails. This example handles a synchronous token
+failure from an HTTP sender; a connected QWP/WebSocket sender does not pull a
+token for each flush:
 
 .. code-block:: python
 

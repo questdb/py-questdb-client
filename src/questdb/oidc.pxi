@@ -103,6 +103,60 @@ cdef void_int _oidc_signal_tick() except -1:
     return 0
 
 
+cdef object _oidc_signal_handler_codes():
+    """Snapshot Python signal handlers before entering user callback code.
+
+    A SIGALRM handler can raise an ordinary ``Exception`` *inside* a renderer
+    or logging handler, after ``PyErr_CheckSignals`` has run. Its type alone
+    cannot distinguish it from an ordinary callback error, which must remain
+    best-effort. Its traceback, however, includes the signal handler's code.
+    Snapshotting also covers a one-shot handler that unregisters itself before
+    raising. Signal handlers only run on the main Python thread; do no work on
+    the other threads on which callbacks can arrive.
+    """
+    if questdb_thread_ident() != _OIDC_MAIN_THREAD_IDENT:
+        return frozenset()
+    import functools
+    import signal
+    codes = set()
+    for signum in signal.valid_signals():
+        try:
+            handler = signal.getsignal(signum)
+        except (OSError, ValueError):
+            continue  # valid_signals includes OS-reserved signal numbers
+        while isinstance(handler, functools.partial):
+            handler = handler.func
+        code = getattr(handler, '__code__', None)
+        if code is None:
+            code = getattr(getattr(handler, '__func__', None), '__code__', None)
+        if code is None and callable(handler):
+            code = getattr(getattr(type(handler), '__call__', None),
+                           '__code__', None)
+        if code is not None:
+            codes.add(code)
+    return frozenset(codes)
+
+
+cdef bint _oidc_raised_in_signal_handler(
+        object exc, object installed_codes) except -1:
+    """Identify a signal exception without treating all callback errors alike."""
+    cdef object tb = exc.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code in installed_codes:
+            return True
+        tb = tb.tb_next
+    # A callback may install a new handler after the snapshot. Also check the
+    # handlers still installed at the point of failure; the snapshot above
+    # remains necessary for one-shot handlers that removed themselves.
+    codes = _oidc_signal_handler_codes()
+    tb = exc.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code in codes:
+            return True
+        tb = tb.tb_next
+    return False
+
+
 # An exception a Python signal handler raised on the MAIN thread inside a
 # persistence diagnostic that no foreground sign_in()/token()/clear() record
 # can re-raise -- an attached transport (an ILP/HTTP flush, say) pulled the
@@ -914,6 +968,7 @@ cdef void _oidc_event_dispatch(
         void* user_data,
         const questdb_oidc_event* event) noexcept with gil:
     cdef object browser_target = None
+    cdef object signal_codes = ()
     cdef uint64_t interval_seconds = 0
     provider = _oidc_provider_from_user_data(user_data)
     if provider is None:
@@ -947,6 +1002,7 @@ cdef void _oidc_event_dispatch(
             # from a renderer bug -- logged, swallowed, and sign_in() polls
             # to the device-code deadline.
             _oidc_signal_tick()
+        signal_codes = _oidc_signal_handler_codes()
     except BaseException as exc:
         _oidc_park_event_interrupt(<OidcDeviceAuth>provider, exc, event.kind)
         return
@@ -994,10 +1050,18 @@ cdef void _oidc_event_dispatch(
                 _oidc_text(event.message, event.message_len) or
                 'OIDC sign-in failed.')
     except BaseException as exc:
-        if not isinstance(exc, Exception):
-            # KeyboardInterrupt, SystemExit and other BaseException subclasses
-            # (pytest-timeout's Failed, for one) are interruptions, not renderer
-            # bugs: a signal can still land inside renderer code.
+        try:
+            interrupted = (not isinstance(exc, Exception)
+                           or _oidc_raised_in_signal_handler(exc, signal_codes))
+        except BaseException as check_exc:
+            # A second signal can arrive while examining the first traceback.
+            _oidc_park_event_interrupt(
+                <OidcDeviceAuth>provider, check_exc, event.kind)
+            return
+        if interrupted:
+            # An arbitrary Python signal handler may raise an Exception, not
+            # just KeyboardInterrupt/SystemExit. The signal handler's frame
+            # distinguishes it from an ordinary best-effort renderer failure.
             _oidc_park_event_interrupt(
                 <OidcDeviceAuth>provider, exc, event.kind)
             return
@@ -1005,11 +1069,17 @@ cdef void _oidc_event_dispatch(
             logging.getLogger('questdb').exception(
                 'OIDC renderer callback failed')
         except BaseException as log_exc:
-            # The logging call runs bytecode too, so a pending Ctrl-C can be
-            # delivered inside it, and handlers are user code. An interruption
-            # raised there must still stop sign_in(); escaping this `noexcept`
-            # function would only report it as unraisable and lose it.
-            if not isinstance(log_exc, Exception):
+            # Signals can also arrive *inside* the logger reporting a broken
+            # renderer. Neither exception may unwind across the native ABI.
+            try:
+                interrupted = (
+                    not isinstance(log_exc, Exception)
+                    or _oidc_raised_in_signal_handler(log_exc, signal_codes))
+            except BaseException as check_exc:
+                _oidc_park_event_interrupt(
+                    <OidcDeviceAuth>provider, check_exc, event.kind)
+                return
+            if interrupted:
                 _oidc_park_event_interrupt(
                     <OidcDeviceAuth>provider, log_exc, event.kind)
 
@@ -1042,6 +1112,7 @@ cdef void _oidc_diagnostic_dispatch(
         const questdb_oidc_diagnostic* diagnostic) noexcept with gil:
     global _OIDC_MAIN_DIAGNOSTIC_DEPTH
     cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
+    cdef object signal_codes = ()
     if on_main:
         _OIDC_MAIN_DIAGNOSTIC_DEPTH += 1
     try:
@@ -1060,6 +1131,7 @@ cdef void _oidc_diagnostic_dispatch(
                 # See `_oidc_event_dispatch`: cpyext delivers signals only at
                 # bytecode boundaries.
                 _oidc_signal_tick()
+            signal_codes = _oidc_signal_handler_codes()
         except BaseException as exc:
             _oidc_park_foreground_interrupt(exc)
             return
@@ -1070,15 +1142,20 @@ cdef void _oidc_diagnostic_dispatch(
                     _oidc_text(diagnostic.message, diagnostic.message_len) or
                     'token-store persistence operation failed')
         except BaseException as exc:
-            if isinstance(exc, Exception):
-                # Logging handlers are user code. Diagnostics are best-effort
-                # and must never unwind through C/Rust or turn a usable token
-                # into a failure.
+            try:
+                interrupted = (not isinstance(exc, Exception)
+                               or _oidc_raised_in_signal_handler(
+                                   exc, signal_codes))
+            except BaseException as check_exc:
+                _oidc_park_foreground_interrupt(check_exc)
                 return
-            # Not an ordinary handler failure: a signal can still land inside
-            # the logging call. Catching it cleared the tripped-signal flag, so
-            # hand it to the call it interrupted instead of discarding it.
-            _oidc_park_foreground_interrupt(exc)
+            if interrupted:
+                # A signal delivered during logging is not an ordinary
+                # best-effort handler failure, even when its handler raises
+                # TimeoutError (an Exception). Do not lose the caller's timer.
+                _oidc_park_foreground_interrupt(exc)
+            # Otherwise the diagnostic remains best-effort: a logging handler
+            # failure must not turn a usable token into an auth failure.
     finally:
         if on_main:
             _OIDC_MAIN_DIAGNOSTIC_DEPTH -= 1
