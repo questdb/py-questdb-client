@@ -188,14 +188,17 @@ cdef bint _oidc_raised_in_signal_handler(
         exc.__traceback__, _oidc_signal_handler_codes())
 
 
-# An exception a Python signal handler raised on the MAIN thread inside a
+# Exceptions Python signal handlers raised on the MAIN thread inside a
 # persistence diagnostic that no foreground sign_in()/token()/clear() record
 # can re-raise -- an attached transport (an ILP/HTTP flush, say) pulled the
-# token on the caller's thread with the GIL released. Catching it inside the
-# callback already cleared CPython's tripped-signal state, so it is handed back
-# to the main thread through a pending call (`_oidc_raise_parked_main`).
-# Touched only with the GIL held.
-cdef object _OIDC_MAIN_PARKED = None
+# token on the caller's thread with the GIL released. Catching one inside the
+# callback already cleared CPython's tripped-signal state, so each is handed
+# back to the main thread through a pending call (`_oidc_raise_parked_main`),
+# oldest first, one per pending call -- as CPython itself delivers two
+# signals' exceptions at successive bytecode boundaries. Bounded: only a
+# handler that raises adds to it. Touched only with the GIL held.
+cdef list _OIDC_MAIN_PARKED = []
+cdef Py_ssize_t _OIDC_MAIN_PARKED_MAX = 64
 cdef bint _OIDC_MAIN_PARK_SCHEDULED = False
 # Diagnostic dispatches currently running Python code ON THE MAIN THREAD. A
 # pending call that fires inside one (the logging call runs bytecode) must not
@@ -207,27 +210,70 @@ cdef bint _OIDC_MAIN_PARK_SCHEDULED = False
 # handler ran, while the main thread kept executing user code.
 cdef int _OIDC_MAIN_DIAGNOSTIC_DEPTH = 0
 # `threading.main_thread()` is the interpreter's main thread whichever thread
-# imports this module.
+# imports this module. `_oidc_after_fork_in_child` re-reads it in a child forked
+# from another thread, where the forking thread becomes the main thread: a stale
+# value there made every diagnostic on the child's real main thread look like a
+# worker's, so an exception it parked was never scheduled and was lost.
 cdef unsigned long _OIDC_MAIN_THREAD_IDENT = threading.main_thread().ident
 
 
+def _oidc_after_fork_in_child():
+    """Re-anchor the main-thread state in a freshly forked child.
+
+    Runs on the forking thread, the only thread the child has and therefore
+    its main thread. When that is not the thread this state described, the
+    in-flight diagnostic dispatches it counted, the exception it parked and
+    the pending call scheduled for it all belonged to a thread that does not
+    exist here: start clean rather than holding a stale exception forever (or
+    deferring every later one behind a depth that can never return to zero).
+    """
+    global _OIDC_MAIN_THREAD_IDENT, _OIDC_MAIN_PARKED
+    global _OIDC_MAIN_PARK_SCHEDULED, _OIDC_MAIN_DIAGNOSTIC_DEPTH
+    cdef unsigned long current = questdb_thread_ident()
+    if current == _OIDC_MAIN_THREAD_IDENT:
+        return
+    _OIDC_MAIN_THREAD_IDENT = current
+    _OIDC_MAIN_PARKED = []
+    _OIDC_MAIN_PARK_SCHEDULED = False
+    _OIDC_MAIN_DIAGNOSTIC_DEPTH = 0
+
+
+# `_client.pyx` includes this file before its own `import os`.
+import os
+
+if hasattr(os, 'register_at_fork'):
+    os.register_at_fork(after_in_child=_oidc_after_fork_in_child)
+
+
+def _debug_oidc_main_thread_ident():
+    """Internal test hook: the thread OIDC treats as the main thread."""
+    return _OIDC_MAIN_THREAD_IDENT
+
+
 cdef int _oidc_raise_parked_main(void* unused) noexcept:
-    """Pending-call body: raise the parked exception on the main thread."""
-    global _OIDC_MAIN_PARKED, _OIDC_MAIN_PARK_SCHEDULED
+    """Pending-call body: raise the oldest parked exception on the main
+    thread, and schedule the next one, if any, for the following boundary."""
+    global _OIDC_MAIN_PARK_SCHEDULED
     _OIDC_MAIN_PARK_SCHEDULED = False
     if _OIDC_MAIN_DIAGNOSTIC_DEPTH > 0:
         return 0
-    exc = _OIDC_MAIN_PARKED
-    _OIDC_MAIN_PARKED = None
-    if exc is None:
+    if not _OIDC_MAIN_PARKED:
         return 0
+    exc = _OIDC_MAIN_PARKED.pop(0)
+    _oidc_schedule_parked_main()
     PyErr_SetObject(type(exc), exc)
     return -1
 
 
+cdef void _oidc_park_main(object exc) noexcept:
+    """Queue ``exc`` for `_oidc_raise_parked_main`. GIL held; never raises."""
+    if len(_OIDC_MAIN_PARKED) < _OIDC_MAIN_PARKED_MAX:
+        _OIDC_MAIN_PARKED.append(exc)
+
+
 cdef void _oidc_schedule_parked_main() noexcept:
     global _OIDC_MAIN_PARK_SCHEDULED
-    if _OIDC_MAIN_PARKED is None or _OIDC_MAIN_PARK_SCHEDULED:
+    if not _OIDC_MAIN_PARKED or _OIDC_MAIN_PARK_SCHEDULED:
         return
     if questdb_add_pending_call(_oidc_raise_parked_main, NULL) == 0:
         _OIDC_MAIN_PARK_SCHEDULED = True
@@ -945,9 +991,14 @@ cdef object _oidc_foreground_exit(_OidcForegroundCall call):
 cdef void _oidc_park_foreground_interrupt(object exc) noexcept:
     """Hand an interrupt raised inside a diagnostic to the call it stopped.
 
-    Must not raise: it runs on the error path of a ``noexcept`` callback.
+    Must not raise: it runs on the error path of a ``noexcept`` callback. It
+    also runs no bytecode: CPython runs the next pending signal handler at any
+    bytecode boundary, and an exception raised there -- before ``exc`` was
+    stored -- was swallowed below together with ``exc``. That lost both of two
+    signals arriving together (Ctrl-C plus a SIGALRM deadline, say), which is
+    why the main-thread test is a plain C comparison and not
+    ``threading.main_thread()``.
     """
-    global _OIDC_MAIN_PARKED
     cdef _OidcForegroundCall call
     cdef OidcDeviceAuth provider
     try:
@@ -965,27 +1016,32 @@ cdef void _oidc_park_foreground_interrupt(object exc) noexcept:
                 provider = <OidcDeviceAuth>call.provider
                 if provider._interrupt is None:
                     provider._interrupt = exc
+                    _oidc_cancel_sign_in_from_callback(provider)
+                    return
                 _oidc_cancel_sign_in_from_callback(provider)
             elif call.interrupt is None:
                 call.interrupt = exc
-            return
-        if threading.get_ident() != threading.main_thread().ident:
+                return
+            # The call already holds an interrupt to raise. A second signal's
+            # exception is not dropped: queue it for the main thread, which
+            # raises it at the following boundary, as CPython would have.
+        if questdb_thread_ident() != _OIDC_MAIN_THREAD_IDENT:
             # A native worker thread: signals are never delivered here and
             # there is no caller to hand an exception to.
             return
-        # No foreground call to re-raise it, yet this is the main thread: an
-        # attached transport pulled a token on the caller's thread with the
-        # GIL released. Catching the exception cleared CPython's
-        # tripped-signal state, so hand the SAME exception back to the main
-        # thread; it surfaces at the first bytecode after that native call
-        # returns, exactly where an uncaught one would have. This covers every
-        # class a handler can raise -- a SIGTERM handler's SystemExit and a
-        # SIGALRM deadline's TimeoutError were discarded before -- and runs
-        # the user's handler once. Re-arming SIGINT instead ran a custom
-        # handler a second time for one Ctrl-C.
+        # No foreground call to re-raise it (or one that already has an
+        # interrupt), yet this is the main thread: an attached transport
+        # pulled a token on the caller's thread with the GIL released.
+        # Catching the exception cleared CPython's tripped-signal state, so
+        # hand the SAME exception back to the main thread; it surfaces at the
+        # first bytecode after that native call returns, exactly where an
+        # uncaught one would have. This covers every class a handler can raise
+        # -- a SIGTERM handler's SystemExit and a SIGALRM deadline's
+        # TimeoutError were discarded before -- and runs the user's handler
+        # once. Re-arming SIGINT instead ran a custom handler a second time for
+        # one Ctrl-C.
         if QUESTDB_HAS_PENDING_RERAISE:
-            if _OIDC_MAIN_PARKED is None:
-                _OIDC_MAIN_PARKED = exc
+            _oidc_park_main(exc)
             # Scheduled by the dispatcher on its way out, once no more Python
             # code of this callback remains to run.
         elif isinstance(exc, KeyboardInterrupt):
@@ -993,6 +1049,26 @@ cdef void _oidc_park_foreground_interrupt(object exc) noexcept:
             _oidc_rearm_keyboard_interrupt()
     except BaseException:
         pass
+
+
+cdef void _oidc_park_pending_signals() noexcept:
+    """Run every other Python signal handler that is pending right now and
+    park what each raises, after a first one raised inside a diagnostic.
+
+    CPython leaves the remaining handlers tripped when one raises, to run at
+    the next bytecode boundary; left for later from inside this callback, the
+    next one was observed never to run at all. Running them here, while the
+    callback holds the GIL, runs each handler once and in signal order, and
+    parks every exception for the caller. Bounded, in case a handler keeps
+    re-raising its own signal.
+    """
+    cdef int attempt
+    for attempt in range(8):
+        try:
+            PyErr_CheckSignals()
+            return
+        except BaseException as exc:
+            _oidc_park_foreground_interrupt(exc)
 
 
 cdef void _oidc_event_dispatch(
@@ -1165,6 +1241,7 @@ cdef void _oidc_diagnostic_dispatch(
             signal_codes = _oidc_signal_handler_codes()
         except BaseException as exc:
             _oidc_park_foreground_interrupt(exc)
+            _oidc_park_pending_signals()
             return
         try:
             if diagnostic.kind == QUESTDB_OIDC_DIAGNOSTIC_PERSISTENCE_WARNING:
@@ -1185,6 +1262,7 @@ cdef void _oidc_diagnostic_dispatch(
                 # best-effort handler failure, even when its handler raises
                 # TimeoutError (an Exception). Do not lose the caller's timer.
                 _oidc_park_foreground_interrupt(exc)
+                _oidc_park_pending_signals()
             # Otherwise the diagnostic remains best-effort: a logging handler
             # failure must not turn a usable token into an auth failure.
     finally:

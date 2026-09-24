@@ -6122,6 +6122,138 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(calls, [signal.SIGINT])
 
+    def _run_child(self, script):
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [os.path.dirname(os.path.dirname(os.path.abspath(questdb.__file__))),
+             os.path.dirname(os.path.abspath(__file__))]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        proc = subprocess.run(
+            [sys.executable, '-c', script],
+            capture_output=True, text=True, timeout=120, env=env)
+        self.assertEqual(
+            proc.returncode, 0,
+            f'child failed (exit {proc.returncode}): '
+            f'{proc.stdout}{proc.stderr}')
+        return proc.stdout
+
+    def test_two_pending_signals_both_reach_the_flush_caller(self):
+        # Regression: with no foreground call, parking the first exception
+        # asked `threading` for the main thread. That ran bytecode, where
+        # CPython ran the second pending handler; its exception was swallowed
+        # together with the first, which had not been parked yet, and the
+        # flush returned normally as if neither signal had arrived. The first
+        # handler must be C-level (the default SIGINT handler) for this: a
+        # Python handler's own frame already clears the eval breaker. As with
+        # two signals outside any callback, the second exception may surface
+        # inside the handling of the first, so the check follows __context__.
+        script = (
+            'import os, signal, tempfile, threading, time\n'
+            'import questdb\n'
+            'from questdb.auth import FileTokenStore\n'
+            'from oidc_test_server import OidcTestServer\n'
+            'from test_auth import make_discovered_auth\n'
+            'def on_alarm(signum, frame):\n'
+            '    raise TimeoutError("deadline")\n'
+            'signal.signal(signal.SIGALRM, on_alarm)\n'
+            'signal.signal(signal.SIGINT, signal.default_int_handler)\n'
+            'sabotaged = threading.Event()\n'
+            'credential = [None]\n'
+            'def hook():\n'
+            '    if sabotaged.is_set():\n'
+            '        return\n'
+            '    if os.path.isfile(credential[0]):\n'
+            '        os.remove(credential[0])\n'
+            '    os.mkdir(credential[0])\n'
+            '    sabotaged.set()\n'
+            '    signal.pthread_kill(threading.get_ident(), signal.SIGINT)\n'
+            '    signal.pthread_kill(threading.get_ident(), signal.SIGALRM)\n'
+            'surfaced = []\n'
+            'def chain(exc):\n'
+            '    names = []\n'
+            '    while exc is not None:\n'
+            '        names.append(type(exc).__name__)\n'
+            '        exc = exc.__context__\n'
+            '    return names\n'
+            'def attempt(fn):\n'
+            '    try:\n'
+            '        fn()\n'
+            '    except BaseException as exc:\n'
+            '        surfaced.extend(chain(exc))\n'
+            'def spin():\n'
+            '    for _ in range(5):\n'
+            '        time.sleep(0.05)\n'
+            'with tempfile.TemporaryDirectory() as store_dir, \\\n'
+            '        OidcTestServer(initial_expires_in=4,\n'
+            '                       refresh_request_hook=hook) as server:\n'
+            '    auth = make_discovered_auth(\n'
+            '        server, token_store=FileTokenStore.at(store_dir))\n'
+            '    auth.sign_in()\n'
+            '    credential[0] = os.path.join(store_dir, next(\n'
+            '        n for n in os.listdir(store_dir) if n.endswith(".json")))\n'
+            '    sender = questdb.Sender.from_conf(\n'
+            '        f"http::addr=127.0.0.1:{server.port};",\n'
+            '        oidc_auth=auth, auto_flush=False)\n'
+            '    sender.establish()\n'
+            '    def flush_until_sabotaged():\n'
+            '        deadline = time.monotonic() + 20\n'
+            '        while not sabotaged.is_set():\n'
+            '            assert time.monotonic() < deadline\n'
+            '            sender.row("t", columns={"v": 1},\n'
+            '                       at=questdb.ServerTimestamp)\n'
+            '            sender.flush()\n'
+            '            if not sabotaged.is_set():\n'
+            '                time.sleep(0.05)\n'
+            '        spin()\n'
+            '    stage = 0\n'
+            '    while stage < 3:\n'
+            '        try:\n'
+            '            attempt(flush_until_sabotaged if stage == 0 else spin)\n'
+            '        except BaseException as exc:\n'
+            '            surfaced.extend(chain(exc))\n'
+            '        stage += 1\n'
+            '    sender.close(flush=False)\n'
+            'print("SURFACED", sorted(set(surfaced)))\n')
+        out = self._run_child(script)
+        self.assertIn(
+            "SURFACED ['KeyboardInterrupt', 'TimeoutError']", out, out)
+
+    @unittest.skipUnless(hasattr(os, 'fork'), 'os.fork required')
+    def test_child_forked_from_a_worker_thread_reanchors_the_main_thread(self):
+        # Regression: the main-thread identity was captured once at import.
+        # In a child forked from a worker thread -- which CPython makes the
+        # child's main thread -- every diagnostic on that thread looked like a
+        # worker's, so an exception its signal handler raised was parked and
+        # never re-raised.
+        script = (
+            'import os, threading, warnings\n'
+            'from questdb import _client\n'
+            'parent_main = _client._debug_oidc_main_thread_ident()\n'
+            'result = {}\n'
+            'def fork_from_worker():\n'
+            '    r, w = os.pipe()\n'
+            '    with warnings.catch_warnings():\n'
+            '        warnings.simplefilter("ignore", DeprecationWarning)\n'
+            '        pid = os.fork()\n'
+            '    if pid == 0:\n'
+            '        ok = (_client._debug_oidc_main_thread_ident()\n'
+            '              == threading.get_ident()\n'
+            '              == threading.main_thread().ident)\n'
+            '        os.write(w, b"1" if ok else b"0")\n'
+            '        os._exit(0)\n'
+            '    os.close(w)\n'
+            '    result["child"] = os.read(r, 1)\n'
+            '    os.close(r)\n'
+            '    os.waitpid(pid, 0)\n'
+            't = threading.Thread(target=fork_from_worker)\n'
+            't.start()\n'
+            't.join()\n'
+            'assert parent_main == threading.main_thread().ident\n'
+            'assert _client._debug_oidc_main_thread_ident() == parent_main\n'
+            'print("CHILD", result["child"].decode())\n')
+        out = self._run_child(script)
+        self.assertIn('CHILD 1', out, out)
+
 
 class OidcApiContractTest(unittest.TestCase):
     def test_concurrent_sign_in_reports_invalid_api_call(self):

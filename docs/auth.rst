@@ -232,7 +232,11 @@ failed save or automatic clear is otherwise reported only there and leaves the
 in-memory credential usable; a failed load, or a refresh lease lost
 mid-refresh, is also raised to the caller as
 :class:`~questdb.auth.OidcNetworkError`, because an uncoordinated refresh could
-resubmit a rotating token. Enabling persistence stores a long-lived refresh token on disk, so use it
+resubmit a rotating token. The exception is ``sign_in()`` against a store that
+can never be used as configured -- a directory it may not create or write, a
+read-only filesystem, or a path that is not a directory: that raises
+:class:`~questdb.auth.OidcConfigError` before any device code is shown, rather
+than a retryable error that would fail identically on every retry. Enabling persistence stores a long-lived refresh token on disk, so use it
 only when that at-rest tradeoff is acceptable. Custom Python token stores are
 not supported by the native provider.
 
