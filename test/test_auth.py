@@ -5660,11 +5660,18 @@ class OidcApiContractTest(unittest.TestCase):
                     raised.exception.code,
                     questdb.QuestDBErrorCode.InvalidApiCall)
                 self.assertIn('1 MiB', str(raised.exception))
-        with mock.patch.dict(os.environ, {
-                'QDB_CLIENT_CONF':
-                    f'http::addr=localhost:9000;username={padding};'}):
-            with self.assertRaises(questdb.QuestDBError):
+        # Windows caps a real environment variable at 32767 characters, so
+        # `os.environ` refuses a value this long there. `from_env` reads the
+        # mapping, so substitute it rather than calling putenv().
+        env = dict(os.environ)
+        env['QDB_CLIENT_CONF'] = (
+            f'http::addr=localhost:9000;username={padding};')
+        with mock.patch.object(os, 'environ', env):
+            with self.assertRaises(questdb.QuestDBError) as raised:
                 questdb.Sender.from_env()
+        self.assertEqual(
+            raised.exception.code, questdb.QuestDBErrorCode.InvalidApiCall)
+        self.assertIn('1 MiB', str(raised.exception))
         # Exactly at the cap is still accepted by the length check.
         head = 'http::addr=localhost:9000;username='
         tail = ';password=p;'
