@@ -2234,6 +2234,12 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                         auth.sign_in()
                     except OidcError as exc:
                         if late_entry.is_set():
+                            # The first call had already released its lock,
+                            # so this entry is legitimate rather than a
+                            # steal. It is still an attempt that ran after
+                            # the interrupt, so count it before stopping.
+                            if interrupted:
+                                attempts_after_interrupt[0] += 1
                             return
                         # The expected refusal. Keep only the anomalies: this
                         # loop can run many thousands of times.
@@ -2246,7 +2252,17 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                     if interrupted:
                         attempts_after_interrupt[0] += 1
                     second_attempted.set()
-                    if not first.is_alive():
+                    # Only the first iteration runs before the interrupt: it
+                    # is the `second_attempted` above that releases the
+                    # renderer to raise one. Stopping as soon as the first
+                    # thread is gone therefore leaves nothing probed after
+                    # the interrupt whenever this thread loses the CPU while
+                    # that call unwinds -- which is how a loaded CI agent
+                    # sees it. Keep going until at least one attempt has
+                    # been made after the interrupt; once the first call is
+                    # gone, that attempt gets in, trips `late_entry`, and
+                    # returns above.
+                    if not first.is_alive() and attempts_after_interrupt[0]:
                         return
 
             first.start()
