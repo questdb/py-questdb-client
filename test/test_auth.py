@@ -5963,7 +5963,8 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
             'reconnect_initial_backoff_millis=100;'
             'reconnect_max_backoff_millis=5000;')
 
-    def _run(self, policy, server_out=None, **connect_kwargs):
+    def _run(self, policy, server_out=None, wait_for_event_on_error=None,
+             **connect_kwargs):
         frame = _CountingArrowArray(
             _pa.record_batch({'v': _pa.array([1, 2, 3], _pa.int64())}))
         with OidcTestServer() as idp:
@@ -5975,8 +5976,15 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
                 with questdb.connect(
                         self.CONF.format(port=server.port),
                         oidc_auth=auth, **connect_kwargs) as db:
-                    db.dataframe(
-                        frame, table_name='t', at=questdb.ServerTimestamp)
+                    try:
+                        db.dataframe(
+                            frame, table_name='t', at=questdb.ServerTimestamp)
+                    except questdb.QuestDBError:
+                        # Events are dispatched asynchronously; leaving the
+                        # context now would discard an undelivered event.
+                        if wait_for_event_on_error is not None:
+                            wait_for_event_on_error.wait(timeout=5)
+                        raise
         return frame
 
     def test_terminal_rejection_between_slices_is_not_redialled(self):
@@ -5990,11 +5998,18 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
             return '503' if index == 0 else '401'
 
         events = []
+        auth_failed_ready = threading.Event()
+
+        def on_event(event):
+            events.append(event)
+            if event.kind is questdb.ConnectionEventKind.AuthFailed:
+                auth_failed_ready.set()
+
         servers = []
         with self.assertRaises(questdb.QuestDBError) as cm:
             self._run(
-                policy, servers, connection_listener=events.append,
-                connection_event_inbox_capacity=256)
+                policy, servers, wait_for_event_on_error=auth_failed_ready,
+                connection_listener=on_event, connection_event_inbox_capacity=256)
         self.assertEqual(cm.exception.code, questdb.QuestDBErrorCode.AuthError)
         self.assertEqual(servers[0]._upgrades, 2)
         auth_failed = [
