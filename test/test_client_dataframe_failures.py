@@ -126,6 +126,23 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
             stats = server.snapshot()
         self.assertIn('cannot be replayed', str(raised.exception))
         self.assertFalse(raised.exception.in_doubt)
+        # The note is appended to the *original* exception, not rebuilt onto a
+        # fresh one. Rebuilding hardcoded the base class, which silently
+        # downgraded every QuestDBError subclass that can reach here: an OIDC
+        # token failure on an `oidc_auth=` transport arrives as
+        # OidcNetworkError / OidcDeviceFlowError / OidcTimeoutError (each
+        # carries a retryable code by design, so it passes the gates above),
+        # and flattening it stopped `except OidcError` matching and dropped
+        # .status / .retry_after / .error / .error_description.
+        #
+        # A no-cause re-raise is the observable proxy: `raise X from exc` set
+        # __cause__, re-raising the original leaves it None. The typed-subclass
+        # variant needs a *mid-stream* token failure (connect-time failures
+        # raise before the stream is marked consumed), which is not reachable
+        # deterministically here — this pins the mechanism on the one class
+        # this fixture can produce.
+        self.assertIs(type(raised.exception), qi.QuestDBError)
+        self.assertIsNone(raised.exception.__cause__)
         self.assertEqual(stats['accepted_connections'], 1)
         self.assertEqual(stats['binary_frames'], 10)
 
@@ -234,6 +251,64 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
                 self.assertEqual(stats['accepted_connections'], 1)
                 self.assertEqual(stats['binary_frames'], 140)
                 self.assertEqual(stats['errors'], [])
+
+    def test_capsule_hint_is_appended_to_the_original_exception(self):
+        # `_capsule_consume_stream_with_hint` appends a remediation hint to a
+        # batch-too-large failure. It used to do so by raising a fresh
+        # `QuestDBError(exc.code, msg)`, which drops the concrete class,
+        # `.sender_error` and `.in_doubt` -- the flag the caller reads to decide
+        # whether replaying could duplicate a landed write. It must mutate the
+        # caught exception's args and re-raise that same object instead.
+        #
+        # The two cases also pin the two sites that append the hint. A
+        # rejection is asynchronous, so which one sees it is a pure race
+        # unless the scenario forces an ordering: `ack_delay_s` holds the
+        # rejection back until every frame has been handed to the socket, so
+        # it can only surface on the trailing sync, while the oversize single
+        # row fails locally on the batch send before any sync. Both orderings
+        # must hint, and each keeps the `in_doubt` the native error carried:
+        # true once frames are in flight (replaying could duplicate a landed
+        # write), false for a row rejected before it was sent.
+        cases = (
+            # A server rejection whose message trips the textual fallback,
+            # delivered late enough to land on the sync.
+            ('rejection',
+             dict(error_status=0x03, error_message=b'batch too large',
+                  ack_delay_s=0.5),
+             _table(40), 1,
+             'Hint: reduce `max_rows_per_batch` (current: 1) and retry.',
+             True),
+            # One row larger than the advertised per-batch cap.
+            ('single_row', dict(max_batch_size=1024),
+             _table(1, str_len=4000), 16,
+             'Hint: a single row exceeds the server per-batch cap',
+             False),
+        )
+        for label, server_kwargs, table, max_rows, hint, in_doubt in cases:
+            with self.subTest(label):
+                with QwpAckServer(**server_kwargs) as server:
+                    with qi.QuestDB.from_conf(_conf(server.port)) as client:
+                        with self.assertRaises(qi.QuestDBError) as raised:
+                            client.dataframe(
+                                table, table_name='t_hint', at='ts',
+                                max_rows_per_batch=max_rows)
+                exc = raised.exception
+                message = str(exc)
+                self.assertIn('\n' + hint, message)
+                # Appended once, to the native message rather than replacing it.
+                self.assertEqual(message.count('Hint:'), 1)
+                self.assertFalse(message.startswith('Hint:'))
+                # The same object the native error path raised. A rebuilt
+                # exception raised inside the `except` would chain the
+                # original as its implicit context -- and would carry only
+                # the fields the rebuild remembered to copy.
+                self.assertIsNone(exc.__context__)
+                self.assertIsNone(exc.__cause__)
+                self.assertIs(type(exc), qi.QuestDBError)
+                # A rebuilt `QuestDBError(exc.code, msg)` would report False
+                # here whatever the native error said.
+                self.assertEqual(exc.in_doubt, in_doubt)
+                self.assertIsNone(exc.sender_error)
 
     def test_reconnect_budget_exhaustion_raises(self):
         # A bound-but-non-listening local port never completes the TCP

@@ -177,6 +177,23 @@ spool, and a connection-event listener.
 .. literalinclude:: ../examples/connect_auth_tls.py
    :language: python
 
+.. _oidc_device_auth_example:
+
+OIDC device-flow sign-in
+------------------------
+
+Interactive sign-in against QuestDB Enterprise, covering the native
+transports, PG-wire, manual token use, and opt-in on-disk persistence. See
+the :ref:`oidc_auth` guide for the full API.
+
+Unlike the other examples on this page, this one cannot run unattended: it
+needs a live OIDC-enabled QuestDB Enterprise deployment and a human to
+approve the device code, so it is deliberately excluded from the automated
+example suite.
+
+.. literalinclude:: ../examples/oidc_device_auth.py
+   :language: python
+
 Connection-level transports
 ===========================
 

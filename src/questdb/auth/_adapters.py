@@ -1,0 +1,551 @@
+################################################################################
+##     ___                  _   ____  ____
+##    / _ \ _   _  ___  ___| |_|  _ \| __ )
+##   | | | | | | |/ _ \/ __| __| | | |  _ \
+##   | |_| | |_| |  __/\__ \ |_| |_| | |_) |
+##    \__\_\\__,_|\___||___/\__|____/|____/
+##
+##  Copyright (c) 2014-2019 Appsicle
+##  Copyright (c) 2019-2026 QuestDB
+##
+##  Licensed under the Apache License, Version 2.0 (the "License");
+##  you may not use this file except in compliance with the License.
+##  You may obtain a copy of the License at
+##
+##  http://www.apache.org/licenses/LICENSE-2.0
+##
+##  Unless required by applicable law or agreed to in writing, software
+##  distributed under the License is distributed on an "AS IS" BASIS,
+##  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+##  See the License for the specific language governing permissions and
+##  limitations under the License.
+##
+################################################################################
+
+"""
+PG-wire connection adapters.
+
+Feed an :class:`OidcDeviceAuth` token into SQLAlchemy / psycopg as the QuestDB
+``_sso`` password. These are thin conveniences over the token; native QuestDB
+senders and pools should attach the provider directly through ``oidc_auth=``.
+
+Because the credential travels as the PG password, both adapters default to
+authenticated TLS (``sslmode="verify-full"``) unless the host is a numeric
+loopback IP. Numeric loopback addresses deliberately use ``prefer`` so a local
+QuestDB remains usable with or without TLS. A hostname such as ``localhost``
+still requires TLS because its resolved addresses are outside this function's
+control.
+
+``verify-full`` needs a trust root, and libpq does not consult the operating
+system's certificate store by default: without ``sslrootcert`` (a CA file, or
+``"system"`` on libpq 16+), ``PGSSLROOTCERT`` or ``~/.postgresql/root.crt`` the
+connection fails with ``root certificate file ... does not exist``. Libpq
+connections explicitly set an empty ``hostaddr`` so an inherited ``PGHOSTADDR``
+cannot redirect the token away from the validated host.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import re
+import urllib.parse
+from typing import TYPE_CHECKING, Any, Optional
+
+from ._errors import OidcConfigError
+
+if TYPE_CHECKING:
+    # Annotation-only dependencies. Runtime imports stay lazy/centralized in
+    # questdb.auth; postponed annotations preserve these public signatures.
+    from questdb._client import OidcDeviceAuth
+    import sqlalchemy.engine
+
+_DEFAULT_PG_PORT = 8812
+_DEFAULT_DATABASE = 'qdb'
+_AUTO_SSLMODE = 'auto'
+
+# libpq / driver parameters that decide WHERE the connection goes -- and
+# therefore WHO receives the bearer token these adapters inject as the password.
+# The adapter owns the destination: it validates `url` / `host=` / `pg_port=`
+# (see `_require_host`) and then hands the token to exactly that peer. A
+# destination parameter smuggled in through the driver passthrough would be
+# applied AFTER that validation -- SQLAlchemy merges `connect_args` over the
+# dialect's own arguments (`cparams.update(connect_args)` in `create_engine`) --
+# so `connect_args={'host': 'other.example'}` would send the token to a host the
+# adapter never vetted. sslmode is deliberately NOT in this set: overriding the
+# TLS policy is a documented escape hatch, and it cannot redirect the token.
+#
+#   * host / hostaddr  -- the peer (hostaddr bypasses name resolution entirely);
+#   * port             -- the peer's port;
+#   * service          -- a pg_service.conf entry that can supply host/hostaddr;
+#   * dsn / conninfo   -- a whole connection string, i.e. all of the above.
+_DESTINATION_PARAMS = frozenset({
+    'host', 'hostaddr', 'port', 'service', 'dsn', 'conninfo'})
+
+
+def _safe_urlparse(url: str) -> urllib.parse.ParseResult:
+    try:
+        parts = urllib.parse.urlparse(url)
+        _ = parts.port  # Validate the port eagerly: a malformed one raises here.
+        return parts
+    except (ValueError, TypeError, AttributeError) as e:
+        raise OidcConfigError(f'Malformed endpoint URL {url!r}: {e}.') from e
+
+# Constrain the PG-wire host to exactly the characters a real hostname / IPv4 /
+# IPv6-literal can contain — ASCII letters, digits, '.', '-', '_', and ':' (which
+# an IPv6 literal carries once urlparse has stripped its brackets; the PG drivers
+# take host and port separately) — and reject everything else. A positive
+# allow-list (rather than a deny-list of known-bad chars) closes the WHOLE class
+# of libpq conninfo-injection / connection-redirection vectors at once, because
+# psycopg turns its kwargs into a libpq conninfo string:
+#   * ',' is the libpq MULTI-HOST separator ('host=a,b' tries both a and b), so a
+#     tampered URL could steer the connection — and the '_sso' token sent as the
+#     password — to an attacker host that merely reads next to the real one;
+#   * a '/' makes libpq treat the value as a Unix-socket DIRECTORY, redirecting
+#     to a local socket;
+#   * ';', '=', whitespace and control chars are conninfo delimiters;
+#   * '%' is only ever an IPv6 zone-id ('fe80::1%eth0'), meaningful for an on-host
+#     link-local address, never for reaching a remote QuestDB.
+# None of these appears in a genuine host, so this is the choke point that keeps a
+# malformed/tampered URL from redirecting the PG connection. Mirrors the host
+# hygiene in _render._SAFE_HOST_RE and _discovery's authority checks.
+_LEGAL_HOST_RE = re.compile(r'\A[A-Za-z0-9._:-]+\Z')
+
+
+def _pg_module():
+    try:
+        import psycopg  # type: ignore  # psycopg v3
+        return psycopg
+    except ImportError:
+        pass
+    try:
+        import psycopg2  # type: ignore
+        return psycopg2
+    except ImportError as e:
+        raise ImportError(
+            'A PostgreSQL driver is required: install `psycopg` (v3) or '
+            '`psycopg2-binary`.') from e
+
+
+def _require_host(url: str, host: Optional[str] = None) -> str:
+    """
+    Validate the QuestDB HTTP(S) URL and resolve the PG-wire host: an explicit
+    ``host`` override, else the host from ``url``. Userinfo is forbidden because
+    a URL such as ``https://trusted.example@evil.example`` resolves to the host
+    after ``@``. Raises (rather than passing a bare ``None`` to the driver) when
+    neither yields one, e.g. a URL with no authority such as ``"localhost"`` or
+    ``"questdb:9000"``.
+
+    The returned host is *unbracketed* — psycopg and SQLAlchemy take address and
+    port separately. ``_safe_urlparse`` validates the port up-front, raising
+    ``OidcConfigError`` (not a bare ``ValueError``) for a malformed one.
+    """
+    if host is not None and not isinstance(host, str):
+        # A non-str host override (int, bytes, an arbitrary object) is truthy,
+        # so it would skip the URL-derived hostname below and reach
+        # .startswith() / _LEGAL_HOST_RE.match() on the wrong type, raising a
+        # bare AttributeError/TypeError that escapes this module's typed-error
+        # contract. Guard it up front, mirroring _coerce_port's pg_port check.
+        raise OidcConfigError(
+            f'host must be a string or None, got {host!r}.')
+    parts = _safe_urlparse(url)
+    scheme = (parts.scheme or '').lower()
+    if scheme not in ('http', 'https'):
+        raise OidcConfigError(
+            'The QuestDB URL must use the http or https scheme.')
+    if parts.username is not None or parts.password is not None:
+        raise OidcConfigError(
+            'The QuestDB URL must not contain a username or password.')
+    resolved = host or parts.hostname
+    if not resolved:
+        raise OidcConfigError(
+            f'The QuestDB URL {url!r} has no host. Use a URL with an explicit '
+            'host (e.g. "https://questdb.example.com:9000"), or pass host=... '
+            'to the adapter.')
+    # An explicit host="[::1]" override arrives bracketed; the URL-derived path is
+    # already unbracketed (urlparse strips the brackets off an IPv6 literal). The
+    # drivers take a BARE address, so strip a single surrounding [...] here too,
+    # keeping the "returned host is unbracketed" contract for both paths. Done
+    # before the illegal-char check so it validates the bare host handed to the
+    # driver (and any junk inside the brackets is still caught).
+    if resolved.startswith('[') and resolved.endswith(']') and len(resolved) > 2:
+        resolved = resolved[1:-1]
+    if not _LEGAL_HOST_RE.match(resolved):
+        raise OidcConfigError(
+            f'The QuestDB host {resolved!r} contains an illegal character. A '
+            'hostname or IP address contains only letters, digits, ".", "-", '
+            '"_" and ":" (IPv6); anything else — "," (a libpq multi-host '
+            'separator), "/" (a Unix-socket path), ";", "=", "%", whitespace or '
+            'a control character — indicates a malformed or tampered URL and '
+            'could otherwise redirect the PG connection or inject connection '
+            'parameters.')
+    return resolved
+
+
+def _coerce_port(pg_port: Any) -> int:
+    """
+    Coerce ``pg_port`` to an ``int`` within the module's typed-error contract.
+
+    A non-integer ``pg_port`` (e.g. a port read from an env var without an
+    ``int()``) would otherwise reach ``URL.create(port=...)`` /
+    ``driver.connect(port=...)`` and surface as a bare ``ValueError`` / driver
+    error, escaping ``OidcConfigError``. ``bool`` is an ``int`` subclass but
+    ``True``/``False`` is never a meaningful port, so reject it explicitly —
+    mirroring the constructor's other up-front type checks.
+    """
+    if isinstance(pg_port, bool):
+        raise OidcConfigError(
+            f'pg_port must be an integer port number, got {pg_port!r}.')
+    # A non-integral float silently truncates through int() (int(8812.9) == 8812)
+    # — never what the caller meant — so reject it explicitly. This also rejects
+    # inf/nan (is_integer() is False for both) with the clearer "integer port"
+    # message rather than the OverflowError/ValueError int() would raise. An
+    # integral float (8812.0) is still accepted as a convenience.
+    if isinstance(pg_port, float) and not pg_port.is_integer():
+        raise OidcConfigError(
+            f'pg_port must be an integer port number, got {pg_port!r}.')
+    try:
+        port = int(pg_port)
+    except (TypeError, ValueError, OverflowError) as e:
+        # int(float('inf')) / int(1e400) raise OverflowError (not ValueError),
+        # so catch it too — else a non-finite pg_port escapes the typed-error
+        # contract as a bare OverflowError (mirrors _validate_positive_number).
+        raise OidcConfigError(
+            f'pg_port must be an integer port number, got {pg_port!r}.') from e
+    # int() also truncates Decimal and Fraction, not just float. Textual
+    # integer ports are intentional (e.g. an env var), but a numeric value
+    # must equal the integer we would pass to the driver: silently connecting
+    # to a different port could send the bearer token to the wrong service.
+    if not isinstance(pg_port, (str, bytes, bytearray)) and pg_port != port:
+        raise OidcConfigError(
+            f'pg_port must be an integer port number, got {pg_port!r}.')
+    if not 1 <= port <= 65535:
+        raise OidcConfigError(
+            f'pg_port must be a valid TCP port (1-65535), got {port}.')
+    return port
+
+
+def _destination_overrides(params: Any) -> list:
+    """The destination-changing keys present in a driver passthrough mapping."""
+    if not params:
+        return []
+    try:
+        keys = list(params)
+    except TypeError:
+        # Not a mapping/iterable: leave it to the driver, which will report it
+        # far more precisely than a guess here could.
+        return []
+    return sorted(
+        str(key) for key in keys
+        if isinstance(key, str) and key.lower() in _DESTINATION_PARAMS)
+
+
+def _reject_destination_overrides(params: Any, passthrough: str) -> None:
+    """Refuse a driver passthrough that re-points the connection.
+
+    Raised BEFORE any token is acquired, so a redirected connection never even
+    reaches the point where the credential would be attached.
+    """
+    offending = _destination_overrides(params)
+    if not offending:
+        return
+    raise OidcConfigError(
+        f'{passthrough} must not set the connection destination '
+        f'({", ".join(offending)}). The token these adapters inject is a '
+        'bearer credential, so the destination is validated up front from '
+        '`url` / `host=` / `pg_port=` and a passthrough value applied after '
+        'that check could send the token to an unvetted peer. Pass '
+        '`host=` and `pg_port=` to the adapter instead.')
+
+
+def _require_expected_destination(
+        cargs: Any, cparams: Any, host: str, port: int) -> None:
+    """Fail closed if the driver arguments no longer name the vetted peer.
+
+    Defence in depth for SQLAlchemy: `connect_args` is rejected up front, but
+    the final ``do_connect`` arguments are what the driver actually dials, and
+    they can also be rewritten by an application's own ``do_connect`` listener
+    registered before this one. Checked on every physical connection, just
+    before the token is attached.
+    """
+    # SQLAlchemy passes both positional and keyword arguments to the driver.
+    # A prior do_connect listener can put a whole conninfo string in cargs,
+    # removing host/port from cparams so libpq dials an unvetted peer. The
+    # dialects used here normally supply no positional arguments; fail closed
+    # rather than trying to parse every driver's positional connection syntax.
+    if cargs or cparams.get('host') != host or str(cparams.get('port')) != str(port):
+        raise OidcConfigError(
+            'refusing to send the OIDC token: the connection arguments no '
+            f'longer name the validated destination ({host}:{port}).')
+    offending = _destination_overrides(cparams)
+    for key in offending:
+        value = cparams[key]
+        if key.lower() == 'host' and value == host:
+            continue
+        if key.lower() == 'port' and str(value) == str(port):
+            continue
+        raise OidcConfigError(
+            f'refusing to send the OIDC token: the connection arguments set '
+            f'{key}={value!r}, which does not match the destination this '
+            f'adapter validated ({host}:{port}).')
+
+
+def _is_numeric_loopback_host(host: str) -> bool:
+    """Whether ``host`` is a numeric loopback IP literal, exactly as libpq will
+    receive it.
+
+    The spelling is checked verbatim. A trailing-dot form such as
+    ``127.0.0.1.`` is *not* a numeric literal to ``getaddrinfo`` (glibc, musl
+    and macOS all refuse it with ``AI_NUMERICHOST``), so libpq resolves it
+    through DNS/NSS like any name -- to whatever address a resolver answers.
+    Stripping the dot here classified it as loopback and downgraded it to
+    ``sslmode=prefer``, which sends the token as a cleartext password to a peer
+    that declines TLS.
+    """
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+# SQLAlchemy PostgreSQL drivers built on libpq, the only ones that take a
+# `sslmode` connect argument. A bare `postgresql` URL selects psycopg2.
+_LIBPQ_DRIVERS = frozenset(('psycopg', 'psycopg2', 'psycopg2cffi'))
+
+
+def _is_libpq_driver(drivername: str) -> bool:
+    dialect, _, driver = drivername.partition('+')
+    return dialect == 'postgresql' and (not driver or driver in _LIBPQ_DRIVERS)
+
+
+def _require_libpq_driver(drivername: str) -> None:
+    """Refuse a non-libpq driver while an ``sslmode`` would be injected.
+
+    Any other driver (pg8000, asyncpg, ...) rejects the unknown keyword on
+    every connection with a bare ``TypeError``, and has its own TLS setting,
+    so the adapter cannot enforce its TLS default there.
+    """
+    if _is_libpq_driver(drivername):
+        return
+    raise OidcConfigError(
+        f'drivername {drivername!r} is not a libpq driver, so it does not '
+        f'accept the libpq "sslmode" this adapter sets to protect the bearer '
+        f'token sent as the PG password. Use postgresql+psycopg or '
+        f'postgresql+psycopg2, or pass sslmode=None and configure TLS for '
+        f'this driver through connect_args (for pg8000, "ssl_context"); '
+        f'without it the token may travel unencrypted.')
+
+
+def _effective_sslmode(host: str, sslmode: Optional[str]) -> Optional[str]:
+    """Resolve the adapter-only ``auto`` mode before calling libpq."""
+    if sslmode != _AUTO_SSLMODE:
+        return sslmode
+    return 'prefer' if _is_numeric_loopback_host(host) else 'verify-full'
+
+
+def sqlalchemy_engine(
+        auth: OidcDeviceAuth,
+        url: str,
+        *,
+        host: Optional[str] = None,
+        pg_port: int = _DEFAULT_PG_PORT,
+        database: str = _DEFAULT_DATABASE,
+        drivername: Optional[str] = None,
+        sslmode: Optional[str] = _AUTO_SSLMODE,
+        **engine_kwargs) -> 'sqlalchemy.engine.Engine':
+    """
+    Build a SQLAlchemy ``Engine`` for QuestDB's PG-wire endpoint, authenticated
+    with ``auth``.
+
+    Connects as user ``_sso``, injecting a **fresh** token as the password on
+    every new connection (via a ``do_connect`` listener) so pooled connections
+    always authenticate with a valid, auto-refreshed token. Requires
+    ``acl.oidc.pg.token.as.password.enabled=true`` on the server.
+
+    Sign in once up front (``auth.sign_in()``) before the pool opens connections.
+    The per-connection injection is **non-interactive**: it reuses and silently
+    refreshes the cached token, but never launches a browser prompt from a pool
+    thread. If no token has been acquired yet it raises
+    :class:`OidcInteractionRequired` rather than blocking the pool on an
+    interactive sign-in.
+
+    :param auth: An :class:`OidcDeviceAuth`, e.g. from
+        :meth:`OidcDeviceAuth.from_questdb`.
+    :param url: The QuestDB base URL; the PG host is derived from it unless
+        ``host=`` is given.
+    :param host: Override the PG-wire host (otherwise taken from ``url``).
+    :param pg_port: PG-wire port (default ``8812``).
+    :param database: Database name (default ``"qdb"``).
+    :param drivername: SQLAlchemy driver; defaults to ``postgresql+psycopg``
+        (v3) or ``postgresql+psycopg2`` depending on what is installed. A
+        driver not built on libpq (``postgresql+pg8000``, say) takes no
+        ``sslmode``: pass ``sslmode=None`` with it and configure its own TLS
+        through ``connect_args``, or construction raises
+        :class:`OidcConfigError`.
+    :param sslmode: libpq ``sslmode`` for the connection. The default ``"auto"``
+        resolves to ``"verify-full"`` for remote hosts, authenticating the
+        server before sending the token as the PG password. Numeric loopback
+        IPs resolve to ``"prefer"`` so a local QuestDB without TLS is accepted;
+        hostnames such as ``localhost`` retain ``"verify-full"`` because their
+        resolved addresses are not pinned. Pass another libpq mode explicitly
+        to override this policy, or ``None`` to manage TLS entirely through
+        ``connect_args`` / the environment. An ``sslmode`` in ``connect_args``
+        always wins. ``verify-full`` needs a trust root: pass
+        ``connect_args={"sslrootcert": ...}`` (a CA file, or ``"system"`` on
+        libpq 16+) unless ``PGSSLROOTCERT`` or ``~/.postgresql/root.crt``
+        provides one. Libpq ``PGHOSTADDR`` is ignored: the adapter supplies an
+        empty ``hostaddr`` to keep the dial on the validated host.
+    :param engine_kwargs: Forwarded to ``create_engine``. ``connect_args`` must
+        not carry a connection *destination* (``host``, ``hostaddr``, ``port``,
+        ``service``, ``dsn``, ``conninfo``): SQLAlchemy merges ``connect_args``
+        over the arguments built from the validated URL, so such a value would
+        re-point the connection — and the bearer token travelling as its
+        password — at a peer this adapter never vetted. Use ``host=`` and
+        ``pg_port=`` instead. A preceding SQLAlchemy ``do_connect`` listener
+        must leave ``host`` and ``port`` in the driver keyword arguments and
+        must not add positional connection arguments: otherwise the adapter
+        refuses to fetch or attach the bearer token.
+    :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
+        has no host; if the resolved host carries connection-string
+        metacharacters; if ``pg_port`` is not a valid TCP port; if
+        ``drivername`` is not a libpq driver while ``sslmode`` is set; or if
+        ``connect_args`` (or a foreign ``do_connect`` listener) sets a
+        connection destination other than the validated one.
+    :raises OidcError: if token acquisition fails while SQLAlchemy opens a
+        connection.
+    :raises ImportError: if SQLAlchemy or a PostgreSQL driver is unavailable.
+        SQLAlchemy and DBAPI construction/connection exceptions otherwise
+        propagate unchanged.
+    """
+    resolved_host = _require_host(url, host)
+    sslmode = _effective_sslmode(resolved_host, sslmode)
+    pg_port = _coerce_port(pg_port)
+    # Before the engine exists and long before a token is acquired: the URL is
+    # validated, so the passthrough must not be able to move the destination.
+    _reject_destination_overrides(
+        engine_kwargs.get('connect_args'), 'connect_args')
+    try:
+        from sqlalchemy import create_engine, event
+        from sqlalchemy.engine import URL
+    except ImportError as e:
+        raise ImportError(
+            'SQLAlchemy is required for questdb.auth.sqlalchemy_engine(); '
+            'install it with `pip install sqlalchemy`.') from e
+
+    if drivername is None:
+        mod = _pg_module()
+        drivername = (
+            'postgresql+psycopg'
+            if mod.__name__ == 'psycopg'
+            else 'postgresql+psycopg2')
+    elif sslmode is not None:
+        _require_libpq_driver(drivername)
+    uses_libpq = _is_libpq_driver(drivername)
+
+    engine = create_engine(
+        URL.create(
+            drivername=drivername,
+            username='_sso',
+            host=resolved_host,
+            port=pg_port,
+            database=database),
+        **engine_kwargs)
+
+    @event.listens_for(engine, 'do_connect')
+    def _provide_token(dialect, conn_rec, cargs, cparams):  # noqa: ANN001
+        # These are the arguments the driver will actually dial. Confirm they
+        # still name the vetted peer BEFORE the bearer token is attached, so
+        # neither a passthrough nor an earlier do_connect listener can turn a
+        # validated destination into an unvetted one.
+        _require_expected_destination(cargs, cparams, resolved_host, pg_port)
+        if uses_libpq:
+            # An explicit empty value suppresses libpq's PGHOSTADDR default
+            # while still resolving the validated host normally. Do this on
+            # every physical connect: the environment can change after the
+            # engine is constructed, and loopback's sslmode=prefer would send
+            # the bearer password in clear to an environment-selected peer.
+            cparams['hostaddr'] = ''
+        # Non-interactive: reuse / silently refresh the up-front token, but never
+        # run an interactive device flow from a pool thread (it would block the
+        # pool). Raises OidcInteractionRequired if no token was acquired first.
+        cparams['password'] = auth.token()
+        # setdefault, so an sslmode the caller put in connect_args wins. Set
+        # here rather than on the URL because that is where the password goes:
+        # the two travel together, and the point is that this password is a
+        # bearer token that must not reach an unauthenticated remote server.
+        if sslmode is not None:
+            cparams.setdefault('sslmode', sslmode)
+
+    return engine
+
+
+def psycopg_connect(
+        auth: OidcDeviceAuth,
+        url: str,
+        *,
+        host: Optional[str] = None,
+        pg_port: int = _DEFAULT_PG_PORT,
+        database: str = _DEFAULT_DATABASE,
+        sslmode: Optional[str] = _AUTO_SSLMODE,
+        **connect_kwargs) -> Any:
+    """
+    Open a raw psycopg (v3) or psycopg2 connection to QuestDB's PG-wire
+    endpoint, authenticating as ``_sso`` with the current token.
+
+    The token is captured at connect time; reconnect to pick up a refreshed
+    token. Requires ``acl.oidc.pg.token.as.password.enabled=true`` on the
+    server.
+
+    :param auth: An :class:`OidcDeviceAuth`, e.g. from
+        :meth:`OidcDeviceAuth.from_questdb`.
+    :param url: The QuestDB base URL; the PG host is derived from it unless
+        ``host=`` is given.
+    :param host: Override the PG-wire host (otherwise taken from ``url``).
+    :param pg_port: PG-wire port (default ``8812``).
+    :param database: Database name (default ``"qdb"``).
+    :param sslmode: libpq ``sslmode`` for the connection. The default ``"auto"``
+        resolves to ``"verify-full"`` for remote hosts, authenticating the
+        server before sending the token as the PG password. Numeric loopback
+        IPs resolve to ``"prefer"`` so a local QuestDB without TLS is accepted;
+        hostnames such as ``localhost`` retain ``"verify-full"`` because their
+        resolved addresses are not pinned. Pass another libpq mode explicitly
+        to override this policy, or ``None`` to manage TLS entirely through
+        ``connect_kwargs`` / the environment. An ``sslmode`` in
+        ``connect_kwargs`` always wins. ``verify-full`` needs a trust root:
+        pass ``sslrootcert=...`` (a CA file, or ``"system"`` on libpq 16+)
+        unless ``PGSSLROOTCERT`` or ``~/.postgresql/root.crt`` provides one.
+        Libpq ``PGHOSTADDR`` is ignored: the adapter supplies an empty
+        ``hostaddr`` to keep the dial on the validated host.
+    :param connect_kwargs: Forwarded to the driver's ``connect()``. As with
+        :func:`sqlalchemy_engine`, a connection *destination* (``host``,
+        ``hostaddr``, ``port``, ``service``, ``dsn``, ``conninfo``) is rejected:
+        the token is a bearer credential and only the validated peer may
+        receive it. Use ``host=`` and ``pg_port=`` instead.
+    :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
+        has no host; if the resolved host carries connection-string
+        metacharacters; if ``pg_port`` is not a valid TCP port; or if
+        ``connect_kwargs`` sets a connection destination.
+    :raises OidcError: if token acquisition fails.
+    :raises ImportError: if neither psycopg nor psycopg2 is installed.
+        Driver connection, TLS and server-authentication exceptions otherwise
+        propagate unchanged.
+    """
+    resolved_host = _require_host(url, host)
+    sslmode = _effective_sslmode(resolved_host, sslmode)
+    pg_port = _coerce_port(pg_port)
+    # `host=`/`port=` here would be a bare TypeError (duplicate keyword), but
+    # `hostaddr` / `service` / `dsn` / `conninfo` would silently redirect the
+    # connection. Rejected together, as one typed error, before `auth.token()`.
+    _reject_destination_overrides(connect_kwargs, 'connect_kwargs')
+    mod = _pg_module()
+    token = auth.token()
+    if sslmode is not None:
+        # setdefault, so an explicit sslmode in connect_kwargs wins.
+        connect_kwargs.setdefault('sslmode', sslmode)
+    return mod.connect(
+        host=resolved_host,
+        hostaddr='',  # Override PGHOSTADDR, but let libpq resolve host itself.
+        port=pg_port,
+        dbname=database,
+        user='_sso',
+        password=token,
+        **connect_kwargs)

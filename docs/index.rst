@@ -14,6 +14,7 @@ Contents
    installation
    sender
    conf
+   auth
    examples
    migration
    api

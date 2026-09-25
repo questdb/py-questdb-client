@@ -9,6 +9,13 @@ The Python QuestDB client runs on any version of Python >= 3.10 on most
 platforms and architectures. Its only required run-time dependency is
 ``numpy>=1.21.0``.
 
+Wheels are published for free-threaded (``t``) CPython builds and import
+normally there, but the extension module declares ``Py_MOD_GIL_USED``: parts
+of it rely on the GIL to serialise access to state shared with native callback
+threads, so importing it on a free-threaded interpreter re-enables the GIL.
+The client is supported on those builds, it simply gains no free-threading
+benefit; running it under ``PYTHON_GIL=0`` is not supported.
+
 Optional Dependencies
 ---------------------
 
@@ -25,6 +32,13 @@ the source library as usual.
 Without it, you may still ingest data row-by-row through
 ``Sender.row()``, and read query results through the
 ``__arrow_c_stream__`` PyCapsule protocol.
+
+The :ref:`OIDC authentication helper <oidc_auth>` (:mod:`questdb.auth`) needs
+no extra dependencies for ``sign_in()`` / ``token()``. Some conveniences
+import the following lazily, only when used: ``sqlalchemy`` and ``psycopg`` /
+``psycopg2`` (PG-wire adapters), ``qrcode`` (terminal QR prompt;
+``qrcode[pil]`` or Pillow for the notebook PNG QR) and ``IPython``
+(rich Jupyter prompt).
 
 PIP
 ---

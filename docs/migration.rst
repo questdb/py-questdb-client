@@ -1,9 +1,111 @@
-===================
-5.0 Migration Guide
-===================
+================
+Migration Guide
+================
+
+5.0 to 5.1
+==========
+
+Seven changes need action: the two UUID / fixed-size-binary items below, the
+stricter ``schema_overrides`` tuple validation, caps on callback inbox
+capacities and config-string length, the failed-commit cleanup and exception
+changes, and a warning an abandoned query result now surfaces instead of
+swallowing. The new ``ConnectionEventKind.CredentialUnavailable`` event kind
+needs none — it is additive, and an existing listener keeps working.
+
+* **UUID bytes are canonical RFC 4122.** UUID values are read and written in
+  canonical big-endian order at every API boundary; the client byte-swaps to
+  QWP wire order internally. The wire format is unchanged and still matches the
+  Java client, so stored data and round-trips are unaffected — only the bytes
+  your application supplies or receives change. A well-formed ``uuid.UUID``
+  object column needs no byte-order change; malformed or subclassed UUID objects
+  whose integer representation does not produce exactly 16 bytes are rejected.
+  If you pre-reversed bytes to work around the old layout, remove that workaround
+  — on the **read** path too. The bytes a UUID column
+  yields changed in the same way and just as silently, on every Arrow-backed
+  reader: :meth:`~questdb.QueryResult.to_arrow`,
+  :meth:`~questdb.QueryResult.to_polars`,
+  :meth:`~questdb.QueryResult.iter_arrow`,
+  :meth:`~questdb.QueryResult.iter_polars`, ``__arrow_c_stream__`` and
+  :meth:`~questdb.QueryResult.to_pandas` /
+  :meth:`~questdb.QueryResult.iter_pandas` with either ``dtype_backend`` (both
+  ``"pyarrow"`` and ``"numpy_nullable"``) or ``types_mapper``. Only the
+  argument-free :meth:`~questdb.QueryResult.to_pandas` /
+  :meth:`~questdb.QueryResult.iter_pandas` build ``uuid.UUID`` objects and are
+  unaffected.
+
+* **A 16-byte Arrow column needs the** ``arrow.uuid`` **label to be a UUID,
+  and** ``fixed_size_binary(32)`` **no longer maps to LONG256.** The width alone
+  no longer claims either type — pyarrow drops field metadata when it exports a
+  single pandas column. An unlabelled column now lands as ``BINARY``, which the
+  server rejects against an existing UUID or LONG256 column rather than storing
+  the wrong type silently. Claim it explicitly:
+
+  .. code-block:: python
+
+      sender.dataframe(df, table_name='trades', at='ts',
+                       schema_overrides={'id': 'uuid', 'hash': 'long256'})
+
+  ``schema_overrides`` accepts the new ``'uuid'`` and ``'long256'`` kinds for
+  this purpose, but it **requires fully Arrow-backed input** — pyarrow,
+  polars, or a pandas frame where *every* column uses ``ArrowDtype`` — and no
+  ``table_name_col``. One NumPy-dtype column is enough to take the NumPy
+  planner instead, which does not apply overrides and raises
+  :class:`~questdb.UnsupportedDataFrameShapeError`; a plain ``datetime64``
+  ``at=`` column does it. That is exactly the shape that used to write
+  LONG256 with no override, so convert the frame first::
+
+      df = df.convert_dtypes(dtype_backend='pyarrow')
+
+  Wrapping the column in pyarrow's ``arrow.uuid`` extension type also works
+  for the 16-byte case, on either path and with no conversion. LONG256 has no
+  equivalent label, so an Arrow-backed frame plus ``schema_overrides`` is the
+  only route for it.
+
+* **Only a geohash schema override accepts an argument.** A tuple such as
+  ``{'x': ('symbol', 16)}`` previously worked by silently discarding ``16``;
+  write ``{'x': 'symbol'}`` instead. The two-item form is reserved for
+  ``('geohash', bits)``. :data:`questdb.SchemaOverride` is now importable for
+  annotating these values.
+
+* **Callback inbox capacities are capped at 65536.**
+  ``connection_event_inbox_capacity`` and ``error_event_inbox_capacity``, and
+  the ``error_inbox_capacity`` config-string key, now reject a larger value
+  where one was previously accepted. Lower any value above the cap; these
+  inboxes bound memory when a listener cannot keep up, and a capacity that
+  large is an allocation failure waiting to happen rather than useful
+  buffering.
+
+* **Config strings are capped at 1 MiB.** This applies to
+  :meth:`Sender.from_conf <questdb.Sender.from_conf>`,
+  :meth:`Sender.from_env <questdb.Sender.from_env>` (``QDB_CLIENT_CONF``),
+  :func:`questdb.connect` and :meth:`QuestDB.from_conf
+  <questdb.QuestDB.from_conf>`, which raise ``QuestDBError(InvalidApiCall)``
+  for a longer string. Remove accidentally duplicated or attacker-controlled
+  content from any string above that bound.
+
+* :meth:`SenderTransaction.commit <questdb.SenderTransaction.commit>` **after
+  the owning sender was closed now raises** ``QuestDBError(InvalidApiCall)``
+  instead of an internal ``TypeError``. A commit whose flush fails leaves the
+  sender's buffer empty and the transaction completed, exactly as in 5.0.
+
+* **An abandoned** :class:`~questdb.QueryResult` **now reports its**
+  ``ResourceWarning``. The finalizer previously swallowed it; it is now routed
+  through :func:`sys.unraisablehook`, which is what makes the leak visible.
+  Under warnings-as-errors this becomes a failure — and because it fires
+  whenever garbage collection happens to run, pytest attributes it to whatever
+  test was executing at the time rather than to the one that abandoned the
+  result. Close results deterministically::
+
+      with db.query('select * from trades') as result:
+          ...
+
+  or filter :class:`ResourceWarning` if a suite runs with ``-W error``.
+
+4.x to 5.0
+==========
 
 Connect once, then stream, load, or query
-=========================================
+-----------------------------------------
 
 The QWP/WebSocket API has one connection-owning root, the :class:`QuestDB
 <questdb.QuestDB>` handle returned by :func:`questdb.connect`:
@@ -56,7 +158,7 @@ rejections are never silent. To ingest concurrently, borrow one sender per
 thread.
 
 DataFrame bulk loads over QWP/WebSocket
-=======================================
+---------------------------------------
 
 Over ``ws::`` / ``wss::``, DataFrame bulk loads use the direct columnar
 path — a database operation, not stream serialization. The recommended
@@ -113,7 +215,7 @@ fully supported (over UDP it serializes row by row into fire-and-forget
 datagrams, with the same delivery caveats as ``row()``).
 
 Update imports from questdb.ingress
-===================================
+-----------------------------------
 
 The 4.x ``questdb.ingress`` module is now a deprecated compatibility shim.
 It keeps ILP/HTTP and ILP/TCP code running — including ``IngressError`` /
@@ -134,7 +236,7 @@ by senders. Where 4.x code built buffers on worker threads and flushed them
 through one sender, borrow one pooled sender per thread instead.
 
 Behavioural changes to watch for
-================================
+--------------------------------
 
 * **Removed QWP flight-window keys.** ``max_in_flight`` and
   ``in_flight_window`` are no longer accepted. Remove them from ws/wss
