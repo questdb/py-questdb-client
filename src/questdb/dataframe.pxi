@@ -1874,46 +1874,60 @@ cdef inline bint _dataframe_is_null_pyobj(PyObject* obj) noexcept:
         _dataframe_is_float_nan(obj))
 
 
-_ROW_WRAPPER_COLUMNAR_ROUTE = (
-    'To write this type from a DataFrame, use a QWP/WebSocket columnar call '
-    '(`QuestDB.dataframe()`, `PooledSender.dataframe()`, or '
-    '`Sender.dataframe()` over `ws::` / `wss::`). `Buffer.dataframe()` and '
-    '`Sender.dataframe()` over other protocols serialize rows and cannot '
-    'apply `schema_overrides`.')
+cdef str _row_wrapper_calls_sentence(str type_name):
+    return (
+        f'Storing {type_name} from a DataFrame works only with '
+        '`QuestDB.dataframe()`, `PooledSender.dataframe()`, and '
+        '`Sender.dataframe()` over `ws::` or `wss::`, not with '
+        '`Buffer.dataframe()` or with `Sender.dataframe()` over other '
+        'protocols.')
+
+
+cdef str _row_wrapper_arrow_sentence(object col_name, str kind):
+    return (
+        'make every column Arrow-backed with '
+        '`df = df.convert_dtypes(dtype_backend="pyarrow")`, and pass '
+        f'`schema_overrides={{{col_name!r}: {kind}}}`.')
 
 
 cdef object _dataframe_row_wrapper_df_message(
         object col_name, PyObject* obj):
     """A working DataFrame route for a scalar wrapper learned from row()."""
+    cdef str col = f'df[{col_name!r}]'
     if isinstance(<object>obj, Char):
         return (
-            'questdb.Char is a row-ingestion wrapper, not a DataFrame cell '
-            f'type. {_ROW_WRAPPER_COLUMNAR_ROUTE} On that route, replace '
-            'each wrapper with `ord(value.value)` in a uint16 column in a '
-            'fully Arrow-backed frame and pass '
-            f'`schema_overrides={{{col_name!r}: \'char\'}}`.')
+            '`questdb.Char` values work only with `row()`, not in a '
+            'DataFrame. To store this column as CHAR, convert it with '
+            f'`{col} = {col}.map(lambda v: ord(v.value)).astype(\'uint16\')`, '
+            + _row_wrapper_arrow_sentence(col_name, "'char'") + ' '
+            + _row_wrapper_calls_sentence('CHAR'))
     if isinstance(<object>obj, DateMillis):
         return (
-            'questdb.DateMillis is a row-ingestion wrapper, not a DataFrame '
-            'cell type. Build the column as Arrow `timestamp(\'ms\')`, '
-            '`date32()`, or `date64()` values instead; DATE is identified by '
-            'its Arrow type and has no `schema_overrides` kind.')
+            '`questdb.DateMillis` values work only with `row()`, not in a '
+            'DataFrame. To store this column as DATE, convert it with '
+            f'`{col} = {col}.map(lambda v: v.value)'
+            '.astype(pd.ArrowDtype(pa.timestamp(\'ms\')))`. The Arrow type '
+            'alone selects DATE, and `date32()` and `date64()` columns work '
+            'too; `schema_overrides` has no DATE option. '
+            + _row_wrapper_calls_sentence('DATE'))
     if isinstance(<object>obj, Long256):
         return (
-            'questdb.Long256 is a row-ingestion wrapper, not a DataFrame cell '
-            f'type. {_ROW_WRAPPER_COLUMNAR_ROUTE} On that route, replace '
-            'each wrapper with its unsigned value encoded as 32 little-endian '
-            'bytes in a binary column in a fully Arrow-backed frame and pass '
-            f'`schema_overrides={{{col_name!r}: \'long256\'}}`.')
+            '`questdb.Long256` values work only with `row()`, not in a '
+            'DataFrame. To store this column as LONG256, convert it with '
+            f'`{col} = {col}.map(lambda v: v.value.to_bytes(32, \'little\'))'
+            '.astype(pd.ArrowDtype(pa.binary(32)))`, '
+            + _row_wrapper_arrow_sentence(col_name, "'long256'") + ' '
+            + _row_wrapper_calls_sentence('LONG256'))
     if isinstance(<object>obj, Geohash):
         return (
-            'questdb.Geohash is a row-ingestion wrapper, not a DataFrame cell '
-            f'type. {_ROW_WRAPPER_COLUMNAR_ROUTE} On that route, replace '
-            'each wrapper with its `.bits` value in a signed-integer column '
-            'in a fully Arrow-backed frame and pass '
-            f'`schema_overrides={{{col_name!r}: (\'geohash\', '
-            f'{(<object>obj).precision})}}`; every value in the column must '
-            'use that precision.')
+            '`questdb.Geohash` values work only with `row()`, not in a '
+            'DataFrame. To store this column as GEOHASH, convert it with '
+            f'`{col} = {col}.map(lambda v: v.bits)`, '
+            + _row_wrapper_arrow_sentence(
+                col_name, f"('geohash', {(<object>obj).precision})")
+            + ' Every value in the column must have a precision of '
+            f'{(<object>obj).precision} bits. '
+            + _row_wrapper_calls_sentence('GEOHASH'))
     return None
 
 # noinspection PyUnreachableCode

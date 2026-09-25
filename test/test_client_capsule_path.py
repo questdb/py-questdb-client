@@ -1302,12 +1302,18 @@ class TestSchemaOverridesPandas(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(
                         qi.UnsupportedDataFrameShapeError,
-                        'schema_overrides requires the Arrow columnar path'):
+                        '`schema_overrides` works only on input in Arrow '
+                        'format') as caught:
                     client.dataframe(
                         df,
                         table_name='ipv4_pandas',
                         at='ts',
                         schema_overrides={'addr': 'ipv4'})
+                # The message names the column that is not Arrow-backed
+                # and leaves out the one that is.
+                self.assertIn(
+                    "In this DataFrame, these columns do not: 'addr'.",
+                    str(caught.exception))
                 self.assertEqual(server.snapshot()['qwp1_frames'], 0)
             finally:
                 client.close()

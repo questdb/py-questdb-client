@@ -7394,22 +7394,52 @@ cdef bint _pandas_dataframe_requires_manual_planner(object df) except -1:
     # the manual planner (which ingests those directly and the Arrow-backed
     # columns via the arrow-import path).
     cdef object dtype
-    cdef object arrow_dtype
     if not _is_pandas_dataframe_object(df):
         return False
     _dataframe_may_import_deps()
-    arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
     try:
         for dtype in df.dtypes:
-            if arrow_dtype is not None and isinstance(dtype, arrow_dtype):
-                continue
-            if isinstance(dtype, _PANDAS.StringDtype):
-                if getattr(dtype, 'storage', None) == 'pyarrow':
-                    continue
-            return True
+            if not _pandas_dtype_is_arrow(dtype):
+                return True
     except Exception:
         return True
     return False
+
+
+cdef bint _pandas_dtype_is_arrow(object dtype) except -1:
+    cdef object arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
+    if arrow_dtype is not None and isinstance(dtype, arrow_dtype):
+        return True
+    return (isinstance(dtype, _PANDAS.StringDtype)
+            and getattr(dtype, 'storage', None) == 'pyarrow')
+
+
+cdef str _schema_overrides_need_arrow_message(object df):
+    """Why `schema_overrides` cannot apply to `df`, naming the pandas
+    columns that are not Arrow-backed when there are any."""
+    cdef list names = []
+    cdef str listed
+    if _is_pandas_dataframe_object(df):
+        try:
+            names = [
+                name for name, dtype in df.dtypes.items()
+                if not _pandas_dtype_is_arrow(dtype)]
+        except Exception:
+            names = []
+    listed = ''
+    if names:
+        listed = ', '.join(repr(name) for name in names[:5])
+        if len(names) > 5:
+            listed += f' and {len(names) - 5} more'
+        listed = f'In this DataFrame, these columns do not: {listed}. '
+    return (
+        '`schema_overrides` works only on input in Arrow format: a '
+        'pyarrow Table or RecordBatch, a polars DataFrame, or a pandas '
+        'DataFrame (pandas 2.2 or newer) whose columns all have Arrow '
+        'dtypes (`pd.ArrowDtype`). ' + listed +
+        'Convert the DataFrame, e.g. '
+        '`df = df.convert_dtypes(dtype_backend="pyarrow")`, or drop '
+        '`schema_overrides`.')
 
 
 cdef bint _pandas_dataframe_is_timestamp_only_at(
@@ -7861,13 +7891,7 @@ cdef void_int _direct_dataframe_run(
                 return 0
             if validated_overrides is not None:
                 raise UnsupportedDataFrameShapeError(
-                    'schema_overrides requires the Arrow columnar path: '
-                    'fully Arrow-backed input (pyarrow / polars, or pandas '
-                    'where every column uses ArrowDtype). This input falls '
-                    'back to the NumPy planner, which does not apply '
-                    'schema_overrides; convert the frame, e.g. '
-                    "df.convert_dtypes(dtype_backend='pyarrow'), or drop "
-                    'schema_overrides.')
+                    _schema_overrides_need_arrow_message(df))
             _dataframe_numpy_publish(
                 src, budget_ms, b, plan, df, table_name,
                 table_name_col, symbols, at, max_rows_per_batch,

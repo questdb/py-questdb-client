@@ -3099,46 +3099,55 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertIn('`value.ip`', str(caught.exception))
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_row_wrappers_name_their_dataframe_remedies(self):
+        """A DataFrame column of the scalar wrappers `row()` takes is
+        refused with the code that converts it. That code is taken from
+        the message and run, so the advice works as printed."""
         cases = (
-            (qi.Char('Q'), (
-                'questdb.Char is a row-ingestion wrapper',
-                'QWP/WebSocket columnar call',
-                '`Buffer.dataframe()`',
-                'cannot apply `schema_overrides`',
-                '`ord(value.value)`',
-                "`schema_overrides={'value': 'char'}`")),
-            (qi.DateMillis(1), (
-                'questdb.DateMillis is a row-ingestion wrapper',
-                "Arrow `timestamp('ms')`, `date32()`, or `date64()`",
-                'has no `schema_overrides` kind')),
-            (qi.Long256(1), (
-                'questdb.Long256 is a row-ingestion wrapper',
-                'QWP/WebSocket columnar call',
-                '`Buffer.dataframe()`',
-                'cannot apply `schema_overrides`',
-                '32 little-endian bytes',
-                "`schema_overrides={'value': 'long256'}`")),
-            (qi.Geohash(7, 20), (
-                'questdb.Geohash is a row-ingestion wrapper',
-                'QWP/WebSocket columnar call',
-                '`Buffer.dataframe()`',
-                'cannot apply `schema_overrides`',
-                'signed-integer column in a fully Arrow-backed frame',
-                "`schema_overrides={'value': ('geohash', 20)}`")),
+            (qi.Char('Q'), 'CHAR', 0x16),
+            (qi.DateMillis(1704164645678), 'DATE', 0x0B),
+            (qi.Long256(2 ** 255 + 7), 'LONG256', 0x0D),
+            (qi.Geohash(7, 20), 'GEOHASH', 0x0E),
         )
-        for value, fragments in cases:
+        for value, type_name, wire in cases:
             with self.subTest(wrapper=type(value).__name__):
                 frame = pd.DataFrame({
-                    'value': pd.Series([value], dtype=object),
-                    'ts': pd.to_datetime([0], unit='s'),
+                    'value': pd.Series([value] * 2, dtype=object),
+                    'ts': pd.to_datetime([0, 1], unit='s'),
                 })
                 buffer = qi.Buffer._new_qwp()
                 with self.assertRaises(qi.QuestDBError) as caught:
                     buffer.dataframe(frame, table_name='t', at='ts')
                 message = str(caught.exception)
-                for fragment in fragments:
-                    self.assertIn(fragment, message)
+                # A call that takes `schema_overrides` gives the same
+                # advice.
+                with self.assertRaises(qi.QuestDBError) as caught:
+                    self._dataframe_column_types(
+                        frame, table_name='t', at='ts')
+                self.assertEqual(str(caught.exception), message)
+                self.assertIn(
+                    f'`questdb.{type(value).__name__}` values work only '
+                    'with `row()`', message)
+                self.assertIn(
+                    f'Storing {type_name} from a DataFrame works only with',
+                    message)
+
+                code = re.findall(r'`([^`]*)`', message)
+                namespace = {'df': frame.copy(), 'pd': pd, 'pa': pyarrow}
+                for step in code:
+                    if step.startswith('df'):
+                        exec(step, namespace)
+                kwargs = {}
+                for step in code:
+                    if step.startswith('schema_overrides='):
+                        kwargs['schema_overrides'] = eval(
+                            step[len('schema_overrides='):])
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        namespace['df'], table_name='t', at='ts',
+                        **kwargs)['value'],
+                    wire)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
