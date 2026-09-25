@@ -5582,6 +5582,65 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         pass
                     self.assertEqual(len(closed), 1)
 
+    _WS_DATAFRAME_CLOSE_WITH_BUSY_LISTENER_SCRIPT = """
+import threading
+import time
+import pandas as pd
+import questdb._client as qi
+from qwp_ws_ack_server import QwpAckServer
+
+in_callback = threading.Event()
+
+def listener(event):
+    # Still running when the load below finishes, on the dispatcher
+    # thread, and needs the GIL back to return.
+    in_callback.set()
+    time.sleep(1.5)
+
+class ClosingFrame(pd.DataFrame):
+    fired = False
+
+    @property
+    def attrs(self):
+        if not ClosingFrame.fired:
+            ClosingFrame.fired = True
+            sender.close(flush=False)
+        return {}
+
+    @attrs.setter
+    def attrs(self, value):
+        pass
+
+with QwpAckServer() as server:
+    sender = qi.Sender.from_conf(
+        f'ws::addr=127.0.0.1:{server.port};auto_flush=off;',
+        connection_listener=listener)
+    sender.establish()
+    assert in_callback.wait(10), 'no connection event delivered'
+    frame = ClosingFrame({
+        'v': [1, 2], 'ts': pd.to_datetime([0, 1], unit='s')})
+    try:
+        sender.dataframe(frame, table_name='t', at='ts')
+    except qi.QuestDBError:
+        pass
+print('OK')
+"""
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_ws_dataframe_closed_from_inside_itself_with_a_busy_listener(
+            self):
+        """After a `close()` from inside the WebSocket `dataframe()`, the
+        run's cloned options are the last owner of the sender's callback
+        dispatcher threads, and freeing them joins those threads. A
+        connection-listener callback still running at that point needs
+        the GIL to return, so the free runs without it; with the GIL held
+        the join and the callback wait on each other, and nothing can
+        interrupt the process.
+
+        Runs in a child interpreter, where a hang reads as a timeout."""
+        self._run_in_child_interpreter(
+            self._WS_DATAFRAME_CLOSE_WITH_BUSY_LISTENER_SCRIPT, timeout=60)
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_ws_sender_dataframe_is_refused_while_a_row_is_being_written(self):
         """`Sender.dataframe` over QWP/WebSocket takes its own
@@ -7568,6 +7627,15 @@ print('OK')
         state is a use-after-free, which there reads as a failed return
         code instead of taking the suite down.
         """
+        self._run_in_child_interpreter(self._NATIVE_THREAD_SCOPED_CALL_SCRIPT)
+
+    def _run_in_child_interpreter(self, script, timeout=120):
+        """Run `script` in a fresh interpreter and require it to print OK.
+
+        For scenarios whose failure is a crash or a hang: in a child, a
+        crash reads as a failed return code and a hang as a timeout,
+        where either would otherwise take the suite down with it.
+        """
         env = dict(os.environ)
         env['PYTHONPATH'] = os.pathsep.join(
             [str(pathlib.Path(qi.__file__).parent.parent),
@@ -7576,9 +7644,8 @@ print('OK')
         env['PYTHONWARNINGS'] = 'ignore'
         try:
             child = subprocess.run(
-                [sys.executable, '-X', 'faulthandler', '-c',
-                 self._NATIVE_THREAD_SCOPED_CALL_SCRIPT],
-                capture_output=True, text=True, env=env, timeout=120)
+                [sys.executable, '-X', 'faulthandler', '-c', script],
+                capture_output=True, text=True, env=env, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             self.fail(f'child timed out after {exc.timeout} seconds')
         self.assertEqual(child.returncode, 0, child.stderr[-4000:])

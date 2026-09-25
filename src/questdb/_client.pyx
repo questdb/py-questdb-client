@@ -10412,6 +10412,7 @@ cdef class Sender:
         cdef dataframe_plan_t ws_plan
         cdef line_sender_opts* ws_opts = NULL
         cdef object ws_dispatch_context = None
+        cdef PyThreadState* gs = NULL
         # The QWP/WebSocket branch below goes straight to its own
         # connection and never reaches `_dataframe`, where the same
         # check stands for every other route. Without it here, a frame
@@ -10462,7 +10463,14 @@ cdef class Sender:
             finally:
                 qdb_pystr_buf_free(ws_b)
                 if ws_opts != NULL:
+                    # The clone shares the sender's callback dispatcher
+                    # threads. After a `close()` during this call it is
+                    # their last owner, and freeing it joins them; a
+                    # callback still running needs the GIL to finish, so
+                    # the free runs without it, as in `Sender._close()`.
+                    _ensure_doesnt_have_gil(&gs)
                     line_sender_opts_free(ws_opts)
+                    _ensure_has_gil(&gs)
         if schema_overrides is not None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
