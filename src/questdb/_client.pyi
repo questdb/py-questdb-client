@@ -1134,6 +1134,22 @@ class PooledSender:
     default at 1,000 rows, 100 milliseconds, or a cap-derived byte threshold,
     and can be configured through the ``auto_flush`` settings on the parent
     :class:`QuestDB` configuration.
+
+    A lease is used by one thread at a time. It may move to another
+    thread -- borrowed on one and used on a worker, say -- provided the
+    hand-off is synchronized and no two threads call into it at once. To
+    ingest from several threads, share the :class:`QuestDB` handle and
+    borrow one lease per thread. Every method holds the lease's lock for
+    its whole call, ``dataframe()`` included, so a call from a second
+    thread waits until the running one returns. Code that runs inside a
+    call -- a column value's conversion, or the Arrow stream
+    ``dataframe()`` reads -- therefore must not wait on another thread
+    that uses the same lease.
+
+    Close every lease, or use it in a ``with`` block. A lease collected
+    without ``close()`` returns its sender to the pool without sending
+    the rows still buffered in it, and reports how many it discarded
+    through the ``questdb`` logger at ``WARNING``.
     """
 
     def __enter__(self) -> PooledSender: ...

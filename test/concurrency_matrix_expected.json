@@ -75,8 +75,8 @@
   "holder_outcome": "completed"
  },
  "PooledSender.dataframe/in-flight | PooledSender.__exit__": {
-  "result": "refused",
-  "reason": "close() can't be called from inside a call on this sender lease. It would return the sender to the pool while that call is still using it. C",
+  "result": "clean",
+  "reason": "",
   "holder_outcome": "completed"
  },
  "PooledSender.dataframe/in-flight | PooledSender.__len__": {
@@ -95,8 +95,8 @@
   "holder_outcome": "completed"
  },
  "PooledSender.dataframe/in-flight | PooledSender.close": {
-  "result": "refused",
-  "reason": "close() can't be called from inside a call on this sender lease. It would return the sender to the pool while that call is still using it. C",
+  "result": "clean",
+  "reason": "",
   "holder_outcome": "completed"
  },
  "PooledSender.dataframe/in-flight | PooledSender.dataframe": {

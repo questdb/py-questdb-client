@@ -7088,6 +7088,124 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 lease.row('after', columns={'v': 1}, at=qi.ServerTimestamp)
                 lease.close()
 
+    def test_a_lease_closed_from_another_thread_waits_for_its_dataframe(self):
+        """A lease is used by one thread at a time, and each of its calls
+        holds the lease for its whole length, `dataframe()` included. A
+        `close()` from another thread while a load runs is therefore not
+        re-entry: it waits for the load to return, then flushes the rows
+        the lease buffered and hands the sender back."""
+        if pd is None:
+            self.skipTest('pandas not installed')
+        armed = threading.Event()
+        in_plan = threading.Event()
+        release = threading.Event()
+        outcome = {}
+
+        class SlowFrame(pd.DataFrame):
+            @property
+            def attrs(self):
+                # Armed only for the call under test, so pandas reading
+                # `attrs` while building the frame does not block.
+                if armed.is_set() and not in_plan.is_set():
+                    in_plan.set()
+                    release.wait(20)
+                return {}
+
+            @attrs.setter
+            def attrs(self, value):
+                pass
+
+        frame = SlowFrame({'v': [1], 'ts': pd.to_datetime([0], unit='s')})
+        with QwpAckServer(record_payloads=True) as server:
+            with qi.QuestDB.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};auto_flush=off;'
+                    'sender_pool_min=0;sender_pool_max=2;'
+                    'query_pool_min=0;pool_reap=manual;') as db:
+                lease = db.sender()
+                lease.row(
+                    'lease_rows', columns={'v': 1}, at=qi.ServerTimestamp)
+
+                def load():
+                    armed.set()
+                    try:
+                        lease.dataframe(
+                            frame, table_name='frame_rows', at='ts')
+                    except BaseException as exc:
+                        outcome['load'] = exc
+                    else:
+                        outcome['load'] = None
+
+                def close_lease():
+                    try:
+                        lease.close()
+                    except BaseException as exc:
+                        outcome['close'] = exc
+                    else:
+                        outcome['close'] = None
+
+                loader = threading.Thread(target=load, daemon=True)
+                closer = threading.Thread(target=close_lease, daemon=True)
+                loader.start()
+                try:
+                    self.assertTrue(in_plan.wait(20))
+                    closer.start()
+                    # Waiting on the load, not refused as re-entry.
+                    closer.join(0.5)
+                    self.assertTrue(
+                        closer.is_alive(), outcome.get('close'))
+                finally:
+                    # However the checks above went, let the load finish
+                    # and return the lease, so a failure does not leave
+                    # the handle's own close waiting on either. `close()`
+                    # is idempotent, so this is a no-op after a close
+                    # that went through.
+                    release.set()
+                    loader.join(20)
+                    if closer.ident is not None:
+                        closer.join(20)
+                    lease.close()
+                self.assertIsNone(outcome['load'])
+                self.assertIsNone(outcome['close'])
+            server.wait_binary_frames_settled()
+            stats = server.snapshot()
+
+        payloads = b''.join(stats['binary_payloads'])
+        self.assertIn(b'frame_rows', payloads)
+        # Sent only by the close that waited: auto-flush is off.
+        self.assertIn(b'lease_rows', payloads)
+
+    def test_a_lease_dropped_without_close_reports_the_rows_it_discards(self):
+        """A lease collected without `close()` cannot flush from there, so
+        the rows still buffered in it are discarded. The `questdb` logger
+        reports how many; a lease with nothing buffered, or one that was
+        closed, reports nothing."""
+        import gc
+        with QwpAckServer() as server:
+            with qi.QuestDB.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                    'auto_flush=off;sender_pool_min=0;query_pool_min=0;'
+                    'pool_reap=manual;') as db:
+                lease = db.sender()
+                for i in range(3):
+                    lease.row(
+                        't', columns={'v': i}, at=qi.TimestampNanos(1 + i))
+                with self.assertLogs('questdb', level='WARNING') as logs:
+                    del lease
+                    gc.collect()
+                self.assertEqual(len(logs.records), 1)
+                self.assertIn(
+                    'discarding 3 buffered row(s)', logs.output[0])
+
+                with self.assertNoLogs('questdb', level='WARNING'):
+                    empty = db.sender()
+                    del empty
+                    closed = db.sender()
+                    closed.row(
+                        't', columns={'v': 9}, at=qi.TimestampNanos(9))
+                    closed.close()
+                    del closed
+                    gc.collect()
+
     def test_closing_a_sender_mid_row_covers_the_buffer_it_flushes(self):
         """`close(flush=True)` flushes the sender's internal buffer, so
         that is the buffer it holds to "no row part-way through". A

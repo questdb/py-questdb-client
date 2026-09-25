@@ -815,9 +815,23 @@ Threading Considerations
 A sender object is not thread-safe, but can be shared between threads if you
 take care of exclusive access (such as using a lock) yourself.
 
+The :class:`QuestDB <questdb.QuestDB>` handle is the object designed to be
+shared: create one per process and call it from any number of threads.
+Everything it hands out follows the sender's rule instead. A sender lease and
+a query result are each used by one thread at a time, and may be handed to
+another thread with proper synchronization, provided no two threads call into
+the same one at once. A reader lease stays on the thread that borrowed it. A
+sender lease holds its own lock for the whole of each call, so a second thread
+calling into it waits until the running call returns.
+
 The simplest concurrency rule: borrow (or create) one sender per thread. With
 QWP/WebSocket, :meth:`QuestDB.sender <questdb.QuestDB.sender>` makes this
 cheap — each borrow leases a pooled connection.
+
+Close every lease, or leave it through a ``with`` block. A sender lease that
+is garbage-collected without ``close()`` returns its connection to the pool
+without sending the rows still buffered in it, and logs how many it discarded
+through the ``questdb`` logger at ``WARNING``.
 
 Notice that the ``questdb`` python module is mostly implemented in native code
 and is designed to release the Python GIL whenever possible, so you can expect

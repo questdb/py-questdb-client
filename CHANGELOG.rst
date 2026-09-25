@@ -314,6 +314,22 @@ Fixed
   raised ``Sender is closed``. Closing a *different* lease from there is
   unaffected: it has nothing to do with the call that is running.
 
+- **A sender lease is used by one thread at a time, and every call on it
+  holds it for the whole call.** ``dataframe()`` now holds the lease's lock
+  for the whole load, as its other methods already did through their own
+  work, so a call on the same lease from a second thread waits until the
+  running one returns. A ``close()`` from another thread during a load
+  therefore waits for the load, then flushes the lease's rows. To ingest
+  from several threads, share the ``QuestDB`` handle and borrow one lease
+  per thread; code that runs inside a lease's call, such as the Arrow
+  stream a load reads, must not wait on another thread using that lease.
+
+- **A sender lease garbage-collected without ``close()`` reports the rows
+  it discards.** Such a lease returns its connection to the pool without
+  sending the rows still buffered in it, and nothing said so. It now logs
+  how many rows it discarded through the ``questdb`` logger at ``WARNING``.
+  Close every lease, or use it in a ``with`` block.
+
 - **``close()`` says which buffer it holds to "no row part-way through".**
   It is the sender's internal buffer, because that is the buffer
   ``close(flush=True)`` flushes. A buffer of your own from ``new_buffer()``

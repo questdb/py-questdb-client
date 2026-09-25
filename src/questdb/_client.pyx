@@ -11003,6 +11003,22 @@ cdef class PooledSender:
     columnar path. Row auto-flush is enabled by default at 1,000 rows, 100
     milliseconds, or a cap-derived byte threshold, and can be configured
     through the parent handle's connection settings.
+
+    A lease is used by one thread at a time. It may move to another
+    thread -- borrowed on one and used on a worker, say -- provided the
+    hand-off is synchronized and no two threads call into it at once. To
+    ingest from several threads, share the :class:`QuestDB` handle and
+    borrow one lease per thread. Every method holds the lease's lock for
+    its whole call, :meth:`dataframe` included, so a call from a second
+    thread waits until the running one returns. Code that runs inside a
+    call -- a column value's conversion, or the Arrow stream
+    :meth:`dataframe` reads -- therefore must not wait on another thread
+    that uses the same lease.
+
+    Close every lease, or use it in a ``with`` block. A lease collected
+    without ``close()`` returns its sender to the pool without sending
+    the rows still buffered in it, and reports how many it discarded
+    through the ``questdb`` logger at ``WARNING``.
     """
     cdef qwp_sender* _qwp
     cdef questdb_db* _db
@@ -11343,23 +11359,21 @@ cdef class PooledSender:
             self._check_open('dataframe')
             self._check_not_in_row('dataframe')
             handle = self._enter_call_locked()
-        # The lock is released for the run: the frame is loaded over the
-        # handle's own connection, not this lease's, and holding the lock
-        # across a bulk load would block every other thread sharing the
-        # lease for its whole duration. The call count stays raised, so a
-        # `close()` arriving from the caller's Python mid-plan is refused
-        # rather than pulling the lease out from under the run.
-        try:
-            handle.dataframe(
-                df,
-                table_name=table_name,
-                table_name_col=table_name_col,
-                symbols=symbols,
-                at=at,
-                max_rows_per_batch=max_rows_per_batch,
-                schema_overrides=schema_overrides)
-        finally:
-            with self._lock:
+            # The lock is held for the whole load, as in every method of a
+            # lease, which one thread uses at a time. That keeps the call
+            # count visible only to the thread running the call: a
+            # `close()` from the caller's own Python mid-plan is refused as
+            # re-entry, and one from another thread waits for the load.
+            try:
+                handle.dataframe(
+                    df,
+                    table_name=table_name,
+                    table_name_col=table_name_col,
+                    symbols=symbols,
+                    at=at,
+                    max_rows_per_batch=max_rows_per_batch,
+                    schema_overrides=schema_overrides)
+            finally:
                 self._exit_call_locked(handle)
         return self
 
@@ -11638,9 +11652,36 @@ cdef class PooledSender:
         self.close(exc_type is None, False)
 
     def __dealloc__(self):
-        if self._lock is not None:
-            with self._lock:
-                self._release_locked()
+        cdef size_t discarded = 0
+        if self._lock is None:
+            return
+        with self._lock:
+            if self._qwp != NULL and self._buffer is not None:
+                discarded = line_sender_buffer_row_count(self._buffer._impl)
+            self._release_locked()
+        if discarded != 0:
+            _log_discarded_lease_rows(discarded)
+
+
+cdef void _log_discarded_lease_rows(size_t rows) noexcept:
+    """Report the rows a lease collected without ``close()`` took with it.
+
+    Called from ``PooledSender.__dealloc__``, which cannot flush them: a
+    lease reaches it only once nothing refers to it, often during garbage
+    collection or interpreter exit. Without this record the rows would
+    vanish with nothing said. Deallocation cannot report an error either,
+    so a logging handler that raises, or a ``logging`` module already
+    torn down at interpreter exit, costs the record and nothing else.
+    """
+    try:
+        logging.getLogger('questdb').warning(
+            'questdb: a PooledSender lease was garbage-collected without '
+            'close(), discarding %d buffered row(s) that were never sent. '
+            'Close every lease, or use it in a `with` block, so that its '
+            'rows are flushed.',
+            rows)
+    except BaseException:
+        pass
 
 
 @cython.no_gc_clear
@@ -11831,14 +11872,15 @@ cdef class PooledReader:
         with self._lock:
             self._check_open('execute')
             handle = self._enter_call_locked()
-        try:
-            result = self.query(sql, binds, reset_symbol_dict=False)
+            # Held for the whole statement, as in every method of a lease:
+            # the call count is then visible only to the thread running it.
             try:
-                result._drain()
+                result = self.query(sql, binds, reset_symbol_dict=False)
+                try:
+                    result._drain()
+                finally:
+                    result.close()
             finally:
-                result.close()
-        finally:
-            with self._lock:
                 self._exit_call_locked(handle)
 
     def close(self):
