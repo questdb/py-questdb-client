@@ -4796,8 +4796,9 @@ class RenderSanitizerTest(unittest.TestCase):
         without_verdict_rendered = _render.format_prompt(without_verdict)
         self.assertIn('open directly', without_verdict_rendered)
         self.assertIn('https://', without_verdict_rendered)
-        # And a vetted target keeps the line.
-        self.assertIn(
+        # A native target equal to the plain URI is not a distinct complete
+        # shortcut, even if the IdP repeats that URI in the complete field.
+        self.assertNotIn(
             'open directly',
             _render.format_prompt(dict(resp, browser_target=real)))
 
@@ -4898,20 +4899,49 @@ class RenderSanitizerTest(unittest.TestCase):
         self.assertIn('OIDC sign-in prompt', captured.output[0])
         self.assertNotIn('TerminalRenderer', captured.output[0])
 
+    def test_native_plain_fallback_never_links_a_truncated_complete(self):
+        plain = 'https://idp.example.com/device'
+        # Native caps display text before stripping invisible characters. Its
+        # full complete URL exceeds the actionable cap, so browser_target falls
+        # back to plain, but the shortened display string is locally valid.
+        raw_complete = plain + '?c=A&state=' + '\u200b' * 24 + 'a' * 250
+        self.assertGreater(len(_render._strip_control(raw_complete)), 256)
+        display_complete = (
+            _render._strip_control(raw_complete[:256]) + r'\u{2026}')
+        self.assertLessEqual(len(display_complete), 256)
+        resp = {
+            'user_code': 'A', 'verification_uri': plain,
+            'verification_uri_complete': display_complete,
+            'browser_target': plain, 'expires_in': 600, 'interval': 5}
+        without_verdict = {k: v for k, v in resp.items()
+                           if k != 'browser_target'}
+        self.assertEqual(_render._matched_complete(without_verdict),
+                         display_complete)
+        self.assertIsNone(_render._matched_complete(resp))
+        self.assertEqual(_render._verification_target(resp), plain)
+        self.assertNotIn('open directly', _render.format_prompt(resp))
+        renderer = _render.JupyterRenderer(qr=False)
+        renderer._resp = resp
+        head = ''.join(renderer._prompt_head())
+        self.assertNotIn('authorize directly', head)
+        self.assertNotIn(display_complete, head)
+        self.assertEqual(head.count('<a href'), 1)
+
     def test_native_vetted_target_still_drives_the_link(self):
-        # The refusal path must not disturb the ordinary case.
+        # The fallback must not disturb a native-vetted complete shortcut.
+        complete = 'https://idp.example.com/device?c=A'
         resp = {
             'user_code': 'A',
             'verification_uri': 'https://idp.example.com/device',
-            'verification_uri_complete': 'https://idp.example.com/device?c=A',
-            'browser_target': 'https://idp.example.com/device?c=A',
+            'verification_uri_complete': complete,
+            'browser_target': complete,
             'expires_in': 600, 'interval': 5}
-        self.assertEqual(
-            _render._verification_target(resp),
-            'https://idp.example.com/device?c=A')
+        self.assertEqual(_render._verification_target(resp), complete)
+        self.assertEqual(_render._matched_complete(resp), complete)
+        self.assertIn('open directly', _render.format_prompt(resp))
         renderer = _render.JupyterRenderer(qr=False)
         renderer._resp = resp
-        self.assertIn('<a href', ''.join(renderer._prompt_head()))
+        self.assertIn('authorize directly', ''.join(renderer._prompt_head()))
 
     def test_custom_renderer_without_browser_target_keeps_fallback(self):
         # A pure-Python renderer builds its own dict with no browser_target

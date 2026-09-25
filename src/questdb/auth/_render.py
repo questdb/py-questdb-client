@@ -330,11 +330,19 @@ def _matched_complete(resp: Dict[str, Any]) -> Optional[str]:
     to the attacker while the displayed host still looks right. So a ``complete``
     whose origin diverges is treated as absent everywhere (not shown, not made
     actionable), and only ``verification_uri`` is used.
+
+    Native events carry display URLs that may have been truncated before Python
+    receives them. Even a same-origin, locally valid complete must match the
+    native ``browser_target`` exactly before becoming an actionable link.
     """
     safe_uri = _safe_target(_verification_uri(resp))
     safe_complete = _safe_target(_verification_uri_complete(resp))
     if (safe_complete is not None and safe_uri is not None
             and _same_origin(safe_complete, safe_uri)):
+        if _native_adjudicated(resp):
+            target = _verification_target(resp)
+            if target != safe_complete or target == safe_uri:
+                return None
         return safe_complete
     return None
 
@@ -676,14 +684,9 @@ def format_prompt(resp: Dict[str, Any]) -> str:
     # dropped rather than shown, so the convenience URL can't point somewhere the
     # primary link does not.
     #
-    # And drop it entirely when native adjudicated these URLs and refused to
-    # vet one: `browser_target` is None for a confusable IDNA host or a URL
-    # past the length cap, and Python's own _safe_target accepts A-labels that
-    # native rejects. The QR path already honours that verdict via
-    # _verification_target, so without this the same response yielded no QR but
-    # still printed the refused URL as an instruction to open -- and many
-    # terminals hyperlink it. The primary line above still shows the URL,
-    # IDNA-escaped and inert, because the user has no other way to sign in.
+    # For native events, _matched_complete also requires an exact match with
+    # browser_target: a truncated display URL may pass Python's origin check
+    # even though native refused to open the original complete URL.
     complete = (
         None if (_native_adjudicated(resp)
                  and _verification_target(resp) is None)
@@ -957,10 +960,9 @@ class JupyterRenderer(Renderer):
             f'<div style="font-size:1.6em;font-family:monospace;'
             f'letter-spacing:2px;margin:6px 0">{code}</div>',
         ]
-        # Offer the one-click "authorize directly" link only when the pre-filled
-        # complete shares the shown link's origin (see _matched_complete): a
-        # complete on a different host would silently send the click to the
-        # attacker while the primary link above still reads as the trusted host.
+        # Offer the one-click link only for a same-origin complete that native
+        # actually vetted (or for the pure-Python fallback without a native
+        # verdict). A shortened display URL must never become an href.
         #
         # Name the host in the label rather than using fixed text. Both URLs
         # come from the same identity-provider response, so an origin match

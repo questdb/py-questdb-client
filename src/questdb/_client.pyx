@@ -2380,15 +2380,17 @@ class ConnectionEventKind(TaggedEnum):
     #: :attr:`ConnectionEvent.host` and :attr:`ConnectionEvent.port` are always
     #: set, and the owning sender/pool operation raises. A listener may page,
     #: tear down the pool or exit on this without further qualification.
-    #:
-    #: A credential the client could not *obtain* is
-    #: :attr:`CredentialUnavailable`, never this.
+    #: A 401 followed by failure to obtain a replacement token is instead
+    #: :attr:`CredentialUnavailable`, which preserves the rejected endpoint
+    #: and retains the provider error's retry/stop classification.
     AuthFailed = ('auth_failed', questdb_connection_event_auth_failed)
-    #: An ``oidc_auth=`` token provider failed, so no credential was ever
-    #: offered and no endpoint was dialled.
+    #: An ``oidc_auth=`` token provider failed while acquiring a credential.
     #:
-    #: :attr:`ConnectionEvent.host` and :attr:`ConnectionEvent.port` are
-    #: ``None``. Read :attr:`ConnectionEvent.cause_code` to tell a retry from
+    #: Before the first dial, :attr:`ConnectionEvent.host` and
+    #: :attr:`ConnectionEvent.port` are ``None``. If the provider fails when
+    #: reacquiring a token after a server 401, they identify the endpoint that
+    #: rejected the previous token; :attr:`ConnectionEvent.cause_msg` includes
+    #: the 401. Read :attr:`ConnectionEvent.cause_code` to tell a retry from
     #: a stop:
     #:
     #: * ``SocketError`` — the ordinary case, and retryable. The sender keeps
