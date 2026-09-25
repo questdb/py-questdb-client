@@ -153,3 +153,36 @@
     python3 -m pip install -U questdb
     ```
   conf: http::addr=localhost:9000;
+- name: qwpws-column-types
+  lang: python
+  path: examples/qwp_column_types.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    Writes the QWP-only column types -- UUID, IPV4, BINARY, CHAR, DATE,
+    LONG256 and GEOHASH -- a row at a time. Needs QuestDB 10 or newer.
+
+    ```
+    python3 -m pip install -U questdb pandas
+    ```
+  addr:
+    host: localhost
+    port: 9000
+- name: qwpws-column-types-dataframe
+  lang: python
+  path: examples/qwp_column_types_dataframe.py
+  header: |-
+    Python client library [docs](https://py-questdb-client.readthedocs.io/en/latest/)
+    and [repo](https://github.com/questdb/py-questdb-client).
+
+    The same column types from a DataFrame, and the round trip that
+    keeps them: read a result back and write it out again without
+    restating a single type. Needs QuestDB 10 or newer.
+
+    ```
+    python3 -m pip install -U questdb pandas pyarrow
+    ```
+  addr:
+    host: localhost
+    port: 9000
