@@ -213,7 +213,13 @@ class HttpServer:
                         wait_ms, code, content_type, body = responses.pop(0)
                     except IndexError:
                         wait_ms, code, content_type, body = 0, 200, None, None
-                    time.sleep(wait_ms / 1000)
+                    if isinstance(wait_ms, threading.Event):
+                        # Allow timeout tests to hold the reply until the client
+                        # has timed out. The bound keeps a broken client from
+                        # hanging the suite indefinitely.
+                        wait_ms.wait(timeout=10)
+                    else:
+                        time.sleep(wait_ms / 1000)
                     self.send_response(code)
                     if content_type:
                         self.send_header('Content-Type', content_type)

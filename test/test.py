@@ -3827,12 +3827,17 @@ class TestBases:
                     request_min_throughput=0,  # disable
                     protocol_version=2,
                     request_timeout=datetime.timedelta(milliseconds=50)) as sender:
-                # Server waits 500ms before responding; the client should
-                # time out at 50ms, well before the response arrives.
-                server.responses.append((500, 200, 'text/plain', b'OK'))
+                # Keep the reply pending until the client times out. A fixed
+                # delay can race the client's timeout if the CI worker stalls
+                # between sending the request and reading the response.
+                response_gate = threading.Event()
+                server.responses.append((response_gate, 200, 'text/plain', b'OK'))
                 sender.row('tbl1', columns={'x': 42}, at=qi.ServerTimestamp)
-                with self.assertRaisesRegex(qi.QuestDBError, 'timeout: per call'):
-                    sender.flush()
+                try:
+                    with self.assertRaisesRegex(qi.QuestDBError, 'timeout: per call'):
+                        sender.flush()
+                finally:
+                    response_gate.set()
 
         def test_http_server_not_serve(self):
             with self.assertRaisesRegex(qi.QuestDBError, 'Could not detect server\'s line protocol version, settings url: http://127.0.0.1:1234/settings'):
