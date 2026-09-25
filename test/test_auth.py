@@ -6320,6 +6320,117 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
         self.assertIn('CHILD 1', out, out)
 
 
+@unittest.skipUnless(hasattr(os, 'fork'), 'os.fork required')
+class OidcForkSafetyTest(unittest.TestCase):
+    def test_inherited_provider_never_enters_a_locked_native_auth(self):
+        # Fork while the sign-in worker owns the native acquisition lock and
+        # waits on the IdP's HTTP response. An inherited close used to block
+        # forever waiting for that worker, which no longer exists in the child.
+        # Run in a subprocess AND bound the inner child: a regression must fail
+        # the test rather than hang the entire suite.
+        script = '''
+import gc, os, signal, threading, time, warnings
+from questdb import QuestDBErrorCode, _client
+from questdb.auth import OidcCancelledError, OidcConfigError, OidcDeviceAuth, Renderer
+from oidc_test_server import OidcTestServer
+
+entered, release = threading.Event(), threading.Event()
+with OidcTestServer() as server:
+    original = server._handle
+    def hold_device_response(handler):
+        if handler.path == '/device':
+            entered.set()
+            assert release.wait(20), 'device response was not released'
+        original(handler)
+    server._handle = hold_device_response
+    auth = OidcDeviceAuth.from_questdb(
+        server.url, renderer=Renderer(), interactive=True,
+        open_browser=False, timeout=30)
+    idle = OidcDeviceAuth(
+        'questdb', server.url + '/device', server.url + '/token',
+        interactive=False, open_browser=False)
+    idle_id = _client._debug_oidc_last_provider_id()
+    worker_error = []
+    def sign_in():
+        try:
+            auth.sign_in()
+        except OidcCancelledError:
+            pass
+        except BaseException as exc:
+            worker_error.append(exc)
+    worker = threading.Thread(target=sign_in, daemon=True)
+    worker.start()
+    assert entered.wait(5), 'sign-in never reached the blocked HTTP request'
+    read_fd, write_fd = os.pipe()
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', DeprecationWarning)
+        pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            for method in ('close', 'token', 'clear', 'cancel_sign_in', 'config'):
+                try:
+                    getattr(auth, method)() if method != 'config' else auth.config
+                except OidcConfigError as exc:
+                    assert exc.code == QuestDBErrorCode.ConfigError
+                    assert 'fork' in str(exc)
+                else:
+                    raise AssertionError(method + ' accepted an inherited auth')
+            # Inherited finalization must not call into the parent's native
+            # callback gates, even when the provider is otherwise idle.
+            del idle
+            gc.collect()
+            assert idle_id not in _client._debug_oidc_registry_snapshot()[1]
+            try:
+                OidcDeviceAuth(
+                    'questdb', server.url + '/device', server.url + '/token',
+                    interactive=False, open_browser=False)
+            except OidcConfigError as exc:
+                assert exc.code == QuestDBErrorCode.ConfigError
+                assert 'exec' in str(exc)
+            else:
+                raise AssertionError('new provider initialized after fork')
+            os.write(write_fd, b'OK')
+            os._exit(0)
+        except BaseException as exc:
+            os.write(write_fd, (type(exc).__name__ + ': ' + str(exc)).encode())
+            os._exit(1)
+    os.close(write_fd)
+    try:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                break
+            time.sleep(.02)
+        else:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            raise AssertionError('child hung using inherited OIDC provider')
+        result = os.read(read_fd, 4096)
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (status, result)
+        assert result == b'OK', result
+    finally:
+        os.close(read_fd)
+        release.set()
+        auth.cancel_sign_in()
+        worker.join(5)
+        assert not worker.is_alive()
+        assert not worker_error, worker_error
+        auth.close()
+        idle.close()
+'''
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [os.path.dirname(os.path.abspath(__file__)),
+             os.path.dirname(os.path.dirname(os.path.abspath(questdb.__file__)))]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        proc = subprocess.run(
+            [sys.executable, '-c', script], env=env,
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+
 class OidcApiContractTest(unittest.TestCase):
     def test_concurrent_sign_in_reports_invalid_api_call(self):
         # A second sign_in() while one runs is a busy refusal, not a terminal

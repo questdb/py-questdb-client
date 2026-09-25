@@ -68,6 +68,7 @@ from test_auth import (
     NativeTransportAttachmentTest,
     OidcApiContractTest,
     OidcDiagnosticSignalTest,
+    OidcForkSafetyTest,
     OidcPoolDataframeFailoverTest,
     OidcReviewFixTest,
     ProviderCycleSafetyTest,

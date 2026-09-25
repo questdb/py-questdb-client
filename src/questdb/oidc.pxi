@@ -229,7 +229,11 @@ def _oidc_after_fork_in_child():
     """
     global _OIDC_MAIN_THREAD_IDENT, _OIDC_MAIN_PARKED
     global _OIDC_MAIN_PARK_SCHEDULED, _OIDC_MAIN_DIAGNOSTIC_DEPTH
+    global _OIDC_REGISTRY_LOCK
     cdef unsigned long current = questdb_thread_ident()
+    # The registry lock may have been held by a parent thread that disappeared.
+    # Keep its entries, but never try to acquire the inherited lock in a child.
+    _OIDC_REGISTRY_LOCK = threading.RLock()
     if current == _OIDC_MAIN_THREAD_IDENT:
         return
     _OIDC_MAIN_THREAD_IDENT = current
@@ -429,7 +433,7 @@ cdef void _oidc_detach_handle_callbacks(
     forms because the provider has not yet been exposed.
     """
     cdef PyThreadState* gs = NULL
-    if handle is None or handle.raw == NULL:
+    if handle is None or handle.raw == NULL or handle.pid != os.getpid():
         return
     _ensure_doesnt_have_gil(&gs)
     if wait_for_events:
@@ -908,7 +912,7 @@ cdef void _oidc_cancel_sign_in_from_callback(
     cdef questdb_error* err = NULL
     cdef bint ok
     cdef PyThreadState* gs = NULL
-    if provider._raw == NULL:
+    if provider._raw == NULL or provider._pid != os.getpid():
         return
     _ensure_doesnt_have_gil(&gs)
     ok = questdb_oidc_auth_cancel_sign_in(provider._raw, &err)
@@ -1409,9 +1413,11 @@ cdef class _OidcNativeHandle:
     """Registry-owned leaf that releases one native auth handle."""
 
     cdef questdb_oidc_auth* raw
+    cdef size_t pid
 
     def __cinit__(self):
         self.raw = NULL
+        self.pid = os.getpid()
 
     def __dealloc__(self):
         cdef questdb_oidc_auth* raw = self.raw
@@ -1419,6 +1425,13 @@ cdef class _OidcNativeHandle:
         if raw == NULL:
             return
         self.raw = NULL
+        # The copy in a child may contain locks owned by vanished parent
+        # threads. Discard this Python reference, never detach or free native.
+        try:
+            if self.pid != os.getpid():
+                return
+        except BaseException:
+            return
         # Reaching here means the provider that owned this handle has been
         # collected, so nothing in Python can close it any more -- but a
         # cancelled token-acquisition worker, which Rust starts detached and
@@ -1462,7 +1475,13 @@ cdef class _OidcNativeHandle:
 
 
 cdef class OidcDeviceAuth:
-    """Native-backed OAuth 2.0 device-flow token provider for QuestDB."""
+    """Native-backed OAuth 2.0 device-flow token provider for QuestDB.
+
+    An instance inherited across ``fork()`` cannot be used or closed in the
+    child: its native locks may belong to parent threads that no longer exist.
+    After OIDC was used in the parent, even creating a new provider in that
+    child is unsafe. Use ``fork()`` followed by ``exec()`` to start fresh.
+    """
 
     cdef object __weakref__
     # The owner of the native handle. Holding it here -- rather than letting
@@ -1485,6 +1504,7 @@ cdef class OidcDeviceAuth:
     # reference above is the ownership.
     cdef questdb_oidc_auth* _raw
     cdef size_t _provider_id
+    cdef size_t _pid
     cdef object _renderer
     cdef bint _closed
     # A KeyboardInterrupt/SystemExit delivered inside a renderer callback,
@@ -1499,6 +1519,7 @@ cdef class OidcDeviceAuth:
     cdef bint _opens_browser
 
     def __cinit__(self):
+        self._pid = os.getpid()
         self._native = None
         self._raw = NULL
         self._provider_id = 0
@@ -1508,7 +1529,21 @@ cdef class OidcDeviceAuth:
         self._sign_in_lock = threading.Lock()
         self._opens_browser = False
 
+    cdef void _require_same_process(self) except *:
+        if self._pid != os.getpid():
+            message = ('This OIDC provider was inherited across fork and '
+                       'cannot be reused; exec a fresh process before '
+                       'creating a new provider.')
+            # Never import in a forked child: another parent thread may have
+            # been importing this module while fork ran. Use the typed class
+            # when already available, and the same ConfigError code otherwise.
+            errors = _oidc_errors_module_if_ready()
+            if errors is not None:
+                raise errors.OidcConfigError(message)
+            raise QuestDBError(QuestDBErrorCode.ConfigError, message)
+
     cdef void _require_open(self) except *:
+        self._require_same_process()
         if self._raw == NULL:
             # Never __init__'d (e.g. cls.__new__ without construction) -- not
             # the same state as closed, which is reported below.
@@ -1605,6 +1640,7 @@ cdef class OidcDeviceAuth:
           ``None``.
         """
         cdef questdb_oidc_builder* builder
+        self._require_same_process()
         _oidc_validate_bool(groups_in_token, 'groups_in_token', False)
         _oidc_validate_bool(insecure, 'insecure', False)
         _oidc_validate_bool(open_browser, 'open_browser', True)
@@ -1772,6 +1808,7 @@ cdef class OidcDeviceAuth:
         from questdb.auth._store import FileTokenStore
 
         if self._raw != NULL:
+            self._require_same_process()
             raise OidcConfigError('OidcDeviceAuth is already initialized')
         if groups_in_token is not None and not questdb_oidc_builder_groups_in_token(
                 builder, groups_in_token is True, &err):
@@ -2068,6 +2105,7 @@ cdef class OidcDeviceAuth:
         cdef questdb_error* err = NULL
         cdef bint ok
         cdef PyThreadState* gs = NULL
+        self._require_same_process()
         if self._raw == NULL:
             return
         _ensure_doesnt_have_gil(&gs)
@@ -2159,6 +2197,7 @@ cdef class OidcDeviceAuth:
         cdef bint ok
         cdef PyThreadState* gs = NULL
         cdef _OidcForegroundCall call
+        self._require_same_process()
         if self._raw == NULL:
             return
         call = _oidc_foreground_enter(None)
@@ -2212,6 +2251,7 @@ cdef class OidcDeviceAuth:
         cdef questdb_error* err = NULL
         cdef bint ok
         cdef PyThreadState* gs = NULL
+        self._require_same_process()
         if self._raw == NULL:
             self._closed = True
             self._renderer = None
@@ -2259,6 +2299,7 @@ cdef class OidcDeviceAuth:
         only on a provider that was never initialized.
         """
         cdef questdb_oidc_config_view view
+        self._require_same_process()
         from questdb.auth._config import OidcConfig
         if self._raw == NULL:
             raise RuntimeError('OidcDeviceAuth is not initialized')
