@@ -6359,7 +6359,9 @@ class OidcForkSafetyTest(unittest.TestCase):
         # Run in a subprocess AND bound the inner child: a regression must fail
         # the test rather than hang the entire suite.
         script = '''
-import gc, os, signal, threading, time, warnings
+import faulthandler, gc, os, signal, threading, time, warnings
+faulthandler.enable(all_threads=True)
+faulthandler.dump_traceback_later(8, repeat=True)
 from questdb import QuestDBErrorCode, _client
 from questdb.auth import OidcCancelledError, OidcConfigError, OidcDeviceAuth, Renderer
 from oidc_test_server import OidcTestServer
@@ -6391,11 +6393,13 @@ with OidcTestServer() as server:
     worker = threading.Thread(target=sign_in, daemon=True)
     worker.start()
     assert entered.wait(5), 'sign-in never reached the blocked HTTP request'
+    os.write(2, b'fork-test: device request blocked; forking\\n')
     read_fd, write_fd = os.pipe()
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', DeprecationWarning)
         pid = os.fork()
     if pid == 0:
+        os.write(2, b'fork-test: child after fork\\n')
         os.close(read_fd)
         try:
             for method in ('close', 'token', 'clear', 'cancel_sign_in', 'config'):
@@ -6425,6 +6429,7 @@ with OidcTestServer() as server:
         except BaseException as exc:
             os.write(write_fd, (type(exc).__name__ + ': ' + str(exc)).encode())
             os._exit(1)
+    os.write(2, b'fork-test: parent after fork\\n')
     os.close(write_fd)
     try:
         deadline = time.monotonic() + 3
@@ -6441,6 +6446,7 @@ with OidcTestServer() as server:
         assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (status, result)
         assert result == b'OK', result
     finally:
+        os.write(2, b'fork-test: parent cleanup\\n')
         os.close(read_fd)
         release.set()
         auth.cancel_sign_in()
@@ -6449,15 +6455,22 @@ with OidcTestServer() as server:
         assert not worker_error, worker_error
         auth.close()
         idle.close()
+        os.write(2, b'fork-test: cleanup complete\\n')
 '''
         env = dict(os.environ)
         env['PYTHONPATH'] = os.pathsep.join(
             [os.path.dirname(os.path.abspath(__file__)),
              os.path.dirname(os.path.dirname(os.path.abspath(questdb.__file__)))]
             + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
-        proc = subprocess.run(
-            [sys.executable, '-c', script], env=env,
-            capture_output=True, text=True, timeout=30)
+        try:
+            proc = subprocess.run(
+                [sys.executable, '-c', script], env=env,
+                capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired as exc:
+            stderr = exc.stderr or b''
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode('utf-8', 'replace')
+            self.fail(f'fork-safety subprocess timed out; stderr:\n{stderr}')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
 
