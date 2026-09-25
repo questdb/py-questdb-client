@@ -307,6 +307,11 @@ or from ``host=`` / ``pg_port=``. A destination in the driver passthrough
 ``connect_args`` / ``connect_kwargs``) is rejected with ``OidcConfigError``
 before any token is acquired, because the token is a bearer credential and
 SQLAlchemy applies ``connect_args`` *after* the arguments built from that URL.
+For libpq drivers, the adapters also pass an explicitly empty ``hostaddr``:
+libpq otherwise uses an inherited ``PGHOSTADDR`` even when ``host`` is set,
+and could send the bearer password to that address. Empty ``hostaddr`` keeps
+normal hostname resolution while overriding the environment variable on every
+physical connection, including connections created after an engine is built.
 A ``do_connect`` listener registered ahead of the adapter must also leave
 ``host`` and ``port`` in the driver's keyword arguments and supply no positional
 connection arguments; the adapter refuses to attach a token if it cannot verify

@@ -39,7 +39,9 @@ control.
 ``verify-full`` needs a trust root, and libpq does not consult the operating
 system's certificate store by default: without ``sslrootcert`` (a CA file, or
 ``"system"`` on libpq 16+), ``PGSSLROOTCERT`` or ``~/.postgresql/root.crt`` the
-connection fails with ``root certificate file ... does not exist``.
+connection fails with ``root certificate file ... does not exist``. Libpq
+connections explicitly set an empty ``hostaddr`` so an inherited ``PGHOSTADDR``
+cannot redirect the token away from the validated host.
 """
 
 from __future__ import annotations
@@ -310,6 +312,11 @@ def _is_numeric_loopback_host(host: str) -> bool:
 _LIBPQ_DRIVERS = frozenset(('psycopg', 'psycopg2', 'psycopg2cffi'))
 
 
+def _is_libpq_driver(drivername: str) -> bool:
+    dialect, _, driver = drivername.partition('+')
+    return dialect == 'postgresql' and (not driver or driver in _LIBPQ_DRIVERS)
+
+
 def _require_libpq_driver(drivername: str) -> None:
     """Refuse a non-libpq driver while an ``sslmode`` would be injected.
 
@@ -317,8 +324,7 @@ def _require_libpq_driver(drivername: str) -> None:
     every connection with a bare ``TypeError``, and has its own TLS setting,
     so the adapter cannot enforce its TLS default there.
     """
-    _, _, driver = drivername.partition('+')
-    if not driver or driver in _LIBPQ_DRIVERS:
+    if _is_libpq_driver(drivername):
         return
     raise OidcConfigError(
         f'drivername {drivername!r} is not a libpq driver, so it does not '
@@ -386,7 +392,8 @@ def sqlalchemy_engine(
         always wins. ``verify-full`` needs a trust root: pass
         ``connect_args={"sslrootcert": ...}`` (a CA file, or ``"system"`` on
         libpq 16+) unless ``PGSSLROOTCERT`` or ``~/.postgresql/root.crt``
-        provides one.
+        provides one. Libpq ``PGHOSTADDR`` is ignored: the adapter supplies an
+        empty ``hostaddr`` to keep the dial on the validated host.
     :param engine_kwargs: Forwarded to ``create_engine``. ``connect_args`` must
         not carry a connection *destination* (``host``, ``hostaddr``, ``port``,
         ``service``, ``dsn``, ``conninfo``): SQLAlchemy merges ``connect_args``
@@ -432,6 +439,7 @@ def sqlalchemy_engine(
             else 'postgresql+psycopg2')
     elif sslmode is not None:
         _require_libpq_driver(drivername)
+    uses_libpq = _is_libpq_driver(drivername)
 
     engine = create_engine(
         URL.create(
@@ -449,6 +457,13 @@ def sqlalchemy_engine(
         # neither a passthrough nor an earlier do_connect listener can turn a
         # validated destination into an unvetted one.
         _require_expected_destination(cargs, cparams, resolved_host, pg_port)
+        if uses_libpq:
+            # An explicit empty value suppresses libpq's PGHOSTADDR default
+            # while still resolving the validated host normally. Do this on
+            # every physical connect: the environment can change after the
+            # engine is constructed, and loopback's sslmode=prefer would send
+            # the bearer password in clear to an environment-selected peer.
+            cparams['hostaddr'] = ''
         # Non-interactive: reuse / silently refresh the up-front token, but never
         # run an interactive device flow from a pool thread (it would block the
         # pool). Raises OidcInteractionRequired if no token was acquired first.
@@ -498,6 +513,8 @@ def psycopg_connect(
         ``connect_kwargs`` always wins. ``verify-full`` needs a trust root:
         pass ``sslrootcert=...`` (a CA file, or ``"system"`` on libpq 16+)
         unless ``PGSSLROOTCERT`` or ``~/.postgresql/root.crt`` provides one.
+        Libpq ``PGHOSTADDR`` is ignored: the adapter supplies an empty
+        ``hostaddr`` to keep the dial on the validated host.
     :param connect_kwargs: Forwarded to the driver's ``connect()``. As with
         :func:`sqlalchemy_engine`, a connection *destination* (``host``,
         ``hostaddr``, ``port``, ``service``, ``dsn``, ``conninfo``) is rejected:
@@ -526,6 +543,7 @@ def psycopg_connect(
         connect_kwargs.setdefault('sslmode', sslmode)
     return mod.connect(
         host=resolved_host,
+        hostaddr='',  # Override PGHOSTADDR, but let libpq resolve host itself.
         port=pg_port,
         dbname=database,
         user='_sso',

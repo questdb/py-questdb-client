@@ -242,6 +242,9 @@ Highlights:
   ``OidcConfigError`` before any token is acquired, because the token is a
   bearer credential and SQLAlchemy merges ``connect_args`` over the arguments
   built from the validated URL. Pass ``host=`` / ``pg_port=`` instead.
+  Libpq connections explicitly pass an empty ``hostaddr`` to suppress an
+  inherited ``PGHOSTADDR`` that could otherwise redirect the bearer password
+  despite the validated ``host``. This is applied on every pooled connection.
   ``sqlalchemy_engine`` accepts a non-libpq ``drivername`` (``pg8000``, say)
   only with ``sslmode=None``, since such a driver takes no ``sslmode``.
 * :meth:`~questdb.auth.OidcDeviceAuth.close` permanently closes a provider and

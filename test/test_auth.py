@@ -5074,6 +5074,7 @@ class AdapterTest(unittest.TestCase):
             dbname='qdb',
             user='_sso',
             password='TOKEN',
+            hostaddr='',  # Mask PGHOSTADDR without bypassing hostname lookup.
             # The token IS the password, so it must not reach the wire in the
             # clear or to an unauthenticated remote server.
             sslmode='verify-full')
@@ -5103,6 +5104,7 @@ class AdapterTest(unittest.TestCase):
             _adapters.psycopg_connect(
                 auth, 'https://questdb.example.com:9000', sslmode=None)
         self.assertNotIn('sslmode', driver.connect.call_args.kwargs)
+        self.assertEqual(driver.connect.call_args.kwargs['hostaddr'], '')
 
     def test_adapters_require_tls_for_localhost_names(self):
         for url in (
@@ -5330,7 +5332,9 @@ class AdapterTest(unittest.TestCase):
                 ([], {'port': 8812}),
                 ([], {'host': 'questdb.example.com'}),
                 (['host=other.example port=5432'], {
-                    'host': 'questdb.example.com', 'port': 8812})):
+                    'host': 'questdb.example.com', 'port': 8812}),
+                ([], {'host': 'questdb.example.com', 'port': 8812,
+                      'hostaddr': '127.0.0.1'})):
             with self.subTest(cargs=cargs, cparams=cparams):
                 with self.assertRaisesRegex(
                         OidcConfigError, 'refusing to send the OIDC token'):
@@ -5342,6 +5346,7 @@ class AdapterTest(unittest.TestCase):
         expected = {'host': 'questdb.example.com', 'port': 8812}
         listener(None, None, [], expected)
         self.assertEqual(expected['password'], 'SECRET-BEARER')
+        self.assertEqual(expected['hostaddr'], '')
 
     def test_sqlalchemy_rejects_unsafe_url_before_token_or_engine(self):
         sqlalchemy = types.ModuleType('sqlalchemy')
@@ -5406,6 +5411,7 @@ class AdapterTest(unittest.TestCase):
         returned.listeners['do_connect'](None, None, [], params)
         self.assertEqual(params['password'], 'SECRET-BEARER')
         self.assertNotIn('sslmode', params)
+        self.assertNotIn('hostaddr', params)  # pg8000 is not libpq.
 
 
 # A JWT (unsigned; native does not verify) whose payload carries only `sub`.
@@ -5486,6 +5492,65 @@ class AdapterRealDriverTest(unittest.TestCase):
         # sslmode "auto" on a numeric loopback resolves to "prefer": TLS is
         # attempted first, then plaintext is accepted.
         self.assertIn('ssl', login['encryption_requests'])
+
+    def test_libpq_environment_hostaddr_cannot_redirect_the_token(self):
+        # host= does not override PGHOSTADDR: libpq dials the latter while the
+        # adapter validates the former. A numeric loopback host permits
+        # plaintext, so this used to send the bearer password to this other
+        # listener after it declined TLS. Construct the engine before setting
+        # the environment: pooled connections must be protected at connect time.
+        import psycopg
+        import sqlalchemy.exc
+        url = 'http://127.0.0.2:9000'
+        with pg_capture_server.PgCaptureServer() as other:
+            for sslmode in ('auto', None):
+                with self.subTest(sslmode=sslmode):
+                    auth = _TokenSequence('DIRECT-SECRET', 'POOLED-SECRET')
+                    engine = sqlalchemy_engine(
+                        auth, url, pg_port=other.port, sslmode=sslmode,
+                        connect_args={'connect_timeout': 1})
+                    try:
+                        # Even if TLS is managed by libpq's environment, its
+                        # destination must still come from the validated URL.
+                        with mock.patch.dict(os.environ, {
+                                'PGHOSTADDR': '127.0.0.1',
+                                'PGSSLMODE': 'prefer'}):
+                            with self.assertRaises((
+                                    psycopg.OperationalError,
+                                    sqlalchemy.exc.OperationalError,
+                                    OidcConfigError)):
+                                psycopg_connect(
+                                    auth, url, pg_port=other.port,
+                                    sslmode=sslmode, connect_timeout=1)
+                            with self.assertRaises((
+                                    psycopg.OperationalError,
+                                    sqlalchemy.exc.OperationalError,
+                                    OidcConfigError)):
+                                engine.connect()
+                    finally:
+                        engine.dispose()
+        self.assertEqual(other.errors, [])
+        self.assertEqual(other.logins, [], 'token sent to PGHOSTADDR peer')
+
+    def test_libpq_environment_hostaddr_does_not_block_the_vetted_peer(self):
+        # An inherited address must not redirect the dial or prevent normal
+        # connections when the validated numeric host itself is reachable.
+        auth = _TokenSequence('DIRECT-SECRET', 'POOLED-SECRET')
+        with pg_capture_server.PgCaptureServer() as pg, \
+                mock.patch.dict(os.environ, {'PGHOSTADDR': '127.0.0.2'}):
+            self._refused(lambda: psycopg_connect(
+                auth, self.URL, pg_port=pg.port, connect_timeout=1))
+            engine = sqlalchemy_engine(
+                auth, self.URL, pg_port=pg.port,
+                connect_args={'connect_timeout': 1})
+            try:
+                self._refused(engine.connect)
+            finally:
+                engine.dispose()
+        self.assertEqual(pg.errors, [])
+        self.assertEqual(
+            [login['password'] for login in pg.logins],
+            ['DIRECT-SECRET', 'POOLED-SECRET'])
 
     def test_sqlalchemy_engine_injects_a_fresh_token_per_connection(self):
         from sqlalchemy.pool import NullPool
