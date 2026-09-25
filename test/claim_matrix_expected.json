@@ -1460,13 +1460,13 @@
   "error": null
  },
  "ipv4 | arrow/int | geohash(20b) | arrow": {
-  "wire_type": "LONG",
-  "notices": 1,
+  "wire_type": "GEOHASH",
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/int | geohash(20b) | numpy": {
-  "wire_type": "LONG",
-  "notices": 1,
+  "wire_type": "GEOHASH",
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/int | geohash(60b) | arrow": {
@@ -1550,13 +1550,13 @@
   "error": null
  },
  "ipv4 | arrow/native | geohash(20b) | arrow": {
-  "wire_type": "LONG",
-  "notices": 1,
+  "wire_type": "GEOHASH",
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/native | geohash(20b) | numpy": {
-  "wire_type": "LONG",
-  "notices": 1,
+  "wire_type": "GEOHASH",
+  "notices": 0,
   "error": null
  },
  "ipv4 | arrow/native | geohash(60b) | arrow": {
@@ -1640,13 +1640,13 @@
   "error": null
  },
  "ipv4 | numpy/int | geohash(20b) | arrow": {
-  "wire_type": "LONG",
-  "notices": 1,
+  "wire_type": "GEOHASH",
+  "notices": 0,
   "error": null
  },
  "ipv4 | numpy/int | geohash(20b) | numpy": {
-  "wire_type": "LONG",
-  "notices": 1,
+  "wire_type": "GEOHASH",
+  "notices": 0,
   "error": null
  },
  "ipv4 | numpy/int | geohash(60b) | arrow": {

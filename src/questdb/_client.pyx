@@ -5537,11 +5537,11 @@ cdef int _geohash_override_dtype(col_source_t source) noexcept:
     ``_GEOHASH_DTYPE_NONE`` for anything else.
 
     A GEOHASH rides on a signed integer: `qwp_numpy_dtype` names only
-    signed geohash slots, and the native Arrow importer refuses an
-    unsigned column outright, so an unsigned column is one no planner
-    can carry the kind on. It gets its own answer because that is a
-    claim guaranteed to do nothing, which is worth saying out loud
-    rather than dropping in silence.
+    signed geohash slots. An unsigned column whose claim fits its width
+    has already been given the signed type of the same width by
+    `_dataframe_reinterpret_unsigned_geohash`, so an unsigned column
+    here holds a claim wider than it can carry. It gets its own answer
+    so that the dropped claim is reported rather than left silent.
     """
     if (source == col_source_t.col_source_u8_numpy
             or source == col_source_t.col_source_u16_numpy
@@ -5722,6 +5722,102 @@ cdef object _claimed_arrow_col_reshape_dtype(
     # LONG256 is a 32-byte fixed binary, a width NumPy has no integer
     # dtype for, so object is the only shape left.
     return object
+
+
+cdef int _geohash_slot_for_width(Py_ssize_t width) noexcept:
+    """The signed GEOHASH slot of this many bytes, or
+    ``_GEOHASH_DTYPE_NONE``."""
+    if width == 1:
+        return <int>qwp_numpy_dtype.qwp_numpy_geohash_i8
+    if width == 2:
+        return <int>qwp_numpy_dtype.qwp_numpy_geohash_i16
+    if width == 4:
+        return <int>qwp_numpy_dtype.qwp_numpy_geohash_i32
+    if width == 8:
+        return <int>qwp_numpy_dtype.qwp_numpy_geohash_i64
+    return _GEOHASH_DTYPE_NONE
+
+
+cdef object _dataframe_reinterpret_unsigned_geohash(
+        object df, object schema_overrides):
+    """Copies of the unsigned integer columns claimed as GEOHASH, as the
+    signed integer of the same width holding the same bits.
+
+    A frame saved from version 5.0 of this client holds a GEOHASH column
+    as an unsigned NumPy integer, since that is what its plain
+    `to_pandas()` returned, and `convert_dtypes(dtype_backend='pyarrow')`
+    turns such a column into an unsigned Arrow one. Both write routes
+    carry a GEOHASH only on a signed integer, and the native Arrow
+    importer refuses an unsigned column outright, so these columns are
+    given the signed type before either route looks at the frame. A
+    GEOHASH value is its bit pattern, so the server receives exactly the
+    bits the unsigned column held.
+
+    Only a claim the column's width can carry is taken this way. A
+    column whose claim is dropped goes out as its own type, so its
+    values have to stay as they are. A column named in
+    `schema_overrides` is left alone too: the override outranks the
+    claim, and the type it names has to fit the column's own dtype.
+    """
+    cdef object cols_meta, arrow_dtype, dtype, meta, bits, ty, col
+    cdef object signed_ty, chunked, out
+    cdef list convert
+    cdef Py_ssize_t width
+    cdef int slot
+    if not _is_pandas_dataframe_object(df):
+        return df
+    cols_meta = _roundtrip_columns_meta(df)
+    if not cols_meta:
+        return df
+    _dataframe_may_import_deps()
+    arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
+    convert = []
+    # Walked by position rather than by label: `dtypes[name]` on a frame
+    # with duplicate column names hands back a Series, not a dtype.
+    for pos, (name, dtype) in enumerate(zip(df.columns, df.dtypes)):
+        meta = cols_meta.get(name)
+        if _roundtrip_kind(meta) != 'geohash':
+            continue
+        if schema_overrides and name in schema_overrides:
+            continue
+        if arrow_dtype is not None and isinstance(dtype, arrow_dtype):
+            if not _dataframe_try_import_pyarrow():
+                continue
+            ty = dtype.pyarrow_dtype
+            if not _PYARROW.types.is_unsigned_integer(ty):
+                continue
+            width = ty.bit_width // 8
+        elif isinstance(dtype, numpy.dtype) and dtype.kind == 'u':
+            width = dtype.itemsize
+        else:
+            continue
+        slot = _geohash_slot_for_width(width)
+        bits = meta.get('precision_bits') or 0
+        if (slot == _GEOHASH_DTYPE_NONE
+                or not _is_integral_not_bool(bits)
+                or not 1 <= int(bits) <= _geohash_dtype_max_bits(slot)):
+            continue
+        convert.append((pos, width))
+    if not convert:
+        return df
+    out = df.copy(deep=False)
+    for pos, width in convert:
+        col = df.iloc[:, pos]
+        if arrow_dtype is not None and isinstance(col.dtype, arrow_dtype):
+            signed_ty = _PYARROW.int8() if width == 1 else (
+                _PYARROW.int16() if width == 2 else (
+                    _PYARROW.int32() if width == 4 else _PYARROW.int64()))
+            chunked = col.array.__arrow_array__()
+            _dataframe_set_column(
+                out, df, pos,
+                _PANDAS.arrays.ArrowExtensionArray(_PYARROW.chunked_array(
+                    [chunk.view(signed_ty) for chunk in chunked.chunks],
+                    type=signed_ty)))
+        else:
+            _dataframe_set_column(
+                out, df, pos, col.to_numpy().view(f'int{width * 8}'))
+    out.attrs = dict(df.attrs)
+    return out
 
 
 cdef object _dataframe_normalize_claimed_arrow(object df):
@@ -5932,9 +6028,9 @@ cdef _log_roundtrip_claim_dropped(object name, str kind, object shape):
     A claim quietly doing nothing is also how a column reaches the
     database as the wrong type, though, and the two are indistinguishable
     from the outside. Drift is the case the silence is for; a type that
-    can never carry the kind -- an unsigned integer under ``geohash``,
-    say, which the native Arrow importer only accepts signed -- is a
-    mistake the caller wants to hear about. Naming the claim and the type
+    can never carry the kind -- a float under ``geohash``, say, or a
+    16-bit integer claimed at 20 bits -- is a mistake the caller wants
+    to hear about. Naming the claim and the type
     that turned it away tells them apart without failing either.
     """
     # A stale claim does not invalidate the frame. Unlike the naive-datetime
@@ -7870,6 +7966,9 @@ cdef void_int _direct_dataframe_run(
             'row (TimestampNanos / datetime), or the explicit '
             '`ServerTimestamp` sentinel to let the server assign each '
             'row\'s timestamp on arrival.')
+    # Ahead of the choice between the Arrow and the NumPy route, so both
+    # see the same signed GEOHASH columns.
+    df = _dataframe_reinterpret_unsigned_geohash(df, schema_overrides)
     # A zero budget (standalone from-conf source) makes a single attempt:
     # a transient failure surfaces immediately rather than re-dialling.
     deadline = time.monotonic() + reconnect_max_s
@@ -8671,11 +8770,14 @@ cdef class QuestDB:
         behind: Python ints, which is what a pandas masked column becomes
         and what plain ``to_pandas()`` returns a LONG256 as, and
         ``bytes``, which is how ``dtype_backend='numpy_nullable'``
-        returns UUID and LONG256. A frame whose columns were retyped
-        past that set — which a custom ``types_mapper`` can do — keeps
-        the claim in ``attrs`` and cannot use it: a claimed column that
-        arrives as a float or a string dtype lands as that dtype
-        implies, and the claim it could not use is reported as a
+        returns UUID and LONG256. Frames saved from version 5.0, whose
+        plain ``to_pandas()`` returned a GEOHASH column as an unsigned
+        integer, round-trip too: such a column is written as the signed
+        integer of the same width, bit for bit. A frame whose columns
+        were retyped past that set — which a custom ``types_mapper`` can
+        do — keeps the claim in ``attrs`` and cannot use it: a claimed
+        column that arrives as a float or a string dtype lands as that
+        dtype implies, and the claim it could not use is reported as a
         warning-level record on the ``questdb`` logger. An object column
         states no width or range of its own, so a claimed value the type
         cannot hold — an integer past ``2**32-1`` under ``ipv4``, a cell

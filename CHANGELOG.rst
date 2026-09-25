@@ -68,11 +68,11 @@ Breaking changes
 - **``to_pandas()`` returns a GEOHASH column as a signed integer**, sized by
   the column's precision: ``int8`` up to 7 bits, ``int16`` to 15, ``int32``
   to 31, ``int64`` to 60. This matches what ``to_arrow()`` and
-  ``to_pandas(dtype_backend='pyarrow')`` already give you, and signed is the
-  only form that can carry a claim back in — so a GEOHASH column now
-  survives a read-modify-write round trip on every backend, including after
-  ``df.convert_dtypes(dtype_backend='pyarrow')``. Code that reads the dtype
-  of a GEOHASH column will see a signed type where it saw an unsigned one.
+  ``to_pandas(dtype_backend='pyarrow')`` already give you. Code that reads
+  the dtype of a GEOHASH column will see a signed type where it saw an
+  unsigned one. Writing a frame back keeps the column GEOHASH either way,
+  so frames saved from 5.0 still write back as GEOHASH, including after
+  ``df.convert_dtypes(dtype_backend='pyarrow')``.
 
 - **DECIMAL now requires CPython.** Writing a DECIMAL reinterprets the
   memory of a ``decimal.Decimal`` using the layout CPython's ``_decimal``
@@ -447,7 +447,7 @@ Fixed
 - **A claim the column's type can never carry is now logged.** The write still
   goes ahead as the column's own type implies — a frame retyped since you
   read it must not fail on that account — but a claim guaranteed to do
-  nothing, such as an unsigned integer under ``geohash``, is a mistake
+  nothing, such as a float column under ``geohash``, is a mistake
   rather than drift, and the two were indistinguishable in silence. A claim
   the column does carry, and one whose column has gone, stay quiet.
 

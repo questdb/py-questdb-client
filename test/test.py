@@ -4685,18 +4685,17 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
         The write still goes ahead as the column's own type implies --
         a claim is a recollection, and a frame retyped since it was read
-        must not fail on that account. But an unsigned integer can never
-        carry a ``geohash``: the native Arrow importer takes the claim on
-        a signed column only, so the claim is guaranteed to do nothing.
-        That is a mistake rather than drift, and the two are
+        must not fail on that account. But a 16-bit integer can never
+        carry a 20-bit ``geohash``, so the claim is guaranteed to do
+        nothing. That is a mistake rather than drift, and the two are
         indistinguishable unless the write says which claim it dropped.
         """
         shapes = (
-            ('arrow-backed frame', pd.ArrowDtype(pyarrow.uint32()), False),
+            ('arrow-backed frame', pd.ArrowDtype(pyarrow.int16()), False),
             ('arrow column, mixed frame',
-             pd.ArrowDtype(pyarrow.uint32()), True),
-            ('numpy column', np.dtype(np.uint32), False),
-            ('numpy column, mixed frame', np.dtype(np.uint32), True),
+             pd.ArrowDtype(pyarrow.int16()), True),
+            ('numpy column', np.dtype(np.int16), False),
+            ('numpy column, mixed frame', np.dtype(np.int16), True),
         )
         for label, dtype, mixed in shapes:
             with self.subTest(shape=label):
@@ -4713,7 +4712,76 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 self.assertEqual(len(said), 1, said)
                 self.assertIn("column 'gh'", said[0])
                 self.assertIn("'geohash'", said[0])
-                self.assertIn('uint32', said[0])
+                self.assertIn('int16', said[0])
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_unsigned_geohash_from_version_5_writes_back_as_geohash(self):
+        """Version 5.0's plain `to_pandas()` returned a GEOHASH column as
+        an unsigned NumPy integer, so a frame saved from it holds one
+        under a GEOHASH claim, and `convert_dtypes(dtype_backend=
+        'pyarrow')` turns it into an unsigned Arrow column. Every such
+        shape writes exactly the bytes of the signed column of the same
+        width holding the same bits, and logs nothing, since the claim
+        is carried. The caller's frame keeps its own dtype."""
+        widths = (
+            (np.uint8, np.int8, pyarrow.uint8(), 8, [200, 5]),
+            (np.uint16, np.int16, pyarrow.uint16(), 16, [60000, 5]),
+            (np.uint32, np.int32, pyarrow.uint32(), 30, [123456789, 5]),
+            (np.uint64, np.int64, pyarrow.uint64(), 60, [(1 << 59) + 3, 5]),
+        )
+        for unsigned, signed, arrow_unsigned, bits, values in widths:
+            same_bits = [
+                int(v) for v in np.array(values, dtype=unsigned).view(signed)]
+            for arrow in (False, True):
+                if arrow:
+                    dtype = pd.ArrowDtype(arrow_unsigned)
+                    signed_dtype = pd.ArrowDtype(
+                        pyarrow.from_numpy_dtype(signed))
+                    # An Arrow column can hold a null; its validity
+                    # travels with the bits.
+                    column, reference = values + [None], same_bits + [None]
+                else:
+                    dtype = np.dtype(unsigned)
+                    signed_dtype = np.dtype(signed)
+                    column, reference = values, same_bits
+                for mixed in (False, True):
+                    with self.subTest(dtype=str(dtype), mixed=mixed):
+                        frame = self._geohash_frame(
+                            column, dtype, bits, mixed=mixed)
+                        with self.assertNoLogs('questdb', level='WARNING'):
+                            payload = self._dataframe_wire_payload(
+                                frame, table_name='geo_unsigned', at='ts')
+                        self.assertEqual(
+                            dict(_first_qwp_table_column_types(payload))[
+                                'gh'],
+                            0x0E)
+                        self.assertEqual(
+                            payload,
+                            self._dataframe_wire_payload(
+                                self._geohash_frame(
+                                    reference, signed_dtype, bits,
+                                    mixed=mixed),
+                                table_name='geo_unsigned', at='ts'))
+                        self.assertEqual(frame['gh'].dtype, dtype)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_schema_overrides_outrank_an_unsigned_geohash_claim(self):
+        """An unsigned column under a GEOHASH claim is written as the
+        signed integer of the same width, but not when `schema_overrides`
+        names it: the override outranks the claim, and IPV4 and CHAR
+        need the column's own unsigned type to apply."""
+        for arrow_ty, kind, wire in ((pyarrow.uint32(), 'ipv4', 0x18),
+                                     (pyarrow.uint16(), 'char', 0x16)):
+            with self.subTest(kind=kind):
+                frame = self._geohash_frame(
+                    [1, 2], pd.ArrowDtype(arrow_ty), bits=16)
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        frame, table_name='geo_outranked', at='ts',
+                        schema_overrides={'gh': kind})['gh'],
+                    wire)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
@@ -7806,6 +7874,16 @@ print('OK')
                                    'precision_bits': bits}}}
             return frame
 
+        def unsigned_frame(bits):
+            frame = pd.DataFrame({
+                'gh': np.array([0], dtype=np.uint32),
+                'ts': pd.to_datetime([0], unit='s')})
+            frame.attrs['questdb'] = {
+                'version': 1,
+                'columns': {'gh': {'kind': 'geohash',
+                                   'precision_bits': bits}}}
+            return frame
+
         def arrow_frame(bits):
             frame = pd.DataFrame({
                 'gh': pd.array([0], dtype=pd.ArrowDtype(pyarrow.int32())),
@@ -7848,6 +7926,8 @@ print('OK')
              lambda value: wire_type(numpy_frame(value))),
             ('precision_bits, arrow planner', 20,
              lambda value: wire_type(arrow_frame(value))),
+            ('precision_bits, unsigned column', 20,
+             lambda value: wire_type(unsigned_frame(value))),
             ('precision_bits, all-null column', 20,
              lambda value: wire_type(all_null_frame(value))),
             ('schema_overrides geohash bits', 20,

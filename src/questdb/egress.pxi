@@ -1371,11 +1371,11 @@ cdef object _numpy_geohash_chunk(
     precision = cd.geohash_precision_bits
     # The width comes from the precision rather than from the wire
     # stride, and is signed, so that it matches what the Arrow egress
-    # gives the same column. A `geohash` claim rides on the column's
-    # type, and the ingest side carries one only on a signed Int8/16/32/64
-    # -- an unsigned column is refused by the native Arrow importer and
-    # so has its claim dropped -- which makes the signed widths the only
-    # shape a GEOHASH column can be read back in and written out again.
+    # gives the same column. A signed width is also what every write
+    # route takes as it stands: the native Arrow importer carries a
+    # `geohash` claim only on a signed Int8/16/32/64, and an unsigned
+    # column reaches it only once `_dataframe_reinterpret_unsigned_geohash`
+    # has given it the signed type of the same width.
     #
     # Each width carries a bit of headroom because a precision fills its
     # bits: an 8-bit geohash holds 0..255, which is every bit of an
