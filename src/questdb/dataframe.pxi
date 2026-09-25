@@ -1754,10 +1754,10 @@ cdef void_int _dataframe_series_resolve_arrow(
     # `QuestDB.dataframe`'s docstring states it for users.
     #
     # The check does not consult the pyarrow version. `pa.uuid()` exists
-    # from pyarrow 18 on, so which remedies the message can name varies,
-    # but which columns are accepted must not: an optional dependency's
-    # version deciding whether a write errors or lands as the wrong type
-    # is a worse trap than either outcome on its own.
+    # from pyarrow 18 on, so the message notes that version when it is
+    # missing, but which columns are accepted must not vary: an optional
+    # dependency's version deciding whether a write errors or lands as
+    # the wrong type is a worse trap than either outcome on its own.
     #
     # Row-ILP takes neither branch. It has no LONG256 and no BINARY at
     # all, so every remedy below is a dead end there; the column falls
@@ -1767,18 +1767,21 @@ cdef void_int _dataframe_series_resolve_arrow(
             and arrowtype.byte_width == 32):
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
-            f'Bad column {pandas_col.name!r}: a 32-byte '
-            f'fixed_size_binary column claims no QuestDB type on this '
-            f'path. To store LONG256, either pass '
-            f'`schema_overrides={{{pandas_col.name!r}: \'long256\'}}` to '
-            f'QuestDB.dataframe() with a fully Arrow-backed frame — '
-            f'every column an ArrowDtype, e.g. '
-            f'df.convert_dtypes(dtype_backend="pyarrow") — or hand '
-            f'QuestDB.dataframe() a pa.Table or pa.RecordBatch whose '
-            f'field for this column carries '
-            f'`questdb.column_type=long256` metadata, which a pandas '
-            f'frame cannot carry. To store the bytes as BINARY, pass '
-            f'them as an object column of bytes.')
+            f'Bad column {pandas_col.name!r}: its values are 32 bytes '
+            f'each (Arrow type fixed_size_binary(32)). They could be '
+            f'LONG256 numbers or plain binary data, and the column does '
+            f'not say which. To store LONG256, do one of the following: '
+            f'pass `schema_overrides={{{pandas_col.name!r}: '
+            f'\'long256\'}}` to dataframe(), which works only when every '
+            f'column of the DataFrame is Arrow-backed, e.g. after '
+            f'`df = df.convert_dtypes(dtype_backend="pyarrow")`; or pass '
+            f'dataframe() a `pa.Table` or `pa.RecordBatch` instead of a '
+            f'DataFrame, with `{{"questdb.column_type": "long256"}}` in '
+            f'this column\'s field metadata (a pandas DataFrame cannot '
+            f'hold field metadata). Each value is read as an unsigned '
+            f'integer, least significant byte first, which is what '
+            f'`value.to_bytes(32, \'little\')` produces. To store plain '
+            f'binary data, make it a column of Python `bytes` objects.')
 
     if (qwp_planner
             and arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
@@ -1786,22 +1789,27 @@ cdef void_int _dataframe_series_resolve_arrow(
             and ext_name is None):
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
-            f'Bad column {pandas_col.name!r}: a 16-byte '
-            f'fixed_size_binary column claims no QuestDB type on this '
-            f'path. To store UUIDs, either '
-            + (f'build the column as `pa.uuid()`, or '
-               if hasattr(_PYARROW, 'uuid')
-               else f'upgrade to pyarrow 18 or newer and build the '
-                    f'column as `pa.uuid()` — the `arrow.uuid` '
-                    f'extension type does not exist in pyarrow '
-                    f'{_PYARROW.__version__} — or ')
-            + f'pass the values as an object-dtype column of '
-            f'`uuid.UUID`, or claim the type with '
-            f'`schema_overrides={{{pandas_col.name!r}: \'uuid\'}}`, '
-            f'which needs QuestDB.dataframe() with a fully Arrow-backed '
-            f'frame — every column an ArrowDtype, e.g. '
-            f'df.convert_dtypes(dtype_backend="pyarrow"). To store the '
-            f'bytes as BINARY, pass them as an object column of bytes.')
+            f'Bad column {pandas_col.name!r}: its values are 16 bytes '
+            f'each (Arrow type fixed_size_binary(16)). They could be '
+            f'UUIDs or plain binary data, and the column does not say '
+            f'which. To store UUIDs, do one of the following: make it a '
+            f'column of `uuid.UUID` objects; give it the Arrow UUID '
+            f'type, `pd.ArrowDtype(pa.uuid())`'
+            + ('' if hasattr(_PYARROW, 'uuid')
+               else f', which needs pyarrow 18 or newer (installed: '
+                    f'{_PYARROW.__version__})')
+            + f'; or pass `schema_overrides={{{pandas_col.name!r}: '
+            f'\'uuid\'}}` to dataframe(), which works only when every '
+            f'column of the DataFrame is Arrow-backed, e.g. after '
+            f'`df = df.convert_dtypes(dtype_backend="pyarrow")`. Raw '
+            f'UUID bytes must be in the standard order (RFC 4122), which '
+            f'is what `uuid.UUID.bytes` returns and `uuid.UUID(bytes=...)` '
+            f'expects. If you produce them as '
+            f'`value.int.to_bytes(16, \'little\')`, the order version 5.0 '
+            f'of this client expected, reverse each value with `b[::-1]` '
+            f'first, or every UUID will be stored reversed. To store '
+            f'plain binary data, make it a column of Python `bytes` '
+            f'objects.')
 
     cdef object t_dec32 = getattr(_PYARROW.lib, 'Type_DECIMAL32', None)
     cdef object t_dec64 = getattr(_PYARROW.lib, 'Type_DECIMAL64', None)

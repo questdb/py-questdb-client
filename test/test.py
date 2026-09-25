@@ -3202,9 +3202,14 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         bytes" from "I meant UUID and the claim did not survive
         pandas"; it refuses both rather than auto-create a table with
         the wrong column type. The refusal does not depend on the
-        pyarrow version — `pa.uuid()` decides which remedies the
-        message can name, not which columns are accepted — so this
-        runs with the extension type present and hidden."""
+        pyarrow version — `pa.uuid()` decides only whether the message
+        notes the pyarrow version it needs, not which columns are
+        accepted — so this runs with the extension type present and
+        hidden."""
+        refusals = {
+            16: "Bad column 'v': its values are 16 bytes each",
+            32: "Bad column 'v': its values are 32 bytes each",
+        }
         uuid_factory = getattr(pyarrow, 'uuid', None)
         for hide_uuid in (False, True):
             if hide_uuid and uuid_factory is None:
@@ -3226,11 +3231,13 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         })
                         with self.assertRaisesRegex(
                                 qi.QuestDBError,
-                                f"Bad column 'v': a {width}-byte "
-                                'fixed_size_binary column claims no '
-                                'QuestDB type'):
+                                refusals[width]) as caught:
                             self._dataframe_column_types(
                                 frame, table_name='blobs', at='ts')
+                        if width == 16:
+                            self.assertEqual(
+                                'pyarrow 18' in str(caught.exception),
+                                hide_uuid or uuid_factory is None)
             finally:
                 if hide_uuid:
                     pyarrow.uuid = uuid_factory
@@ -3246,7 +3253,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         value32 = bytes(range(32))
         stamps = pd.to_datetime(['2025-01-01', '2025-01-02'])
 
-        # "pass the values as an object-dtype column of `uuid.UUID`"
+        # "make it a column of `uuid.UUID` objects"
         self.assertEqual(
             self._dataframe_column_types(
                 pd.DataFrame({'v': pd.Series([value16] * 2, dtype=object),
@@ -3254,7 +3261,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 table_name='blobs', at='ts')['v'],
             0x0C)
 
-        # "build the column as `pa.uuid()`"
+        # "give it the Arrow UUID type, `pd.ArrowDtype(pa.uuid())`"
         if hasattr(pyarrow, 'uuid'):
             self.assertEqual(
                 self._dataframe_column_types(
@@ -3265,8 +3272,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                     table_name='blobs', at='ts')['v'],
                 0x0C)
 
-        # "claim the type with `schema_overrides=...`, which needs a
-        # fully Arrow-backed frame"
+        # "pass `schema_overrides=...` to dataframe(), which works only
+        # when every column of the DataFrame is Arrow-backed"
         for width, kind, wire in ((16, 'uuid', 0x0C), (32, 'long256', 0x0D)):
             with self.subTest(schema_overrides=kind):
                 arrow_frame = pd.DataFrame({
@@ -3284,8 +3291,28 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         schema_overrides={'v': kind})['v'],
                     wire)
 
-        # "to store the bytes as BINARY, pass them as an object column
-        # of bytes"
+        # "pass dataframe() a `pa.Table` or `pa.RecordBatch` instead of
+        # a DataFrame, with `{"questdb.column_type": "long256"}` in this
+        # column's field metadata"
+        table = pyarrow.table(
+            [pyarrow.array([value32] * 2, pyarrow.binary(32)),
+             pyarrow.array(stamps, pyarrow.timestamp('us'))],
+            schema=pyarrow.schema([
+                pyarrow.field('v', pyarrow.binary(32),
+                              metadata={'questdb.column_type': 'long256'}),
+                pyarrow.field('ts', pyarrow.timestamp('us'))]))
+        for source in (table, table.to_batches()[0]):
+            with self.subTest(field_metadata=type(source).__name__):
+                payload = self._dataframe_wire_payload(
+                    source, table_name='blobs', at='ts')
+                self.assertEqual(
+                    dict(_first_qwp_table_column_types(payload))['v'], 0x0D)
+                # "least significant byte first": the bytes go out as
+                # given, which is the order `to_bytes(32, 'little')` makes.
+                self.assertIn(value32, payload)
+
+        # "To store plain binary data, make it a column of Python `bytes`
+        # objects"
         for width in (16, 32):
             with self.subTest(binary_width=width):
                 self.assertEqual(
@@ -3296,6 +3323,45 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                             'n': [1, 2], 'ts': stamps}),
                         table_name='blobs', at='ts')['v'],
                     0x17)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_uuid_refusal_names_the_byte_order_its_remedies_read(self):
+        """A column of bytes in the layout 5.0 took is the one most
+        likely to hit the 16-byte refusal. Any 16 bytes are a valid
+        UUID, so taking a remedy with those bytes unchanged stores every
+        value reversed and nothing fails. The message names the RFC 4122
+        order and the flip, and the flip it names stores the intended
+        UUID."""
+        old_layout = self.UUID_VALUE.int.to_bytes(16, 'little')
+        stamps = pd.to_datetime(['2025-01-01', '2025-01-02'])
+        frame = pd.DataFrame({
+            'u': pd.Series([old_layout] * 2,
+                           dtype=pd.ArrowDtype(pyarrow.binary(16))),
+            'n': [1, 2], 'ts': stamps,
+        })
+        with self.assertRaises(qi.QuestDBError) as caught:
+            self._dataframe_column_types(frame, table_name='uuids', at='ts')
+        message = str(caught.exception)
+        self.assertIn('RFC 4122', message)
+        self.assertIn("value.int.to_bytes(16, 'little')", message)
+        self.assertIn('b[::-1]', message)
+
+        flipped = old_layout[::-1]
+        self.assertEqual(flipped, self.UUID_VALUE.bytes)
+        arrow_frame = pd.DataFrame({
+            'u': pd.Series([flipped] * 2,
+                           dtype=pd.ArrowDtype(pyarrow.binary(16))),
+            'n': pd.array([1, 2], dtype=pd.ArrowDtype(pyarrow.int64())),
+            'ts': pd.array(stamps, dtype=pd.ArrowDtype(
+                pyarrow.timestamp('us'))),
+        })
+        payload = self._dataframe_wire_payload(
+            arrow_frame, table_name='uuids', at='ts',
+            schema_overrides={'u': 'uuid'})
+        # QWP carries a UUID as its 128-bit integer, little-endian.
+        self.assertIn(old_layout, payload)
+        self.assertNotIn(self.UUID_VALUE.bytes, payload)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
@@ -4370,7 +4436,7 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         bare = mixed.copy()
         bare.attrs = {}
         with self.assertRaisesRegex(
-                qi.QuestDBError, '16-byte fixed_size_binary column'):
+                qi.QuestDBError, "Bad column 'u': its values are 16 bytes"):
             self._dataframe_column_types(
                 bare, table_name='attrs_round_trip', at='ts')
 
