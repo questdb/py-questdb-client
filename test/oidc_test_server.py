@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import http.server
 import json
+import socketserver
 import threading
 import urllib.parse
 
 
 class _ThreadingHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self):
+        # HTTPServer.server_bind() reverse-resolves the bind address with
+        # getfqdn(). A loopback-only test server needs no DNS, and macOS CI
+        # can block there for longer than the fork test's whole deadline.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class OidcTestServer:
