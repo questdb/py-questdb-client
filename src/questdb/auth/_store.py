@@ -76,7 +76,12 @@ class FileTokenStore:
 
     The native client owns all I/O, identity checks, atomic replacement and
     cross-process locking. On POSIX it creates directories with mode ``0700``
-    and token files with mode ``0600``. Non-POSIX platforms currently reject
+    and token files with mode ``0600``. An existing directory is tightened to
+    ``0700`` on first use, and one that was group- or other-writable is swept
+    before its contents are trusted: entries named like store records (64
+    lowercase hex characters then ``.json``, or a ``.tmp`` temporary) are
+    deleted, whoever wrote them. Use a directory dedicated to the store.
+    Non-POSIX platforms currently reject
     every *credential mutation* (persist, clear) before changing the stored
     entry, because the durable metadata barrier required for rotating refresh
     tokens is unavailable; reads stay available so a credential written by

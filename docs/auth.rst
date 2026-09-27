@@ -211,7 +211,11 @@ Both are rejected rather than silently resolved. A path passed straight to
 ``FileTokenStore(...)`` is a Python path, not the shared setting, and is
 expanded and absolutised as usual. The native client writes plaintext JSON
 using atomic replacement and cross-process coordination; on POSIX, directories
-are mode ``0700`` and files mode ``0600``. Non-POSIX platforms currently reject
+are mode ``0700`` and files mode ``0600``. An existing directory is tightened to
+``0700`` on first use, and one that was group- or other-writable is swept before
+its contents are trusted: entries named like store records (64 lowercase hex
+characters then ``.json``, or a ``.tmp`` temporary) are deleted, whoever wrote
+them. Point the store at a directory dedicated to it. Non-POSIX platforms currently reject
 file-store *mutations* before changing the stored entry because they lack the
 durable metadata barrier required for safe refresh-token rotation; reads remain
 available, so the coordination protocol may still leave empty ``.lock`` files

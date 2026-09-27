@@ -2273,6 +2273,58 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 finally:
                     signal.signal(signal.SIGALRM, previous)
 
+    @unittest.skipUnless(hasattr(signal, 'SIGALRM'), 'SIGALRM required')
+    def test_signal_raised_inside_the_default_renderer_interrupts_sign_in(self):
+        # The built-in renderers swallow their own I/O and QR failures. A
+        # signal handler's Exception raised while one runs -- here, while the
+        # terminal renderer writes the prompt -- was swallowed with them and
+        # logged as a write failure, so sign_in() polled until the device code
+        # expired (or reported success) and the deadline was lost.
+        class AlarmStream(io.StringIO):
+            fired = False
+
+            def write(self, text):
+                if not self.fired:
+                    self.fired = True
+                    signal.raise_signal(signal.SIGALRM)
+                return super().write(text)
+
+        def on_alarm(signum, frame):
+            raise TimeoutError('deadline inside the default renderer')
+
+        pending = (400, {'error': 'authorization_pending'}, None)
+        previous = signal.signal(signal.SIGALRM, on_alarm)
+        try:
+            with OidcTestServer(
+                    device_token_response=pending, device_expires_in=8,
+                    device_interval=1) as server:
+                stream = AlarmStream()
+                auth = make_discovered_auth(
+                    server, renderer=TerminalRenderer(stream=stream))
+                try:
+                    started = time.monotonic()
+                    with self.assertRaises(TimeoutError):
+                        auth.sign_in()
+                    self.assertTrue(stream.fired)
+                    self.assertLess(time.monotonic() - started, 6)
+                    with self.assertRaises(OidcInteractionRequired):
+                        auth.token()
+                finally:
+                    auth.close()
+        finally:
+            signal.signal(signal.SIGALRM, previous)
+
+    def test_default_renderer_still_swallows_its_own_write_failure(self):
+        # Only a signal handler's exception escapes; a broken stream remains a
+        # best-effort warning, not a sign-in failure.
+        class BrokenStream(io.StringIO):
+            def write(self, text):
+                raise OSError('stream closed')
+
+        renderer = TerminalRenderer(stream=BrokenStream())
+        with self.assertLogs('questdb', level='WARNING'):
+            renderer.on_waiting(5)
+
     @unittest.skipUnless(hasattr(signal, 'SIGUSR1'), 'SIGUSR1 required')
     def test_renderer_sharing_signal_handler_code_does_not_cancel_sign_in(self):
         # Two callbacks from the same factory share __code__, but invoking
@@ -5376,6 +5428,14 @@ class AdapterTest(unittest.TestCase):
         expected = {'host': 'questdb.example.com', 'port': 8812}
         listener(None, None, [], expected)
         self.assertEqual(expected['password'], 'SECRET-BEARER')
+        self.assertEqual(expected['hostaddr'], '')
+
+        # SQLAlchemy before 2.0.48 passes the SAME cparams dict to every
+        # physical connect, so this listener's own empty hostaddr is still in
+        # it on the next one. That must not be refused as a redirection.
+        auth.token.return_value = 'SECOND-BEARER'
+        listener(None, None, [], expected)
+        self.assertEqual(expected['password'], 'SECOND-BEARER')
         self.assertEqual(expected['hostaddr'], '')
 
     def test_sqlalchemy_rejects_unsafe_url_before_token_or_engine(self):

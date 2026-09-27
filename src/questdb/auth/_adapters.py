@@ -456,6 +456,13 @@ def sqlalchemy_engine(
         # still name the vetted peer BEFORE the bearer token is attached, so
         # neither a passthrough nor an earlier do_connect listener can turn a
         # validated destination into an unvetted one.
+        if uses_libpq and cparams.get('hostaddr') == '':
+            # SQLAlchemy before 2.0.48 hands every physical connect the same
+            # cparams dict, so the empty hostaddr set below on an earlier
+            # connect is still here. Empty names no peer -- libpq treats it as
+            # unset -- so it is no redirection; drop it before the check and
+            # set it again below.
+            del cparams['hostaddr']
         _require_expected_destination(cargs, cparams, resolved_host, pg_port)
         if uses_libpq:
             # An explicit empty value suppresses libpq's PGHOSTADDR default

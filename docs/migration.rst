@@ -5,11 +5,11 @@ Migration Guide
 5.0 to 5.1
 ==========
 
-Seven changes need action: the two UUID / fixed-size-binary items below, the
+Eight changes need action: the two UUID / fixed-size-binary items below, the
 stricter ``schema_overrides`` tuple validation, caps on callback inbox
-capacities and config-string length, the failed-commit cleanup and exception
-changes, and a warning an abandoned query result now surfaces instead of
-swallowing. The new ``ConnectionEventKind.CredentialUnavailable`` event kind
+capacities and config-string length, the exception a commit raises once its
+sender is closed, the error a query failover that runs out of time raises, and
+a warning an abandoned query result now surfaces instead of swallowing. The new ``ConnectionEventKind.CredentialUnavailable`` event kind
 needs none — it is additive, and an existing listener keeps working.
 
 * **UUID bytes are canonical RFC 4122.** UUID values are read and written in
@@ -87,6 +87,15 @@ needs none — it is additive, and an existing listener keeps working.
   the owning sender was closed now raises** ``QuestDBError(InvalidApiCall)``
   instead of an internal ``TypeError``. A commit whose flush fails leaves the
   sender's buffer empty and the transaction completed, exactly as in 5.0.
+
+* **A query failover that runs out of time raises what it found.** When
+  ``failover_max_duration_ms`` expires while reconnect attempts remain and the
+  last round was rejected on role, at the WebSocket upgrade or at TLS, the
+  query raises that ``RoleMismatch`` / ``HandshakeError`` / ``TlsError``
+  instead of the connection failure that started the failover, as a failover
+  that ran out of attempts already did. Code that branches on
+  ``QuestDBError.code`` after a failed query should treat these codes as a
+  possible outcome of a timed-out failover.
 
 * **An abandoned** :class:`~questdb.QueryResult` **now reports its**
   ``ResourceWarning``. The finalizer previously swallowed it; it is now routed

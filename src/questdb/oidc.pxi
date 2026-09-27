@@ -188,6 +188,19 @@ cdef bint _oidc_raised_in_signal_handler(
         exc.__traceback__, _oidc_signal_handler_codes())
 
 
+def _oidc_exception_is_from_signal_handler(object exc):
+    """Whether ``exc`` was raised by a Python signal handler.
+
+    For the built-in renderers, whose best-effort ``except Exception`` blocks
+    would otherwise swallow a signal handler's exception (a SIGALRM deadline's
+    ``TimeoutError``, say) raised while they run, so ``sign_in()`` kept
+    polling. They re-raise it for the event dispatcher to cancel the sign-in,
+    exactly as for a custom renderer.
+    """
+    return bool(_oidc_raised_in_signal_handler(
+        exc, _oidc_signal_handler_codes()))
+
+
 # Exceptions Python signal handlers raised on the MAIN thread inside a
 # persistence diagnostic that no foreground sign_in()/token()/clear() record
 # can re-raise -- an attached transport (an ILP/HTTP flush, say) pulled the
@@ -1600,8 +1613,12 @@ cdef class OidcDeviceAuth:
         * ``insecure`` — permits plaintext HTTP for the **QuestDB discovery
           request only**. The identity provider is always held to HTTPS (or
           loopback); this flag never relaxes that.
-        * ``ca_bundle`` — path to a PEM bundle used instead of the system roots
-          when contacting QuestDB and the IdP.
+        * ``ca_bundle`` — path to a PEM bundle used when contacting QuestDB
+          and the IdP, instead of the default roots: the Mozilla root bundle
+          compiled into the client together with the operating system's trust
+          store. An OS trust store that reports a load error (for example
+          ``SSL_CERT_DIR`` naming a missing directory) fails construction;
+          setting ``ca_bundle`` avoids consulting it.
         * ``open_browser`` — whether :meth:`sign_in` launches a browser at the
           verification URL. ``None`` (the default) opens one, except inside a
           Jupyter kernel, where the kernel may be on a different machine from

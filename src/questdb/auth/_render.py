@@ -42,6 +42,27 @@ import urllib.parse
 from typing import Any, Dict, Optional, TextIO
 
 
+def _reraise_signal_interrupt() -> None:
+    """Re-raise the exception being handled if a signal handler raised it.
+
+    Call only from an ``except`` block. The built-in renderers swallow their
+    own I/O and QR failures, but a Python signal handler can raise an ordinary
+    ``Exception`` (a SIGALRM deadline's ``TimeoutError``) while renderer code
+    runs. Swallowing that lost the signal: ``sign_in()`` kept polling. Let it
+    reach the event dispatcher, which cancels the sign-in for it.
+    """
+    exc = sys.exc_info()[1]
+    if exc is None:
+        return
+    try:
+        from questdb._client import _oidc_exception_is_from_signal_handler
+        from_signal = _oidc_exception_is_from_signal_handler(exc)
+    except Exception:
+        return
+    if from_signal:
+        raise exc
+
+
 def in_ipython_kernel() -> bool:
     """True when running inside an interactive Jupyter/ZMQ kernel."""
     try:
@@ -836,6 +857,7 @@ class TerminalRenderer(Renderer):
                     text.encode(enc, 'replace').decode(enc, 'replace'))
             stream.flush()
         except Exception:
+            _reraise_signal_interrupt()
             # Swallowing is still right -- a broken console must not abort a
             # sign-in that is otherwise working -- but silence is not. Without
             # this, a prompt written to a closed or redirected stream vanished
@@ -1083,6 +1105,7 @@ def _qr_ascii(data: str) -> Optional[str]:
     try:
         import qrcode  # type: ignore
     except Exception:
+        _reraise_signal_interrupt()
         return None
     try:
         qr = qrcode.QRCode(border=1)
@@ -1093,6 +1116,7 @@ def _qr_ascii(data: str) -> Optional[str]:
         qr.print_ascii(out=buf, invert=True)
         return buf.getvalue()
     except Exception:
+        _reraise_signal_interrupt()
         return None
 
 
@@ -1102,6 +1126,7 @@ def _qr_data_uri(data: str) -> Optional[str]:
     try:
         import qrcode  # type: ignore
     except Exception:
+        _reraise_signal_interrupt()
         return None
     try:
         import base64
@@ -1112,4 +1137,5 @@ def _qr_data_uri(data: str) -> Optional[str]:
         b64 = base64.b64encode(buf.getvalue()).decode('ascii')
         return f'data:image/png;base64,{b64}'
     except Exception:
+        _reraise_signal_interrupt()
         return None

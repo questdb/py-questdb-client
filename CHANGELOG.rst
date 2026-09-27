@@ -126,6 +126,20 @@ It raises :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
 accidentally duplicated or attacker-controlled content rather than trying to
 raise this safety bound.
 
+Query failover that runs out of time reports what it found
+**********************************************************
+
+When a query's mid-stream failover gives up because
+``failover_max_duration_ms`` ran out while reconnect attempts remained, and the
+last reconnect round was rejected by every endpoint on role
+(``RoleMismatch``, e.g. no primary available), at the WebSocket upgrade
+(``HandshakeError``) or at TLS (``TlsError``), the query now raises that error
+-- its message prefixed with the wall-clock budget context -- instead of the
+connection failure that started the failover. This matches what a failover
+that runs out of *attempts* already raised. In every other case, including a
+query that ran past the budget before its first failure, the original failure
+is still raised unchanged.
+
 Features
 ~~~~~~~~
 
@@ -278,9 +292,10 @@ New ``ConnectionEventKind.CredentialUnavailable``
 *************************************************
 
 :attr:`ConnectionEventKind.CredentialUnavailable <questdb.ConnectionEventKind.CredentialUnavailable>`
-is a new event kind reporting a token provider that failed before any
-endpoint was dialled — an ``oidc_auth=`` provider with no cached or
-refreshable credential. It has no counterpart before 5.1, because token
+is a new event kind reporting a token provider that failed to supply a
+credential — an ``oidc_auth=`` provider with no cached or refreshable
+credential, either before any endpoint was dialled or when replacing a token a
+server rejected with HTTP 401. It has no counterpart before 5.1, because token
 providers did not exist: a listener written against 5.0 cannot have seen it.
 
 ``AuthFailed`` keeps the meaning it has always had, now stated explicitly: it
@@ -288,8 +303,10 @@ is unconditionally **terminal**, and means the
 server rejected a credential the client presented, and ``host`` / ``port``
 are always set. A listener that pages, tears down the pool, or exits on it
 needs no further qualification. ``CredentialUnavailable`` sets ``host`` and
-``port`` to ``None`` and reports the provider's classification in
-``cause_code``, which is what says whether the sender will carry on:
+``port`` to ``None`` when the provider failed before any dial; after a 401
+they name the endpoint that rejected the previous token and ``cause_msg``
+includes the 401. It reports the provider's classification in ``cause_code``,
+which is what says whether the sender will carry on:
 
 * ``SocketError`` — retryable, and the ordinary case. The sender keeps
   reconnecting so queued rows survive while the identity provider recovers or
