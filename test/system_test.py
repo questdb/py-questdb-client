@@ -3745,6 +3745,38 @@ class TestEgressPool(unittest.TestCase):
                 f'close() must return the drained reader to the pool; '
                 f'got in_use={in_use}, idle={idle}')
 
+    def test_query_lease_reuses_reader_after_query_error(self):
+        for consume in ('to_arrow', 'to_pandas', 'iter_arrow', 'iter_pandas'):
+            with self.subTest(consume=consume):
+                with qi.QuestDB.from_conf(self._conf()) as client:
+                    with client.reader() as lease:
+                        result = lease.query(
+                            'SELECT missing_query_column FROM long_sequence(1)')
+                        with self.assertRaises(qi.QuestDBError) as cm:
+                            value = getattr(result, consume)()
+                            if consume.startswith('iter_'):
+                                list(value)
+                        self.assertEqual(
+                            cm.exception.code, qi.QuestDBErrorCode.ServerParseError)
+                        result.close()
+                        after = lease.query('SELECT 42 AS v').to_arrow()
+                        self.assertEqual(after.column('v').to_pylist(), [42])
+                    self.assertEqual(
+                        qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_query_error_returns_healthy_reader_to_pool(self):
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            result = client.query(
+                'SELECT missing_query_column FROM long_sequence(1)')
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.to_arrow()
+            self.assertEqual(
+                cm.exception.code, qi.QuestDBErrorCode.ServerParseError)
+            result.close()
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+            after = client.query('SELECT 42 AS v').to_arrow()
+            self.assertEqual(after.column('v').to_pylist(), [42])
+
     def test_query_lease_result_handoff_to_worker_then_next_query(self):
         """The lease stays on its creating thread while one result moves
         to a worker. Joining that worker publishes the drained cursor
