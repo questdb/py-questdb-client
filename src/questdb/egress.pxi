@@ -49,12 +49,12 @@ cdef class _ReaderHandle:
     returned but before the reader closed.
 
     ``_must_close`` defaults to ``True``: only the generator's
-    clean-drain path (or code that explicitly knows the cursor
-    reached terminal) clears it. Any error path or abandon-without-
-    consume path forces the reader to drop, since the Rust
-    Cursor::Drop closes the transport whenever ``cursor_active`` is
-    still set at drop time — recycling such a reader would hand the
-    next borrower a broken pipe.
+    clean-drain path (or a cursor known to leave its connection
+    reusable) clears it. A server QUERY_ERROR can leave a healthy
+    connection reusable; transport failures and abandon-without-consume
+    still force the reader to drop. Rust Cursor::Drop closes the
+    transport whenever ``cursor_active`` is still set at drop time —
+    recycling such a reader would hand the next borrower a broken pipe.
     """
     cdef qwp_reader* _reader
     cdef bint _must_close
@@ -159,6 +159,12 @@ cdef class _CursorHandle:
         cdef PyThreadState* gs = NULL
         with self._lock:
             if self._cursor != NULL:
+                # QUERY_ERROR is terminal without necessarily closing the
+                # transport. Consult the cursor before freeing it so error
+                # cleanup can return a healthy reader to its lease or pool.
+                if (self._reader_ref is not None
+                        and qwp_reader_cursor_connection_reusable(self._cursor)):
+                    self._reader_ref._must_close = False
                 _ensure_doesnt_have_gil(&gs)
                 qwp_reader_cursor_free(self._cursor)
                 _ensure_has_gil(&gs)
