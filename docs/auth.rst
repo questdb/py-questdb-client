@@ -288,6 +288,14 @@ for a server whose certificate a browser would trust. Supply one of:
   later (``psycopg.pq.version()`` reports it);
 * the ``PGSSLROOTCERT`` environment variable or ``~/.postgresql/root.crt``.
 
+An explicit ``sslrootcert`` overrides both ``PGSSLROOTCERT`` and
+``~/.postgresql/root.crt``, so do not pass ``"system"`` if your CA is
+configured there. Pass it only for a remote (``verify-full``) host: libpq 16
+and later refuse ``sslrootcert="system"`` with any weaker ``sslmode``, so
+combined with a numeric loopback URL, which defaults to ``prefer``, every
+connection fails with ``weak sslmode "prefer" may not be used with
+sslrootcert=system``.
+
 Pass it through ``connect_args`` for ``sqlalchemy_engine``, or as a keyword
 argument to ``psycopg_connect``::
 
@@ -360,6 +368,31 @@ immediately rather than rendering a prompt into an output nobody will open.
 Pass ``interactive=False`` to get that fail-fast behaviour anywhere else, such
 as cron or CI. For unattended contexts generally, prefer a QuestDB
 service-account token or the OAuth client-credentials flow.
+
+.. _auth-fork:
+
+Forked processes
+================
+
+OIDC does not survive ``fork()`` without ``exec()``:
+
+* A provider inherited by a forked child cannot be used, attached to a
+  transport, or closed there: its native locks may belong to parent threads
+  that no longer exist. Those calls raise
+  :class:`~questdb.auth.OidcConfigError`.
+* Once the parent has constructed any
+  :class:`~questdb.auth.OidcDeviceAuth` -- constructing one is enough, it
+  need not have been used -- constructing a *new* provider in a forked child
+  raises :class:`~questdb.auth.OidcConfigError` too.
+
+This affects pre-fork worker models: ``gunicorn --preload``, Celery's prefork
+pool, and :mod:`multiprocessing` with the ``fork`` start method (the default
+on Linux before Python 3.14). Either construct the provider only inside each
+worker, never in the parent before it forks, or start workers with ``spawn``
+or ``forkserver``, which run a fresh interpreter::
+
+    import multiprocessing
+    multiprocessing.set_start_method('forkserver')
 
 Security notes
 ==============

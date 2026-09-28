@@ -577,6 +577,16 @@ cdef uint64_t _OIDC_FOREGROUND_RETRY_SLICE_MS = 2000
 # Must stay well below `_OIDC_FOREGROUND_RETRY_SLICE_MS`.
 cdef uint64_t _OIDC_FOREGROUND_SLICE_EARLY_MARGIN_MS = 100
 
+# The codes native `reconnect_error_is_terminal` stops its reconnect loop on
+# (`qwp_ws_driver.rs`). A role reject is exempt there, but on this direct-sender
+# path it arrives as `RoleMismatch`, which is not listed.
+_NATIVE_RECONNECT_TERMINAL_CODES = frozenset((
+    QuestDBErrorCode.AuthError,
+    QuestDBErrorCode.ConfigError,
+    QuestDBErrorCode.ProtocolVersionError,
+    QuestDBErrorCode.StoreResendRequired,
+    QuestDBErrorCode.SymbolDictFull))
+
 
 cdef inline bint _is_oidc_terminal_for_foreground(object exc, object oidc_auth):
     """Whether ``exc`` is an OIDC failure that a foreground retry cannot clear.
@@ -5867,11 +5877,13 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
     foreground gate ever saw the error it exists to fail fast on.
 
     Between slices that terminal OIDC case ends the wait early, and so does
-    any error the native call returned *before* its slice ran out: native
-    only returns early for an error its reconnect loop treats as terminal
-    (``AuthError`` from a 401/403 upgrade, ``ProtocolVersionError``, ...), so
-    that is the error, and the moment, at which the single native call would
-    have returned too. Re-dialling it would re-present a rejected credential
+    any error its reconnect loop treats as terminal (``AuthError`` from a
+    401/403 upgrade, ``ProtocolVersionError``, ...): recognised by its code,
+    or by the native call returning *before* its slice ran out, which native
+    only does for such an error. The code check matters because native's
+    last pick runs at the slice deadline, so a terminal error from it arrives
+    on time. That is the error, and the moment, at which the single native
+    call would have returned too. Re-dialling it would re-present a rejected credential
     and repeat terminal connection events. Every other failure keeps retrying
     until the caller's budget is spent, exactly as the single native call
     does without a provider: a primary election
@@ -5909,12 +5921,19 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
         err = NULL
         if last_slice or _is_oidc_terminal_for_foreground(exc, None):
             raise exc
+        # Native makes one more pick after sleeping to its slice deadline, so
+        # a terminal error from that pick comes back AT the deadline and the
+        # timing test below cannot tell it from a retryable one. Re-dialling
+        # it re-presented the rejected credential and fired a second terminal
+        # `AuthFailed` event.
+        if exc.code in _NATIVE_RECONNECT_TERMINAL_CODES:
+            raise exc
         now = time.monotonic()
         # Native started its slice deadline after `slice_start`, and returns
         # a retryable error only once that deadline has passed. Returning
-        # earlier means native gave up on a terminal error. The margin
-        # absorbs a coarse monotonic clock; a terminal error inside it costs
-        # at most one more slice.
+        # earlier means native gave up on a terminal error -- one whose code
+        # the check above may not know. The margin absorbs a coarse monotonic
+        # clock.
         if now < slice_start + (
                 slice_ms - _OIDC_FOREGROUND_SLICE_EARLY_MARGIN_MS) / 1000.0:
             raise exc

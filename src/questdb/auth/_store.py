@@ -135,8 +135,7 @@ class FileTokenStore:
         if expanded.startswith('~'):
             raise OidcConfigError(
                 f'could not resolve the home directory in {os.fsdecode(path)!r} '
-                'for the OIDC token store; pass an absolute path, or set '
-                f'{TOKEN_STORE_DIR_ENV}')
+                'for the OIDC token store; pass an absolute path')
         self._directory = os.path.abspath(expanded)
 
     @classmethod

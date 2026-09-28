@@ -1492,8 +1492,12 @@ cdef class OidcDeviceAuth:
 
     An instance inherited across ``fork()`` cannot be used or closed in the
     child: its native locks may belong to parent threads that no longer exist.
-    After OIDC was used in the parent, even creating a new provider in that
-    child is unsafe. Use ``fork()`` followed by ``exec()`` to start fresh.
+    Once the parent has constructed any ``OidcDeviceAuth`` -- constructing one
+    is enough, it need not have been used -- creating a new provider in a
+    forked child raises :class:`~questdb.auth.OidcConfigError` as well. Use
+    ``fork()`` followed by ``exec()`` (for example the ``spawn`` or
+    ``forkserver`` :mod:`multiprocessing` start methods) to start fresh, or
+    construct the provider only in the child. See :ref:`auth-fork`.
     """
 
     cdef object __weakref__

@@ -258,7 +258,8 @@ def _reject_destination_overrides(params: Any, passthrough: str) -> None:
 
 
 def _require_expected_destination(
-        cargs: Any, cparams: Any, host: str, port: int) -> None:
+        cargs: Any, cparams: Any, host: str, port: int,
+        allow_empty_hostaddr: bool = False) -> None:
     """Fail closed if the driver arguments no longer name the vetted peer.
 
     Defence in depth for SQLAlchemy: `connect_args` is rejected up front, but
@@ -266,6 +267,10 @@ def _require_expected_destination(
     they can also be rewritten by an application's own ``do_connect`` listener
     registered before this one. Checked on every physical connection, just
     before the token is attached.
+
+    ``allow_empty_hostaddr`` accepts ``hostaddr=''``, which names no peer --
+    libpq treats it as unset -- and is what the SQLAlchemy hook itself sets to
+    mask ``PGHOSTADDR``.
     """
     # SQLAlchemy passes both positional and keyword arguments to the driver.
     # A prior do_connect listener can put a whole conninfo string in cargs,
@@ -282,6 +287,9 @@ def _require_expected_destination(
         if key.lower() == 'host' and value == host:
             continue
         if key.lower() == 'port' and str(value) == str(port):
+            continue
+        if (allow_empty_hostaddr and key.lower() == 'hostaddr'
+                and value == ''):
             continue
         raise OidcConfigError(
             f'refusing to send the OIDC token: the connection arguments set '
@@ -456,14 +464,17 @@ def sqlalchemy_engine(
         # still name the vetted peer BEFORE the bearer token is attached, so
         # neither a passthrough nor an earlier do_connect listener can turn a
         # validated destination into an unvetted one.
-        if uses_libpq and cparams.get('hostaddr') == '':
-            # SQLAlchemy before 2.0.48 hands every physical connect the same
-            # cparams dict, so the empty hostaddr set below on an earlier
-            # connect is still here. Empty names no peer -- libpq treats it as
-            # unset -- so it is no redirection; drop it before the check and
-            # set it again below.
-            del cparams['hostaddr']
-        _require_expected_destination(cargs, cparams, resolved_host, pg_port)
+        #
+        # SQLAlchemy before 2.0.48 hands every physical connect the same
+        # cparams dict, concurrently from several pool threads, so the empty
+        # hostaddr set below on an earlier connect is still here. It names no
+        # peer, so the check accepts it rather than this hook deleting and
+        # re-adding it: another thread could observe or dial the dict between
+        # the two, and dialling without it lets PGHOSTADDR pick the peer.
+        # Every write this hook makes to the shared dict is idempotent.
+        _require_expected_destination(
+            cargs, cparams, resolved_host, pg_port,
+            allow_empty_hostaddr=uses_libpq)
         if uses_libpq:
             # An explicit empty value suppresses libpq's PGHOSTADDR default
             # while still resolving the validated host normally. Do this on

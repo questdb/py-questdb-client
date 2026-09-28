@@ -1277,6 +1277,10 @@ class NativeOidcTest(unittest.TestCase):
                 with self.assertRaises(OidcConfigError) as ctx:
                     FileTokenStore('~/qdb-tokens')
                 self.assertIn('home directory', str(ctx.exception))
+                # The explicit constructor ignores the default-location
+                # override, so the error must not suggest setting it.
+                self.assertNotIn(
+                    'QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR', str(ctx.exception))
                 self.assertEqual(
                     ctx.exception.code, questdb.QuestDBErrorCode.ConfigError)
                 # A path with no `~` is unaffected by the guard.
@@ -5438,6 +5442,28 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(expected['password'], 'SECOND-BEARER')
         self.assertEqual(expected['hostaddr'], '')
 
+        # Those connects run concurrently on pool threads, and `token()`
+        # releases the GIL. The listener must never remove `hostaddr` from the
+        # shared dict, even momentarily: another thread's check would refuse
+        # the gap-filling value, and another thread dialling during the gap
+        # would let PGHOSTADDR choose the peer the token is sent to.
+        class _SharedCparams(dict):
+            def __delitem__(self, key):
+                raise AssertionError(f'listener removed {key!r}')
+
+            def pop(self, key, *default):
+                raise AssertionError(f'listener removed {key!r}')
+
+        shared = _SharedCparams(
+            host='questdb.example.com', port=8812, hostaddr='')
+        observed = []
+        auth.token.side_effect = lambda: (
+            observed.append(dict(shared)) or 'THIRD-BEARER')
+        listener(None, None, [], shared)
+        auth.token.side_effect = None
+        self.assertEqual(shared['password'], 'THIRD-BEARER')
+        self.assertEqual(observed[0]['hostaddr'], '')
+
     def test_sqlalchemy_rejects_unsafe_url_before_token_or_engine(self):
         sqlalchemy = types.ModuleType('sqlalchemy')
         sqlalchemy.create_engine = mock.Mock()
@@ -6077,6 +6103,43 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
             if e.kind is questdb.ConnectionEventKind.AuthFailed]
         self.assertEqual(len(auth_failed), 1, events)
 
+    def test_terminal_rejection_at_a_slice_deadline_is_not_redialled(self):
+        # Native makes one more pick after sleeping to its slice deadline, so
+        # a 401 from that pick comes back AT the deadline and the timing test
+        # alone read it as retryable: the ladder started another slice,
+        # re-presented the rejected token and emitted a second AuthFailed.
+        lock = threading.Lock()
+        first_retry = []
+        actions = []
+
+        def policy(index, t):
+            with lock:
+                if index == 0:
+                    action = '503'
+                else:
+                    if not first_retry:
+                        first_retry.append(t)
+                    # The first slice is 2s; switch just before it ends, so
+                    # only the post-deadline pick sees the 401.
+                    action = '503' if t - first_retry[0] < 1.95 else '401'
+                actions.append(action)
+                return action
+
+        auth_failed_ready = threading.Event()
+
+        def on_event(event):
+            if event.kind is questdb.ConnectionEventKind.AuthFailed:
+                auth_failed_ready.set()
+
+        with self.assertRaises(questdb.QuestDBError) as cm:
+            self._run(
+                policy, wait_for_event_on_error=auth_failed_ready,
+                connection_listener=on_event,
+                connection_event_inbox_capacity=256)
+        self.assertEqual(cm.exception.code, questdb.QuestDBErrorCode.AuthError)
+        with lock:
+            self.assertEqual(actions.count('401'), 1, actions)
+
     def test_role_election_longer_than_a_retry_slice_is_ridden_out(self):
         # The first attempt fails with a retryable 503; the reconnect then sees
         # every endpoint answer as a replica for longer than the 2s slice the
@@ -6561,9 +6624,18 @@ class OidcApiContractTest(unittest.TestCase):
                 device_token_response=pending, device_expires_in=15,
                 device_interval=1) as server:
             auth = make_discovered_auth(server, renderer=_Renderer())
-            first = threading.Thread(
-                target=lambda: self.assertRaises(
-                    OidcCancelledError, auth.sign_in))
+            # Record the outcome: an assertion failing inside the thread would
+            # die with it and leave the test green.
+            first_outcome = []
+
+            def first_sign_in():
+                try:
+                    auth.sign_in()
+                    first_outcome.append(None)
+                except BaseException as exc:
+                    first_outcome.append(exc)
+
+            first = threading.Thread(target=first_sign_in)
             first.start()
             try:
                 self.assertTrue(waiting.wait(20))
@@ -6576,6 +6648,10 @@ class OidcApiContractTest(unittest.TestCase):
                 auth.cancel_sign_in()
                 first.join(20)
             self.assertFalse(first.is_alive())
+            # The refused second call left the running one alone: it ran on
+            # until cancel_sign_in() ended it.
+            self.assertEqual(len(first_outcome), 1)
+            self.assertIsInstance(first_outcome[0], OidcCancelledError)
 
     def test_config_strings_over_1_mib_are_rejected_before_parsing(self):
         padding = 'a' * (1 << 20)

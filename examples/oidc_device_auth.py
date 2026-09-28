@@ -11,6 +11,7 @@ loop), so it is not part of the automated example suite.
 """
 
 import contextlib
+import ipaddress
 import os
 import sys
 import urllib.parse
@@ -44,6 +45,28 @@ def _sender_conf(url: str) -> str:
     return f'{parsed.scheme}::addr={host}:{port};'
 
 
+def _pg_tls_args(url: str) -> dict:
+    """The trust root for the PG-wire adapters' default ``verify-full``.
+
+    libpq does not consult the system store unless told to. It finds a CA of
+    your own through ``PGSSLROOTCERT`` or ``~/.postgresql/root.crt``, and an
+    explicit ``sslrootcert`` would override both, so pass one only when neither
+    exists: ``"system"`` (libpq 16 or later) uses the OS trust store. A
+    numeric loopback URL defaults to ``sslmode="prefer"`` instead, which libpq
+    refuses to combine with ``sslrootcert="system"``.
+    """
+    host = urllib.parse.urlsplit(url).hostname or ''
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return {}
+    except ValueError:
+        pass
+    root_crt = os.path.join(os.path.expanduser('~'), '.postgresql', 'root.crt')
+    if os.environ.get('PGSSLROOTCERT') or os.path.exists(root_crt):
+        return {}
+    return {'sslrootcert': 'system'}
+
+
 def sign_in(url: str = QUESTDB_URL) -> OidcDeviceAuth:
     """Discover config from QuestDB and sign in interactively (once)."""
     auth = OidcDeviceAuth.from_questdb(url)
@@ -63,9 +86,8 @@ def pg_wire(url: str = QUESTDB_URL):
     # SQLAlchemy: a fresh token is injected as the password on every new
     # (pooled) connection, so the engine keeps working as the token rotates.
     # A remote host defaults to sslmode="verify-full", which needs a trust
-    # root: libpq does not consult the system store unless told to. Point
-    # sslrootcert at your CA file, or use "system" with libpq 16 or later.
-    tls = {'sslrootcert': os.environ.get('PGSSLROOTCERT', 'system')}
+    # root; see _pg_tls_args().
+    tls = _pg_tls_args(url)
     from sqlalchemy import text
     engine = sqlalchemy_engine(auth, url, connect_args=tls)
     with engine.connect() as conn:

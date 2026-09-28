@@ -190,6 +190,13 @@ Highlights:
   remain unchanged, including a non-rotating refresh token.
 * OIDC discovery, endpoint validation, token selection, caching, refresh, and
   concurrency control use the same native implementation as the C/C++ clients.
+* OIDC does not survive ``fork()`` without ``exec()``. A provider inherited by
+  a forked child is refused there, and once the parent has constructed any
+  :class:`~questdb.auth.OidcDeviceAuth` (used or not), constructing a new one
+  in a forked child raises :class:`~questdb.auth.OidcConfigError`. Pre-fork
+  servers (``gunicorn --preload``, Celery prefork, :mod:`multiprocessing` with
+  the ``fork`` start method) must construct the provider inside each worker or
+  start workers with ``spawn`` / ``forkserver``; see :ref:`auth-fork`.
 * OIDC scopes are preserved exactly for groups-mode token selection and the
   persisted token-store identity. Refresh requests intentionally omit ``scope``,
   matching the Java client, so the identity provider preserves the scope that
