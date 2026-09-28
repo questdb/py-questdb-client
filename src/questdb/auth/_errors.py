@@ -49,11 +49,13 @@ class OidcError(QuestDBError):
     subclass such as :class:`OidcInteractionRequired` — to handle auth failures
     specifically.
 
-    ``code`` mirrors the native classification: ``QuestDBErrorCode.AuthError``
-    for a terminal auth failure, ``SocketError`` for one the client considers
-    retryable (a transient token-provider failure on a reconnect), and
-    ``ConfigError`` for a misconfiguration. Retry logic that keys on ``code``
-    therefore treats an OIDC failure exactly as it treats any other.
+    ``code`` reports the failing call's native error category, not an OIDC
+    recovery instruction: an interaction-required token lookup may report
+    ``AuthError`` while a sender flush reports ``SocketError`` for the same
+    missing credential. Catch :class:`OidcInteractionRequired` first, using
+    its ``acquisition_busy`` flag to distinguish waiting for another thread
+    from needing interactive sign-in. Do not retry a sender flush solely
+    because its code is ``SocketError``.
 
     ``status`` is the HTTP status of the failing IdP response when known,
     otherwise ``None`` (a failure with no HTTP exchange behind it — a transport
@@ -128,6 +130,17 @@ class OidcError(QuestDBError):
         #: carried the header (typically 429/503), otherwise ``None``.
         self.retry_after = retry_after
 
+    @property
+    def acquisition_busy(self) -> bool:
+        """Whether another thread is acquiring a credential or rendering a
+        callback and this call should be retried after that work finishes.
+
+        False on an :class:`OidcInteractionRequired` means the caller must
+        arrange an explicit ``sign_in()`` instead; a same-thread callback
+        re-entry must return from the callback before doing either.
+        """
+        return bool(getattr(self, '_acquisition_busy', False))
+
 
 class OidcConfigError(OidcError):
     """
@@ -157,8 +170,12 @@ class OidcNetworkError(OidcError):
 class OidcInteractionRequired(OidcError):
     """
     Interactive sign-in is required, but raised instead of hanging in a
-    non-interactive context (``papermill``, cron, CI). Use a QuestDB
-    service-account REST token or the OAuth2 client-credentials grant there.
+    non-interactive context (``papermill``, cron, CI). If
+    :attr:`acquisition_busy` is true, another thread is doing the sign-in or
+    token acquisition; defer the operation rather than calling ``sign_in()``
+    again. Otherwise arrange interactive sign-in outside a callback. Use a
+    QuestDB service-account REST token or the OAuth2 client-credentials grant
+    when no interactive sign-in is possible.
     """
 
 

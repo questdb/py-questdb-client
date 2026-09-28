@@ -80,6 +80,7 @@ from questdb.auth._render import (
 import pg_capture_server
 from oidc_test_server import OidcTestServer
 from qwp_ws_ack_server import QwpAckServer
+from qwp_egress_failover_server import EgressFailoverServer
 
 try:
     import pandas as pd
@@ -3362,7 +3363,7 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         encoded_refresh_token = 'RT+%2B%2F%25+exact+credential'
         renderer = RecordingRenderer()
         with OidcTestServer(
-                initial_access_token=EXPIRED_ACCESS_TOKEN,
+                initial_expires_in=1,
                 refresh_token=refresh_token,
                 refresh_token_response=(429, {
                     'error': 'slow_down',
@@ -3372,6 +3373,7 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 }, {'Retry-After': '7'})) as server:
             auth = make_discovered_auth(server, renderer=renderer)
             auth.sign_in()
+            time.sleep(0.75)  # move past the half-lifetime refresh threshold
             with self.assertRaises(OidcNetworkError) as ctx:
                 auth.token()
             token_requests = server.requests('/token', 'POST')
@@ -3440,11 +3442,12 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         # uses these to schedule a retry). Exercises has_status / has_retry_after
         # + uint16_t status / uint64_t retry_after_seconds in the error view.
         with OidcTestServer(
-                initial_access_token=EXPIRED_ACCESS_TOKEN,
+                initial_expires_in=1,
                 refresh_token_response=(
                     429, {'error': 'slow_down'}, {'Retry-After': '7'})) as server:
             auth = make_discovered_auth(server)
-            auth.sign_in()  # obtains the (expired) access token + refresh token
+            auth.sign_in()
+            time.sleep(0.75)  # expire the cached token before its refresh
             with self.assertRaises(OidcNetworkError) as ctx:
                 auth.token()  # triggers the refresh, which hits the 429
         self.assertEqual(ctx.exception.status, 429)
@@ -5945,10 +5948,13 @@ class OidcReviewFixTest(unittest.TestCase):
                 self.assertEqual(exc.retry_after, 7)
                 # The unwritten tail is not read.
                 self.assertFalse(exc._acquisition_busy)
+                self.assertFalse(exc.acquisition_busy)
 
         full = _client._debug_oidc_error_from_view_prefix(error_full, 4, True)
         self.assertIs(type(full), OidcInteractionRequired)
         self.assertTrue(full._acquisition_busy)
+        self.assertTrue(full.acquisition_busy)
+        self.assertFalse(OidcInteractionRequired('sign in').acquisition_busy)
 
         # Shorter than v1: nothing is readable, so only the untyped base class.
         short = _client._debug_oidc_error_from_view_prefix(
@@ -6161,6 +6167,148 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
 
         frame = self._run(policy)
         self.assertEqual(frame.exports, 2)
+
+
+@unittest.skipIf(pd is None, 'pandas required for reader failover')
+class OidcReaderLifetimeTest(unittest.TestCase):
+    def test_query_result_retains_auth_diagnostics_after_handle_close(self):
+        credential = [None]
+        sabotaged = threading.Event()
+        warnings_seen = []
+
+        def fail_refresh_save():
+            if not sabotaged.is_set():
+                if os.path.isfile(credential[0]):
+                    os.remove(credential[0])
+                os.mkdir(credential[0])
+                sabotaged.set()
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                if record.levelno == logging.WARNING:
+                    warnings_seen.append(record.getMessage())
+
+        logger = logging.getLogger('questdb')
+        capture = Capture()
+        with tempfile.TemporaryDirectory() as directory, \
+                OidcTestServer(initial_expires_in=6,
+                               refresh_request_hook=fail_refresh_save) as idp, \
+                EgressFailoverServer() as qdb:
+            auth = make_discovered_auth(
+                idp, token_store=FileTokenStore.at(directory))
+            auth.sign_in()
+            signed_at = time.monotonic()
+            credential[0] = os.path.join(directory, next(
+                name for name in os.listdir(directory)
+                if name.endswith('.json')))
+            db = questdb.connect(
+                f'ws::addr=127.0.0.1:{qdb.port};lazy_connect=true;',
+                oidc_auth=auth)
+            result = db.query('select v from t')
+            auth_ref = weakref.ref(auth)
+            db.close()
+            del db, auth
+            gc.collect()
+            self.assertIsNotNone(auth_ref(),
+                'a live reader must keep its diagnostic callback target alive')
+            logger.addHandler(capture)
+            try:
+                # The replay opens a new reader connection, pulling a token
+                # past its half-lifetime threshold and failing the save.
+                time.sleep(max(0, 3.6 - (time.monotonic() - signed_at)))
+                qdb.release_first.set()
+                self.assertEqual(result.to_pandas()['v'].tolist(), [1, 2, 3])
+                self.assertTrue(sabotaged.is_set())
+                self.assertEqual(qdb.authorizations,
+                                 ['Bearer AT-initial', 'Bearer AT-refreshed'])
+                self.assertTrue(any('token store save failed' in msg
+                                    for msg in warnings_seen), warnings_seen)
+                self.assertEqual(qdb.errors, [])
+            finally:
+                logger.removeHandler(capture)
+                result.close()
+            del result
+            self.assertTrue(_settle_until(lambda: auth_ref() is None))
+
+
+class OidcSenderReentryTest(unittest.TestCase):
+    def test_persistence_warning_cannot_close_or_mutate_flushing_sender(self):
+        # The diagnostic runs on the flushing thread, inside native's mutable
+        # sender borrow. A logging handler used to free the sender mid-flush
+        # (segfault), or append rows into its borrowed outgoing buffer (UAF).
+        credential = [None]
+        sabotaged = threading.Event()
+        rejected = []
+        sender_ref = [None]
+        buffer_ref = [None]
+
+        def fail_save():
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential[0]):
+                os.remove(credential[0])
+            os.mkdir(credential[0])
+            sabotaged.set()
+
+        class Reenter(logging.Handler):
+            def emit(self, _record):
+                sender = sender_ref[0]
+                for name, action in (
+                    ('close', lambda: sender.close()),
+                    ('row', lambda: sender.row(
+                        'from_handler', columns={'v': 1},
+                        at=questdb.ServerTimestamp)),
+                    ('owned_row', lambda: buffer_ref[0].row(
+                        'from_handler', columns={'v': 1},
+                        at=questdb.ServerTimestamp)),
+                    ('owned_clear', lambda: buffer_ref[0].clear()),
+                ):
+                    try:
+                        action()
+                    except questdb.QuestDBError as exc:
+                        rejected.append((name, exc.code))
+
+        logger = logging.getLogger('questdb')
+        handler = Reenter()
+        try:
+            with tempfile.TemporaryDirectory() as directory, \
+                    OidcTestServer(initial_expires_in=4,
+                                   refresh_request_hook=fail_save) as server:
+                auth = make_discovered_auth(
+                    server, token_store=FileTokenStore.at(directory))
+                auth.sign_in()
+                credential[0] = os.path.join(directory, next(
+                    name for name in os.listdir(directory)
+                    if name.endswith('.json')))
+                sender = questdb.Sender.from_conf(
+                    f'http::addr=127.0.0.1:{server.port};',
+                    oidc_auth=auth, auto_flush=False)
+                sender.establish()
+                sender_ref[0] = sender
+                buffer_ref[0] = sender.new_buffer()
+                logger.addHandler(handler)
+                try:
+                    deadline = time.monotonic() + 15
+                    while not rejected:
+                        self.assertLess(time.monotonic(), deadline)
+                        buffer_ref[0].row('t', columns={'v': 1},
+                                          at=questdb.ServerTimestamp)
+                        sender.flush(buffer_ref[0])
+                        time.sleep(0.05)
+                    self.assertEqual(rejected, [
+                        ('close', questdb.QuestDBErrorCode.InvalidApiCall),
+                        ('row', questdb.QuestDBErrorCode.InvalidApiCall),
+                        ('owned_row', questdb.QuestDBErrorCode.InvalidApiCall),
+                        ('owned_clear', questdb.QuestDBErrorCode.InvalidApiCall),
+                    ])
+                    self.assertFalse(any(
+                        b'from_handler' in request['body']
+                        for request in server.requests(path='/write', method='POST')))
+                finally:
+                    logger.removeHandler(handler)
+                    sender.close(flush=False)
+        finally:
+            logger.removeHandler(handler)
 
 
 @unittest.skipUnless(

@@ -1094,6 +1094,7 @@ cdef class SenderTransaction:
         self._complete = False
 
     def __enter__(self):
+        self._sender._check_not_in_own_callback('transaction')
         if self._sender._in_txn:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -1147,6 +1148,7 @@ cdef class SenderTransaction:
                 "row() can\'t be called: Sender is closed."
             )
 
+        self._sender._check_not_in_own_callback('transaction.row')
         self._sender._buffer._row(
             False,  # allow_auto_flush
             self._table_name,
@@ -1176,6 +1178,7 @@ cdef class SenderTransaction:
                 QuestDBErrorCode.InvalidApiCall,
                 "dataframe() can\'t be called: Sender is closed."
             )
+        self._sender._check_not_in_own_callback('transaction.dataframe')
         _dataframe(
             auto_flush_blank(),
             self._sender._buffer._impl,
@@ -1199,6 +1202,7 @@ cdef class SenderTransaction:
         discarded, and neither :meth:`commit` nor :meth:`rollback` may be
         called again.
         """
+        self._sender._check_not_in_own_callback('transaction.commit')
         if self._complete:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -1244,6 +1248,7 @@ cdef class SenderTransaction:
 
         This will clear the buffer.
         """
+        self._sender._check_not_in_own_callback('transaction.rollback')
         if self._complete:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -1266,6 +1271,8 @@ cdef class Buffer:
     cdef size_t _init_buf_size
     cdef size_t _max_name_len
     cdef bint _qwp
+    # A native flush borrows this buffer even when it is caller-owned.
+    cdef bint _in_flight
     cdef object _row_complete_sender
 
     def __cinit__(self):
@@ -1274,6 +1281,7 @@ cdef class Buffer:
         self._init_buf_size = 0
         self._max_name_len = 0
         self._qwp = False
+        self._in_flight = False
         self._row_complete_sender = None
 
     def __init__(
@@ -1324,6 +1332,10 @@ cdef class Buffer:
         line_sender_buffer_free(self._impl)
 
     cdef inline void_int _check_impl(self) except -1:
+        if self._in_flight:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'Buffer cannot be accessed while a native flush is using it.')
         if self._impl == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -2044,15 +2056,19 @@ cdef class Buffer:
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
         self._check_impl()
-        _dataframe(
-            auto_flush_blank(),
-            self._impl,
-            self._b,
-            df,
-            table_name,
-            table_name_col,
-            symbols,
-            at)
+        self._in_flight = True
+        try:
+            _dataframe(
+                auto_flush_blank(),
+                self._impl,
+                self._b,
+                df,
+                table_name,
+                table_name_col,
+                symbols,
+                at)
+        finally:
+            self._in_flight = False
         return self
 
 
@@ -7222,6 +7238,7 @@ cdef class QuestDB:
         db = self._begin_db_use('query')
         try:
             reader_handle = _borrow_reader_from_pool(db)
+            reader_handle._oidc_auth = self._oidc_auth
             cursor_handle = _execute_query(
                 reader_handle, sql, binds, reset_symbol_dict)
         finally:
@@ -7256,6 +7273,7 @@ cdef class QuestDB:
         db_use = True
         try:
             reader_handle = _borrow_reader_from_pool(db)
+            reader_handle._oidc_auth = self._oidc_auth
             lease = PooledReader.__new__(PooledReader)
             lease._attach(self, reader_handle)
             db_use = False
@@ -7462,6 +7480,10 @@ cdef class Sender:
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
     cdef bint _in_txn
+    # Set while a GIL-released native call borrows this sender/buffer. An OIDC
+    # diagnostic can reacquire the GIL on that very thread and run arbitrary
+    # logging or signal handlers before the native call returns.
+    cdef bint _native_in_flight
     cdef int64_t _slot_id
     # A clone of the fully-configured opts for QWP/WebSocket senders, retained
     # so dataframe() can open a poolless direct columnar connection per call
@@ -8305,6 +8327,7 @@ cdef class Sender:
         :func:`Sender.close`; otherwise raises
         :class:`QuestDBError` (``InvalidApiCall``).
         """
+        self._check_not_in_own_callback('new_buffer')
         if self._impl == NULL:
             if self._opts == NULL:
                 raise QuestDBError(
@@ -8408,16 +8431,19 @@ cdef class Sender:
         cdef line_sender_error* err = NULL
         cdef PyThreadState * gs = NULL
         cdef line_sender* failed_impl = NULL
+        self._check_not_in_own_callback('establish')
         if self._opts == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'establish() can\'t be called after close().')
 
-        # We disable the GIL when calling `line_sender_build` since for HTTP
-        # it can make HTTP requests to auto-detect the protocol version.
+        # Build can pull an OIDC token and enter a Python diagnostic callback
+        # while native still borrows the options.
+        self._native_in_flight = True
         _ensure_doesnt_have_gil(&gs)
         self._impl = line_sender_build(self._opts, &err)
         _ensure_has_gil(&gs)
+        self._native_in_flight = False
 
         if self._impl == NULL:
             raise c_err_to_py(err)
@@ -8499,6 +8525,7 @@ cdef class Sender:
         """
         Start a :ref:`sender_transaction` block.
         """
+        self._check_not_in_own_callback('transaction')
         return SenderTransaction(self, table_name)
 
     def row(self,
@@ -8534,6 +8561,7 @@ cdef class Sender:
                 "row() can\'t be called: Sender is closed."
             )
 
+        self._check_not_in_own_callback('row')
         self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
         return self
 
@@ -8603,6 +8631,7 @@ cdef class Sender:
         cdef direct_conn_source_t src
         cdef qdb_pystr_buf* ws_b = NULL
         cdef dataframe_plan_t ws_plan
+        self._check_not_in_own_callback('dataframe')
         if _is_qwp_ws_protocol(self._c_protocol):
             if self._qwp_ws_opts == NULL:
                 raise QuestDBError(
@@ -8612,6 +8641,7 @@ cdef class Sender:
             src.opts = self._qwp_ws_opts
             ws_b = qdb_pystr_buf_new()
             ws_plan = dataframe_plan_blank()
+            self._native_in_flight = True
             try:
                 _direct_dataframe_run(
                     &src,
@@ -8628,6 +8658,7 @@ cdef class Sender:
                     self._oidc_auth)
                 return self
             finally:
+                self._native_in_flight = False
                 qdb_pystr_buf_free(ws_b)
         if schema_overrides is not None:
             raise QuestDBError(
@@ -8654,15 +8685,21 @@ cdef class Sender:
                 QuestDBErrorCode.InvalidApiCall,
                 "dataframe() can\'t be called: Sender is closed."
             )
-        _dataframe(
-            af,
-            self._buffer._impl,
-            self._buffer._b,
-            df,
-            table_name,
-            table_name_col,
-            symbols,
-            at)
+        self._native_in_flight = True
+        self._buffer._in_flight = True
+        try:
+            _dataframe(
+                af,
+                self._buffer._impl,
+                self._buffer._b,
+                df,
+                table_name,
+                table_name_col,
+                symbols,
+                at)
+        finally:
+            self._buffer._in_flight = False
+            self._native_in_flight = False
         return self
 
     cpdef flush(
@@ -8705,6 +8742,7 @@ cdef class Sender:
         cdef line_sender* sender = self._impl
         cdef line_sender_error* err = NULL
         cdef line_sender_buffer* c_buf = NULL
+        cdef Buffer active_buf
         cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
         cdef bint ok = False
 
@@ -8730,8 +8768,14 @@ cdef class Sender:
             c_buf = self._buffer._impl
         if line_sender_buffer_size(c_buf) == 0 and not _is_qwp_ws_protocol(self._c_protocol):
             return
+        active_buf = buffer if buffer is not None else self._buffer
 
-        # We might be blocking on IO, so temporarily release the GIL.
+        # Publish the guard before releasing the GIL: OIDC diagnostics can
+        # re-enter Python on this thread while native still holds &mut Sender
+        # and a borrowed pointer to c_buf. A logging/signal handler must not
+        # free the sender or mutate its buffer before the call returns.
+        self._native_in_flight = True
+        active_buf._in_flight = True
         _ensure_doesnt_have_gil(&gs)
         if transactional:
             ok = line_sender_flush_and_keep_with_flags(
@@ -8746,6 +8790,8 @@ cdef class Sender:
         else:
             ok = line_sender_flush_and_keep(sender, c_buf, &err)
         _ensure_has_gil(&gs)
+        active_buf._in_flight = False
+        self._native_in_flight = False
         if ok and c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
         if not ok:
@@ -8775,6 +8821,11 @@ cdef class Sender:
                 raise c_err_to_py(err)
 
     cdef inline void_int _check_not_in_own_callback(self, str method) except -1:
+        if self._native_in_flight:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f'{method}() cannot be called while this sender is in a native '
+                'operation (including from its OIDC diagnostic callback).')
         # The QWP/WebSocket error handler runs synchronously on the flushing
         # thread while the native sender is borrowed; reentering it from the
         # handler would alias or free the live sender and abort the process.
@@ -8835,9 +8886,19 @@ cdef class Sender:
         else:
             c_buf = self._buffer._impl
 
+        self._native_in_flight = True
+        if buffer is not None:
+            buffer._in_flight = True
+        else:
+            self._buffer._in_flight = True
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_flush_and_get_fsn(sender, c_buf, &fsn, &err)
         _ensure_has_gil(&gs)
+        if buffer is not None:
+            buffer._in_flight = False
+        else:
+            self._buffer._in_flight = False
+        self._native_in_flight = False
         if not ok:
             if c_buf == self._buffer._impl:
                 line_sender_buffer_clear(c_buf)
@@ -8872,10 +8933,20 @@ cdef class Sender:
         else:
             c_buf = self._buffer._impl
 
+        self._native_in_flight = True
+        if buffer is not None:
+            buffer._in_flight = True
+        else:
+            self._buffer._in_flight = True
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_flush_and_keep_and_get_fsn(
             sender, c_buf, &fsn, &err)
         _ensure_has_gil(&gs)
+        if buffer is not None:
+            buffer._in_flight = False
+        else:
+            self._buffer._in_flight = False
+        self._native_in_flight = False
         if not ok:
             if c_buf == self._buffer._impl:
                 line_sender_buffer_clear(c_buf)
@@ -8953,6 +9024,7 @@ cdef class Sender:
         # deadline (`timeout_millis`; 0 == wait indefinitely) surfaces as a
         # `line_sender_error_failover_retry`, which we translate back into the
         # historical ``reached == False`` return rather than raising.
+        self._native_in_flight = True
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_wait(
             self._impl,
@@ -8960,6 +9032,7 @@ cdef class Sender:
             c_timeout_millis,
             &err)
         _ensure_has_gil(&gs)
+        self._native_in_flight = False
         if not ok:
             if line_sender_error_get_code(err) != \
                     line_sender_error_failover_retry:
@@ -8983,9 +9056,11 @@ cdef class Sender:
         cdef bint ok = False
 
         self._check_qwp_ws('drive_once')
+        self._native_in_flight = True
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_drive_once(self._impl, &progressed, &err)
         _ensure_has_gil(&gs)
+        self._native_in_flight = False
         if not ok:
             raise c_err_to_py(err)
         return bool(progressed)
@@ -9051,9 +9126,11 @@ cdef class Sender:
         cdef bint ok = False
 
         self._check_qwp_ws('close_drain')
+        self._native_in_flight = True
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_close_drain(self._impl, &err)
         _ensure_has_gil(&gs)
+        self._native_in_flight = False
         if not ok:
             raise c_err_to_py(err)
 

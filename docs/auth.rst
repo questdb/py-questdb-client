@@ -87,10 +87,15 @@ lifecycle are :class:`~questdb.auth.OidcError` subclasses —
 :class:`~questdb.auth.OidcDeviceFlowError`, and
 :class:`~questdb.auth.OidcTimeoutError`. ``OidcError`` is a
 :class:`QuestDBError <questdb.QuestDBError>` subclass. Its ``code`` mirrors the
-client's own classification: ``QuestDBErrorCode.AuthError`` for a terminal auth
-failure, ``SocketError`` for one treated as retryable (a transient token pull on
-a reconnect), and ``ConfigError`` for a misconfiguration — so retry logic that
-keys on ``code`` handles an OIDC failure exactly as it handles any other.
+failing call's native category, **not** a recovery instruction. For example,
+``OidcInteractionRequired`` reports ``AuthError`` from ``auth.token()`` or the
+PG adapters, but ``SocketError`` from an HTTP sender flush in the very same
+state (no sign-in yet). The sender cannot recover by retrying until someone
+signs in. Catch ``OidcInteractionRequired`` before general error-code-based
+retry logic. Its public ``acquisition_busy`` property is true when another
+thread is acquiring a token or rendering a callback: defer the operation
+until that thread finishes. If false, arrange interactive sign-in (after
+returning from any callback) rather than retrying the failing operation.
 
 HTTP senders fetch a token on each flush; QWP/WebSocket senders and readers
 fetch one on connect/reconnect (and may retry after a handshake 401), **not**
@@ -125,8 +130,10 @@ token for each flush:
             at=questdb.ServerTimestamp)
     try:
         sender.flush(buf, clear=False)
-    except OidcInteractionRequired:
-        auth.sign_in()      # token lapsed; re-authenticate interactively
+    except OidcInteractionRequired as exc:
+        if exc.acquisition_busy:
+            raise           # defer the batch until the other thread finishes
+        auth.sign_in()      # token lapsed; re-authenticate outside callbacks
         sender.flush(buf, clear=False)   # the rows are still in `buf`
     except OidcError:
         raise               # other auth failure — not a retriable data error
@@ -226,8 +233,11 @@ is logged at ``WARNING`` on the ``questdb`` logger during normal operation.
 Persistence-warning handlers must not call ``sign_in()``, ``clear()``, an
 uncached ``token()``, or an attached transport operation that needs a token from
 the same provider; those operations are rejected before they can deadlock.
-Cached token reads,
-``cancel_sign_in()``, and ``close()`` remain callback-safe. The binding imports
+Cached token reads and provider ``cancel_sign_in()`` / ``close()`` remain
+callback-safe. An attached **Sender** may not be closed or mutated by a
+persistence-warning handler while it is performing a native flush: those
+operations raise ``QuestDBError(InvalidApiCall)`` rather than freeing the
+sender or changing its buffer while native code still holds it. The binding imports
 ``logging`` before registering its own shutdown hook, so the hook detaches OIDC
 callbacks while logging handlers are still live;
 ``logging.shutdown()`` runs afterwards. Diagnostics produced after the detach
