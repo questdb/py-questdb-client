@@ -334,10 +334,12 @@ libpq otherwise uses an inherited ``PGHOSTADDR`` even when ``host`` is set,
 and could send the bearer password to that address. Empty ``hostaddr`` keeps
 normal hostname resolution while overriding the environment variable on every
 physical connection, including connections created after an engine is built.
-A ``do_connect`` listener registered ahead of the adapter must also leave
-``host`` and ``port`` in the driver's keyword arguments and supply no positional
-connection arguments; the adapter refuses to attach a token if it cannot verify
-those final arguments still name the validated destination.
+A ``do_connect`` listener registered at any point must also leave ``host`` and
+``port`` in the driver's keyword arguments and supply no positional connection
+arguments; the adapter checks the destination after all listeners have run,
+just before attaching the token at the dialect's connect boundary. A listener
+that returns its own DBAPI connection bypasses this boundary and will not
+receive a token from the adapter.
 
 Missing SQLAlchemy or PostgreSQL-driver dependencies raise ``ImportError``.
 Token acquisition failures from either adapter raise ``OidcError``; SQLAlchemy,

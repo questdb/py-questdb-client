@@ -262,18 +262,16 @@ def _require_expected_destination(
         allow_empty_hostaddr: bool = False) -> None:
     """Fail closed if the driver arguments no longer name the vetted peer.
 
-    Defence in depth for SQLAlchemy: `connect_args` is rejected up front, but
-    the final ``do_connect`` arguments are what the driver actually dials, and
-    they can also be rewritten by an application's own ``do_connect`` listener
-    registered before this one. Checked on every physical connection, just
-    before the token is attached.
+    ``connect_args`` is rejected up front, but an application's
+    ``do_connect`` listeners can rewrite the arguments later. Check them at
+    the dialect's final connect boundary, before attaching the token.
 
     ``allow_empty_hostaddr`` accepts ``hostaddr=''``, which names no peer --
-    libpq treats it as unset -- and is what the SQLAlchemy hook itself sets to
-    mask ``PGHOSTADDR``.
+    libpq treats it as unset -- and is what the adapter sets to mask
+    ``PGHOSTADDR``.
     """
     # SQLAlchemy passes both positional and keyword arguments to the driver.
-    # A prior do_connect listener can put a whole conninfo string in cargs,
+    # A do_connect listener can put a whole conninfo string in cargs,
     # removing host/port from cparams so libpq dials an unvetted peer. The
     # dialects used here normally supply no positional arguments; fail closed
     # rather than trying to parse every driver's positional connection syntax.
@@ -364,9 +362,10 @@ def sqlalchemy_engine(
     Build a SQLAlchemy ``Engine`` for QuestDB's PG-wire endpoint, authenticated
     with ``auth``.
 
-    Connects as user ``_sso``, injecting a **fresh** token as the password on
-    every new connection (via a ``do_connect`` listener) so pooled connections
-    always authenticate with a valid, auto-refreshed token. Requires
+    Connects as user ``_sso``, injecting a **fresh** token as the password at
+    the dialect's final connect boundary on every new connection, *after* all
+    ``do_connect`` listeners. Pooled connections therefore authenticate with
+    a valid, auto-refreshed token. Requires
     ``acl.oidc.pg.token.as.password.enabled=true`` on the server.
 
     Sign in once up front (``auth.sign_in()``) before the pool opens connections.
@@ -408,10 +407,12 @@ def sqlalchemy_engine(
         over the arguments built from the validated URL, so such a value would
         re-point the connection — and the bearer token travelling as its
         password — at a peer this adapter never vetted. Use ``host=`` and
-        ``pg_port=`` instead. A preceding SQLAlchemy ``do_connect`` listener
-        must leave ``host`` and ``port`` in the driver keyword arguments and
-        must not add positional connection arguments: otherwise the adapter
-        refuses to fetch or attach the bearer token.
+        ``pg_port=`` instead. SQLAlchemy ``do_connect`` listeners must leave
+        ``host`` and ``port`` in the driver keyword arguments and must not add
+        positional connection arguments: otherwise the adapter refuses to
+        fetch or attach the bearer token. A listener that returns its own
+        DBAPI connection bypasses the dialect and therefore the adapter's
+        token injection.
     :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
         has no host; if the resolved host carries connection-string
         metacharacters; if ``pg_port`` is not a valid TCP port; if
@@ -432,7 +433,7 @@ def sqlalchemy_engine(
     _reject_destination_overrides(
         engine_kwargs.get('connect_args'), 'connect_args')
     try:
-        from sqlalchemy import create_engine, event
+        from sqlalchemy import create_engine
         from sqlalchemy.engine import URL
     except ImportError as e:
         raise ImportError(
@@ -458,41 +459,33 @@ def sqlalchemy_engine(
             database=database),
         **engine_kwargs)
 
-    @event.listens_for(engine, 'do_connect')
-    def _provide_token(dialect, conn_rec, cargs, cparams):  # noqa: ANN001
-        # These are the arguments the driver will actually dial. Confirm they
-        # still name the vetted peer BEFORE the bearer token is attached, so
-        # neither a passthrough nor an earlier do_connect listener can turn a
-        # validated destination into an unvetted one.
-        #
-        # SQLAlchemy before 2.0.48 hands every physical connect the same
-        # cparams dict, concurrently from several pool threads, so the empty
-        # hostaddr set below on an earlier connect is still here. It names no
-        # peer, so the check accepts it rather than this hook deleting and
-        # re-adding it: another thread could observe or dial the dict between
-        # the two, and dialling without it lets PGHOSTADDR pick the peer.
-        # Every write this hook makes to the shared dict is idempotent.
+    # SQLAlchemy calls dialect.connect only after its do_connect listeners
+    # have run. A do_connect hook that injects the password itself cannot
+    # guard against a *later* listener redirecting cparams. Keep the token
+    # out of every listener and validate the destination at the final dial.
+    # A listener that returns a DBAPI connection skips dialect.connect, but
+    # has no access to the token through the connection arguments either.
+    original_connect = engine.dialect.connect
+
+    def _connect_with_token(*cargs, **cparams):
         _require_expected_destination(
             cargs, cparams, resolved_host, pg_port,
             allow_empty_hostaddr=uses_libpq)
         if uses_libpq:
-            # An explicit empty value suppresses libpq's PGHOSTADDR default
-            # while still resolving the validated host normally. Do this on
-            # every physical connect: the environment can change after the
-            # engine is constructed, and loopback's sslmode=prefer would send
-            # the bearer password in clear to an environment-selected peer.
+            # Always mask PGHOSTADDR, including when a listener removed the
+            # empty hostaddr value from a prior connect. The keyword dict is
+            # private to this invocation even on SQLAlchemy versions that
+            # reuse the original cparams between pool threads.
             cparams['hostaddr'] = ''
-        # Non-interactive: reuse / silently refresh the up-front token, but never
-        # run an interactive device flow from a pool thread (it would block the
-        # pool). Raises OidcInteractionRequired if no token was acquired first.
-        cparams['password'] = auth.token()
-        # setdefault, so an sslmode the caller put in connect_args wins. Set
-        # here rather than on the URL because that is where the password goes:
-        # the two travel together, and the point is that this password is a
-        # bearer token that must not reach an unauthenticated remote server.
+        # An sslmode in connect_args (or set by a listener) takes precedence.
         if sslmode is not None:
             cparams.setdefault('sslmode', sslmode)
+        # Non-interactive: silently refresh an existing token, but never start
+        # a device flow from a pool thread. Fetch it only after validation.
+        cparams['password'] = auth.token()
+        return original_connect(*cargs, **cparams)
 
+    engine.dialect.connect = _connect_with_token
     return engine
 
 

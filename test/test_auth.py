@@ -3251,27 +3251,20 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             for value in stats['upgrade_authorizations']))
         self.assertEqual(stats['errors'], [])
 
-    def test_sqlalchemy_listener_uses_native_refreshed_token(self):
+    def test_sqlalchemy_dialect_connect_uses_native_refreshed_token(self):
         with OidcTestServer(
                 initial_access_token=EXPIRED_ACCESS_TOKEN) as server:
             auth = make_discovered_auth(server)
             auth.sign_in()
-            engine = types.SimpleNamespace(listeners={})
+            original_connect = mock.Mock()
+            engine = types.SimpleNamespace(
+                dialect=types.SimpleNamespace(connect=original_connect))
             sqlalchemy = types.ModuleType('sqlalchemy')
             sqlalchemy.create_engine = mock.Mock(return_value=engine)
-
-            class Event:
-                @staticmethod
-                def listens_for(target, name):
-                    def register(listener):
-                        target.listeners[name] = listener
-                        return listener
-                    return register
 
             class URL:
                 create = mock.Mock(return_value='postgresql-url')
 
-            sqlalchemy.event = Event
             sqlalchemy_engine_module = types.ModuleType('sqlalchemy.engine')
             sqlalchemy_engine_module.URL = URL
             modules = {
@@ -3283,13 +3276,12 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                     auth,
                     server.url,
                     drivername='postgresql+psycopg')
-            # SQLAlchemy's dialect supplies the validated destination in
-            # cparams; the mock listener must model those real driver args.
-            params = {'host': '127.0.0.1', 'port': 8812}
-            returned.listeners['do_connect'](None, None, [], params)
+            # Model the final call made after SQLAlchemy's do_connect hooks.
+            returned.dialect.connect(host='127.0.0.1', port=8812)
             token_requests = server.requests('/token', 'POST')
 
         self.assertIs(returned, engine)
+        params = original_connect.call_args.kwargs
         self.assertEqual(params['password'], 'AT-refreshed')
         self.assertEqual(params['sslmode'], 'prefer')
         self.assertEqual(len(token_requests), 2)
@@ -5375,27 +5367,18 @@ class AdapterTest(unittest.TestCase):
             driver.connect.call_args.kwargs['sslrootcert'],
             '/etc/ssl/questdb-ca.pem')
 
-    def test_sqlalchemy_listener_refuses_to_token_a_redirected_connection(self):
-        # Defence in depth for the arguments the driver actually dials: an
-        # application's own `do_connect` listener registered before this one can
-        # rewrite cparams after `connect_args` was vetted. The token must not be
-        # attached to a destination that no longer matches the validated peer.
-        engine = types.SimpleNamespace(listeners={})
+    def test_sqlalchemy_final_connect_refuses_a_redirected_connection(self):
+        # A do_connect listener may change the destination before the dialect
+        # sees it. The final guard must reject it without fetching a token.
+        original_connect = mock.Mock()
+        engine = types.SimpleNamespace(
+            dialect=types.SimpleNamespace(connect=original_connect))
         sqlalchemy = types.ModuleType('sqlalchemy')
         sqlalchemy.create_engine = mock.Mock(return_value=engine)
-
-        class Event:
-            @staticmethod
-            def listens_for(target, name):
-                def register(listener):
-                    target.listeners[name] = listener
-                    return listener
-                return register
 
         class URL:
             create = mock.Mock(return_value='postgresql-url')
 
-        sqlalchemy.event = Event
         sqlalchemy_engine_module = types.ModuleType('sqlalchemy.engine')
         sqlalchemy_engine_module.URL = URL
         modules = {
@@ -5409,15 +5392,10 @@ class AdapterTest(unittest.TestCase):
                 auth,
                 'https://questdb.example.com:9000',
                 drivername='postgresql+psycopg')
-        listener = returned.listeners['do_connect']
-
-        redirected = {'host': 'other.example', 'port': 8812}
-        with self.assertRaisesRegex(OidcConfigError, 'refusing to send'):
-            listener(None, None, [], redirected)
-        auth.token.assert_not_called()
-        self.assertNotIn('password', redirected)
+        connect = returned.dialect.connect
 
         for cargs, cparams in (
+                ([], {'host': 'other.example', 'port': 8812}),
                 ([], {'port': 8812}),
                 ([], {'host': 'questdb.example.com'}),
                 (['host=other.example port=5432'], {
@@ -5427,45 +5405,18 @@ class AdapterTest(unittest.TestCase):
             with self.subTest(cargs=cargs, cparams=cparams):
                 with self.assertRaisesRegex(
                         OidcConfigError, 'refusing to send the OIDC token'):
-                    listener(None, None, cargs, cparams)
+                    connect(*cargs, **cparams)
                 auth.token.assert_not_called()
+                original_connect.assert_not_called()
                 self.assertNotIn('password', cparams)
 
-        # The validated destination still gets its token.
-        expected = {'host': 'questdb.example.com', 'port': 8812}
-        listener(None, None, [], expected)
-        self.assertEqual(expected['password'], 'SECRET-BEARER')
-        self.assertEqual(expected['hostaddr'], '')
-
-        # SQLAlchemy before 2.0.48 passes the SAME cparams dict to every
-        # physical connect, so this listener's own empty hostaddr is still in
-        # it on the next one. That must not be refused as a redirection.
-        auth.token.return_value = 'SECOND-BEARER'
-        listener(None, None, [], expected)
-        self.assertEqual(expected['password'], 'SECOND-BEARER')
-        self.assertEqual(expected['hostaddr'], '')
-
-        # Those connects run concurrently on pool threads, and `token()`
-        # releases the GIL. The listener must never remove `hostaddr` from the
-        # shared dict, even momentarily: another thread's check would refuse
-        # the gap-filling value, and another thread dialling during the gap
-        # would let PGHOSTADDR choose the peer the token is sent to.
-        class _SharedCparams(dict):
-            def __delitem__(self, key):
-                raise AssertionError(f'listener removed {key!r}')
-
-            def pop(self, key, *default):
-                raise AssertionError(f'listener removed {key!r}')
-
-        shared = _SharedCparams(
-            host='questdb.example.com', port=8812, hostaddr='')
-        observed = []
-        auth.token.side_effect = lambda: (
-            observed.append(dict(shared)) or 'THIRD-BEARER')
-        listener(None, None, [], shared)
-        auth.token.side_effect = None
-        self.assertEqual(shared['password'], 'THIRD-BEARER')
-        self.assertEqual(observed[0]['hostaddr'], '')
+        # Only the final, validated dial attaches a token. It also supplies
+        # hostaddr='' even when a listener removed it, masking PGHOSTADDR.
+        connect(host='questdb.example.com', port=8812)
+        params = original_connect.call_args.kwargs
+        self.assertEqual(params['password'], 'SECRET-BEARER')
+        self.assertEqual(params['hostaddr'], '')
+        auth.token.assert_called_once_with()
 
     def test_sqlalchemy_rejects_unsafe_url_before_token_or_engine(self):
         sqlalchemy = types.ModuleType('sqlalchemy')
@@ -5489,19 +5440,16 @@ class AdapterTest(unittest.TestCase):
         # pg8000 and other non-libpq drivers take no `sslmode`: injecting it
         # failed every pooled connection with a bare TypeError. Refuse at
         # construction, and accept the driver once TLS is left to connect_args.
-        engine = types.SimpleNamespace(listeners={})
+        connects = []
+
+        def make_engine(*args, **kwargs):
+            connect = mock.Mock()
+            connects.append(connect)
+            return types.SimpleNamespace(
+                dialect=types.SimpleNamespace(connect=connect))
+
         sqlalchemy = types.ModuleType('sqlalchemy')
-        sqlalchemy.create_engine = mock.Mock(return_value=engine)
-
-        class Event:
-            @staticmethod
-            def listens_for(target, name):
-                def register(listener):
-                    target.listeners[name] = listener
-                    return listener
-                return register
-
-        sqlalchemy.event = Event
+        sqlalchemy.create_engine = mock.Mock(side_effect=make_engine)
         sqlalchemy_engine = types.ModuleType('sqlalchemy.engine')
         sqlalchemy_engine.URL = mock.Mock()
         modules = {
@@ -5526,8 +5474,8 @@ class AdapterTest(unittest.TestCase):
             _adapters.sqlalchemy_engine(auth, url, drivername='postgresql')
             returned = _adapters.sqlalchemy_engine(
                 auth, url, drivername='postgresql+pg8000', sslmode=None)
-        params = {'host': 'questdb.example.com', 'port': 8812}
-        returned.listeners['do_connect'](None, None, [], params)
+        returned.dialect.connect(host='questdb.example.com', port=8812)
+        params = connects[-1].call_args.kwargs
         self.assertEqual(params['password'], 'SECRET-BEARER')
         self.assertNotIn('sslmode', params)
         self.assertNotIn('hostaddr', params)  # pg8000 is not libpq.
@@ -5620,6 +5568,7 @@ class AdapterRealDriverTest(unittest.TestCase):
         # the environment: pooled connections must be protected at connect time.
         import psycopg
         import sqlalchemy.exc
+        from sqlalchemy import event
         url = 'http://127.0.0.2:9000'
         with pg_capture_server.PgCaptureServer() as other:
             for sslmode in ('auto', None):
@@ -5628,6 +5577,14 @@ class AdapterRealDriverTest(unittest.TestCase):
                     engine = sqlalchemy_engine(
                         auth, url, pg_port=other.port, sslmode=sslmode,
                         connect_args={'connect_timeout': 1})
+
+                    def remove_hostaddr(dialect, conn_rec, cargs, cparams):
+                        # A late listener must not restore PGHOSTADDR's power
+                        # to redirect the dial or see the token itself.
+                        self.assertNotIn('password', cparams)
+                        cparams.pop('hostaddr', None)
+
+                    event.listen(engine, 'do_connect', remove_hostaddr)
                     try:
                         # Even if TLS is managed by libpq's environment, its
                         # destination must still come from the validated URL.
@@ -5693,9 +5650,9 @@ class AdapterRealDriverTest(unittest.TestCase):
             self.assertIn('ssl', login['encryption_requests'])
 
     def test_sqlalchemy_connect_args_merge_over_the_adapter_defaults(self):
-        # SQLAlchemy merges `connect_args` into cparams before the do_connect
-        # listener runs, and the listener only `setdefault`s sslmode -- so an
-        # explicit sslmode wins, and other passthrough arguments survive to
+        # SQLAlchemy merges `connect_args` into cparams before the final
+        # dialect connect. The adapter only `setdefault`s sslmode there -- so
+        # an explicit sslmode wins, and other passthrough arguments survive to
         # the driver alongside the injected password.
         auth = _TokenSequence('TOKEN-1')
         with pg_capture_server.PgCaptureServer() as pg:
@@ -5748,8 +5705,8 @@ class AdapterRealDriverTest(unittest.TestCase):
         self.assertEqual(other.logins, [])
 
     def test_sqlalchemy_refuses_a_listener_that_redirects_the_connection(self):
-        # A `do_connect` listener registered for every engine runs ahead of
-        # the adapter's own. If it re-points the dial, the adapter must refuse
+        # A `do_connect` listener registered for every engine runs before the
+        # dialect connects. If it re-points the dial, the adapter must refuse
         # before attaching the token -- and nothing may reach any server.
         import sqlalchemy
         from sqlalchemy import event
@@ -5772,6 +5729,52 @@ class AdapterRealDriverTest(unittest.TestCase):
         self.assertIn('refusing to send the OIDC token', str(ctx.exception))
         self.assertEqual(auth.calls, 0)
         self.assertEqual(pg.logins, [])
+
+    def test_sqlalchemy_late_listener_cannot_redirect_a_token(self):
+        # Regression: SQLAlchemy runs do_connect listeners registered *after*
+        # engine creation after the adapter's old hook, but before the dial.
+        # The token must not yet be in cparams, and neither peer may see it.
+        from sqlalchemy import event
+        auth = _TokenSequence('SECRET-BEARER')
+        with pg_capture_server.PgCaptureServer() as vetted, \
+                pg_capture_server.PgCaptureServer() as other:
+            engine = sqlalchemy_engine(auth, self.URL, pg_port=vetted.port)
+
+            def redirect(dialect, conn_rec, cargs, cparams):
+                self.assertNotIn('password', cparams)
+                cparams['port'] = other.port
+
+            event.listen(engine, 'do_connect', redirect)
+            try:
+                with self.assertRaisesRegex(
+                        OidcConfigError, 'refusing to send the OIDC token'):
+                    engine.connect()
+            finally:
+                engine.dispose()
+        self.assertEqual(auth.calls, 0)
+        self.assertEqual(vetted.logins, [])
+        self.assertEqual(other.logins, [])
+
+    def test_sqlalchemy_late_listener_can_set_nondestination_arguments(self):
+        from sqlalchemy import event
+        auth = _TokenSequence('SECRET-BEARER')
+        with pg_capture_server.PgCaptureServer() as pg:
+            engine = sqlalchemy_engine(auth, self.URL, pg_port=pg.port)
+
+            def set_application_name(dialect, conn_rec, cargs, cparams):
+                self.assertNotIn('password', cparams)
+                cparams['application_name'] = 'late-listener'
+
+            event.listen(engine, 'do_connect', set_application_name)
+            try:
+                self._refused(engine.connect)
+            finally:
+                engine.dispose()
+        self.assertEqual(auth.calls, 1)
+        self.assertEqual(pg.errors, [])
+        self.assertEqual(pg.logins[0]['password'], 'SECRET-BEARER')
+        self.assertEqual(
+            pg.logins[0]['params']['application_name'], 'late-listener')
 
 
 class OidcReviewFixTest(unittest.TestCase):
@@ -6077,6 +6080,11 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
                         if wait_for_event_on_error is not None:
                             wait_for_event_on_error.wait(timeout=5)
                         raise
+                    # A successful direct DataFrame call must publish data,
+                    # not merely export it or return without error. More than
+                    # one frame may be sent; the mock counts before ACKing.
+                    self.assertGreaterEqual(
+                        server.snapshot()['binary_frames'], 1)
         return frame
 
     def test_terminal_rejection_between_slices_is_not_redialled(self):
@@ -6171,6 +6179,8 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
 
 @unittest.skipIf(pd is None, 'pandas required for reader failover')
 class OidcReaderLifetimeTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix',
+                         'durable file token store requires POSIX')
     def test_query_result_retains_auth_diagnostics_after_handle_close(self):
         credential = [None]
         sabotaged = threading.Event()
@@ -6232,6 +6242,8 @@ class OidcReaderLifetimeTest(unittest.TestCase):
 
 
 class OidcSenderReentryTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix',
+                         'durable file token store requires POSIX')
     def test_persistence_warning_cannot_close_or_mutate_flushing_sender(self):
         # The diagnostic runs on the flushing thread, inside native's mutable
         # sender borrow. A logging handler used to free the sender mid-flush
