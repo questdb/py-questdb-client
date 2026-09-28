@@ -71,7 +71,9 @@ from test_auth import (
     OidcForkSafetyTest,
     OidcTestServerFixtureTest,
     OidcPoolDataframeFailoverTest,
+    OidcReaderLifetimeTest,
     OidcReviewFixTest,
+    OidcSenderReentryTest,
     ProviderCycleSafetyTest,
     RenderSanitizerTest,
 )
