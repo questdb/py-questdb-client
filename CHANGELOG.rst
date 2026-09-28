@@ -94,8 +94,11 @@ Breaking changes
 
   It is still a ``dict`` — it indexes, iterates, compares, pickles and
   serializes to JSON as before, and a hand-written ``dict`` is read the same
-  way. To change what a frame claims, assign a whole new mapping — the nested
-  ``columns`` mapping is frozen too, so unpack that one as well::
+  way. A pickled frame loads without this package installed: the claim comes
+  back as a plain ``dict``, which pandas copies the ordinary way until the
+  table is read from QuestDB again. To change what a frame claims, assign a
+  whole new mapping — the nested ``columns`` mapping is frozen too, so unpack
+  that one as well::
 
       df.attrs['questdb'] = {
           'version': 1,

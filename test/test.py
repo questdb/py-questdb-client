@@ -2726,29 +2726,39 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
-    def test_roundtrip_claim_survives_a_pickle(self):
+    def test_roundtrip_claim_pickles_as_a_plain_dict(self):
         # `df.to_pickle`, multiprocessing and dask all pickle the frame,
-        # and pandas pickles `attrs` with it. `__reduce__` is written by
-        # hand so that what comes back is a claim rather than the plain
-        # dict its payload travels as -- an unpickled frame that had
-        # become editable would let one holder of it change what every
-        # other holder claims.
+        # and pandas pickles `attrs` with it. A pickle that named the
+        # claim's class would load only where this package is installed,
+        # at a version that still has that private class. The claim
+        # goes in as a plain dict at every depth instead, so the frame
+        # loads wherever pandas does.
         frame = self._nullable_roundtrip_frame()
-        restored = pickle.loads(pickle.dumps(frame))
+        data = pickle.dumps(frame)
+        restored = pickle.loads(data)
         claim = restored.attrs['questdb']
-        self.assertIsInstance(claim, qi._RoundtripClaim)
         self.assertEqual(claim, frame.attrs['questdb'])
-        # Frozen at every depth, the same as the claim it came from.
-        with self.assertRaisesRegex(TypeError, 'cannot be edited in place'):
-            claim['version'] = 2
-        with self.assertRaisesRegex(TypeError, 'cannot be edited in place'):
-            claim['columns']['u']['kind'] = 'long256'
-        self.assertIs(copy.deepcopy(claim), claim)
-        # And it still reads as a claim on the way back in.
+
+        def mapping_types(value):
+            if isinstance(value, dict):
+                yield type(value)
+                for item in value.values():
+                    yield from mapping_types(item)
+        self.assertEqual(set(mapping_types(claim)), {dict})
+
+        # A plain dict reads the same way on the way back in.
         self.assertEqual(
             self._dataframe_column_types(
                 restored, table_name='attrs_pickled', at='ts')['u'],
             0x0C)
+
+        # And the pickle loads where this package cannot be imported.
+        self._run_in_child_interpreter(
+            'import pickle, sys\n'
+            "sys.modules['questdb'] = None\n"
+            f'frame = pickle.loads({data!r})\n'
+            "assert type(frame.attrs['questdb']) is dict\n"
+            "print('OK')\n")
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

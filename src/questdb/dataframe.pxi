@@ -227,6 +227,13 @@ cdef enum col_target_t:
 cdef int _ROUNDTRIP_META_VERSION = 1
 
 
+cdef object _plain_mapping(object value):
+    """`value` with every mapping in it, at every depth, a plain `dict`."""
+    if isinstance(value, dict):
+        return {key: _plain_mapping(item) for key, item in value.items()}
+    return value
+
+
 class _RoundtripClaim(dict):
     """The ``df.attrs['questdb']`` payload: a ``dict`` that declines to
     be copied.
@@ -250,9 +257,10 @@ class _RoundtripClaim(dict):
     at every depth.
 
     It is still a ``dict``, so it indexes, iterates, compares and
-    serializes exactly like a plain mapping, and a hand-written plain
-    ``dict`` is read on the way in just the same, provided it carries
-    the same two keys this one does::
+    serializes exactly like a plain mapping. It pickles as a plain
+    ``dict``, so a pickled frame loads without this package installed.
+    A hand-written plain ``dict`` is read on the way in just the same,
+    provided it carries the same two keys this one does::
 
         {'version': 1, 'columns': {'src_ip': {'kind': 'ipv4'}}}
 
@@ -300,9 +308,14 @@ class _RoundtripClaim(dict):
         return self
 
     def __reduce__(self):
-        # Pickling round-trips through a plain dict payload, so an
-        # unpickled claim is a claim and not a bare dict.
-        return (_RoundtripClaim, (dict(self),))
+        # Pickled as a plain dict, nested mappings included, so a pickle
+        # names no class of this package: a pickled frame loads wherever
+        # pandas does, with or without this package installed. The frame
+        # it loads into carries an ordinary dict, which `dataframe()`
+        # reads the same way, and which pandas copies into each frame
+        # derived from it, so it needs neither the freezing nor the
+        # sharing this class exists for.
+        return (dict, (_plain_mapping(self),))
 
     def _immutable(self, *args, **kwargs):
         raise TypeError(
