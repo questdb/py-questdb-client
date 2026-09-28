@@ -51,6 +51,7 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
         TestEgressFailoverRoleNegotiation)
 
 from fixture import _parse_version
+from test_system_fixture_setup import TestSystemFixtureSetup
 
 # OIDC auth tests. Their runtime logic uses only the standard library, but
 # importing them runs ``from questdb.auth import ...``, and ``questdb.auth`` is a

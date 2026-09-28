@@ -4,6 +4,7 @@ import sys
 sys.dont_write_bytecode = True
 import os
 import datetime
+import json
 import importlib.util
 import random
 import shutil
@@ -14,14 +15,18 @@ import time
 import unittest
 import uuid
 import pathlib
+import urllib.error
+import urllib.parse
+import urllib.request
 import numpy as np
 import decimal
 
 import patch_path
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
-from fixture import \
-    QuestDbFixture, install_questdb, install_questdb_from_repo, CA_PATH, AUTH
+from fixture import (
+    QuestDbFixture, QueryError, install_questdb, install_questdb_from_repo,
+    CA_PATH, AUTH)
 from oidc_test_server import OidcTestServer
 from qwp_ws_ack_server import QwpRecordingProxy
 
@@ -65,7 +70,21 @@ def may_install_questdb():
             '/questdb-' +
             QUESTDB_VERSION +
             '-no-jre-bin.tar.gz')
-        install_path = install_questdb(QUESTDB_VERSION, url)
+        # DNS/GitHub can be briefly unavailable on CI runners. A failed
+        # setUpClass is still reported as an error even if a later class
+        # successfully downloads the same release, so retry the fetch here.
+        # Never retry an HTTP response (e.g. a missing release asset).
+        for attempt in range(4):
+            try:
+                install_path = install_questdb(QUESTDB_VERSION, url)
+                break
+            except urllib.error.URLError as exc:
+                if isinstance(exc, urllib.error.HTTPError) or attempt == 3:
+                    raise
+                delay = 2 ** attempt
+                print(f'QuestDB download failed: {exc}; '
+                      f'retrying in {delay}s.', file=sys.stderr)
+                time.sleep(delay)
 
     QUESTDB_PLAIN_INSTALL_PATH = PROJ_ROOT / 'build' / 'questdb' / 'plain'
     shutil.copytree(
@@ -6124,7 +6143,24 @@ class TestEgressFailover(unittest.TestCase):
         return conf
 
     def _exec(self, sql):
-        return self.qdb_plain.http_sql_query(sql)
+        # The shared fixture's 5s HTTP timeout is too short for a CREATE TABLE
+        # directly after a Windows server bounce: /ping is ready before the
+        # SQL worker catches up. Use a longer timeout for this test's table
+        # setup; do not blindly replay non-idempotent DDL on a socket timeout.
+        url = (f'http://{self.qdb_plain.host}:'
+               f'{self.qdb_plain.http_server_port}/exec?' +
+               urllib.parse.urlencode({'query': sql}))
+        request = urllib.request.Request(
+            url, headers=self.qdb_plain.http_headers(), method='GET')
+        try:
+            response = urllib.request.urlopen(request, timeout=30)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            data = json.loads(response.read())
+        if 'error' in data:
+            raise QueryError(data['error'])
+        return data
 
     def _drop_quietly(self, table):
         try:
