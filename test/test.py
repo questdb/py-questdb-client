@@ -7223,6 +7223,105 @@ print('OK')
         finally:
             qi._debug_set_close_lease_wait_limit_s(original)
 
+    def test_a_finalizer_that_closes_the_handle_during_close_returns(self):
+        """Releasing the callbacks at the end of `close()` can run a
+        finalizer on the closing thread. An object that passes its own
+        method as `error_handler` and closes the handle in `__del__` is
+        finalized there once the program has dropped it. That inner
+        `close()` finds the close already finished and returns at once,
+        rather than waiting for the very close that is running it."""
+        original = qi._debug_close_lease_wait_limit_s()
+        qi._debug_set_close_lease_wait_limit_s(5.0)
+        outcome = {}
+
+        class Writer:
+            def __init__(self, conf):
+                self.db = qi.QuestDB.from_conf(
+                    conf, error_handler=self.on_error)
+
+            def on_error(self, err):
+                pass
+
+            def __del__(self):
+                began = time.monotonic()
+                try:
+                    self.db.close()
+                    outcome['inner'] = 'ok'
+                except qi.QuestDBError as exc:
+                    outcome['inner'] = str(exc)
+                outcome['waited'] = time.monotonic() - began
+
+        try:
+            with QwpAckServer() as server:
+                conf = (f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;')
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    writer = Writer(conf)
+                    db = writer.db
+                    # From here only the handle's `error_handler` keeps
+                    # the writer alive.
+                    del writer
+                    self.assertNotIn('inner', outcome)
+                    db.close()
+                    self._assert_closed(db)
+        finally:
+            qi._debug_set_close_lease_wait_limit_s(original)
+        self.assertEqual(outcome.get('inner'), 'ok')
+        self.assertLess(outcome['waited'], 1.0)
+
+    def test_a_concurrent_close_does_not_wait_for_callback_finalizers(
+            self):
+        """The close that runs the teardown publishes it as finished
+        before it releases the callbacks, whose finalizers then run on
+        that thread. A concurrent `close()` waiting for the teardown
+        returns without waiting for them, so a finalizer that needs a
+        lock the waiting thread holds runs once that thread lets go,
+        instead of both threads standing until the wait runs out."""
+        original = qi._debug_close_lease_wait_limit_s()
+        qi._debug_set_close_lease_wait_limit_s(5.0)
+        app_lock = threading.Lock()
+
+        class Handler:
+            def __call__(self, err):
+                pass
+
+            def __del__(self):
+                with app_lock:
+                    pass
+
+        try:
+            with QwpAckServer(ack_delay_s=1.0) as server:
+                conf = (f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;auto_flush=off;'
+                        'sender_pool_min=1;sender_pool_max=2;')
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    db = qi.QuestDB.from_conf(
+                        conf, error_handler=Handler())
+                    lease = db.sender()
+                    lease.row('t', columns={'v': 1},
+                              at=qi.TimestampNanos(1))
+                    lease.close()
+                    # Drains for as long as the server holds its ack.
+                    first = threading.Thread(target=db.close)
+                    first.start()
+                    try:
+                        self.assertTrue(
+                            self._wait_for_the_teardown_to_start(db),
+                            'no close() took over the teardown')
+                        began = time.monotonic()
+                        with app_lock:
+                            db.close()
+                        waited = time.monotonic() - began
+                    finally:
+                        first.join(timeout=30)
+                    self.assertFalse(first.is_alive())
+                    self.assertLess(waited, 4.0)
+                    self._assert_closed(db)
+        finally:
+            qi._debug_set_close_lease_wait_limit_s(original)
+
     def test_close_timeout_zero_closes_only_an_idle_handle(self):
         """`timeout=0` never waits: it closes a handle nothing is using
         and raises at once otherwise, naming what is outstanding."""

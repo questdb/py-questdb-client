@@ -9428,6 +9428,19 @@ cdef class QuestDB:
             # the handle only moves toward closed.
             if _dispatching_for(self._thread_owner_token):
                 return
+            # A close() of this handle from a finalizer that a
+            # garbage-collection pass runs on this thread while this
+            # thread holds the pointer (after taking it, before
+            # publishing the close) waits below for its own close
+            # until its limit runs out, then raises. This is
+            # deliberately left alone. It needs an unreachable object
+            # whose finalizer closes this very handle, collected in a
+            # window of a few Python operations, and it loses nothing.
+            # The ways out are poor: returning early can report
+            # success before the teardown has run, and a refusal needs
+            # the tearing-down thread tracked for a case that
+            # practically never happens.
+            #
             # A number of seconds is one budget for the whole call, so
             # this wait gets only what the drain left of it and ends
             # at `call_deadline`. The default and `None` set no
@@ -9489,12 +9502,14 @@ cdef class QuestDB:
             closed = True
         finally:
             _ensure_has_gil(&gs)
-            if closed:
-                _release_callback_refs(self._cb_refs_key)
-                self._cb_refs_key = 0
-                self._dispatch_context = None
-                self._error_handler = None
-                self._connection_listener = None
+            # The close is published as finished before the callbacks
+            # are released. Releasing them can run their finalizers
+            # right here, on this thread: a finalizer that calls
+            # close() on this handle, or that waits for a lock held by
+            # a thread waiting for this close, finds the close already
+            # finished instead of waiting for it. Nothing needs the
+            # callbacks by now: `questdb_db_close` has joined the
+            # dispatchers, so no callback can run any more.
             with self._state_cond:
                 if closed:
                     self._conf_str = None
@@ -9505,6 +9520,12 @@ cdef class QuestDB:
                     self._db = db
                 self._close_running = False
                 self._state_cond.notify_all()
+            if closed:
+                _release_callback_refs(self._cb_refs_key)
+                self._cb_refs_key = 0
+                self._dispatch_context = None
+                self._error_handler = None
+                self._connection_listener = None
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """
