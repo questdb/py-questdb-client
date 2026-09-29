@@ -1524,7 +1524,7 @@ class QuestDB:
         Manually reap idle above-pool-size connections.
         """
 
-    def close(self):
+    def close(self, timeout: Optional[float] = ...) -> None:
         """
         Close the client and its connection pool.
 
@@ -1537,16 +1537,40 @@ class QuestDB:
         the first ``close()`` that finds nothing using the handle, or
         when the handle itself is collected.
 
-        The wait for the drain is bounded. Every five seconds it
-        reports what it is still waiting for through the ``questdb``
-        logger at ``WARNING``. After a minute ``QuestDBError`` is
-        raised with ``code`` set to
-        ``QuestDBErrorCode.InvalidApiCall``, naming how many leases and
-        calls are still outstanding. The handle stays closing -- it
-        never goes back to open -- and a later ``close()`` resumes the
-        wait and finishes the teardown. A lease held by the calling
-        thread, or by a thread that has since finished, can never be
-        returned: close every lease before closing the handle.
+        ``timeout`` sets how long this call waits for that drain:
+
+        - Left out: a call in progress is waited for until it
+          returns, and an outstanding lease for up to a minute.
+        - A number of seconds: calls and leases alike are waited for
+          up to that long. ``0`` closes only if nothing is in flight.
+        - ``None``: calls and leases alike are waited for until they
+          are done.
+
+        ``close()`` cannot interrupt a call in progress. A
+        ``dataframe()`` reading a stream that never ends, or one
+        waiting on the very thread that calls ``close()``, keeps it
+        waiting until ``timeout`` runs out -- and, with no limit on
+        calls, for ever. A lease comes back only when its holder
+        closes it, so one held by the calling thread, or by a thread
+        that has since finished, never will: close every lease before
+        closing the handle.
+
+        When the limit runs out, ``QuestDBError`` is raised with
+        ``code`` set to ``QuestDBErrorCode.InvalidApiCall``, naming how
+        many leases and calls are still outstanding. The handle stays
+        closing -- it never goes back to open -- and a later
+        ``close()``, with any ``timeout``, resumes the wait and
+        finishes the teardown. The same limit applies to waiting for a
+        concurrent ``close()`` on another thread to finish its
+        teardown.
+
+        While it waits, it reports what it is still waiting for
+        through the ``questdb`` logger at ``WARNING``: every five
+        seconds for the first minute, then once a minute.
+
+        Leaving a ``with`` block closes with the limits of a
+        ``close()`` with no arguments. For other limits, call
+        ``close(timeout=...)`` as the block's last statement.
 
         Idempotent: closing a closed handle returns without doing
         anything, and no ``close()`` returns success unless the

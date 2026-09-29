@@ -6146,10 +6146,12 @@ print('OK')
 
     #: The two held states in which a `close()` is still draining, and
     #: the one in which it has finished. Named here because what the
-    #: handle owes a caller differs between them by exactly one thing:
-    #: whether a second `close()` has anything left to wait for.
+    #: handle owes a second `close()` differs between them: it waits
+    #: out a call in progress and finishes, stops at the bound on a
+    #: lease, and returns at once from a finished close.
     CONCURRENCY_DRAINING = (
         'QuestDB.close/lease-wait', 'QuestDB.close/call-wait')
+    CONCURRENCY_CALL_WAIT = 'QuestDB.close/call-wait'
     CONCURRENCY_CLOSED = 'QuestDB.close/done'
 
     #: The two members that are allowed to return cleanly against a
@@ -6212,9 +6214,10 @@ print('OK')
         So the set comes from reflection: every public member of
         `QuestDB` is checked against the grid's three closing states,
         and a new one is covered the day it is added. Only `close` and
-        `__exit__` may answer cleanly, and only once the close has
-        finished -- while one is still draining, a second has something
-        left to wait for and says so."""
+        `__exit__` may answer cleanly: once the close has finished, or
+        while it waits for a call in progress, which a second close
+        waits out as well. While one waits on a lease, a second has
+        the same lease to wait for and gives up at the same bound."""
         table = self._concurrency_table()
         members = sorted(
             name for name, _, _, _ in api_surface.qualified_members()
@@ -6223,14 +6226,15 @@ print('OK')
 
         wrong = []
         for held in self.CONCURRENCY_DRAINING + (self.CONCURRENCY_CLOSED,):
-            closed = held == self.CONCURRENCY_CLOSED
+            finishes = held in (
+                self.CONCURRENCY_CLOSED, self.CONCURRENCY_CALL_WAIT)
             for member in members:
                 record = table.get(f'{held} | {member}')
                 self.assertIsNotNone(
                     record, f'no grid row for {held} | {member}')
                 want = (
                     'clean'
-                    if closed and member in self.CONCURRENCY_IDEMPOTENT
+                    if finishes and member in self.CONCURRENCY_IDEMPOTENT
                     else 'refused')
                 if record['result'] != want:
                     wrong.append(
@@ -6911,75 +6915,189 @@ print('OK')
         finally:
             qi._debug_set_close_lease_wait_limit_s(original)
 
-    def test_close_names_a_running_call_rather_than_blaming_a_lease(self):
-        """`dataframe()` counts as a call in progress, not a lease.
-        A `close()` that stops waiting while one is running says so --
-        advice to close leases would point at nothing -- and the call
-        itself runs to completion. A later `close()` then finishes the
-        teardown."""
+    _CLOSE_TEST_CONF = ('ws::addr=127.0.0.1:{port};lazy_connect=true;'
+                        'sender_pool_min=1;sender_pool_max=3;')
+
+    def _start_slow_load(self, db):
+        """Start `db.dataframe()` on another thread, over an Arrow
+        producer whose first batch waits for the returned event -- a
+        slow scan, a remote fetch, a stream with no end in sight.
+        Returns once the call is under way."""
+        table = pyarrow.table(
+            {'v': pyarrow.array([1, 2, 3], pyarrow.int64())})
+        started = threading.Event()
+        unblock = threading.Event()
+        outcome = {}
+
+        class SlowProducer:
+            def __arrow_c_stream__(self, requested_schema=None):
+                started.set()
+                unblock.wait(timeout=30)
+                return table.__arrow_c_stream__(requested_schema)
+
+        def load():
+            try:
+                db.dataframe(SlowProducer(), table_name='t',
+                             at=qi.ServerTimestamp)
+                outcome['load'] = 'ok'
+            except qi.QuestDBError as exc:
+                outcome['load'] = str(exc)
+
+        loader = threading.Thread(target=load)
+        loader.start()
+        if not started.wait(timeout=30):
+            unblock.set()
+            loader.join(timeout=30)
+            self.fail('the dataframe() call never started')
+        return unblock, loader, outcome
+
+    def _assert_closed(self, db):
+        with self.assertRaises(qi.QuestDBError) as closed:
+            db.sender()
+        self.assertIn('closed', str(closed.exception))
+
+    def test_close_waits_for_a_running_call_past_the_bound(self):
+        """`dataframe()` counts as a call in progress, not a lease. With
+        no `timeout`, `close()` waits for a call until it returns -- the
+        default bound is for leases, which may never come back -- and
+        then finishes the teardown and returns normally."""
         if pyarrow is None:
             self.skipTest('pyarrow not installed')
         original = qi._debug_close_lease_wait_limit_s()
         qi._debug_set_close_lease_wait_limit_s(0.5)
         try:
             with QwpAckServer() as server:
-                conf = (f'ws::addr=127.0.0.1:{server.port};'
-                        'lazy_connect=true;'
-                        'sender_pool_min=1;sender_pool_max=3;')
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    db = qi.QuestDB.from_conf(conf)
-                    table = pyarrow.table(
-                        {'v': pyarrow.array([1, 2, 3], pyarrow.int64())})
-                    started = threading.Event()
-                    unblock = threading.Event()
-                    outcome = {}
-
-                    class SlowProducer:
-                        """An ordinary Arrow producer whose first batch
-                        takes a while -- a slow scan, a remote fetch."""
-                        def __arrow_c_stream__(self, requested_schema=None):
-                            started.set()
-                            unblock.wait(timeout=30)
-                            return table.__arrow_c_stream__(
-                                requested_schema)
-
-                    def load():
-                        try:
-                            db.dataframe(SlowProducer(), table_name='t',
-                                         at=qi.ServerTimestamp)
-                            outcome['load'] = 'ok'
-                        except qi.QuestDBError as exc:
-                            outcome['load'] = str(exc)
-
-                    loader = threading.Thread(target=load)
-                    loader.start()
+                    db = qi.QuestDB.from_conf(
+                        self._CLOSE_TEST_CONF.format(port=server.port))
+                    unblock, loader, outcome = self._start_slow_load(db)
+                    # Lets the load finish well past the 0.5 s bound.
+                    release = threading.Timer(1.5, unblock.set)
                     try:
-                        self.assertTrue(
-                            started.wait(timeout=30),
-                            'the dataframe() call never started')
-                        with self.assertRaises(qi.QuestDBError) as caught:
-                            db.close()
-                        self.assertIn(
-                            '1 call(s) in progress',
-                            str(caught.exception))
-                        self.assertIn(
-                            '0 outstanding sender()/reader() lease(s)',
-                            str(caught.exception))
+                        release.start()
+                        began = time.monotonic()
+                        db.close()
+                        waited = time.monotonic() - began
                     finally:
+                        release.cancel()
                         unblock.set()
                         loader.join(timeout=30)
                     self.assertFalse(loader.is_alive(),
                                      'dataframe() never returned')
+                    self.assertGreaterEqual(waited, 1.0)
                     # The call that was in flight when close() was
                     # asked runs to completion.
                     self.assertEqual(outcome.get('load'), 'ok')
-                    db.close()
-                    with self.assertRaises(qi.QuestDBError) as closed:
-                        db.sender()
-                    self.assertIn('closed', str(closed.exception))
+                    self._assert_closed(db)
         finally:
             qi._debug_set_close_lease_wait_limit_s(original)
+
+    def test_close_timeout_bounds_a_running_call(self):
+        """A caller whose calls may never finish -- a load reading a
+        stream with no end -- passes `timeout`, which bounds calls as
+        well as leases. Running out leaves the handle closing, the call
+        runs to completion anyway, and a later `close()` finishes."""
+        if pyarrow is None:
+            self.skipTest('pyarrow not installed')
+        with QwpAckServer() as server:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                db = qi.QuestDB.from_conf(
+                    self._CLOSE_TEST_CONF.format(port=server.port))
+                unblock, loader, outcome = self._start_slow_load(db)
+                try:
+                    began = time.monotonic()
+                    with self.assertRaises(qi.QuestDBError) as caught:
+                        db.close(timeout=0.3)
+                    waited = time.monotonic() - began
+                    message = str(caught.exception)
+                    self.assertIn('stopped waiting after 0.3s', message)
+                    self.assertIn('1 call(s) in progress', message)
+                    self.assertIn("can't interrupt it", message)
+                    self.assertNotIn('A lease is returned', message)
+                    self.assertGreaterEqual(waited, 0.25)
+                    self.assertLess(waited, 5.0)
+                    with self.assertRaises(qi.QuestDBError) as refused:
+                        db.sender()
+                    self.assertIn('closing', str(refused.exception))
+                finally:
+                    unblock.set()
+                    loader.join(timeout=30)
+                self.assertEqual(outcome.get('load'), 'ok')
+                db.close(timeout=10)
+                self._assert_closed(db)
+
+    def test_close_timeout_zero_closes_only_an_idle_handle(self):
+        """`timeout=0` never waits: it closes a handle nothing is using
+        and raises at once otherwise, naming what is outstanding."""
+        with QwpAckServer() as server:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                db = qi.QuestDB.from_conf(
+                    self._CLOSE_TEST_CONF.format(port=server.port))
+                lease = db.sender()
+                began = time.monotonic()
+                with self.assertRaises(qi.QuestDBError) as caught:
+                    db.close(timeout=0)
+                self.assertLess(time.monotonic() - began, 1.0)
+                self.assertIn(
+                    'stopped waiting after 0s: 1 outstanding '
+                    'sender()/reader() lease(s)',
+                    str(caught.exception))
+                lease.close()
+                db.close(timeout=0)
+                self._assert_closed(db)
+
+    def test_close_timeout_none_waits_past_the_lease_bound(self):
+        """`timeout=None` puts no limit on leases either, for a caller
+        whose leases are closed by other threads in their own time."""
+        original = qi._debug_close_lease_wait_limit_s()
+        qi._debug_set_close_lease_wait_limit_s(0.3)
+        try:
+            with QwpAckServer() as server:
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    db = qi.QuestDB.from_conf(
+                        self._CLOSE_TEST_CONF.format(port=server.port))
+                    lease = db.sender()
+                    # Handed off and closed on another thread, well past
+                    # the 0.3 s bound a close() with no timeout would
+                    # stop at.
+                    closer = threading.Timer(1.0, lease.close)
+                    closer.start()
+                    try:
+                        began = time.monotonic()
+                        db.close(timeout=None)
+                        waited = time.monotonic() - began
+                    finally:
+                        closer.cancel()
+                        closer.join(timeout=30)
+                    self.assertGreaterEqual(waited, 0.9)
+                    self._assert_closed(db)
+        finally:
+            qi._debug_set_close_lease_wait_limit_s(original)
+
+    def test_close_timeout_must_be_a_number_of_seconds(self):
+        """A bad `timeout` is refused before `close()` publishes
+        anything, so the handle stays open and keeps taking work. Any
+        real number of seconds is accepted, NumPy's included."""
+        with QwpAckServer() as server:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                db = qi.QuestDB.from_conf(
+                    self._CLOSE_TEST_CONF.format(port=server.port))
+                cases = ((True, TypeError), ('5', TypeError),
+                         (object(), TypeError), (-1, ValueError),
+                         (float('nan'), ValueError))
+                for bad, error in cases:
+                    with self.subTest(timeout=repr(bad)):
+                        with self.assertRaises(error):
+                            db.close(timeout=bad)
+                lease = db.sender()
+                lease.close()
+                db.close(timeout=np.float64(1.5))
+                self._assert_closed(db)
 
     def test_leaving_a_with_block_on_an_error_keeps_the_users_exception(self):
         """The frames unwinding out of a `with` block are often the ones

@@ -160,8 +160,29 @@ Breaking changes
   silence. That is ordinary schema drift, and surviving it quietly is what
   the claim is for.
 
+- **``QuestDB.close()`` stops waiting for leases after 60 seconds.** It used
+  to wait for every ``sender()`` and ``reader()`` lease however long it
+  stayed open, which hung for ever on a lease nobody was going to close. It
+  now raises :class:`QuestDBError <questdb.QuestDBError>` when a lease is
+  still open after 60 seconds, even one another thread is still using for a
+  long load. Close your leases before closing the handle, or call
+  ``close()`` again once they are closed. ``close(timeout=None)`` waits
+  for leases without a limit, as before. A call in progress, such as a long
+  ``QuestDB.dataframe()``, is still waited for without a limit. See *Fixed*
+  below for the rest of the change, and *New* for ``timeout``.
+
 New
 ~~~
+
+- **``QuestDB.close(timeout=...)`` sets how long closing may wait.** With
+  no argument, ``close()`` waits for a call in progress until it returns
+  and for an open lease up to 60 seconds. A number of seconds bounds both;
+  ``0`` closes only if nothing is in flight. ``None`` waits for both
+  without a limit. When the limit runs out, ``close()`` raises
+  :class:`QuestDBError <questdb.QuestDBError>` and the handle stays
+  closing; a later ``close()`` picks the wait up again. A ``with`` block
+  closes with no argument, so for other limits call
+  ``db.close(timeout=...)`` as the block's last statement.
 
 - **``row()`` on QWP senders now writes UUID, IPV4, BINARY, CHAR, DATE,
   LONG256, and GEOHASH columns.** Pass ``uuid.UUID``,
@@ -366,20 +387,23 @@ Fixed
   its holder closes it. The native pool is torn down by the first
   ``close()`` that finds nothing using the handle, or when the handle
   itself is collected.
-  ``close()`` waits for that drain, but not for ever: a lease held by
-  the calling thread, or by one that has since finished, can never be
-  returned, and neither is distinguishable from a slow load. After 60
-  seconds ``close()`` raises
+  With no ``timeout``, ``close()`` waits for a call in progress until it
+  returns. It waits for leases too, but not for ever: a lease held by the
+  calling thread, or by one that has since finished, can never be
+  returned, and neither is distinguishable from a lease still in use.
+  While a lease is still outstanding after 60 seconds, ``close()`` raises
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.InvalidApiCall``, saying how many leases and how
   many calls are still outstanding — so close every ``sender()`` and
-  ``reader()`` lease before closing the handle. While it waits, every
-  five seconds it reports what it is still waiting for through the
-  ``questdb`` logger at ``WARNING`` (these notices were
-  ``UserWarning``\ s before, which ended the wait at the first notice
-  under ``-W error`` instead of at the bound). The handle stays
-  closing: close the remaining leases and call ``close()`` again to
-  finish the teardown. No ``close()`` returns success unless the
+  ``reader()`` lease before closing the handle. ``close()`` cannot
+  interrupt a call, so a ``dataframe()`` reading a stream that never ends
+  keeps it waiting; pass ``timeout`` (see *New*) to bound that too. While
+  it waits, it reports what it is still waiting for through the
+  ``questdb`` logger at ``WARNING``, every five seconds for the first
+  minute and then once a minute (these notices were ``UserWarning``\ s
+  before, which ended the wait at the first notice under ``-W error``).
+  The handle stays closing: close the remaining leases and call
+  ``close()`` again to finish the teardown. No ``close()`` returns success unless the
   teardown has run — when several race, one runs it and the others
   return once it is done.
   Called from inside one of the handle's own ``error_handler`` /

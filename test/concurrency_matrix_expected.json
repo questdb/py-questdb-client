@@ -206,12 +206,12 @@
  },
  "PooledSender.dataframe/in-flight | QuestDB.__exit__": {
   "result": "refused",
-  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. A lease is returned onl",
   "holder_outcome": "completed"
  },
  "PooledSender.dataframe/in-flight | QuestDB.close": {
   "result": "refused",
-  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. A lease is returned onl",
   "holder_outcome": "completed"
  },
  "PooledSender.dataframe/in-flight | QuestDB.connection_events_delivered": {
@@ -651,12 +651,12 @@
  },
  "PooledSender.row/in-flight | QuestDB.__exit__": {
   "result": "refused",
-  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 0 call(s) in progress on this handle. The handle stays closin",
+  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 0 call(s) in progress on this handle. A lease is returned onl",
   "holder_outcome": "completed"
  },
  "PooledSender.row/in-flight | QuestDB.close": {
   "result": "refused",
-  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 0 call(s) in progress on this handle. The handle stays closin",
+  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 0 call(s) in progress on this handle. A lease is returned onl",
   "holder_outcome": "completed"
  },
  "PooledSender.row/in-flight | QuestDB.connection_events_delivered": {
@@ -1095,13 +1095,13 @@
   "holder_outcome": "close=completed; dataframe=completed"
  },
  "QuestDB.close/call-wait | QuestDB.__exit__": {
-  "result": "refused",
-  "reason": "close() stopped waiting after 5s: 0 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "result": "clean",
+  "reason": "",
   "holder_outcome": "close=completed; dataframe=completed"
  },
  "QuestDB.close/call-wait | QuestDB.close": {
-  "result": "refused",
-  "reason": "close() stopped waiting after 5s: 0 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "result": "clean",
+  "reason": "",
   "holder_outcome": "close=completed; dataframe=completed"
  },
  "QuestDB.close/call-wait | QuestDB.connection_events_delivered": {
@@ -1986,12 +1986,12 @@
  },
  "QuestDB.close/lease-wait | QuestDB.__exit__": {
   "result": "refused",
-  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 0 call(s) in progress on this handle. The handle stays closin",
+  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 0 call(s) in progress on this handle. A lease is returned onl",
   "holder_outcome": "completed"
  },
  "QuestDB.close/lease-wait | QuestDB.close": {
   "result": "refused",
-  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 0 call(s) in progress on this handle. The handle stays closin",
+  "reason": "close() stopped waiting after 5s: 1 outstanding sender()/reader() lease(s) and 0 call(s) in progress on this handle. A lease is returned onl",
   "holder_outcome": "completed"
  },
  "QuestDB.close/lease-wait | QuestDB.connection_events_delivered": {
@@ -2430,13 +2430,13 @@
   "holder_outcome": "completed"
  },
  "QuestDB.dataframe/in-flight | QuestDB.__exit__": {
-  "result": "refused",
-  "reason": "close() stopped waiting after 5s: 0 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "result": "clean",
+  "reason": "",
   "holder_outcome": "completed"
  },
  "QuestDB.dataframe/in-flight | QuestDB.close": {
-  "result": "refused",
-  "reason": "close() stopped waiting after 5s: 0 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "result": "clean",
+  "reason": "",
   "holder_outcome": "completed"
  },
  "QuestDB.dataframe/in-flight | QuestDB.connection_events_delivered": {
@@ -2875,13 +2875,13 @@
   "holder_outcome": "completed"
  },
  "QuestDB.dataframe/mid-stream | QuestDB.__exit__": {
-  "result": "refused",
-  "reason": "close() stopped waiting after 5s: 0 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "result": "clean",
+  "reason": "",
   "holder_outcome": "completed"
  },
  "QuestDB.dataframe/mid-stream | QuestDB.close": {
-  "result": "refused",
-  "reason": "close() stopped waiting after 5s: 0 outstanding sender()/reader() lease(s) and 1 call(s) in progress on this handle. The handle stays closin",
+  "result": "clean",
+  "reason": "",
   "holder_outcome": "completed"
  },
  "QuestDB.dataframe/mid-stream | QuestDB.connection_events_delivered": {

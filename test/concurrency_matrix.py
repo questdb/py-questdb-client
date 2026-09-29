@@ -104,6 +104,18 @@ PARK_TIMEOUT_S = 15.0
 #: wait is a question about the member axis, not the holder axis.
 CLOSE_WAIT_LIMIT_S = 5.0
 
+#: How far into a `close()` on the asking thread every park is let go.
+#:
+#: A `close()` with no `timeout` waits for a call in progress until
+#: the call returns, so against a parked call it can only finish once
+#: the call does.
+#: Letting the parks go just past the close's bound shows that it
+#: waited through the bound and then finished; waiting out
+#: `PARK_TIMEOUT_S` would only show that the park gave up. A lease is
+#: not a park, so a close waiting on one has already stopped at its
+#: bound by then, and the release changes nothing for it.
+CLOSE_PARK_RELEASE_S = CLOSE_WAIT_LIMIT_S + 1.0
+
 #: The bound the *holder's* close runs under, when a scenario parks a
 #: thread inside one. Deliberately longer than any cell, and in force
 #: only while that close starts: `close()` reads the bound once and
@@ -194,6 +206,12 @@ class Held:
         park = Park(name)
         self.parks.append(park)
         return park
+
+    def let_go_parks(self):
+        """Release every park and nothing else: the threads finish in
+        their own time, and `let_go_and_join` still collects them."""
+        for park in self.parks:
+            park.let_go()
 
     def on_release(self, fn):
         """Something to undo once the cell has its answer.
@@ -448,7 +466,17 @@ def run_cell(holder_name, member):
                 record['result'] = 'unreachable'
                 record['reason'] = str(exc)
             else:
-                _score_call(record, target, member, kind, args, kwargs)
+                release = None
+                if member in ('QuestDB.close', 'QuestDB.__exit__'):
+                    release = threading.Timer(
+                        CLOSE_PARK_RELEASE_S, held.let_go_parks)
+                    release.daemon = True
+                    release.start()
+                try:
+                    _score_call(record, target, member, kind, args, kwargs)
+                finally:
+                    if release is not None:
+                        release.cancel()
 
         stuck = held.let_go_and_join()
         record['holder_outcome'] = held.summary()

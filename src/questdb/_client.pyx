@@ -7266,14 +7266,70 @@ cdef object _merge_capsule_overrides(
 # one kind restored by reshaping the column rather than by an override,
 # in `_dataframe_normalize_claimed_date`: no Arrow override names it,
 # and the Arrow type it needs is the whole claim.
-#: How long `QuestDB.close()` waits for in-flight work to drain before
-#: it stops waiting and raises. Generous, because a lease held by
-#: another thread may be part-way through a large load and that wait is
-#: the correct one; finite, because a lease held by the calling thread,
-#: or by one that has since finished, is never coming back and an
-#: unbounded wait there is a hang with no way out. Hitting the bound
-#: leaves the handle closing; a later `close()` resumes the wait.
+#: How long `QuestDB.close()` with no `timeout` waits while a lease is
+#: outstanding before it stops waiting and raises. Generous, because a
+#: lease held by another thread may be part-way through a large load
+#: and that wait is the correct one; finite, because a lease held by
+#: the calling thread, or by one that has since finished, is never
+#: coming back and an unbounded wait there is a hang with no way out.
+#: Hitting the bound leaves the handle closing; a later `close()`
+#: resumes the wait. A `close()` with no `timeout` puts no bound on
+#: calls in progress: a caller whose calls may never finish passes one.
 cdef double _CLOSE_LEASE_WAIT_LIMIT_S = 60.0
+
+
+class _CloseTimeoutDefault:
+    """What `QuestDB.close()` gets when no `timeout` is passed.
+
+    `None` already means "no limit", so the default -- the lease bound
+    above and no bound on calls -- needs a value of its own.
+    """
+    __slots__ = ()
+
+    def __repr__(self):
+        return '<default>'
+
+
+_CLOSE_TIMEOUT_DEFAULT = _CloseTimeoutDefault()
+
+
+cdef double _close_timeout_seconds(object timeout) except -1.0:
+    """`QuestDB.close()`'s `timeout` as seconds, refused unless it is a
+    number of seconds, 0 or more."""
+    cdef double seconds
+    if isinstance(timeout, bool) or not isinstance(timeout, _numbers.Real):
+        raise TypeError(
+            'close() timeout must be None or a number of seconds, not '
+            f'{_fqn(type(timeout))}.')
+    seconds = float(timeout)
+    # Written so that NaN, which compares false either way, is refused.
+    if not seconds >= 0.0:
+        raise ValueError(
+            'close() timeout must be a number of seconds, 0 or more, '
+            f'not {timeout!r}.')
+    return seconds
+
+
+cdef str _close_gave_up_message(
+        double waited, size_t leases, size_t calls):
+    """What a `close()` that ran out of time says it left behind."""
+    cdef str message = (
+        f'close() stopped waiting after {waited:g}s: {leases} '
+        'outstanding sender()/reader() lease(s) and '
+        f'{calls} call(s) in progress on this handle.')
+    if leases:
+        message += (
+            ' A lease is returned only by the code holding it -- one '
+            'held by this thread, or by a thread that has finished, '
+            'never will be.')
+    if calls:
+        message += (
+            " A call in progress returns once its work is done; close() "
+            "can't interrupt it.")
+    return message + (
+        ' The handle stays closing and takes no new work. Call close() '
+        'again once nothing is outstanding, or with a larger timeout -- '
+        'timeout=None waits without a limit.')
 
 
 def _debug_close_lease_wait_limit_s():
@@ -8196,9 +8252,10 @@ cdef class QuestDB:
             # out here and may be returned from anywhere, so counting
             # it per thread would leave the borrower's count standing
             # and the returner's below zero. The two kinds are counted
-            # apart so `close()` can say which it is waiting for: a
-            # call finishes on its own, a lease only if its holder
-            # closes it.
+            # apart because `close()` limits its wait for each
+            # differently and says which it is waiting for: a call ends
+            # when its work does, a lease only when its holder closes
+            # it.
             if scoped:
                 self._enter_scoped_call()
                 self._call_uses += 1
@@ -9134,7 +9191,7 @@ cdef class QuestDB:
             if db_use:
                 self._end_db_use()
 
-    cpdef close(self):
+    cpdef close(self, object timeout=_CLOSE_TIMEOUT_DEFAULT):
         """
         Close the client and its connection pool.
 
@@ -9148,17 +9205,43 @@ cdef class QuestDB:
         down by the first ``close()`` that finds nothing using the
         handle, or when the handle itself is collected.
 
-        The wait for that drain is bounded. Every five seconds it
-        reports what it is still waiting for through the ``questdb``
-        logger at ``WARNING``. After a minute this call raises
+        ``timeout`` sets how long this call waits for that drain:
+
+        - Left out: a call in progress is waited for until it
+          returns, and an outstanding lease for up to a minute.
+        - A number of seconds: calls and leases alike are waited for
+          up to that long. ``0`` closes only if nothing is in flight.
+        - ``None``: calls and leases alike are waited for until they
+          are done.
+
+        ``close()`` cannot interrupt a call in progress. A
+        ``dataframe()`` reading a stream that never ends, or one
+        waiting on the very thread that calls ``close()``, keeps it
+        waiting until ``timeout`` runs out -- and, with no limit on
+        calls, for ever. A lease comes back only when its holder
+        closes it, so one held by the calling thread, or by a thread
+        that has since finished, never will: close every lease before
+        closing the handle.
+
+        When the limit runs out, this call raises
         :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set
         to ``QuestDBErrorCode.InvalidApiCall``, naming how many leases
-        and calls are still outstanding. The handle
-        stays closing -- it never goes back to open -- and a later
-        ``close()`` resumes the wait and finishes the teardown once
-        the last of them is done. A lease held by the calling thread,
-        or by a thread that has since finished, can never be returned:
-        close every lease before closing the handle.
+        and calls are still outstanding. The handle stays closing --
+        it never goes back to open -- and a later ``close()``, with
+        any ``timeout``, resumes the wait and finishes the teardown
+        once the last of them is done. The same limit applies to
+        waiting for a concurrent ``close()`` on another thread to
+        finish its teardown.
+
+        While it waits, it reports what it is still waiting for
+        through the ``questdb`` logger at ``WARNING``: every five
+        seconds for the first minute, then once a minute.
+
+        Leaving a ``with`` block closes with the limits of a
+        ``close()`` with no arguments. For other limits, call
+        ``close(timeout=...)`` as the block's last statement; the
+        close the block makes on the way out then finds the handle
+        closed and returns.
 
         Idempotent: closing a closed handle returns without doing
         anything, and no ``close()`` returns success unless the
@@ -9182,6 +9265,19 @@ cdef class QuestDB:
         cdef bint notice = False
         cdef size_t notice_leases = 0
         cdef size_t notice_calls = 0
+        cdef object lease_limit
+        cdef object call_limit
+        # Read before anything is published, so a bad argument changes
+        # nothing for any other thread.
+        if timeout is _CLOSE_TIMEOUT_DEFAULT:
+            lease_limit = _CLOSE_LEASE_WAIT_LIMIT_S
+            call_limit = None
+        elif timeout is None:
+            lease_limit = None
+            call_limit = None
+        else:
+            lease_limit = _close_timeout_seconds(timeout)
+            call_limit = lease_limit
         with self._state_cond:
             # A close from inside one of this handle's own calls --
             # `dataframe()` reading `attrs`, a cell conversion, an
@@ -9233,11 +9329,20 @@ cdef class QuestDB:
         #
         # A lease is returned only by the code holding it, and a lease
         # about to be closed looks exactly like one nobody will ever
-        # touch again. The wait is bounded so the caller gets control
-        # back; the handle stays closing, and a later close() resumes
-        # the wait.
-        limit = _CLOSE_LEASE_WAIT_LIMIT_S
-        deadline = time.monotonic() + limit
+        # touch again; a call runs until its work is done, and nothing
+        # here can interrupt it. Whether either will finish is
+        # something only the caller can know, so the caller sets the
+        # limits: one deadline for leases and one for calls, either of
+        # which may be absent. Each applies only while something of
+        # its kind is outstanding, and neither count grows once the
+        # handle is closing. Running out leaves the handle closing,
+        # and a later close() resumes the wait.
+        started = time.monotonic()
+        lease_deadline = (
+            None if lease_limit is None else started + lease_limit)
+        call_deadline = (
+            None if call_limit is None else started + call_limit)
+        next_notice = started + 5.0
         while True:
             notice = False
             with self._state_cond:
@@ -9255,41 +9360,47 @@ cdef class QuestDB:
                     self._db = NULL
                     self._close_running = True
                     break
-                # Polled at whichever is sooner, so the bound
-                # holds whatever it is set to rather than only at
-                # multiples of the warning cadence.
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
+                deadline = None
+                if self._lease_uses != 0 and lease_deadline is not None:
+                    deadline = lease_deadline
+                if (self._call_uses != 0 and call_deadline is not None
+                        and (deadline is None or call_deadline < deadline)):
+                    deadline = call_deadline
+                now = time.monotonic()
+                if deadline is not None and now >= deadline:
                     raise QuestDBError(
                         QuestDBErrorCode.InvalidApiCall,
-                        'close() stopped waiting after '
-                        f'{limit:g}s: {self._lease_uses} '
-                        'outstanding sender()/reader() lease(s) '
-                        f'and {self._call_uses} call(s) in '
-                        'progress on this handle. The handle '
-                        'stays closing and takes no new work. A '
-                        'call in progress finishes on its own; a '
-                        'lease is returned only by the code '
-                        'holding it -- one held by this thread, '
-                        'or by a thread that has finished, never '
-                        'will be. When nothing is left '
-                        'outstanding, call close() again to '
-                        'finish closing the handle.')
-                if (not self._state_cond.wait(
-                            timeout=min(5.0, remaining))
+                        _close_gave_up_message(
+                            deadline - started,
+                            self._lease_uses,
+                            self._call_uses))
+                # Woken at whichever is sooner, the next notice or the
+                # limit, so a limit holds whatever it is set to rather
+                # than only at the notice cadence. A wait that runs out
+                # with work still outstanding is reported either way.
+                wait_s = next_notice - now
+                if deadline is not None and deadline - now < wait_s:
+                    wait_s = deadline - now
+                if (not self._state_cond.wait(timeout=max(wait_s, 0.0))
                         and (self._lease_uses
                              + self._call_uses) != 0):
                     notice = True
                     notice_leases = self._lease_uses
                     notice_calls = self._call_uses
+                    # Every five seconds for the first minute, then
+                    # once a minute: a wait for a long load would
+                    # otherwise log a line every five seconds for as
+                    # long as the load runs.
+                    now = time.monotonic()
+                    next_notice = now + (
+                        5.0 if now - started < 60.0 else 60.0)
             if notice:
                 # Logged rather than warned, like every other
                 # notice this client emits from a place the
                 # caller did not ask for one: a warning turns
                 # into an exception under `-W error`, which
-                # would end the wait at the first notice
-                # instead of at the bound and hand back the
-                # wrong exception type.
+                # would end the wait at the first notice and
+                # hand back the wrong exception type.
                 logging.getLogger('questdb').warning(
                     'QuestDB.close() is waiting for %d '
                     'outstanding lease(s) and %d in-progress '
@@ -9308,8 +9419,11 @@ cdef class QuestDB:
             # The teardown wait gets its own bound rather than what
             # is left of the drain's: it starts when this wait does,
             # so hitting it means the teardown itself has taken this
-            # long, and the error below can say so truthfully.
-            deadline = time.monotonic() + limit
+            # long, and the error below can say so truthfully. The
+            # bound is the lease limit -- a minute by default, the
+            # caller's timeout when one is passed, none for None.
+            deadline = (None if lease_limit is None
+                        else time.monotonic() + lease_limit)
             while True:
                 notice = False
                 with self._state_cond:
@@ -9332,17 +9446,20 @@ cdef class QuestDB:
                             'that this call waited for could not '
                             'finish the teardown. The handle stays '
                             'closing; call close() again.')
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0.0:
-                        raise QuestDBError(
-                            QuestDBErrorCode.InvalidApiCall,
-                            'close() stopped waiting after '
-                            f'{limit:g}s for a concurrent close() '
-                            'on another thread to finish the '
-                            'teardown. The handle stays closing; '
-                            'call close() again to resume waiting.')
-                    if (not self._state_cond.wait(
-                                timeout=min(5.0, remaining))
+                    wait_s = 5.0
+                    if deadline is not None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0.0:
+                            raise QuestDBError(
+                                QuestDBErrorCode.InvalidApiCall,
+                                'close() stopped waiting after '
+                                f'{lease_limit:g}s for a concurrent '
+                                'close() on another thread to finish '
+                                'the teardown. The handle stays '
+                                'closing; call close() again to '
+                                'resume waiting.')
+                        wait_s = min(5.0, remaining)
+                    if (not self._state_cond.wait(timeout=wait_s)
                             and self._close_running):
                         notice = True
                 if notice:
