@@ -339,7 +339,7 @@ where it is not:
      - ``'char'`` on a ``uint16`` column
    * - ``GEOHASH``
      - —
-     - ``('geohash', bits)`` on a signed integer column
+     - ``('geohash', bits)`` on an integer column, signed or unsigned
    * - ``DATE``
      - ``pa.timestamp('ms')``, ``pa.date32()``, ``pa.date64()``
      - —

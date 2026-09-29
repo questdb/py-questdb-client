@@ -5738,36 +5738,98 @@ cdef int _geohash_slot_for_width(Py_ssize_t width) noexcept:
     return _GEOHASH_DTYPE_NONE
 
 
+cdef object _geohash_override_bits(object schema_overrides, object name):
+    """The precision `schema_overrides` gives this column as a GEOHASH,
+    or ``None`` when it leaves the column out or names another kind.
+
+    The overrides are validated by the time this runs, so a GEOHASH
+    entry is always a ``('geohash', bits)`` pair.
+    """
+    cdef object override
+    if not schema_overrides:
+        return None
+    override = schema_overrides.get(name)
+    if isinstance(override, tuple) and override[0] == 'geohash':
+        return override[1]
+    return None
+
+
+cdef object _pyarrow_signed_int_type(Py_ssize_t width):
+    """The signed pyarrow integer type of this many bytes."""
+    if width == 1:
+        return _PYARROW.int8()
+    if width == 2:
+        return _PYARROW.int16()
+    if width == 4:
+        return _PYARROW.int32()
+    return _PYARROW.int64()
+
+
 cdef object _dataframe_reinterpret_unsigned_geohash(
         object df, object schema_overrides):
-    """Copies of the unsigned integer columns claimed as GEOHASH, as the
-    signed integer of the same width holding the same bits.
+    """A copy of the frame in which each unsigned integer column bound
+    for GEOHASH is the signed integer of the same width, holding the
+    same bits.
 
-    A frame saved from version 5.0 of this client holds a GEOHASH column
-    as an unsigned NumPy integer, since that is what its plain
-    `to_pandas()` returned, and `convert_dtypes(dtype_backend='pyarrow')`
-    turns such a column into an unsigned Arrow one. Both write routes
-    carry a GEOHASH only on a signed integer, and the native Arrow
-    importer refuses an unsigned column outright, so these columns are
-    given the signed type before either route looks at the frame. A
-    GEOHASH value is its bit pattern, so the server receives exactly the
-    bits the unsigned column held.
+    Both write routes carry a GEOHASH only on a signed integer, and the
+    native Arrow importer refuses an unsigned column outright, so these
+    columns are given the signed type before either route looks at the
+    frame. A GEOHASH value is its bit pattern, so the server receives
+    exactly the bits the unsigned column held. NumPy columns become
+    views and Arrow columns views of each chunk, so no data is copied.
+
+    A column is bound for GEOHASH when `schema_overrides` names it
+    ``('geohash', bits)``, or when it carries a GEOHASH claim in
+    ``df.attrs['questdb']`` and `schema_overrides` does not name it:
+    the override outranks the claim. The claim is how a frame saved
+    from version 5.0 of this client arrives, since its plain
+    `to_pandas()` returned a GEOHASH column as an unsigned NumPy
+    integer, and `convert_dtypes(dtype_backend='pyarrow')` turns that
+    into an unsigned Arrow column. An override can name an unsigned
+    column in any frame that takes overrides, so pyarrow and polars
+    frames are covered too. A one-shot stream, such as a
+    `RecordBatchReader`, is read only as the write goes, so its
+    columns keep their own type.
 
     Only a claim the column's width can carry is taken this way. A
     column whose claim is dropped goes out as its own type, so its
-    values have to stay as they are. A column named in
-    `schema_overrides` is left alone too: the override outranks the
-    claim, and the type it names has to fit the column's own dtype.
+    values have to stay as they are. An override is taken at any
+    precision: one too wide for the column is refused by the importer,
+    which names the range the column can hold. An override of another
+    kind leaves the column alone, since 'ipv4' and 'char' need the
+    unsigned type to apply.
     """
+    cdef object names_geohash = None
+    if _is_pandas_dataframe_object(df):
+        return _pandas_reinterpret_unsigned_geohash(df, schema_overrides)
+    if schema_overrides:
+        names_geohash = any(
+            _geohash_override_bits(schema_overrides, name) is not None
+            for name in schema_overrides)
+    if not names_geohash:
+        return df
+    if _is_polars_dataframe_or_lazy(df):
+        return _polars_reinterpret_unsigned_geohash(df, schema_overrides)
+    # Checked by module before pyarrow is asked, so a frame of another
+    # kind never makes this import pyarrow.
+    if (type(df).__module__.startswith('pyarrow')
+            and _dataframe_try_import_pyarrow()
+            and isinstance(df, (_PYARROW.Table, _PYARROW.RecordBatch))):
+        return _pyarrow_reinterpret_unsigned_geohash(df, schema_overrides)
+    return df
+
+
+cdef object _pandas_reinterpret_unsigned_geohash(
+        object df, object schema_overrides):
+    """`_dataframe_reinterpret_unsigned_geohash` for a pandas frame."""
     cdef object cols_meta, arrow_dtype, dtype, meta, bits, ty, col
-    cdef object signed_ty, chunked, out
+    cdef object chunked, out
     cdef list convert
     cdef Py_ssize_t width
     cdef int slot
-    if not _is_pandas_dataframe_object(df):
-        return df
+    cdef bint overridden
     cols_meta = _roundtrip_columns_meta(df)
-    if not cols_meta:
+    if not cols_meta and not schema_overrides:
         return df
     _dataframe_may_import_deps()
     arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
@@ -5775,11 +5837,16 @@ cdef object _dataframe_reinterpret_unsigned_geohash(
     # Walked by position rather than by label: `dtypes[name]` on a frame
     # with duplicate column names hands back a Series, not a dtype.
     for pos, (name, dtype) in enumerate(zip(df.columns, df.dtypes)):
-        meta = cols_meta.get(name)
-        if _roundtrip_kind(meta) != 'geohash':
-            continue
-        if schema_overrides and name in schema_overrides:
-            continue
+        overridden = bool(schema_overrides) and name in schema_overrides
+        if overridden:
+            bits = _geohash_override_bits(schema_overrides, name)
+            if bits is None:
+                continue
+        else:
+            meta = cols_meta.get(name) if cols_meta else None
+            if _roundtrip_kind(meta) != 'geohash':
+                continue
+            bits = meta.get('precision_bits') or 0
         if arrow_dtype is not None and isinstance(dtype, arrow_dtype):
             if not _dataframe_try_import_pyarrow():
                 continue
@@ -5792,9 +5859,12 @@ cdef object _dataframe_reinterpret_unsigned_geohash(
         else:
             continue
         slot = _geohash_slot_for_width(width)
-        bits = meta.get('precision_bits') or 0
-        if (slot == _GEOHASH_DTYPE_NONE
-                or not _is_integral_not_bool(bits)
+        if slot == _GEOHASH_DTYPE_NONE:
+            continue
+        # An override is taken at any precision, a claim only at one the
+        # width can carry; see `_dataframe_reinterpret_unsigned_geohash`.
+        if not overridden and (
+                not _is_integral_not_bool(bits)
                 or not 1 <= int(bits) <= _geohash_dtype_max_bits(slot)):
             continue
         convert.append((pos, width))
@@ -5804,20 +5874,75 @@ cdef object _dataframe_reinterpret_unsigned_geohash(
     for pos, width in convert:
         col = df.iloc[:, pos]
         if arrow_dtype is not None and isinstance(col.dtype, arrow_dtype):
-            signed_ty = _PYARROW.int8() if width == 1 else (
-                _PYARROW.int16() if width == 2 else (
-                    _PYARROW.int32() if width == 4 else _PYARROW.int64()))
+            ty = _pyarrow_signed_int_type(width)
             chunked = col.array.__arrow_array__()
             _dataframe_set_column(
                 out, df, pos,
                 _PANDAS.arrays.ArrowExtensionArray(_PYARROW.chunked_array(
-                    [chunk.view(signed_ty) for chunk in chunked.chunks],
-                    type=signed_ty)))
+                    [chunk.view(ty) for chunk in chunked.chunks],
+                    type=ty)))
         else:
             _dataframe_set_column(
                 out, df, pos, col.to_numpy().view(f'int{width * 8}'))
     out.attrs = dict(df.attrs)
     return out
+
+
+cdef object _pyarrow_reinterpret_unsigned_geohash(
+        object table, object schema_overrides):
+    """`_dataframe_reinterpret_unsigned_geohash` for a pyarrow `Table`
+    or `RecordBatch`.
+
+    Each retyped field keeps its name, nullability and metadata, and
+    the schema keeps its own metadata, so everything the importer reads
+    from them arrives as it was.
+    """
+    cdef object schema = table.schema
+    cdef object columns = None
+    cdef object field, ty, col
+    cdef Py_ssize_t i, width
+    for i in range(len(schema)):
+        field = schema.field(i)
+        if _geohash_override_bits(schema_overrides, field.name) is None:
+            continue
+        if not _PYARROW.types.is_unsigned_integer(field.type):
+            continue
+        width = field.type.bit_width // 8
+        if _geohash_slot_for_width(width) == _GEOHASH_DTYPE_NONE:
+            continue
+        ty = _pyarrow_signed_int_type(width)
+        if columns is None:
+            columns = list(table.columns)
+        col = columns[i]
+        if isinstance(col, _PYARROW.ChunkedArray):
+            columns[i] = _PYARROW.chunked_array(
+                [chunk.view(ty) for chunk in col.chunks], type=ty)
+        else:
+            columns[i] = col.view(ty)
+        schema = schema.set(i, field.with_type(ty))
+    if columns is None:
+        return table
+    return type(table).from_arrays(columns, schema=schema)
+
+
+cdef object _polars_reinterpret_unsigned_geohash(
+        object df, object schema_overrides):
+    """`_dataframe_reinterpret_unsigned_geohash` for a polars
+    `DataFrame` or `LazyFrame`; a `LazyFrame` stays lazy."""
+    cdef object schema, name, dtype
+    cdef tuple unsigned = (
+        _POLARS.UInt8, _POLARS.UInt16, _POLARS.UInt32, _POLARS.UInt64)
+    cdef list exprs = []
+    schema = (df.collect_schema() if hasattr(df, 'collect_schema')
+              else df.schema)
+    for name, dtype in schema.items():
+        if (dtype in unsigned
+                and _geohash_override_bits(schema_overrides, name)
+                is not None):
+            exprs.append(_POLARS.col(name).reinterpret(signed=True))
+    if not exprs:
+        return df
+    return df.with_columns(exprs)
 
 
 cdef object _dataframe_normalize_claimed_arrow(object df):

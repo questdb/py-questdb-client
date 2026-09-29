@@ -200,6 +200,14 @@ New
   get there, since polars has no fixed-size binary dtype. Every non-null
   value must be exactly 16 or 32 bytes.
 
+- **A ``('geohash', bits)`` override accepts an unsigned integer column.**
+  Until now it had to be signed (``int8`` to ``int64``), and an unsigned
+  column was refused with "override 'geohash' is not applicable". It now
+  goes out as the signed integer of the same width holding the same bits,
+  as a GEOHASH claim on an unsigned column already does, in pandas,
+  pyarrow and polars frames. A one-shot stream such as a
+  ``RecordBatchReader`` still needs a signed column.
+
 - **DataFrame BINARY columns accept ``bytearray`` and ``memoryview`` cells**
   as well as ``bytes``. An object column of ``numpy.bytes_`` now works too.
 

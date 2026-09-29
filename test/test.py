@@ -4793,6 +4793,93 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         schema_overrides={'gh': kind})['gh'],
                     wire)
 
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_geohash_override_on_an_unsigned_column_writes_geohash(self):
+        """`schema_overrides={'gh': ('geohash', bits)}` takes an unsigned
+        integer column in every frame that takes overrides, as a claim
+        does: the column is written as the signed integer of the same
+        width holding the same bits. Each shape and width writes exactly
+        the bytes of the signed column with the same override."""
+        widths = (
+            (pyarrow.uint8(), pyarrow.int8(), 8, [200, 5]),
+            (pyarrow.uint16(), pyarrow.int16(), 16, [60000, 5]),
+            (pyarrow.uint32(), pyarrow.int32(), 32, [4000000000, 5]),
+            (pyarrow.uint64(), pyarrow.int64(), 60, [(1 << 59) + 3, 5]),
+        )
+        shapes = [
+            ('pyarrow Table', lambda array: pyarrow.table({'gh': array})),
+            ('pyarrow RecordBatch',
+             lambda array: pyarrow.record_batch({'gh': array})),
+        ]
+        if pd is not None:
+            shapes.append(
+                ('pandas ArrowDtype',
+                 lambda array: pd.DataFrame({'gh': pd.Series(
+                     array, dtype=pd.ArrowDtype(array.type))})))
+        try:
+            import polars as pl
+        except ImportError:
+            pl = None
+        if pl is not None:
+            shapes.append(
+                ('polars DataFrame',
+                 lambda array: pl.from_arrow(pyarrow.table({'gh': array}))))
+            shapes.append(
+                ('polars LazyFrame',
+                 lambda array: pl.from_arrow(
+                     pyarrow.table({'gh': array})).lazy()))
+        for unsigned, signed, bits, values in widths:
+            # A null travels with the bits in every one of these shapes.
+            array = pyarrow.array(values + [None], type=unsigned)
+            reference = array.view(signed)
+            for label, build in shapes:
+                with self.subTest(shape=label, width=str(unsigned)):
+                    overrides = {'gh': ('geohash', bits)}
+                    payload = self._dataframe_wire_payload(
+                        build(array), table_name='geo_override_unsigned',
+                        at=qi.ServerTimestamp, schema_overrides=overrides)
+                    self.assertEqual(
+                        dict(_first_qwp_table_column_types(payload))['gh'],
+                        0x0E)
+                    self.assertEqual(
+                        payload,
+                        self._dataframe_wire_payload(
+                            build(reference),
+                            table_name='geo_override_unsigned',
+                            at=qi.ServerTimestamp,
+                            schema_overrides=overrides))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_geohash_override_outranks_an_unsigned_geohash_claim(self):
+        """An unsigned column under both a GEOHASH claim and a GEOHASH
+        override is written at the override's precision, with nothing
+        logged: the column carries the kind, so no claim is dropped."""
+        claimed = self._geohash_frame(
+            [200, 5], pd.ArrowDtype(pyarrow.uint8()), bits=8)
+        with self.assertNoLogs('questdb', level='WARNING'):
+            payload = self._dataframe_wire_payload(
+                claimed, table_name='geo_both', at='ts',
+                schema_overrides={'gh': ('geohash', 6)})
+        unclaimed = claimed.copy()
+        unclaimed.attrs = {}
+        self.assertEqual(
+            payload,
+            self._dataframe_wire_payload(
+                unclaimed, table_name='geo_both', at='ts',
+                schema_overrides={'gh': ('geohash', 6)}))
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_geohash_override_too_wide_for_an_unsigned_column(self):
+        """An override wider than the unsigned column is refused, and the
+        refusal names the range a column of that width can hold."""
+        with self.assertRaises(qi.QuestDBError) as caught:
+            self._dataframe_wire_payload(
+                pyarrow.table({'gh': pyarrow.array([1, 2], pyarrow.uint8())}),
+                table_name='geo_too_wide', at=qi.ServerTimestamp,
+                schema_overrides={'gh': ('geohash', 12)})
+        self.assertIn('must be 1..=8', str(caught.exception))
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_a_claim_the_column_carries_or_has_outlived_stays_quiet(self):

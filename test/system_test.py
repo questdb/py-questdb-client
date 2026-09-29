@@ -3861,13 +3861,11 @@ class TestEgressQwpRowTypes(unittest.TestCase):
 
         That conversion is what the ``QuestDB.dataframe`` docstring
         names, and it moves the frame from the NumPy planner to the
-        Arrow columnar path. The two read the claim in different places,
-        and the Arrow path carries a ``geohash`` claim only on a signed
-        Arrow integer -- an unsigned column is refused by the native
-        importer, so its claim is dropped and the column would land as a
-        plain LONG. The NumPy egress therefore hands the column back
-        signed, at the width the precision needs, which is the same
-        shape the Arrow egress gives it.
+        Arrow columnar path. The two read the claim in different places.
+        The NumPy egress hands the column back signed, at the width the
+        precision needs, which is the same shape the Arrow egress gives
+        it, so the column is one the native importer takes a ``geohash``
+        on directly.
         """
         src = 't_ghs_src_' + uuid.uuid4().hex[:8]
         dst = 't_ghs_dst_' + uuid.uuid4().hex[:8]
