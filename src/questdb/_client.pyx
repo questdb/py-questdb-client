@@ -8540,9 +8540,10 @@ cdef class QuestDB:
         Borrow a context-managed row-building sender from the pool.
 
         The lease counts as an active use of the handle until it is
-        closed: :meth:`QuestDB.close` waits for outstanding leases (the
-        wait is bounded -- see :meth:`close <QuestDB.close>`), and a
-        lease keeps working while the handle drains.
+        closed: :meth:`QuestDB.close` waits for outstanding leases for as
+        long as its ``timeout`` allows (a minute by default -- see
+        :meth:`close <QuestDB.close>`), and a lease keeps working while
+        the handle drains.
         """
         cdef questdb_db* db = NULL
         cdef qwp_sender* sender = NULL
@@ -9081,9 +9082,10 @@ cdef class QuestDB:
                     reset_symbol_dict=False).to_pandas()
 
         The lease counts as an active use of the handle until it is
-        closed: :meth:`QuestDB.close` waits for outstanding leases (the
-        wait is bounded -- see :meth:`close <QuestDB.close>`), and a
-        lease keeps working while the handle drains.
+        closed: :meth:`QuestDB.close` waits for outstanding leases for as
+        long as its ``timeout`` allows (a minute by default -- see
+        :meth:`close <QuestDB.close>`), and a lease keeps working while
+        the handle drains.
         """
         cdef _ReaderHandle reader_handle
         cdef PooledReader lease
@@ -9207,10 +9209,14 @@ cdef class QuestDB:
         down by the first ``close()`` that finds nothing using the
         handle, or when the handle itself is collected.
 
-        ``timeout`` sets how long this call waits for that drain:
+        ``timeout`` sets how long this call waits for that drain.
+        Calls are the handle's own methods in progress, such as
+        ``dataframe()`` and ``query()``; anything done through a lease
+        counts as that lease, including a long ``lease.dataframe()``.
 
         - Left out: a call in progress is waited for until it
-          returns, and an outstanding lease for up to a minute.
+          returns, and an outstanding lease for up to a minute. A long
+          load through a lease needs a larger ``timeout``, or ``None``.
         - A number of seconds: calls and leases alike are waited for
           up to that long. ``0`` closes only if nothing is in flight.
         - ``None``: calls and leases alike are waited for until they
@@ -9236,6 +9242,15 @@ cdef class QuestDB:
         limited too: a number of seconds covers that wait and the
         drain together; left out, that wait gets a minute of its own;
         ``None`` puts no limit on it.
+
+        ``timeout`` covers only this waiting. The teardown then spends
+        up to ``close_flush_timeout_millis`` (5 seconds by default)
+        draining each sender's queue. An in-memory queue drops whatever
+        it has not delivered by then; a disk-backed queue (``sf_dir``)
+        keeps it for replay on restart. The drop is not reported to
+        Python: it raises nothing and logs nothing through the
+        ``questdb`` logger. To be sure rows have arrived, close each
+        lease with ``close(wait=True)`` before closing the handle.
 
         While it waits, it reports what it is still waiting for
         through the ``questdb`` logger at ``WARNING``: every five

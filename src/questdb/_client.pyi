@@ -1537,10 +1537,14 @@ class QuestDB:
         the first ``close()`` that finds nothing using the handle, or
         when the handle itself is collected.
 
-        ``timeout`` sets how long this call waits for that drain:
+        ``timeout`` sets how long this call waits for that drain.
+        Calls are the handle's own methods in progress, such as
+        ``dataframe()`` and ``query()``; anything done through a lease
+        counts as that lease, including a long ``lease.dataframe()``.
 
         - Left out: a call in progress is waited for until it
-          returns, and an outstanding lease for up to a minute.
+          returns, and an outstanding lease for up to a minute. A long
+          load through a lease needs a larger ``timeout``, or ``None``.
         - A number of seconds: calls and leases alike are waited for
           up to that long. ``0`` closes only if nothing is in flight.
         - ``None``: calls and leases alike are waited for until they
@@ -1565,6 +1569,15 @@ class QuestDB:
         of seconds covers that wait and the drain together; left out,
         that wait gets a minute of its own; ``None`` puts no limit on
         it.
+
+        ``timeout`` covers only this waiting. The teardown then spends
+        up to ``close_flush_timeout_millis`` (5 seconds by default)
+        draining each sender's queue. An in-memory queue drops whatever
+        it has not delivered by then; a disk-backed queue (``sf_dir``)
+        keeps it for replay on restart. The drop is not reported to
+        Python: it raises nothing and logs nothing through the
+        ``questdb`` logger. To be sure rows have arrived, close each
+        lease with ``close(wait=True)`` before closing the handle.
 
         While it waits, it reports what it is still waiting for
         through the ``questdb`` logger at ``WARNING``: every five
