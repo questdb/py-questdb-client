@@ -180,9 +180,10 @@ New
   ``0`` closes only if nothing is in flight. ``None`` waits for both
   without a limit. When the limit runs out, ``close()`` raises
   :class:`QuestDBError <questdb.QuestDBError>` and the handle stays
-  closing; a later ``close()`` picks the wait up again. A ``with`` block
-  closes with no argument, so for other limits call
-  ``db.close(timeout=...)`` as the block's last statement.
+  closing; a later ``close()`` picks the wait up again. To bound leaving
+  a ``with`` block, call ``db.close(timeout=...)`` as the block's last
+  statement: the close the block makes on its way out waits only for
+  what is left of that timeout.
 
 - **``row()`` on QWP senders now writes UUID, IPV4, BINARY, CHAR, DATE,
   LONG256, and GEOHASH columns.** Pass ``uuid.UUID``,

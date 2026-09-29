@@ -8195,6 +8195,7 @@ cdef class QuestDB:
     cdef size_t _call_uses
     cdef bint _closing
     cdef bint _close_running
+    cdef object _close_deadline
     cdef object _thread_owner_token
     cdef object _dispatch_context
     cdef object _connection_listener
@@ -8211,6 +8212,7 @@ cdef class QuestDB:
         self._call_uses = 0
         self._closing = False
         self._close_running = False
+        self._close_deadline = None
         # One module-level Python thread-local registry indexes scoped calls
         # by this exact owner token. This preserves per-handle/per-thread
         # identity without allocating either an OS TLS key or a separate
@@ -9229,19 +9231,24 @@ cdef class QuestDB:
         and calls are still outstanding. The handle stays closing --
         it never goes back to open -- and a later ``close()``, with
         any ``timeout``, resumes the wait and finishes the teardown
-        once the last of them is done. The same limit applies to
-        waiting for a concurrent ``close()`` on another thread to
-        finish its teardown.
+        once the last of them is done. Waiting for a concurrent
+        ``close()`` on another thread to finish its teardown is
+        limited too: a number of seconds covers that wait and the
+        drain together; left out, that wait gets a minute of its own;
+        ``None`` puts no limit on it.
 
         While it waits, it reports what it is still waiting for
         through the ``questdb`` logger at ``WARNING``: every five
         seconds for the first minute, then once a minute.
 
-        Leaving a ``with`` block closes with the limits of a
-        ``close()`` with no arguments. For other limits, call
-        ``close(timeout=...)`` as the block's last statement; the
-        close the block makes on the way out then finds the handle
-        closed and returns.
+        A number of seconds is a budget for the whole close,
+        including the close a ``with`` block makes on its way out:
+        when the most recent ``close()`` on the handle was given one,
+        leaving the block waits only for what is left of it, and not
+        at all once it has run out. To bound leaving a ``with`` block,
+        call ``close(timeout=...)`` as the block's last statement.
+        Otherwise, leaving the block closes with the limits of a
+        ``close()`` with no arguments.
 
         Idempotent: closing a closed handle returns without doing
         anything, and no ``close()`` returns success unless the
@@ -9278,6 +9285,21 @@ cdef class QuestDB:
         else:
             lease_limit = _close_timeout_seconds(timeout)
             call_limit = lease_limit
+        # A lease is returned only by the code holding it, and a lease
+        # about to be closed looks exactly like one nobody will ever
+        # touch again; a call runs until its work is done, and nothing
+        # here can interrupt it. Whether either will finish is
+        # something only the caller can know, so the caller sets the
+        # limits: one deadline for leases and one for calls, either of
+        # which may be absent. Each applies only while something of
+        # its kind is outstanding, and neither count grows once the
+        # handle is closing. Running out leaves the handle closing,
+        # and a later close() resumes the wait.
+        started = time.monotonic()
+        lease_deadline = (
+            None if lease_limit is None else started + lease_limit)
+        call_deadline = (
+            None if call_limit is None else started + call_limit)
         with self._state_cond:
             # A close from inside one of this handle's own calls --
             # `dataframe()` reading `attrs`, a cell conversion, an
@@ -9318,6 +9340,12 @@ cdef class QuestDB:
             # move down -- `_begin_db_use` takes no new work once it
             # is set.
             self._closing = True
+            # A number of seconds is a budget for the whole close: the
+            # close a `with` block makes on its way out waits only for
+            # what is left of it (see `__exit__`). Only a number sets
+            # `call_deadline`, so the default and `None` clear the
+            # budget, and the way out closes with the default limits.
+            self._close_deadline = call_deadline
         # Each wait below holds the lock only to read state and to
         # wait on it, and emits its progress notice with the lock
         # released. A notice runs the caller's logging handlers, which
@@ -9326,22 +9354,6 @@ cdef class QuestDB:
         # does both. While one runs, every lease return, call exit and
         # refusal still goes through the lock, so the drain being
         # reported on keeps moving.
-        #
-        # A lease is returned only by the code holding it, and a lease
-        # about to be closed looks exactly like one nobody will ever
-        # touch again; a call runs until its work is done, and nothing
-        # here can interrupt it. Whether either will finish is
-        # something only the caller can know, so the caller sets the
-        # limits: one deadline for leases and one for calls, either of
-        # which may be absent. Each applies only while something of
-        # its kind is outstanding, and neither count grows once the
-        # handle is closing. Running out leaves the handle closing,
-        # and a later close() resumes the wait.
-        started = time.monotonic()
-        lease_deadline = (
-            None if lease_limit is None else started + lease_limit)
-        call_deadline = (
-            None if call_limit is None else started + call_limit)
         next_notice = started + 5.0
         while True:
             notice = False
@@ -9416,14 +9428,16 @@ cdef class QuestDB:
             # the handle only moves toward closed.
             if _dispatching_for(self._thread_owner_token):
                 return
-            # The teardown wait gets its own bound rather than what
-            # is left of the drain's: it starts when this wait does,
-            # so hitting it means the teardown itself has taken this
-            # long, and the error below can say so truthfully. The
-            # bound is the lease limit -- a minute by default, the
-            # caller's timeout when one is passed, none for None.
-            deadline = (None if lease_limit is None
-                        else time.monotonic() + lease_limit)
+            # A number of seconds is one budget for the whole call, so
+            # this wait gets only what the drain left of it and ends
+            # at `call_deadline`. The default and `None` set no
+            # budget: this wait gets a bound of its own, starting
+            # when it does -- a minute by default, none for None.
+            if call_deadline is not None:
+                deadline = call_deadline
+            else:
+                deadline = (None if lease_limit is None
+                            else time.monotonic() + lease_limit)
             while True:
                 notice = False
                 with self._state_cond:
@@ -9496,6 +9510,11 @@ cdef class QuestDB:
         """
         Close the handle at the end of a ``with`` block.
 
+        When the most recent :meth:`close` on the handle was given a
+        number of seconds, this close waits only for what is left of
+        that budget; otherwise it closes with the limits of a
+        :meth:`close` with no arguments.
+
         Leaving the block on an exception still closes, but a close
         that cannot finish is reported through the ``questdb`` logger
         instead of raised: the frames unwinding here are often the
@@ -9505,11 +9524,17 @@ cdef class QuestDB:
         :meth:`close` does -- a lease left open there is a leak worth
         hearing about.
         """
+        with self._state_cond:
+            deadline = self._close_deadline
+        if deadline is None:
+            timeout = _CLOSE_TIMEOUT_DEFAULT
+        else:
+            timeout = max(deadline - time.monotonic(), 0.0)
         if exc_type is None:
-            self.close()
+            self.close(timeout)
             return
         try:
-            self.close()
+            self.close(timeout)
         except QuestDBError:
             logging.getLogger('questdb').exception(
                 'QuestDB.close() could not finish while leaving a '

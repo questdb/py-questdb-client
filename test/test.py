@@ -6956,6 +6956,22 @@ print('OK')
             db.sender()
         self.assertIn('closed', str(closed.exception))
 
+    def _wait_for_the_teardown_to_start(self, db):
+        """Wait until some `close()` has taken the handle's native
+        pointer and is running the teardown: from then on, a call is
+        refused as closed rather than as closing. `reap_idle()` is the
+        probe because it borrows no lease. Returns whether that
+        happened within ten seconds."""
+        give_up = time.monotonic() + 10.0
+        while time.monotonic() < give_up:
+            try:
+                db.reap_idle()
+            except qi.QuestDBError as exc:
+                if 'QuestDB is closed' in str(exc):
+                    return True
+            time.sleep(0.001)
+        return False
+
     def test_close_waits_for_a_running_call_past_the_bound(self):
         """`dataframe()` counts as a call in progress, not a lease. With
         no `timeout`, `close()` waits for a call until it returns -- the
@@ -7027,6 +7043,185 @@ print('OK')
                 self.assertEqual(outcome.get('load'), 'ok')
                 db.close(timeout=10)
                 self._assert_closed(db)
+
+    def test_leaving_a_with_block_keeps_to_the_close_timeout(self):
+        """`close(timeout=...)` as a `with` block's last statement bounds
+        leaving the block. When it runs out, its error leaves the block,
+        and the close on the way out gets only what is left of the same
+        budget -- nothing -- instead of a close with no arguments, which
+        would wait for the call in progress until it returns. That
+        close still runs, and its failure is logged."""
+        if pyarrow is None:
+            self.skipTest('pyarrow not installed')
+        with QwpAckServer() as server:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                db = qi.QuestDB.from_conf(
+                    self._CLOSE_TEST_CONF.format(port=server.port))
+                unblock, loader, outcome = self._start_slow_load(db)
+                try:
+                    began = time.monotonic()
+                    with self.assertLogs('questdb', level='ERROR') as logged:
+                        with self.assertRaises(qi.QuestDBError) as caught:
+                            with db:
+                                db.close(timeout=0.3)
+                    waited = time.monotonic() - began
+                    self.assertIn('stopped waiting after 0.3s',
+                                  str(caught.exception))
+                    self.assertTrue(
+                        any('`with` block' in line
+                            for line in logged.output),
+                        'the close on the way out was not reported: '
+                        f'{logged.output}')
+                    self.assertLess(waited, 5.0)
+                finally:
+                    unblock.set()
+                    loader.join(timeout=30)
+                self.assertEqual(outcome.get('load'), 'ok')
+                db.close(timeout=10)
+                self._assert_closed(db)
+
+    def test_a_clean_with_exit_keeps_to_a_spent_close_timeout(self):
+        """The budget holds on a clean exit too: a caller that catches
+        the error of a `close(timeout=...)` that ran out and leaves the
+        block normally gets the error of a close with no time left,
+        at once, rather than a wait for the call in progress."""
+        if pyarrow is None:
+            self.skipTest('pyarrow not installed')
+        with QwpAckServer() as server:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                db = qi.QuestDB.from_conf(
+                    self._CLOSE_TEST_CONF.format(port=server.port))
+                unblock, loader, outcome = self._start_slow_load(db)
+                try:
+                    began = time.monotonic()
+                    with self.assertRaises(qi.QuestDBError) as caught:
+                        with db:
+                            with self.assertRaises(qi.QuestDBError):
+                                db.close(timeout=0.3)
+                    waited = time.monotonic() - began
+                    self.assertIn('stopped waiting after 0s',
+                                  str(caught.exception))
+                    self.assertIn('1 call(s) in progress',
+                                  str(caught.exception))
+                    self.assertLess(waited, 5.0)
+                finally:
+                    unblock.set()
+                    loader.join(timeout=30)
+                self.assertEqual(outcome.get('load'), 'ok')
+                db.close(timeout=10)
+                self._assert_closed(db)
+
+    def test_close_timeout_covers_the_wait_for_another_threads_teardown(
+            self):
+        """A number of seconds is one budget for the whole call. A
+        `close()` that spends it waiting for a lease, and then finds
+        that another thread has taken over the teardown, raises at once
+        rather than waiting a fresh `timeout` for that teardown -- or
+        waiting for it without a limit. The server holds its acks back,
+        so the teardown outlasts the budget. The timed close is held in
+        its progress notice while this thread takes over the teardown,
+        so which of the two runs it is not left to a race."""
+        log = logging.getLogger('questdb')
+        outcome = {}
+        test = self
+        with QwpAckServer(ack_delay_s=2.0) as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'lazy_connect=true;auto_flush=off;'
+                    'sender_pool_min=1;sender_pool_max=2;')
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                db = qi.QuestDB.from_conf(conf)
+                lease = db.sender()
+                lease.row('t', columns={'v': 1},
+                          at=qi.TimestampNanos(1))
+                in_notice = threading.Event()
+
+                class HoldsTheNotice(logging.Handler):
+                    def emit(self, record):
+                        if (in_notice.is_set() or 'is waiting for'
+                                not in record.getMessage()):
+                            return
+                        in_notice.set()
+                        outcome['taken_over'] = (
+                            test._wait_for_the_teardown_to_start(db))
+
+                def timed_close():
+                    began = time.monotonic()
+                    try:
+                        db.close(timeout=1.0)
+                        outcome['close'] = 'ok'
+                    except qi.QuestDBError as exc:
+                        outcome['close'] = str(exc)
+                    outcome['waited'] = time.monotonic() - began
+
+                handler = HoldsTheNotice()
+                propagate = log.propagate
+                log.addHandler(handler)
+                log.propagate = False
+                try:
+                    closer = threading.Thread(target=timed_close)
+                    closer.start()
+                    # The notice comes when the budget runs out with
+                    # the lease still outstanding.
+                    self.assertTrue(in_notice.wait(timeout=30),
+                                    'the timed close() never waited')
+                    lease.close()
+                    db.close()
+                    closer.join(timeout=30)
+                finally:
+                    log.removeHandler(handler)
+                    log.propagate = propagate
+                self._assert_closed(db)
+        self.assertTrue(outcome.get('taken_over'),
+                        'no close() took over the teardown')
+        self.assertIn(
+            'stopped waiting after 1s for a concurrent close()',
+            outcome['close'])
+        self.assertLess(outcome['waited'], 1.5)
+
+    def test_a_close_without_timeout_bounds_the_teardown_wait_alone(self):
+        """With no `timeout` there is no budget: waiting for another
+        thread's teardown gets a bound of its own, the lease limit,
+        and the error names that limit."""
+        original = qi._debug_close_lease_wait_limit_s()
+        qi._debug_set_close_lease_wait_limit_s(0.5)
+        try:
+            with QwpAckServer(ack_delay_s=2.0) as server:
+                conf = (f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;auto_flush=off;'
+                        'sender_pool_min=1;sender_pool_max=2;')
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    db = qi.QuestDB.from_conf(conf)
+                    lease = db.sender()
+                    lease.row('t', columns={'v': 1},
+                              at=qi.TimestampNanos(1))
+                    lease.close()
+                    # Drains for as long as the server holds its ack.
+                    first = threading.Thread(target=db.close)
+                    first.start()
+                    try:
+                        self.assertTrue(
+                            self._wait_for_the_teardown_to_start(db),
+                            'no close() took over the teardown')
+                        began = time.monotonic()
+                        with self.assertLogs('questdb', level='WARNING'):
+                            with self.assertRaises(
+                                    qi.QuestDBError) as caught:
+                                db.close()
+                        waited = time.monotonic() - began
+                    finally:
+                        first.join(timeout=30)
+                    self.assertIn(
+                        'stopped waiting after 0.5s for a concurrent '
+                        'close()',
+                        str(caught.exception))
+                    self.assertGreaterEqual(waited, 0.45)
+                    self._assert_closed(db)
+        finally:
+            qi._debug_set_close_lease_wait_limit_s(original)
 
     def test_close_timeout_zero_closes_only_an_idle_handle(self):
         """`timeout=0` never waits: it closes a handle nothing is using

@@ -1560,17 +1560,24 @@ class QuestDB:
         many leases and calls are still outstanding. The handle stays
         closing -- it never goes back to open -- and a later
         ``close()``, with any ``timeout``, resumes the wait and
-        finishes the teardown. The same limit applies to waiting for a
-        concurrent ``close()`` on another thread to finish its
-        teardown.
+        finishes the teardown. Waiting for a concurrent ``close()`` on
+        another thread to finish its teardown is limited too: a number
+        of seconds covers that wait and the drain together; left out,
+        that wait gets a minute of its own; ``None`` puts no limit on
+        it.
 
         While it waits, it reports what it is still waiting for
         through the ``questdb`` logger at ``WARNING``: every five
         seconds for the first minute, then once a minute.
 
-        Leaving a ``with`` block closes with the limits of a
-        ``close()`` with no arguments. For other limits, call
-        ``close(timeout=...)`` as the block's last statement.
+        A number of seconds is a budget for the whole close,
+        including the close a ``with`` block makes on its way out:
+        when the most recent ``close()`` on the handle was given one,
+        leaving the block waits only for what is left of it, and not
+        at all once it has run out. To bound leaving a ``with`` block,
+        call ``close(timeout=...)`` as the block's last statement.
+        Otherwise, leaving the block closes with the limits of a
+        ``close()`` with no arguments.
 
         Idempotent: closing a closed handle returns without doing
         anything, and no ``close()`` returns success unless the
@@ -1589,6 +1596,11 @@ class QuestDB:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """
         Close the handle at the end of a ``with`` block.
+
+        When the most recent :meth:`close` on the handle was given a
+        number of seconds, this close waits only for what is left of
+        that budget; otherwise it closes with the limits of a
+        :meth:`close` with no arguments.
 
         Leaving the block on an exception still closes, but a close
         that cannot finish is reported through the ``questdb`` logger
