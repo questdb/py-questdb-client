@@ -6564,6 +6564,11 @@ cdef class QuestDB:
     cdef object _conf_str
     cdef object _state_cond
     cdef size_t _active_uses
+    # Count uses by their originating thread, not their release thread: a
+    # lease may be handed off and returned on a different thread. close()
+    # must never wait for a use held by its own caller (including an OIDC
+    # diagnostic callback running inside a native borrow).
+    cdef dict _uses_by_thread
     cdef bint _closing
     cdef object _connection_listener
     cdef object _error_handler
@@ -6577,6 +6582,7 @@ cdef class QuestDB:
         self._conf_str = None
         self._state_cond = threading.Condition(threading.RLock())
         self._active_uses = 0
+        self._uses_by_thread = {}
         self._closing = False
         self._connection_listener = None
         self._error_handler = None
@@ -6590,6 +6596,7 @@ cdef class QuestDB:
 
     cdef questdb_db* _begin_db_use(self, str method) except? NULL:
         cdef questdb_db* db = NULL
+        cdef unsigned long owner = questdb_thread_ident()
         self._state_cond.acquire()
         try:
             db = self._db
@@ -6597,16 +6604,26 @@ cdef class QuestDB:
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
                     f"{method}() can't be called: QuestDB is closed.")
+            # Dict insertion can fail; don't publish an unmatched global use.
+            self._uses_by_thread[owner] = self._uses_by_thread.get(owner, 0) + 1
             self._active_uses += 1
             return db
         finally:
             self._state_cond.release()
 
-    cdef void _end_db_use(self) except *:
+    cdef void _end_db_use(self, object owner=None) except *:
+        cdef size_t count
+        if owner is None:
+            owner = questdb_thread_ident()
         self._state_cond.acquire()
         try:
-            if self._active_uses == 0:
+            count = self._uses_by_thread.get(owner, 0)
+            if count == 0 or self._active_uses == 0:
                 raise RuntimeError('QuestDB use counter underflow.')
+            if count == 1:
+                del self._uses_by_thread[owner]
+            else:
+                self._uses_by_thread[owner] = count - 1
             self._active_uses -= 1
             if self._active_uses == 0:
                 self._state_cond.notify_all()
@@ -7378,8 +7395,11 @@ cdef class QuestDB:
         """
         Close the client and its connection pool.
 
-        This method is idempotent. When called from inside one of this
-        handle's own ``error_handler`` / ``connection_listener``
+        This method is idempotent. Calling it while this thread owns an
+        active pool operation or a borrowed lease raises ``QuestDBError``
+        instead of waiting for itself; close the lease first. When called
+        from inside one of this handle's own ``error_handler`` /
+        ``connection_listener``
         callbacks, it does not wait for a concurrent ``close()`` on
         another thread to finish; the in-flight callback completes after
         that close returns.
@@ -7388,6 +7408,12 @@ cdef class QuestDB:
         cdef PyThreadState* gs = NULL
         cdef bint closed = False
         with self._state_cond:
+            if self._uses_by_thread.get(questdb_thread_ident(), 0):
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    'QuestDB.close() cannot wait for a pool operation or '
+                    'lease held by the calling thread. Finish the operation '
+                    'or close the lease first.')
             db = self._db
             if db == NULL:
                 # A caller dispatching for this handle must not wait here:
@@ -9228,6 +9254,7 @@ cdef class PooledSender:
     cdef QuestDB _handle
     cdef Buffer _buffer
     cdef object _lock
+    cdef unsigned long _owner_thread_id
     cdef int64_t _batch_started_ms
 
     def __cinit__(self):
@@ -9248,6 +9275,7 @@ cdef class PooledSender:
         self._db = db
         self._qwp = sender
         self._buffer = buffer
+        self._owner_thread_id = questdb_thread_ident()
         self._batch_started_ms = 0
 
     cdef void_int _check_open(self, str method) except -1:
@@ -9356,7 +9384,7 @@ cdef class PooledSender:
         questdb_db_return_sender(db, sender)
         _ensure_has_gil(&gs)
         if handle is not None:
-            handle._end_db_use()
+            handle._end_db_use(self._owner_thread_id)
 
     def __enter__(self):
         with self._lock:
@@ -9740,12 +9768,16 @@ cdef class PooledReader:
     cdef _ReaderHandle _reader
     cdef _CursorHandle _last_cursor
     cdef object _lock
+    cdef unsigned long _owner_thread_id
+    cdef bint _query_in_flight
 
     def __cinit__(self):
         self._handle = None
         self._reader = None
         self._last_cursor = None
         self._lock = threading.RLock()
+        self._owner_thread_id = 0
+        self._query_in_flight = False
 
     cdef void _attach(
             self,
@@ -9753,8 +9785,13 @@ cdef class PooledReader:
             _ReaderHandle reader) noexcept:
         self._handle = handle
         self._reader = reader
+        self._owner_thread_id = questdb_thread_ident()
 
     cdef void_int _check_open(self, str method) except -1:
+        if self._query_in_flight:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f"{method}() can't be called during a reader query.")
         if self._reader is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -9764,6 +9801,12 @@ cdef class PooledReader:
         cdef _ReaderHandle reader = self._reader
         cdef _CursorHandle last = self._last_cursor
         cdef QuestDB handle = self._handle
+        if self._query_in_flight:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'PooledReader.close() cannot release a reader during a query.')
+        if last is not None:
+            last._check_not_driving('PooledReader.close')
         if reader is None:
             return
         self._reader = None
@@ -9773,7 +9816,7 @@ cdef class PooledReader:
             last._free()
         reader._close()
         if handle is not None:
-            handle._end_db_use()
+            handle._end_db_use(self._owner_thread_id)
 
     cdef void _release_finalizer_locked(self) noexcept:
         """Release a GC-owned lease without waiting for a worker cursor."""
@@ -9801,7 +9844,7 @@ cdef class PooledReader:
             reader._close()
         if handle is not None:
             try:
-                handle._end_db_use()
+                handle._end_db_use(self._owner_thread_id)
             except BaseException:
                 # Finalizers cannot propagate. The fields were already cleared,
                 # so retrying would underflow the active-use count.
@@ -9853,8 +9896,12 @@ cdef class PooledReader:
                         'end, so its transport was torn down. close() '
                         'this lease and obtain a new one with '
                         'QuestDB.reader().')
-            cursor_handle = _execute_query(
-                self._reader, sql, binds, reset_symbol_dict, False)
+            self._query_in_flight = True
+            try:
+                cursor_handle = _execute_query(
+                    self._reader, sql, binds, reset_symbol_dict, False)
+            finally:
+                self._query_in_flight = False
             self._last_cursor = cursor_handle
         return QueryResult(cursor_handle)
 
@@ -9886,6 +9933,15 @@ cdef class PooledReader:
         returned to the pool, any other is dropped and the pool refills
         on demand.
         """
+        # A native query may synchronously invoke Python diagnostics with
+        # the GIL held. Reject re-entry before waiting for another thread's
+        # lease lock, and check again under the lock in _release_locked().
+        if self._query_in_flight:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'PooledReader.close() cannot release a reader during a query.')
+        if self._last_cursor is not None:
+            self._last_cursor._check_not_driving('PooledReader.close')
         with self._lock:
             self._release_locked()
 

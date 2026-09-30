@@ -68,6 +68,7 @@ from test_auth import (
     NativeOidcTest,
     NativeTransportAttachmentTest,
     OidcApiContractTest,
+    OidcDiagnosticReentryTest,
     OidcDiagnosticSignalTest,
     OidcForkSafetyTest,
     OidcTestServerFixtureTest,
@@ -2024,6 +2025,38 @@ class TestQwpWebSocketApi(unittest.TestCase):
 
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
+
+    def test_client_close_rejects_own_lease_then_accepts_worker_return(self):
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            client = qi.QuestDB.from_conf(conf)
+            sender = client.sender()
+            errors = []
+            try:
+                with self.assertRaises(qi.QuestDBError) as cm:
+                    client.close()
+                self.assertIs(cm.exception.code,
+                              qi.QuestDBErrorCode.InvalidApiCall)
+
+                def return_lease():
+                    try:
+                        sender.close(flush=False)
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                worker = threading.Thread(target=return_lease)
+                worker.start()
+                worker.join(timeout=2)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(errors, [])
+                # The use belongs to the borrowing thread, but it can be
+                # released by a different thread without stranding its count.
+                client.close()
+            finally:
+                sender.close(flush=False)
+                client.close()
 
     def test_client_sender_context_flushes_success_and_discards_exception(self):
         with QwpAckServer() as server:

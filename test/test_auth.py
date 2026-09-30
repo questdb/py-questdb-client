@@ -6306,6 +6306,216 @@ class OidcReaderLifetimeTest(unittest.TestCase):
             self.assertTrue(_settle_until(lambda: auth_ref() is None))
 
 
+@unittest.skipUnless(os.name == 'posix',
+                     'durable file token store requires POSIX')
+class OidcDiagnosticReentryTest(unittest.TestCase):
+    """Isolate native callback regressions: a broken guard can crash or hang."""
+
+    def _run_isolated(self, name, exercise, timeout):
+        if os.environ.get('_QUESTDB_OIDC_REENTRY_CHILD') == name:
+            exercise()
+            return
+        env = dict(os.environ)
+        env['_QUESTDB_OIDC_REENTRY_CHILD'] = name
+        env['PYTHONPATH'] = os.pathsep.join(
+            [os.path.dirname(os.path.dirname(os.path.abspath(questdb.__file__))),
+             os.path.dirname(os.path.abspath(__file__))]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        proc = subprocess.run(
+            [sys.executable, '-m', 'unittest',
+             f'test_auth.OidcDiagnosticReentryTest.test_{name}'],
+            env=env, capture_output=True, text=True, timeout=timeout)
+        self.assertEqual(proc.returncode, 0,
+                         f'child failed ({proc.returncode}): '
+                         f'{proc.stdout}{proc.stderr}')
+
+    def _exercise_cursor_reentry(self, leased, consumer='arrow'):
+        credential = [None]
+        sabotaged = threading.Event()
+        observed = []
+
+        def fail_save():
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential[0]):
+                os.remove(credential[0])
+            os.mkdir(credential[0])
+            sabotaged.set()
+
+        class Reenter(logging.Handler):
+            def emit(self, record):
+                if 'token store save failed' not in record.getMessage():
+                    return
+                actions = [('result.close', result.close),
+                           ('result.cancel', result.cancel)]
+                if leased:
+                    actions.extend([('lease.close', lease.close),
+                                    ('db.close', db.close)])
+                for name, action in actions:
+                    try:
+                        action()
+                    except questdb.QuestDBError as exc:
+                        observed.append((name, exc.code))
+                    else:
+                        observed.append((name, None))
+
+        logger = logging.getLogger('questdb')
+        old_level = logger.level
+        logger.setLevel(logging.WARNING)
+        handler = Reenter()
+        with tempfile.TemporaryDirectory() as directory, \
+                OidcTestServer(initial_expires_in=6,
+                               refresh_request_hook=fail_save) as idp, \
+                EgressFailoverServer() as qdb:
+            auth = make_discovered_auth(
+                idp, token_store=FileTokenStore.at(directory))
+            auth.sign_in()
+            signed_at = time.monotonic()
+            credential[0] = os.path.join(directory, next(
+                n for n in os.listdir(directory) if n.endswith('.json')))
+            db = questdb.connect(
+                f'ws::addr=127.0.0.1:{qdb.port};lazy_connect=true;'
+                'failover_max_attempts=2;failover_max_duration_ms=0;'
+                'failover_backoff_initial_ms=0;failover_backoff_max_ms=0;',
+                oidc_auth=auth)
+            lease = None
+            result = None
+            try:
+                if leased:
+                    lease = db.reader()
+                    result = lease.query('select v from t')
+                else:
+                    result = db.query('select v from t')
+                logger.addHandler(handler)
+                # Force a token refresh while replaying after the first
+                # connection drops; the save failure emits synchronously
+                # inside the borrowed native cursor's next_batch call.
+                time.sleep(max(0, 3.6 - (time.monotonic() - signed_at)))
+                qdb.release_first.set()
+                if consumer == 'pandas':
+                    values = result.to_pandas()['v'].tolist()
+                elif consumer == 'iter_pandas':
+                    values = [value for frame in result.iter_pandas()
+                              for value in frame['v'].tolist()]
+                elif consumer == 'stream':
+                    import pyarrow as pa
+                    reader = pa.RecordBatchReader.from_stream(result)
+                    try:
+                        values = reader.read_all().column(0).to_pylist()
+                    finally:
+                        reader.close()
+                else:
+                    values = result.to_arrow().column(0).to_pylist()
+                self.assertEqual(values, [1, 2, 3])
+                self.assertTrue(sabotaged.is_set())
+                expected = ['result.close', 'result.cancel']
+                if leased:
+                    expected.extend(['lease.close', 'db.close'])
+                self.assertEqual(observed, [
+                    (name, questdb.QuestDBErrorCode.InvalidApiCall)
+                    for name in expected])
+                self.assertEqual(qdb.authorizations,
+                                 ['Bearer AT-initial', 'Bearer AT-refreshed'])
+                self.assertEqual(qdb.errors, [])
+            finally:
+                qdb.release_first.set()
+                logger.removeHandler(handler)
+                logger.setLevel(old_level)
+                if result is not None:
+                    result.close()
+                if lease is not None:
+                    lease.close()
+                db.close()
+
+    def test_result_close_during_cursor_pull(self):
+        try:
+            import pyarrow
+        except ImportError:
+            self.skipTest('pyarrow required for the Arrow cursor')
+        self._run_isolated('result_close_during_cursor_pull',
+                           lambda: self._exercise_cursor_reentry(False), 30)
+
+    def test_lease_close_during_cursor_pull(self):
+        try:
+            import pyarrow
+        except ImportError:
+            self.skipTest('pyarrow required for the Arrow cursor')
+        self._run_isolated('lease_close_during_cursor_pull',
+                           lambda: self._exercise_cursor_reentry(True), 30)
+
+    def test_numpy_result_close_during_cursor_pull(self):
+        if pd is None:
+            self.skipTest('pandas required for the numpy cursor')
+        self._run_isolated('numpy_result_close_during_cursor_pull',
+                           lambda: self._exercise_cursor_reentry(
+                               False, consumer='pandas'), 30)
+
+    def test_numpy_iterator_close_during_cursor_pull(self):
+        if pd is None:
+            self.skipTest('pandas required for the numpy cursor')
+        self._run_isolated('numpy_iterator_close_during_cursor_pull',
+                           lambda: self._exercise_cursor_reentry(
+                               False, consumer='iter_pandas'), 30)
+
+    def test_arrow_c_stream_close_during_cursor_pull(self):
+        try:
+            import pyarrow
+        except ImportError:
+            self.skipTest('pyarrow required to consume the Arrow C stream')
+        self._run_isolated('arrow_c_stream_close_during_cursor_pull',
+                           lambda: self._exercise_cursor_reentry(
+                               False, consumer='stream'), 30)
+
+    def test_pool_close_during_first_reader_borrow(self):
+        self._run_isolated('pool_close_during_first_reader_borrow',
+                           self._exercise_pool_close, 10)
+
+    def _exercise_pool_close(self):
+        observed = []
+        with tempfile.TemporaryDirectory() as parent, OidcTestServer() as idp:
+            directory = os.path.join(parent, 'tokens')
+            os.mkdir(directory)
+            auth = make_discovered_auth(
+                idp, token_store=FileTokenStore.at(directory))
+            db = questdb.connect(
+                'ws::addr=127.0.0.1:65530;lazy_connect=true;'
+                'sender_pool_min=0;query_pool_min=0;', oidc_auth=auth)
+            # Turn the token directory into a file so the first load emits a
+            # warning from the active pool-borrow thread, not a worker.
+            os.rmdir(directory)
+            with open(directory, 'w') as output:
+                output.write('not-a-directory')
+
+            class Reenter(logging.Handler):
+                def emit(self, record):
+                    if 'token store load failed' not in record.getMessage():
+                        return
+                    try:
+                        db.close()
+                    except questdb.QuestDBError as exc:
+                        observed.append(exc.code)
+                    else:
+                        observed.append(None)
+
+            logger = logging.getLogger('questdb')
+            old_level = logger.level
+            logger.setLevel(logging.WARNING)
+            handler = Reenter()
+            logger.addHandler(handler)
+            try:
+                with self.assertRaises((OidcError, questdb.QuestDBError)) as cm:
+                    db.query('select 1')
+                self.assertNotEqual(getattr(cm.exception, 'code', None),
+                                    questdb.QuestDBErrorCode.InvalidApiCall)
+                self.assertEqual(observed,
+                                 [questdb.QuestDBErrorCode.InvalidApiCall])
+                self.assertIsNotNone(_client._debug_egress_pool_stats(db))
+            finally:
+                logger.removeHandler(handler)
+                logger.setLevel(old_level)
+                db.close()
+
+
 class OidcSenderReentryTest(unittest.TestCase):
     @unittest.skipUnless(os.name == 'posix',
                          'durable file token store requires POSIX')

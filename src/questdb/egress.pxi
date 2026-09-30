@@ -129,6 +129,8 @@ cdef class _CursorHandle:
     cdef bint _owns_reader
     cdef object _lock
     cdef int _reset_seq
+    # The RLock does not prevent same-thread diagnostic callback re-entry.
+    cdef bint _native_in_flight
 
     def __cinit__(self):
         self._cursor = NULL
@@ -136,6 +138,13 @@ cdef class _CursorHandle:
         self._owns_reader = True
         self._lock = threading.RLock()
         self._reset_seq = 0
+        self._native_in_flight = False
+
+    cdef void_int _check_not_driving(self, str method) except -1:
+        if self._native_in_flight:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                f'{method}() cannot be called during a cursor operation.')
 
     cdef void _attach(
             self,
@@ -159,17 +168,27 @@ cdef class _CursorHandle:
     cdef void _free_locked(self) noexcept:
         """The body of `_free`. Caller must hold `_lock`."""
         cdef PyThreadState* gs = NULL
-        if self._cursor != NULL:
-            _ensure_doesnt_have_gil(&gs)
-            qwp_reader_cursor_free(self._cursor)
-            _ensure_has_gil(&gs)
-            self._cursor = NULL
-        if self._reader_ref is not None:
-            if self._owns_reader:
-                self._reader_ref._close()
-            self._reader_ref = None
+        if self._native_in_flight:
+            return
+        self._native_in_flight = True
+        try:
+            if self._cursor != NULL:
+                _ensure_doesnt_have_gil(&gs)
+                qwp_reader_cursor_free(self._cursor)
+                _ensure_has_gil(&gs)
+                self._cursor = NULL
+            if self._reader_ref is not None:
+                if self._owns_reader:
+                    self._reader_ref._close()
+                self._reader_ref = None
+        finally:
+            self._native_in_flight = False
 
     cdef void _free(self) noexcept:
+        # A finalizer cannot raise; the native caller retains the handle and
+        # will release it after returning from its diagnostic callback.
+        if self._native_in_flight:
+            return
         with self._lock:
             self._free_locked()
 
@@ -190,9 +209,11 @@ cdef class _CursorHandle:
         freeing operation; ``__dealloc__`` remains the eventual fallback.
         """
         cdef bint undrained
-        if not self._lock.acquire(False):
+        if self._native_in_flight or not self._lock.acquire(False):
             return -1
         try:
+            if self._native_in_flight:
+                return -1
             if self._cursor == NULL:
                 return 0
             undrained = (
@@ -262,18 +283,23 @@ cdef object _fetch_one_batch(
     schema.release = NULL
 
     with handle._lock:
+        handle._check_not_driving('next_arrow_batch')
         cursor = handle._cursor
         if cursor == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'cursor is closed')
-        with nogil:
-            if compact:
-                result = qwp_reader_cursor_next_arrow_batch_compact(
-                    cursor, &array, &schema, &err)
-            else:
-                result = qwp_reader_cursor_next_arrow_batch(
-                    cursor, &array, &schema, &err)
+        handle._native_in_flight = True
+        try:
+            with nogil:
+                if compact:
+                    result = qwp_reader_cursor_next_arrow_batch_compact(
+                        cursor, &array, &schema, &err)
+                else:
+                    result = qwp_reader_cursor_next_arrow_batch(
+                        cursor, &array, &schema, &err)
+        finally:
+            handle._native_in_flight = False
 
     if result == qwp_reader_arrow_batch_ok:
         # Hand ownership of the array + schema buffers to pyarrow.
@@ -436,8 +462,13 @@ cdef void_int _drain_cursor(_CursorHandle handle) except -1:
             if cursor == NULL:
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
-            with nogil:
-                batch = qwp_reader_cursor_next_batch(cursor, &err)
+            handle._check_not_driving('drain')
+            handle._native_in_flight = True
+            try:
+                with nogil:
+                    batch = qwp_reader_cursor_next_batch(cursor, &err)
+            finally:
+                handle._native_in_flight = False
         if batch == NULL:
             if err != NULL:
                 raise _reader_err_to_py(err)
@@ -907,14 +938,19 @@ cdef int _qs_pull_impl(_QueryStreamProducer prod):
     memset(&local_array, 0, sizeof(ArrowArray))
     memset(&local_schema, 0, sizeof(ArrowSchema))
     with prod.cursor_handle._lock:
+        prod.cursor_handle._check_not_driving('arrow_stream')
         cursor = prod.cursor_handle._cursor
         if cursor == NULL:
             _qs_set_error(prod, b'cursor is closed', 16)
             prod.exhausted = True
             return -1
-        with nogil:
-            result = qwp_reader_cursor_next_arrow_batch_compact(
-                cursor, &local_array, &local_schema, &err)
+        prod.cursor_handle._native_in_flight = True
+        try:
+            with nogil:
+                result = qwp_reader_cursor_next_arrow_batch_compact(
+                    cursor, &local_array, &local_schema, &err)
+        finally:
+            prod.cursor_handle._native_in_flight = False
     if result == qwp_reader_arrow_batch_ok:
         current_seq = prod.cursor_handle._reset_sequence()
         if current_seq != prod.seen_seq:
@@ -2026,8 +2062,13 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
                 if cursor == NULL:
                     raise QuestDBError(
                         QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
-                with nogil:
-                    batch = qwp_reader_cursor_next_batch(cursor, &err)
+                handle._check_not_driving('to_numpy')
+                handle._native_in_flight = True
+                try:
+                    with nogil:
+                        batch = qwp_reader_cursor_next_batch(cursor, &err)
+                finally:
+                    handle._native_in_flight = False
                 if handle._reset_seq != seen_seq:
                     # Mid-query failover replayed from batch-0: discard the
                     # pre-failover accumulation and re-derive the schema.
@@ -2330,8 +2371,13 @@ cdef class _NumpyBatchIter:
                 if cursor == NULL:
                     raise QuestDBError(
                         QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
-                with nogil:
-                    batch = qwp_reader_cursor_next_batch(cursor, &err)
+                self.handle._check_not_driving('iter_numpy')
+                self.handle._native_in_flight = True
+                try:
+                    with nogil:
+                        batch = qwp_reader_cursor_next_batch(cursor, &err)
+                finally:
+                    self.handle._native_in_flight = False
                 if self.handle._reset_seq != self.seen_seq:
                     if self.delivered:
                         # Mid-query failover after batches were already yielded:
@@ -2478,7 +2524,9 @@ class QueryResult:
     thread and consumed, cancelled, closed, or dropped there. Use a normal
     synchronisation hand-off (for example, ``Thread.start`` / ``join`` or a
     thread-safe queue), and access it from only one thread at a time.
-    Concurrent operations on one result are unsupported.
+    Concurrent operations on one result are unsupported. Calling ``close``
+    or ``cancel`` from a synchronous diagnostic callback while the cursor is
+    being read raises ``InvalidApiCall`` instead of releasing an in-use cursor.
 
     ``__arrow_c_stream__`` is native — the cursor's record batches are
     exposed directly through the Arrow C Data Interface, so polars /
@@ -2739,13 +2787,19 @@ class QueryResult:
         cdef object exc = None
         if handle is None:
             return
+        handle._check_not_driving('cancel')
         with handle._lock:
+            handle._check_not_driving('cancel')
             cursor = handle._cursor
             if cursor == NULL:
                 return
-            with nogil:
-                ok = qwp_reader_cursor_cancel(cursor, &err)
-                reusable = qwp_reader_cursor_connection_reusable(cursor)
+            handle._native_in_flight = True
+            try:
+                with nogil:
+                    ok = qwp_reader_cursor_cancel(cursor, &err)
+                    reusable = qwp_reader_cursor_connection_reusable(cursor)
+            finally:
+                handle._native_in_flight = False
         if not ok:
             if err != NULL:
                 exc = _reader_err_to_py(err)
@@ -2775,11 +2829,20 @@ class QueryResult:
         invalid.
         """
         cdef _CursorHandle handle = self._cancel_handle
-        self._cursor_handle = None
-        self._cancel_handle = None
-        self._consumed = True
         if handle is not None:
-            handle._free()
+            # A native next_batch/next_arrow_batch still borrows this cursor
+            # when a synchronous OIDC diagnostic calls back into Python.
+            # Reject re-entry before detaching the only public references.
+            handle._check_not_driving('close')
+            with handle._lock:
+                handle._check_not_driving('close')
+                self._cursor_handle = None
+                self._cancel_handle = None
+                self._consumed = True
+                handle._free_locked()
+        else:
+            self._cursor_handle = None
+            self._consumed = True
 
     def __enter__(self):
         return self
