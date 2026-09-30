@@ -7367,7 +7367,14 @@ print('OK')
         instead of both threads standing until the wait runs out."""
         original = qi._debug_close_lease_wait_limit_s()
         qi._debug_set_close_lease_wait_limit_s(5.0)
-        app_lock = threading.Lock()
+        # Reentrant because of where the finalizer runs. On a GIL build
+        # it runs on the teardown thread, which waits here while this
+        # thread holds the lock -- the case the test is about. On a
+        # free-threaded build the object is handed back to the thread
+        # that created it, this one, and freed at its next bytecode,
+        # while it still holds the lock. A plain `Lock` would block that
+        # thread on itself for ever.
+        app_lock = threading.RLock()
 
         class Handler:
             def __call__(self, err):

@@ -34,6 +34,11 @@ jobs:
           # cibuildwheel upgrade. Add a version here once it is GA and its
           # dependencies publish wheels.
           CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-*"
+          # Log the resolved test environment and emit all Python thread
+          # stacks if the test suite stops making progress.
+          CIBW_TEST_COMMAND: >-
+            python {project}/ci/run_tests_with_watchdog.py
+            {project}/test/test.py -v
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-arm64
