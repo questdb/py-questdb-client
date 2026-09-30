@@ -6206,7 +6206,9 @@ class OidcReaderMidStreamErrorTest(unittest.TestCase):
         def consume(result, auth, qdb):
             chunks = result.iter_pandas()
             self.assertEqual(next(chunks)['v'].tolist(), [1, 2, 3])
-            self.assertTrue(qdb.first_batch_sent.is_set())
+            # The client may consume the frame before the server thread sets
+            # the event immediately after sendall; wait for that thread.
+            self.assertTrue(qdb.first_batch_sent.wait(timeout=5))
             auth.close()
             qdb.release_first.set()
             with self.assertRaises(OidcCancelledError) as raised:
@@ -6228,7 +6230,7 @@ class OidcReaderMidStreamErrorTest(unittest.TestCase):
                 self.assertEqual(
                     reader.read_next_batch().column(0).to_pylist(),
                     [1, 2, 3])
-                self.assertTrue(qdb.first_batch_sent.is_set())
+                self.assertTrue(qdb.first_batch_sent.wait(timeout=5))
                 auth.close()
                 qdb.release_first.set()
                 with self.assertRaises(OSError) as raised:
