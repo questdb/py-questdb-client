@@ -323,7 +323,9 @@ Fixed
   successful ``with``-block exit committed the rows the caller had asked to
   roll back. Rollback now records completion immediately and defers the
   physical clear until the serializer releases its marker, so none of those
-  rows can survive into a later flush.
+  rows can survive into a later flush. The deferral covers only rows the
+  transaction itself is writing; a rollback of a transaction that was never
+  entered is refused while a row or dataframe is being written.
 
 - **A completed transaction object cannot append rows outside a transaction
   or be entered again.** ``row()``, ``dataframe()`` and ``__enter__()`` now
@@ -438,18 +440,21 @@ Fixed
 - **Every call that would change or end the buffer is refused while a row
   is being written**: ``clear()``, ``flush()``, ``flush_and_get_fsn()``,
   ``flush_and_keep_and_get_fsn()``, ``close()``, ``close_drain()``,
-  ``commit()``, ``transaction()`` and ``dataframe()``, on senders and on
-  pooled leases alike. A column value whose conversion runs Python can call
-  back into the sender that is part-way through a row, and each of these
-  would have destroyed or reordered what that row was writing.
+  ``commit()``, ``transaction()``, entering a transaction, ``rollback()`` of
+  a transaction that was never entered, and ``dataframe()``, on senders and
+  on pooled leases alike. A column value whose conversion runs Python can
+  call back into the sender that is part-way through a row, and each of
+  these would have destroyed or reordered what that row was writing.
   ``close_drain()`` is the sharpest of them: draining stops the sender
   accepting anything further, so the row still being written can never be
   finished and the complete rows buffered before it go with it — after
   which ``close(flush=True)`` reported success having sent nothing. A
-  ``transaction()`` opened from there swallowed the whole frame, because a
-  ``dataframe()`` part-way through its plan build still has the clear
-  buffer a transaction requires, and the rollback that ends such a block
-  then discarded it.
+  transaction entered from there swallowed the whole frame, whether
+  ``transaction()`` made it at that point or earlier, or it was constructed
+  directly as ``SenderTransaction``: a ``dataframe()`` part-way through its
+  plan build still has the clear buffer a transaction requires, and the
+  rollback that ends such a block then discarded it. Rolling back a
+  transaction that was never entered discarded the frame the same way.
 
 - **Bulk GEOHASH values retain the permissive narrowing contract.** The
   client validates the declared precision and the integer carrier width, but

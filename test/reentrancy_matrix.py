@@ -322,8 +322,8 @@ def _ilp_sender(ctx, stack):
 
 
 def _http_sender(ctx, stack):
-    """Transactions are an ILP/HTTP feature, so the two transaction rows
-    of the grid need this rather than the tcp sender."""
+    """Transactions are an ILP/HTTP feature, so every row of the grid
+    with a transaction in it needs this rather than the tcp sender."""
     server = HttpServer()
     server.__enter__()
     stack.append(server)
@@ -379,6 +379,19 @@ def _outer_sender_dataframe_ilp(ctx, stack, hook, deps):
     pd = deps.require('pandas')
     sender = _ilp_sender(ctx, stack)
     ctx.buffer = sender.new_buffer()
+    sender.dataframe(hostile_frame(hook, pd), table_name='t', at='ts')
+
+
+@outer('Sender.dataframe/http',
+       'a hostile `attrs` read during the plan build of a frame written '
+       'outside any transaction, with a transaction made but not entered')
+def _outer_sender_dataframe_http(ctx, stack, hook, deps):
+    # The transaction is made before the frame starts, so its methods
+    # are reached without passing the check in `Sender.transaction()`.
+    pd = deps.require('pandas')
+    sender = _http_sender(ctx, stack)
+    ctx.buffer = sender.new_buffer()
+    ctx.txn = sender.transaction('t')
     sender.dataframe(hostile_frame(hook, pd), table_name='t', at='ts')
 
 

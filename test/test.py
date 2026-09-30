@@ -6070,6 +6070,139 @@ print('OK')
             sender.flush()
             self.assertEqual(len(server.requests), 1)
 
+    def _dataframe_calling(self, sender, hook):
+        """Write a two-row frame through `sender.dataframe()`, calling
+        `hook` once from its plan build: the frame has counted itself
+        in as a row in progress but has not written anything yet."""
+
+        class HookFrame(pd.DataFrame):
+            armed = False
+            fired = False
+
+            @property
+            def attrs(self):
+                if HookFrame.armed and not HookFrame.fired:
+                    HookFrame.fired = True
+                    hook()
+                return {}
+
+            @attrs.setter
+            def attrs(self, value):
+                pass
+
+        frame = HookFrame({
+            'v': [1, 2],
+            'ts': pd.to_datetime([0, 1], unit='s')})
+        HookFrame.armed = True
+        sender.dataframe(frame, table_name='t', at='ts')
+        self.assertTrue(HookFrame.fired, 'the plan build never read attrs')
+
+    def _assert_refused_mid_row(self, refused, method):
+        self.assertEqual(len(refused), 1)
+        self.assertIsNotNone(
+            refused[0], f'{method}() was allowed mid-dataframe')
+        self.assertIn(
+            f"{method}() can't be called while a row is being "
+            'written into this buffer',
+            str(refused[0]))
+
+    def _assert_frame_sent(self, sender, server):
+        """Both rows of the frame are still buffered, and go out on the
+        next ordinary flush."""
+        self.assertGreater(len(sender), 0)
+        sender.flush()
+        self.assertEqual(len(server.requests), 1)
+        self.assertIn(b't v=1i', server.requests[0])
+        self.assertIn(b't v=2i', server.requests[0])
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_transaction_made_earlier_cannot_open_inside_a_dataframe(self):
+        """`transaction()` checks for a row in progress when it makes
+        the transaction, so one made before the frame reaches
+        `__enter__` from inside it without that check. `__enter__`
+        holds the same check."""
+        refused = []
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            txn = sender.transaction('inner')
+
+            def hook():
+                try:
+                    txn.__enter__()
+                    txn.rollback()
+                except qi.QuestDBError as exc:
+                    refused.append(exc)
+                else:
+                    refused.append(None)
+
+            self._dataframe_calling(sender, hook)
+            self._assert_refused_mid_row(refused, '__enter__')
+            self._assert_frame_sent(sender, server)
+
+            # The refusal left the transaction untouched and usable.
+            with txn:
+                txn.row(columns={'w': 1}, at=qi.ServerTimestamp)
+            self.assertEqual(len(server.requests), 2)
+            self.assertEqual(server.requests[1], b'inner w=1i\n')
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_transaction_constructed_directly_cannot_open_inside_a_dataframe(
+            self):
+        """`SenderTransaction(sender, ...)` never passes through
+        `Sender.transaction()`, so the check that counts is the one in
+        `__enter__`."""
+        refused = []
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+
+            def hook():
+                try:
+                    txn = qi.SenderTransaction(sender, 'inner')
+                    txn.__enter__()
+                    txn.rollback()
+                except qi.QuestDBError as exc:
+                    refused.append(exc)
+                else:
+                    refused.append(None)
+
+            self._dataframe_calling(sender, hook)
+            self._assert_refused_mid_row(refused, '__enter__')
+            self._assert_frame_sent(sender, server)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_rolling_back_a_transaction_never_entered_keeps_the_frame(self):
+        """A rollback waits for a row in progress to finish before it
+        clears the buffer, which is right for a row the transaction is
+        writing. A transaction that was never entered is writing none,
+        so the row in progress is an ordinary write, and clearing after
+        it would discard every row the frame wrote. That rollback is
+        refused instead."""
+        refused = []
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            txn = sender.transaction('inner')
+
+            def hook():
+                try:
+                    txn.rollback()
+                except qi.QuestDBError as exc:
+                    refused.append(exc)
+                else:
+                    refused.append(None)
+
+            self._dataframe_calling(sender, hook)
+            self._assert_refused_mid_row(refused, 'rollback')
+            self._assert_frame_sent(sender, server)
+
+            # The refused rollback did not complete the transaction.
+            txn.rollback()
+            with self.assertRaisesRegex(
+                    qi.QuestDBError, 'Transaction already completed'):
+                txn.rollback()
+
     def test_a_lease_returned_on_another_thread_still_lets_close_run(self):
         """The per-thread count that stops a self-waiting close must
         only cover calls that begin and end on one thread. A lease is

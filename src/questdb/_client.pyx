@@ -1125,6 +1125,7 @@ cdef class SenderTransaction:
     """
     cdef Sender _sender
     cdef str _table_name
+    cdef bint _entered
     cdef bint _complete
     cdef bint _committing
 
@@ -1135,6 +1136,7 @@ cdef class SenderTransaction:
                 'Transactions are only supported for ILP/HTTP.')
         self._sender = sender
         self._table_name = table_name
+        self._entered = False
         self._complete = False
         self._committing = False
 
@@ -1156,6 +1158,15 @@ cdef class SenderTransaction:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'Already inside a transaction, can\'t start another.')
+        # A transaction requires a clear buffer, which a `dataframe()`
+        # part-way through its plan build still has -- it has written
+        # nothing yet. A transaction opened there would take in rows the
+        # caller wrote outside any transaction, and its rollback would
+        # discard them. Refusing here also means that any row in
+        # progress while this transaction is open is one it started,
+        # which is what makes `rollback()` safe to defer its clear.
+        if self._sender._buffer is not None:
+            self._sender._buffer._check_not_in_row('__enter__')
         if self._sender._buffer is not None and len(self._sender._buffer):
             if self._sender._auto_flush_mode.enabled:
                 self._sender.flush()
@@ -1165,6 +1176,7 @@ cdef class SenderTransaction:
                     'Sender buffer must be clear when starting a ' +
                     'transaction. You must call `.flush()` before this call.')
         self._sender._in_txn = True
+        self._entered = True
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -1345,6 +1357,15 @@ cdef class SenderTransaction:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 "Transaction commit is already in progress, can't rollback.")
+        # The clear below waits for a row in progress to finish, which
+        # is right only when that row belongs to this transaction.
+        # `__enter__` is refused mid-row, so while this transaction is
+        # open every row in progress is its own. A transaction that was
+        # never entered owns no rows, so a row in progress then belongs
+        # to an ordinary write, and the deferred clear would discard it
+        # once it finished.
+        if not self._entered and self._sender._buffer is not None:
+            self._sender._buffer._check_not_in_row('rollback')
         # Completion is an absorbing state, even when rollback is called
         # re-entrantly from a value conversion while the buffer cannot yet
         # be cleared. Publishing it before cleanup keeps `__exit__` from
@@ -10711,11 +10732,11 @@ cdef class Sender:
         """
         Start a :ref:`sender_transaction` block.
         """
-        # A transaction requires a clear buffer, which a `dataframe()`
-        # part-way through its plan build still has -- it has written
-        # nothing yet. Opening one there put the frame's rows inside a
-        # transaction the caller never asked for, and the rollback that
-        # ends it threw the whole frame away with nothing said.
+        # The guard that protects a row in progress sits on
+        # `SenderTransaction.__enter__` and `rollback()`, where the
+        # transaction acts on the buffer: a transaction made earlier, or
+        # constructed directly, reaches those without passing through
+        # here. Refusing here as well names the call the caller made.
         if self._buffer is not None:
             self._buffer._check_not_in_row('transaction')
         return SenderTransaction(self, table_name)
