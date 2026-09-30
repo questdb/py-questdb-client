@@ -73,6 +73,7 @@ from test_auth import (
     OidcTestServerFixtureTest,
     OidcPoolDataframeFailoverTest,
     OidcReaderLifetimeTest,
+    OidcReaderMidStreamErrorTest,
     OidcReviewFixTest,
     OidcSenderReentryTest,
     ProviderCycleSafetyTest,

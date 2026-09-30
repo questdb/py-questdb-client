@@ -8346,6 +8346,7 @@ cdef class Sender:
     @property
     def max_name_len(self) -> int:
         """Maximum length of a table or column name."""
+        self._check_not_in_own_callback('max_name_len')
         if self._impl == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -8406,6 +8407,7 @@ cdef class Sender:
         Protocol version 2 introduces binary floating point support and
         the array datatype.
         """
+        self._check_not_in_own_callback('protocol_version')
         if self._impl == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -9102,6 +9104,7 @@ cdef class Sender:
         Total connection events discarded by the listener inbox's
         drop-oldest policy. ``0`` when no listener is registered.
         """
+        self._check_not_in_own_callback('connection_events_dropped')
         if self._impl == NULL:
             return 0
         return line_sender_connection_events_dropped(self._impl)
@@ -9112,6 +9115,7 @@ cdef class Sender:
         Total connection events delivered to the listener. ``0`` when no
         listener is registered.
         """
+        self._check_not_in_own_callback('connection_events_delivered')
         if self._impl == NULL:
             return 0
         return line_sender_connection_events_delivered(self._impl)

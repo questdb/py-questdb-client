@@ -42,7 +42,9 @@ def _result(request_id):
 
 
 class EgressFailoverServer:
-    def __init__(self):
+    def __init__(self, deliver_first_batch=False):
+        self.deliver_first_batch = deliver_first_batch
+        self.first_batch_sent = threading.Event()
         self.release_first = threading.Event()
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -112,6 +114,9 @@ class EgressFailoverServer:
                     request_id = struct.unpack('<q', payload[1:9])[0]
                     break
             if index == 1:
+                if self.deliver_first_batch:
+                    _write_frame(conn, 0x2, _result(request_id)[0])
+                    self.first_batch_sent.set()
                 self.release_first.wait(30)
                 _fin_close(conn)
             else:

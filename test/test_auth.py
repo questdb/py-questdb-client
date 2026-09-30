@@ -6177,6 +6177,69 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
         self.assertEqual(frame.exports, 2)
 
 
+class OidcReaderMidStreamErrorTest(unittest.TestCase):
+    def _query_after_first_batch(self, consume):
+        # The first batch has reached Python before we close the provider and
+        # drop the socket. Borrow-time failures cannot exercise either reader
+        # error boundary; reconnect must pull a token after this point.
+        with OidcTestServer() as idp, \
+                EgressFailoverServer(deliver_first_batch=True) as qdb:
+            auth = make_discovered_auth(idp)
+            auth.sign_in()
+            with questdb.connect(
+                    f'ws::addr=127.0.0.1:{qdb.port};lazy_connect=true;'
+                    'failover_max_attempts=2;'
+                    'failover_backoff_initial_ms=0;'
+                    'failover_backoff_max_ms=0;',
+                    oidc_auth=auth) as db:
+                result = db.query('select v from t')
+                try:
+                    consume(result, auth, qdb)
+                finally:
+                    qdb.release_first.set()
+                    result.close()
+            self.assertEqual(qdb.authorizations, ['Bearer AT-initial'])
+            self.assertEqual(qdb.errors, [])
+
+    @unittest.skipIf(pd is None, 'pandas required for iter_pandas')
+    def test_python_iterator_preserves_midstream_oidc_error(self):
+        def consume(result, auth, qdb):
+            chunks = result.iter_pandas()
+            self.assertEqual(next(chunks)['v'].tolist(), [1, 2, 3])
+            self.assertTrue(qdb.first_batch_sent.is_set())
+            auth.close()
+            qdb.release_first.set()
+            with self.assertRaises(OidcCancelledError) as raised:
+                next(chunks)
+            self.assertIsInstance(raised.exception, questdb.QuestDBError)
+            self.assertIs(
+                raised.exception.code, questdb.QuestDBErrorCode.AuthError)
+        self._query_after_first_batch(consume)
+
+    def test_arrow_c_stream_reports_generic_midstream_error(self):
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('pyarrow required to consume Arrow C streams')
+
+        def consume(result, auth, qdb):
+            reader = pa.RecordBatchReader.from_stream(result)
+            try:
+                self.assertEqual(
+                    reader.read_next_batch().column(0).to_pylist(),
+                    [1, 2, 3])
+                self.assertTrue(qdb.first_batch_sent.is_set())
+                auth.close()
+                qdb.release_first.set()
+                with self.assertRaises(OSError) as raised:
+                    reader.read_next_batch()
+                self.assertNotIsInstance(raised.exception, OidcError)
+                self.assertIn('[AuthError]', str(raised.exception))
+            finally:
+                reader.close()
+        self._query_after_first_batch(consume)
+
+
 @unittest.skipIf(pd is None, 'pandas required for reader failover')
 class OidcReaderLifetimeTest(unittest.TestCase):
     @unittest.skipUnless(os.name == 'posix',
@@ -6246,8 +6309,8 @@ class OidcSenderReentryTest(unittest.TestCase):
                          'durable file token store requires POSIX')
     def test_persistence_warning_cannot_close_or_mutate_flushing_sender(self):
         # The diagnostic runs on the flushing thread, inside native's mutable
-        # sender borrow. A logging handler used to free the sender mid-flush
-        # (segfault), or append rows into its borrowed outgoing buffer (UAF).
+        # sender borrow. Even read-only native getters would create an aliasing
+        # Rust &Sender; closing it or appending rows can also cause a crash/UAF.
         credential = [None]
         sabotaged = threading.Event()
         rejected = []
@@ -6274,6 +6337,12 @@ class OidcSenderReentryTest(unittest.TestCase):
                         'from_handler', columns={'v': 1},
                         at=questdb.ServerTimestamp)),
                     ('owned_clear', lambda: buffer_ref[0].clear()),
+                    ('max_name_len', lambda: sender.max_name_len),
+                    ('protocol_version', lambda: sender.protocol_version),
+                    ('connection_events_dropped',
+                     lambda: sender.connection_events_dropped),
+                    ('connection_events_delivered',
+                     lambda: sender.connection_events_delivered),
                 ):
                     try:
                         action()
@@ -6312,6 +6381,12 @@ class OidcSenderReentryTest(unittest.TestCase):
                         ('row', questdb.QuestDBErrorCode.InvalidApiCall),
                         ('owned_row', questdb.QuestDBErrorCode.InvalidApiCall),
                         ('owned_clear', questdb.QuestDBErrorCode.InvalidApiCall),
+                        ('max_name_len', questdb.QuestDBErrorCode.InvalidApiCall),
+                        ('protocol_version', questdb.QuestDBErrorCode.InvalidApiCall),
+                        ('connection_events_dropped',
+                         questdb.QuestDBErrorCode.InvalidApiCall),
+                        ('connection_events_delivered',
+                         questdb.QuestDBErrorCode.InvalidApiCall),
                     ])
                     self.assertFalse(any(
                         b'from_handler' in request['body']
