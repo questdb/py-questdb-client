@@ -3136,6 +3136,40 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             for value in stats['upgrade_authorizations']))
         self.assertEqual(stats['errors'], [])
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_standalone_qwp_dataframe_authenticates_direct_connection(self):
+        # Unlike row()/flush(), dataframe() opens a separate poolless QWP
+        # connection from the sender's cloned options. A successful upgrade
+        # and acknowledged frame must require the attached OIDC credential.
+        with OidcTestServer() as oidc_server:
+            auth = make_discovered_auth(oidc_server)
+            auth.sign_in()
+            with QwpAckServer(
+                    required_authorization='Bearer AT-initial') as qwp_server:
+                conf = (
+                    f'ws::addr=127.0.0.1:{qwp_server.port};'
+                    'lazy_connect=true;')
+                sender = questdb.Sender.from_conf(
+                    conf, oidc_auth=auth, auto_flush=False)
+                try:
+                    sender.dataframe(
+                        pd.DataFrame({
+                            'value': [42],
+                            'ts': pd.to_datetime([1700000000], unit='s'),
+                        }),
+                        table_name='oidc_direct',
+                        at='ts')
+                finally:
+                    sender.close(flush=False)
+                stats = qwp_server.snapshot()
+
+        self.assertGreaterEqual(stats['binary_frames'], 1)
+        self.assertGreaterEqual(len(stats['upgrade_authorizations']), 1)
+        self.assertTrue(all(
+            value == 'Bearer AT-initial'
+            for value in stats['upgrade_authorizations']))
+        self.assertEqual(stats['errors'], [])
+
     @unittest.skipUnless(
         os.name == 'posix', 'durable file token store requires POSIX')
     def test_background_token_provider_dispatches_persistence_diagnostic(self):
