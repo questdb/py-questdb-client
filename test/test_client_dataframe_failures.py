@@ -162,6 +162,33 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         self.assertEqual(stats['accepted_connections'], 1)
         self.assertEqual(stats['binary_frames'], 0)
 
+    def test_consumed_stream_input_error_is_not_told_to_retry(self):
+        # An override naming a column the stream does not have fails the
+        # same way on any reader, so the error carries no fresh-reader
+        # advice: what the caller has to change is the call.
+        schema = pa.schema([
+            ('ts', pa.timestamp('us', tz='UTC')),
+            ('v', pa.int64()),
+        ])
+        batch = pa.record_batch(
+            [pa.array([1_700_000_000_000_000], type=schema[0].type),
+             pa.array([1], type=pa.int64())], schema=schema)
+
+        with QwpAckServer() as server:
+            with qi.QuestDB.from_conf(_conf(server.port)) as client:
+                reader = pa.RecordBatchReader.from_batches(schema, [batch])
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    client.dataframe(
+                        reader, table_name='t_stream_bad_override', at='ts',
+                        schema_overrides={'missing': 'ipv4'})
+            stats = server.snapshot()
+        message = str(raised.exception)
+        self.assertIn('missing', message)
+        self.assertNotIn('fresh reader', message)
+        self.assertNotIn('cannot be replayed', message)
+        self.assertFalse(raised.exception.in_doubt)
+        self.assertEqual(stats['binary_frames'], 0)
+
     def test_consumed_stream_after_eager_commit_reports_both_risks(self):
         # A one-shot stream can be both non-replayable and delivery-ambiguous
         # at the DataFrame-call boundary. Let its first batch cross the eager

@@ -8219,6 +8219,14 @@ cdef void_int _direct_dataframe_run(
                         f'already committed rows before retrying.',
                         exc.sender_error,
                         in_doubt=True) from exc
+                # A fresh reader helps only with a failure that a retry
+                # can get past. Anything else -- a column the route
+                # cannot carry, an override that does not apply -- fails
+                # the same way on any reader, so it goes out unchanged.
+                if exc.code not in (
+                        QuestDBErrorCode.FailoverRetry,
+                        QuestDBErrorCode.SocketError):
+                    raise
                 raise QuestDBError(
                     exc.code,
                     f'{exc} The input stream was already partially '
