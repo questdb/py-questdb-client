@@ -8406,6 +8406,19 @@ cdef class QuestDB:
             # it.
             if scoped:
                 self._enter_scoped_call()
+                # The first scoped call on a thread allocates its call
+                # table, and on CPython 3.10/3.11 and PyPy an allocation
+                # can run a garbage-collection pass right here. A
+                # finalizer it runs can close this handle on this
+                # thread, since the lock is reentrant, and that close
+                # sees no use yet and frees the pool. The pointer read
+                # above is only good if the handle is still open now.
+                if self._db == NULL or self._closing:
+                    self._exit_scoped_call()
+                    raise QuestDBError(
+                        QuestDBErrorCode.InvalidApiCall,
+                        f"{method}() can't be called: QuestDB was "
+                        'closed while the call was starting.')
                 self._call_uses += 1
             else:
                 self._lease_uses += 1

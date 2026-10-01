@@ -8421,6 +8421,69 @@ print('OK')
         """
         self._run_in_child_interpreter(self._NATIVE_THREAD_SCOPED_CALL_SCRIPT)
 
+    _FINALIZER_CLOSE_AS_CALL_STARTS_SCRIPT = """
+import gc
+import threading
+import questdb._client as qi
+from qwp_ws_ack_server import QwpAckServer
+
+class Closer:
+    def __init__(self, db):
+        self.db = db
+        self.cycle = self  # only a garbage-collection pass reclaims it
+
+    def __del__(self):
+        self.db.close()
+
+class CollectingLocal(threading.local):
+    # Runs a collection at the call table's first write on a thread,
+    # where CPython 3.10/3.11 and PyPy can run one on their own.
+    armed = False
+
+    def __setattr__(self, name, value):
+        if CollectingLocal.armed and name == 'scoped_table':
+            CollectingLocal.armed = False
+            gc.collect()
+        super().__setattr__(name, value)
+
+gc.disable()
+outcome = []
+with QwpAckServer() as server:
+    db = qi.QuestDB.from_conf(
+        f'ws::addr=127.0.0.1:{server.port};sender_pool_min=0;'
+        'query_pool_min=0;pool_reap=manual;')
+    qi._THREAD_OWNER_STATE = CollectingLocal()
+
+    def worker():
+        Closer(db)
+        CollectingLocal.armed = True
+        try:
+            outcome.append(db.connection_events_dropped)
+        except qi.QuestDBError as exc:
+            outcome.append(str(exc))
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+assert not CollectingLocal.armed, 'the collection never ran'
+assert len(outcome) == 1 and 'was closed while the call was starting' in str(
+    outcome[0]), outcome
+db.close()
+print('OK')
+"""
+
+    def test_a_close_from_a_finalizer_as_a_call_starts_is_refused(self):
+        """The first scoped call on a thread allocates its call table
+        between reading the pool pointer and counting the call. A
+        garbage-collection pass there can run a finalizer that closes the
+        handle on this thread, and that close sees no use and frees the
+        pool. The call then refuses instead of using the freed pointer.
+
+        Runs in a child interpreter, where a use-after-free reads as a
+        failed return code."""
+        self._run_in_child_interpreter(
+            self._FINALIZER_CLOSE_AS_CALL_STARTS_SCRIPT, timeout=60)
+
     def _run_in_child_interpreter(self, script, timeout=120):
         """Run `script` in a fresh interpreter and require it to print OK.
 
