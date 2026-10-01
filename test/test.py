@@ -2138,6 +2138,81 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 sender.close(flush=False)
                 client.close()
 
+    def test_client_close_does_not_confuse_recycled_borrower_thread_id(self):
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            client = qi.QuestDB.from_conf(conf)
+            release = threading.Event()
+            shared = []
+            errors = []
+            closer = None
+
+            def return_lease():
+                release.wait()
+                if shared:
+                    shared[0][1].close(flush=False)
+
+            worker = threading.Thread(target=return_lease)
+            worker.start()
+            try:
+                def borrow_and_exit():
+                    try:
+                        shared.append((threading.get_ident(), client.sender()))
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                borrower = threading.Thread(target=borrow_and_exit)
+                borrower.start()
+                borrower.join(timeout=2)
+                self.assertFalse(borrower.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(len(shared), 1)
+                former_owner_id = shared[0][0]
+
+                # CPython may recycle a departed thread's numeric ID. Keep
+                # its untouched lease live while an unrelated closer starts.
+                for _ in range(64):
+                    matched = threading.Event()
+                    completed = threading.Event()
+
+                    def close_from_new_thread():
+                        if threading.get_ident() != former_owner_id:
+                            return
+                        matched.set()
+                        try:
+                            client.close()
+                        except BaseException as exc:
+                            errors.append(exc)
+                        finally:
+                            completed.set()
+
+                    closer = threading.Thread(target=close_from_new_thread)
+                    closer.start()
+                    if not matched.wait(1):
+                        closer.join(timeout=2)
+                        self.assertFalse(closer.is_alive())
+                        continue
+                    self.assertFalse(completed.wait(0.05),
+                                     'Unrelated closer rejected the live lease')
+                    release.set()
+                    self.assertTrue(completed.wait(2))
+                    closer.join(timeout=2)
+                    self.assertFalse(closer.is_alive())
+                    self.assertEqual(errors, [])
+                    break
+                else:
+                    self.skipTest('interpreter did not recycle the borrower ID')
+            finally:
+                release.set()
+                worker.join(timeout=2)
+                if closer is not None:
+                    closer.join(timeout=2)
+                if shared:
+                    shared[0][1].close(flush=False)
+                client.close()
+
     def test_client_sender_context_flushes_success_and_discards_exception(self):
         with QwpAckServer() as server:
             conf = (

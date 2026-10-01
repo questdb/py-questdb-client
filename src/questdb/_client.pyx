@@ -101,6 +101,8 @@ from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
 from cpython.pycapsule cimport (PyCapsule_GetPointer, PyCapsule_IsValid,
                                 PyCapsule_New)
 from cpython.ref cimport Py_INCREF, Py_DECREF
+from cpython.dict cimport PyDict_GetItemWithError, PyDict_SetItem
+from cpython.pystate cimport PyThreadState_GetDict
 
 from .line_sender cimport *
 from .rpyutils cimport *
@@ -6556,6 +6558,29 @@ cdef bint _is_batch_too_large_error(object exc):
         or 'batch too large' in msg)
 
 
+# A thread ID can be recycled immediately after its thread exits. Keep an
+# identity object in the thread-state dictionary instead: outstanding leases
+# retain the object after thread exit, so a new thread cannot inherit its use.
+# This C-API lookup does not run Python bytecode before the OIDC callback's
+# pending-signal check; unlike threading.current_thread(), it is also cheap
+# enough for PooledSender._check_open's per-row path.
+cdef object _DB_THREAD_TOKEN_KEY = object()
+
+
+cdef inline object _db_thread_token():
+    cdef PyObject* state_dict = PyThreadState_GetDict()
+    cdef PyObject* existing
+    cdef object token
+    if state_dict == NULL:
+        raise RuntimeError('No Python thread state for QuestDB pool use.')
+    existing = PyDict_GetItemWithError(<object>state_dict, _DB_THREAD_TOKEN_KEY)
+    if existing != NULL:
+        return <object>existing
+    token = object()
+    PyDict_SetItem(<object>state_dict, _DB_THREAD_TOKEN_KEY, token)
+    return token
+
+
 # no_gc_clear keeps tp_clear from nulling fields the native dispatchers
 # still target. The callback targets are additionally pinned in
 # _LIVE_CALLBACK_REFS until the dispatchers are joined, so the cycle collector
@@ -6575,10 +6600,9 @@ cdef class QuestDB:
     cdef object _conf_str
     cdef object _state_cond
     cdef size_t _active_uses
-    # Count uses by their originating thread, not their release thread: a
-    # lease may be handed off and returned on a different thread. close()
-    # must never wait for a use held by its own caller (including an OIDC
-    # diagnostic callback running inside a native borrow).
+    # Count uses by originating thread token, not by a recyclable numeric
+    # thread ID or by the lease's release thread. close() must never wait for
+    # a use held by its own caller, including an OIDC diagnostic callback.
     cdef dict _uses_by_thread
     cdef bint _closing
     cdef object _connection_listener
@@ -6607,7 +6631,7 @@ cdef class QuestDB:
 
     cdef questdb_db* _begin_db_use(self, str method) except? NULL:
         cdef questdb_db* db = NULL
-        cdef unsigned long owner = questdb_thread_ident()
+        cdef object owner = _db_thread_token()
         self._state_cond.acquire()
         try:
             db = self._db
@@ -6623,11 +6647,11 @@ cdef class QuestDB:
             self._state_cond.release()
 
     cdef void_int _transfer_db_use(
-            self, unsigned long old_owner, unsigned long new_owner) except -1:
+            self, object old_owner, object new_owner) except -1:
         """Move a borrowed sender's use when it is handed to another thread."""
         cdef size_t count
         cdef dict uses
-        if old_owner == new_owner:
+        if old_owner is new_owner:
             return 0
         with self._state_cond:
             # Publish both changes together: a failed dict insertion must not
@@ -6647,7 +6671,7 @@ cdef class QuestDB:
     cdef void _end_db_use(self, object owner=None) except *:
         cdef size_t count
         if owner is None:
-            owner = questdb_thread_ident()
+            owner = _db_thread_token()
         self._state_cond.acquire()
         try:
             count = self._uses_by_thread.get(owner, 0)
@@ -6982,7 +7006,7 @@ cdef class QuestDB:
             buffer._qwp = True
 
             lease = PooledSender.__new__(PooledSender)
-            lease._attach(self, db, sender, buffer)
+            lease._attach(self, db, sender, buffer, _db_thread_token())
             sender = NULL
             db_use = False
             return lease
@@ -7325,7 +7349,7 @@ cdef class QuestDB:
             reader_handle = _borrow_reader_from_pool(db)
             reader_handle._oidc_auth = self._oidc_auth
             lease = PooledReader.__new__(PooledReader)
-            lease._attach(self, reader_handle)
+            lease._attach(self, reader_handle, _db_thread_token())
             db_use = False
             return lease
         finally:
@@ -7446,7 +7470,7 @@ cdef class QuestDB:
         cdef PyThreadState* gs = NULL
         cdef bint closed = False
         with self._state_cond:
-            if self._uses_by_thread.get(questdb_thread_ident(), 0):
+            if self._uses_by_thread.get(_db_thread_token(), 0):
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
                     'QuestDB.close() cannot wait for a pool operation or '
@@ -9300,7 +9324,7 @@ cdef class PooledSender:
     cdef QuestDB _handle
     cdef Buffer _buffer
     cdef object _lock
-    cdef unsigned long _owner_thread_id
+    cdef object _owner_thread_token
     cdef int64_t _batch_started_ms
 
     def __cinit__(self):
@@ -9309,6 +9333,7 @@ cdef class PooledSender:
         self._handle = None
         self._buffer = None
         self._lock = threading.RLock()
+        self._owner_thread_token = None
         self._batch_started_ms = 0
 
     cdef void _attach(
@@ -9316,23 +9341,25 @@ cdef class PooledSender:
             QuestDB handle,
             questdb_db* db,
             qwp_sender* sender,
-            Buffer buffer) noexcept:
+            Buffer buffer,
+            object owner_token) noexcept:
         self._handle = handle
         self._db = db
         self._qwp = sender
         self._buffer = buffer
-        self._owner_thread_id = questdb_thread_ident()
+        self._owner_thread_token = owner_token
         self._batch_started_ms = 0
 
     cdef void_int _check_open(self, str method) except -1:
-        cdef unsigned long current = questdb_thread_ident()
+        cdef object current
         if self._qwp == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f"{method}() can't be called: Sender is closed.")
-        if current != self._owner_thread_id:
-            self._handle._transfer_db_use(self._owner_thread_id, current)
-            self._owner_thread_id = current
+        current = _db_thread_token()
+        if current is not self._owner_thread_token:
+            self._handle._transfer_db_use(self._owner_thread_token, current)
+            self._owner_thread_token = current
         return 0
 
     cdef bint _should_auto_flush_locked(self) except -1:
@@ -9435,7 +9462,7 @@ cdef class PooledSender:
         questdb_db_return_sender(db, sender)
         _ensure_has_gil(&gs)
         if handle is not None:
-            handle._end_db_use(self._owner_thread_id)
+            handle._end_db_use(self._owner_thread_token)
 
     def __enter__(self):
         with self._lock:
@@ -9819,7 +9846,7 @@ cdef class PooledReader:
     cdef _ReaderHandle _reader
     cdef _CursorHandle _last_cursor
     cdef object _lock
-    cdef unsigned long _owner_thread_id
+    cdef object _owner_thread_token
     cdef bint _query_in_flight
 
     def __cinit__(self):
@@ -9827,16 +9854,17 @@ cdef class PooledReader:
         self._reader = None
         self._last_cursor = None
         self._lock = threading.RLock()
-        self._owner_thread_id = 0
+        self._owner_thread_token = None
         self._query_in_flight = False
 
     cdef void _attach(
             self,
             QuestDB handle,
-            _ReaderHandle reader) noexcept:
+            _ReaderHandle reader,
+            object owner_token) noexcept:
         self._handle = handle
         self._reader = reader
-        self._owner_thread_id = questdb_thread_ident()
+        self._owner_thread_token = owner_token
 
     cdef void_int _check_open(self, str method) except -1:
         if self._query_in_flight:
@@ -9867,7 +9895,7 @@ cdef class PooledReader:
             last._free()
         reader._close()
         if handle is not None:
-            handle._end_db_use(self._owner_thread_id)
+            handle._end_db_use(self._owner_thread_token)
 
     cdef void _release_finalizer_locked(self) noexcept:
         """Release a GC-owned lease without waiting for a worker cursor."""
@@ -9895,7 +9923,7 @@ cdef class PooledReader:
             reader._close()
         if handle is not None:
             try:
-                handle._end_db_use(self._owner_thread_id)
+                handle._end_db_use(self._owner_thread_token)
             except BaseException:
                 # Finalizers cannot propagate. The fields were already cleared,
                 # so retrying would underflow the active-use count.
@@ -10011,12 +10039,13 @@ def _debug_new_pooled_reader_finalizer_owner(
     cdef PooledReader lease = PooledReader.__new__(PooledReader)
     cdef _ReaderHandle reader = _ReaderHandle()
     cdef QuestDB handle
+    cdef object owner_token = _db_thread_token()
     cursor_handle._attach(NULL, reader, False)
     if client is None:
-        lease._attach(None, reader)
+        lease._attach(None, reader, owner_token)
     else:
         handle = client
         handle._begin_db_use('_debug_new_pooled_reader_finalizer_owner')
-        lease._attach(handle, reader)
+        lease._attach(handle, reader, owner_token)
     lease._last_cursor = cursor_handle
     return lease
