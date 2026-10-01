@@ -433,7 +433,8 @@ cdef void_int _dataframe_log_claim_problems(object df) except -1:
     Called once per write, from `_dataframe` and `_direct_dataframe_run`,
     rather than from the readers, which run several times per write.
     """
-    cdef object attrs, qmeta, cols_meta, name, meta, kind
+    cdef object attrs, qmeta, cols_meta, name, meta, raw_kind
+    cdef str kind
     attrs = getattr(df, 'attrs', None)
     if not isinstance(attrs, dict) or 'questdb' not in attrs:
         return 0
@@ -457,11 +458,15 @@ cdef void_int _dataframe_log_claim_problems(object df) except -1:
             _log_roundtrip_claim_entry_unread(
                 name, f'the entry is {meta!r}, not a mapping')
             continue
-        kind = meta.get('kind')
-        if not isinstance(kind, str):
+        raw_kind = meta.get('kind')
+        if not isinstance(raw_kind, str):
             _log_roundtrip_claim_entry_unread(
-                name, f"its 'kind' is {kind!r}, not a string")
-        elif kind not in _roundtrip_known_kinds():
+                name, f"its 'kind' is {raw_kind!r}, not a string")
+            continue
+        # The kind the readers act on, so this reports exactly what
+        # they skip.
+        kind = _roundtrip_kind(meta)
+        if kind not in _roundtrip_known_kinds():
             _log_roundtrip_claim_entry_unread(
                 name, f'{kind!r} is not a kind this client knows')
     return 0
@@ -498,6 +503,14 @@ cdef str _roundtrip_kind(object meta):
     -- a list, say, from metadata that went through JSON -- would raise
     ``TypeError`` where the contract promises the claim is skipped.
     Holding it to ``str`` here settles that for both readers.
+
+    A ``str`` subclass -- ``numpy.str_``, a ``(str, Enum)`` member --
+    comes back as a plain ``str`` holding the same characters, since
+    every reader goes on to keep it in a ``str``-typed variable, which
+    takes nothing else. ``str.__str__`` is the conversion because it
+    reads the characters themselves: ``str()`` would call the
+    subclass's own ``__str__``, which for a ``(str, Enum)`` member is
+    ``'Kind.IPV4'``, not ``'ipv4'``.
     """
     cdef object kind
     if not isinstance(meta, dict):
@@ -505,6 +518,8 @@ cdef str _roundtrip_kind(object meta):
     kind = meta.get('kind')
     if not isinstance(kind, str):
         return None
+    if type(kind) is not str:
+        kind = str.__str__(kind)
     return kind
 
 

@@ -9637,6 +9637,54 @@ print('OK')
             logs.output)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_roundtrip_kind_that_is_a_str_subclass_reads_as_its_text(self):
+        """A claim's kind can arrive as a `str` subclass -- `numpy.str_`
+        from array data, or a member of a `(str, Enum)` the caller keeps
+        its kinds in. It reads as the text it holds, whatever the
+        subclass's own `__str__` says, on every route."""
+
+        class Kind(str, Enum):
+            IPV4 = 'ipv4'
+
+        class Loud(str):
+            def __str__(self):
+                return 'not the kind'
+
+        stamps = pd.to_datetime(['2025-01-01'])
+
+        def frame(kind):
+            df = pd.DataFrame({
+                'ip': pd.array([0x01020304], dtype='uint32'),
+                'ts': stamps,
+            })
+            df.attrs['questdb'] = {
+                'version': 1, 'columns': {'ip': {'kind': kind}}}
+            return df
+
+        def route_notices(kind):
+            with HttpServer() as server, qi.Sender(
+                    qi.Protocol.Http, '127.0.0.1', server.port,
+                    auto_flush=False) as sender:
+                with self.assertLogs('questdb', 'WARNING') as logs:
+                    sender.dataframe(
+                        frame(kind), table_name='attrs_kind', at='ts')
+            return [line for line in logs.output
+                    if 'which this write cannot apply' in line]
+
+        expected_route = route_notices('ipv4')
+        self.assertEqual(len(expected_route), 1, expected_route)
+        for kind in (np.str_('ipv4'), Kind.IPV4, Loud('ipv4')):
+            with self.subTest(kind=type(kind).__name__):
+                # Written a column at a time, the claim is applied.
+                with self.assertNoLogs('questdb', 'WARNING'):
+                    types = self._dataframe_column_types(
+                        frame(kind), table_name='attrs_kind', at='ts')
+                self.assertEqual(types['ip'], 0x18)
+                # Written a row at a time, it is reported exactly as the
+                # plain string is.
+                self.assertEqual(route_notices(kind), expected_route)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_explicit_claims_outrank_roundtrip_attrs(self):
         # `schema_overrides` and `symbols` state a type outright and
