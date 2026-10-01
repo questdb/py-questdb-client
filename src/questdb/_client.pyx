@@ -8713,7 +8713,9 @@ cdef class QuestDB:
         closed: :meth:`QuestDB.close` waits for outstanding leases for as
         long as its ``timeout`` allows (a minute by default -- see
         :meth:`close <QuestDB.close>`), and a lease keeps working while
-        the handle drains.
+        the handle drains -- apart from :meth:`PooledSender.dataframe`,
+        which is new work on the handle and is refused once ``close()``
+        has started.
         """
         cdef questdb_db* db = NULL
         cdef qwp_sender* sender = NULL
@@ -9377,14 +9379,19 @@ cdef class QuestDB:
         work: ``sender()``, ``reader()``, ``dataframe()``, ``query()``
         and the rest raise. Work already in flight drains: a call in
         progress runs to completion, and an outstanding lease keeps
-        working until its holder closes it. The native pool is torn
-        down by the first ``close()`` that finds nothing using the
-        handle, or when the handle itself is collected.
+        working until its holder closes it. The one exception is
+        :meth:`PooledSender.dataframe`, which forwards to
+        :meth:`dataframe` over a connection of its own from the pool,
+        so a load started through a lease after ``close()`` is new work
+        and is refused like any other. The native pool is torn down by
+        the first ``close()`` that finds nothing using the handle, or
+        when the handle itself is collected.
 
         ``timeout`` sets how long this call waits for that drain.
         Calls are the handle's own methods in progress, such as
         ``dataframe()`` and ``query()``; anything done through a lease
-        counts as that lease, including a long ``lease.dataframe()``.
+        counts as that lease, including a long ``lease.dataframe()``
+        already running when ``close()`` starts.
 
         - Left out: a call in progress is waited for until it
           returns, and an outstanding lease for up to a minute. A long
@@ -11835,6 +11842,12 @@ cdef class PooledSender:
         :meth:`row` to drain. There is therefore **no ordering relationship**
         between ``dataframe()`` and buffered rows — ``dataframe()`` does not
         flush them; publish those with :meth:`flush`.
+
+        Being the handle's own path, it is refused once
+        :meth:`QuestDB.close` has started, as :meth:`QuestDB.dataframe`
+        is, even though this lease's other methods keep working until
+        it is closed. A load already running when ``close()`` starts
+        finishes.
 
         Arguments mirror :meth:`QuestDB.dataframe`.
         """

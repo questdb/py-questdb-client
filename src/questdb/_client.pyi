@@ -1533,14 +1533,19 @@ class QuestDB:
         handle's own calls or callbacks -- the handle refuses new
         work, while work already in flight drains: a call in progress
         runs to completion, and an outstanding lease keeps working
-        until its holder closes it. The native pool is torn down by
+        until its holder closes it. The one exception is
+        :meth:`PooledSender.dataframe`, which forwards to
+        :meth:`dataframe` over a connection of its own from the pool,
+        so a load started through a lease after ``close()`` is new work
+        and is refused like any other. The native pool is torn down by
         the first ``close()`` that finds nothing using the handle, or
         when the handle itself is collected.
 
         ``timeout`` sets how long this call waits for that drain.
         Calls are the handle's own methods in progress, such as
         ``dataframe()`` and ``query()``; anything done through a lease
-        counts as that lease, including a long ``lease.dataframe()``.
+        counts as that lease, including a long ``lease.dataframe()``
+        already running when ``close()`` starts.
 
         - Left out: a call in progress is waited for until it
           returns, and an outstanding lease for up to a minute. A long

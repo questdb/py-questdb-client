@@ -397,7 +397,10 @@ Fixed
   are refused with ``QuestDB is closing``, while work already in
   flight drains — a call in progress (``dataframe()``, ``query()``,
   …) runs to completion, and an outstanding lease keeps working until
-  its holder closes it. The native pool is torn down by the first
+  its holder closes it. The exception is ``PooledSender.dataframe()``,
+  which forwards to ``QuestDB.dataframe()`` over its own pooled
+  connection: started after ``close()``, it is new work and is refused;
+  one already running finishes. The native pool is torn down by the first
   ``close()`` that finds nothing using the handle, or when the handle
   itself is collected.
   With no ``timeout``, ``close()`` waits for a call in progress until it
