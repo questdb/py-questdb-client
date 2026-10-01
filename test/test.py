@@ -1743,6 +1743,43 @@ class TestQwpWebSocketApi(unittest.TestCase):
             any('listener failed' in line for line in logs.output),
             logs.output)
 
+    def test_idle_sender_listener_can_read_sender_metadata(self):
+        dispatched = threading.Event()
+        idle = threading.Event()
+        observed = []
+
+        def on_event(_event):
+            if not idle.wait(5):
+                observed.append(TimeoutError('sender did not become idle'))
+            else:
+                try:
+                    observed.append((
+                        sender.max_name_len,
+                        sender.protocol_version,
+                        sender.connection_events_dropped,
+                        sender.connection_events_delivered))
+                except BaseException as exc:
+                    observed.append(exc)
+            dispatched.set()
+
+        with QwpAckServer() as server:
+            sender = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;',
+                connection_listener=on_event)
+            try:
+                sender.establish()
+                sender.row('events', columns={'value': 1},
+                           at=qi.ServerTimestamp)
+                sender.flush()
+                idle.set()
+                self.assertTrue(dispatched.wait(5))
+                self.assertEqual(len(observed), 1)
+                self.assertIsInstance(observed[0], tuple, observed)
+                self.assertEqual(len(observed[0]), 4)
+            finally:
+                idle.set()
+                sender.close(flush=False)
+
     def test_error_event_inbox_overflow_drops_oldest(self):
         """With the handler blocked and a 1-slot inbox, a continuous
         rejection stream must overflow the inbox and count drops.
@@ -2055,6 +2092,49 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 # released by a different thread without stranding its count.
                 client.close()
             finally:
+                sender.close(flush=False)
+                client.close()
+
+    def test_client_close_waits_for_sender_handed_to_worker(self):
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            client = qi.QuestDB.from_conf(conf)
+            sender = client.sender()
+            used = threading.Event()
+            release = threading.Event()
+            errors = []
+
+            def use_and_return():
+                try:
+                    sender.row('events', columns={'value': 1},
+                               at=qi.ServerTimestamp)
+                    used.set()
+                    if not release.wait(10):
+                        raise AssertionError('timed out waiting to return lease')
+                    sender.close(flush=False)
+                except BaseException as exc:
+                    errors.append(exc)
+                    used.set()
+                    release.set()
+
+            worker = threading.Thread(target=use_and_return)
+            worker.start()
+            try:
+                self.assertTrue(used.wait(5))
+                # Returning a lease from a worker must unblock the borrower's
+                # close(), not be rejected as an outstanding same-thread use.
+                timer = threading.Timer(0.1, release.set)
+                timer.start()
+                client.close()
+                timer.join(timeout=5)
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(errors, [])
+            finally:
+                release.set()
+                worker.join(timeout=5)
                 sender.close(flush=False)
                 client.close()
 

@@ -128,7 +128,8 @@ class QwpAckServer:
                  defer_aware_acks=False, record_payloads=False,
                  error_status=None, error_message=b"mock rejection",
                  tls=False, required_authorization=None,
-                 close_after_upgrade_unless_authorization=None):
+                 close_after_upgrade_unless_authorization=None,
+                 durable_ack=False):
         """
         `close_plan`: iterable consumed one value per accepted connection;
         a connection with value N is closed after handling its Nth binary
@@ -170,6 +171,7 @@ class QwpAckServer:
         self.ack_delay_s = ack_delay_s
         self._close_iter = iter(close_plan) if close_plan is not None else None
         self.max_batch_size = max_batch_size
+        self.durable_ack = durable_ack
         self.defer_aware_acks = defer_aware_acks
         self.record_payloads = record_payloads
         self.error_status = error_status
@@ -355,6 +357,8 @@ class QwpAckServer:
                 "X-QWP-Version: 1\r\n")
             if self.max_batch_size > 0:
                 response += f"X-QWP-Max-Batch-Size: {self.max_batch_size}\r\n"
+            if self.durable_ack:
+                response += "X-QWP-Durable-Ack: enabled\r\n"
             response += "\r\n"
             conn.sendall(response.encode("ascii"))
             if (

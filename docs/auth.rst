@@ -96,6 +96,12 @@ retry logic. Its public ``acquisition_busy`` property is true when another
 thread is acquiring a token or rendering a callback: defer the operation
 until that thread finishes. If false, arrange interactive sign-in (after
 returning from any callback) rather than retrying the failing operation.
+Similarly, a query's ``RoleMismatch`` code does not promise that another
+immediate query will succeed: it can mean that every endpoint advertised the
+wrong role until failover exhausted its time or attempts. Inspect the error
+and retry only after the deployment has a suitable endpoint. A handshake
+``AuthError`` (401/403) means the offered credential was rejected; repair or
+replace it before retrying, rather than blindly repeating the same request.
 
 HTTP senders fetch a token on each flush; QWP/WebSocket senders and readers
 fetch one on connect/reconnect (and may retry after a handshake 401), **not**

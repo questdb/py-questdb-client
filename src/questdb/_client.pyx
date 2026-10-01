@@ -578,8 +578,8 @@ cdef uint64_t _OIDC_FOREGROUND_RETRY_SLICE_MS = 2000
 cdef uint64_t _OIDC_FOREGROUND_SLICE_EARLY_MARGIN_MS = 100
 
 # The codes native `reconnect_error_is_terminal` stops its reconnect loop on
-# (`qwp_ws_driver.rs`). A role reject is exempt there, but on this direct-sender
-# path it arrives as `RoleMismatch`, which is not listed.
+# (`qwp_ws_driver.rs`). Role rejects are exempt, including 421 responses
+# whose unrecognized role header gives them a ProtocolVersionError code.
 _NATIVE_RECONNECT_TERMINAL_CODES = frozenset((
     QuestDBErrorCode.AuthError,
     QuestDBErrorCode.ConfigError,
@@ -2518,7 +2518,9 @@ cdef list _dispatch_target_stack():
 
 
 cdef bint _on_dispatch_thread_for(object handler, object listener):
-    stack = getattr(_DISPATCH_THREAD, 'targets', None)
+    # Most ingest threads never dispatch a callback. Inspecting the local
+    # dictionary avoids raising an AttributeError for every Sender.row().
+    stack = _DISPATCH_THREAD.__dict__.get('targets')
     if not stack:
         return False
     for target in stack:
@@ -5896,9 +5898,12 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
     any error its reconnect loop treats as terminal (``AuthError`` from a
     401/403 upgrade, ``ProtocolVersionError``, ...): recognised by its code,
     or by the native call returning *before* its slice ran out, which native
-    only does for such an error. The code check matters because native's
+    can also do for a structured role rejection (exempted below). The code
+    check matters because native's
     last pick runs at the slice deadline, so a terminal error from it arrives
-    on time. That is the error, and the moment, at which the single native
+    on time. An unrecognized-role 421 also has a ProtocolVersionError code,
+    but its native role-rejection marker exempts it from the terminal gate.
+    That is the error, and the moment, at which the single native
     call would have returned too. Re-dialling it would re-present a rejected credential
     and repeat terminal connection events. Every other failure keeps retrying
     until the caller's budget is spent, exactly as the single native call
@@ -5920,6 +5925,7 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
     cdef double remaining = 0.0
     cdef uint64_t remaining_ms = 0
     cdef bint last_slice = True
+    cdef bint role_reject = False
     cdef object exc
     if src.slice_for_oidc and budget_ms > _OIDC_FOREGROUND_RETRY_SLICE_MS:
         slice_ms = _OIDC_FOREGROUND_RETRY_SLICE_MS
@@ -5933,6 +5939,10 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
         _ensure_has_gil(&gs)
         if conn != NULL:
             return conn
+        # A 421 with an unrecognized X-QuestDB-Role uses the same public
+        # ProtocolVersionError code as a genuinely unsupported protocol.
+        # Capture its native role-rejection marker before freeing the error.
+        role_reject = questdb_error_is_qwp_ws_role_reject(err)
         exc = c_err_to_py(err)
         err = NULL
         if last_slice or _is_oidc_terminal_for_foreground(exc, None):
@@ -5942,15 +5952,16 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
         # timing test below cannot tell it from a retryable one. Re-dialling
         # it re-presented the rejected credential and fired a second terminal
         # `AuthFailed` event.
-        if exc.code in _NATIVE_RECONNECT_TERMINAL_CODES:
+        if exc.code in _NATIVE_RECONNECT_TERMINAL_CODES and not role_reject:
             raise exc
         now = time.monotonic()
         # Native started its slice deadline after `slice_start`, and returns
         # a retryable error only once that deadline has passed. Returning
         # earlier means native gave up on a terminal error -- one whose code
-        # the check above may not know. The margin absorbs a coarse monotonic
+        # the check above may not know -- unless it carries a role rejection.
+        # The margin absorbs a coarse monotonic
         # clock.
-        if now < slice_start + (
+        if not role_reject and now < slice_start + (
                 slice_ms - _OIDC_FOREGROUND_SLICE_EARLY_MARGIN_MS) / 1000.0:
             raise exc
         remaining = deadline - now
@@ -6610,6 +6621,28 @@ cdef class QuestDB:
             return db
         finally:
             self._state_cond.release()
+
+    cdef void_int _transfer_db_use(
+            self, unsigned long old_owner, unsigned long new_owner) except -1:
+        """Move a borrowed sender's use when it is handed to another thread."""
+        cdef size_t count
+        cdef dict uses
+        if old_owner == new_owner:
+            return 0
+        with self._state_cond:
+            # Publish both changes together: a failed dict insertion must not
+            # leave close() seeing an unmatched lease under either thread.
+            uses = self._uses_by_thread.copy()
+            count = uses.get(old_owner, 0)
+            if count == 0:
+                raise RuntimeError('QuestDB use counter underflow.')
+            uses[new_owner] = uses.get(new_owner, 0) + 1
+            if count == 1:
+                del uses[old_owner]
+            else:
+                uses[old_owner] = count - 1
+            self._uses_by_thread = uses
+        return 0
 
     cdef void _end_db_use(self, object owner=None) except *:
         cdef size_t count
@@ -7396,8 +7429,13 @@ cdef class QuestDB:
         Close the client and its connection pool.
 
         This method is idempotent. Calling it while this thread owns an
-        active pool operation or a borrowed lease raises ``QuestDBError``
-        instead of waiting for itself; close the lease first. When called
+        active pool operation or a lease last used on this thread raises
+        ``QuestDBError`` instead of waiting for itself. A sender lease handed
+        to another thread is attributed to that thread when it first uses the
+        sender, so a close here can wait for its return. Synchronize that
+        first use (for example by entering the sender's context on the worker)
+        before closing on the former owner: an unused handoff is
+        indistinguishable from an unreturned same-thread lease. When called
         from inside one of this handle's own ``error_handler`` /
         ``connection_listener``
         callbacks, it does not wait for a concurrent ``close()`` on
@@ -8372,7 +8410,7 @@ cdef class Sender:
     @property
     def max_name_len(self) -> int:
         """Maximum length of a table or column name."""
-        self._check_not_in_own_callback('max_name_len')
+        self._check_not_in_own_callback('max_name_len', allow_idle_callback=True)
         if self._impl == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -8433,7 +8471,7 @@ cdef class Sender:
         Protocol version 2 introduces binary floating point support and
         the array datatype.
         """
-        self._check_not_in_own_callback('protocol_version')
+        self._check_not_in_own_callback('protocol_version', allow_idle_callback=True)
         if self._impl == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -8848,12 +8886,18 @@ cdef class Sender:
             else:
                 raise c_err_to_py(err)
 
-    cdef inline void_int _check_not_in_own_callback(self, str method) except -1:
+    cdef inline void_int _check_not_in_own_callback(
+            self, str method, bint allow_idle_callback=False) except -1:
         if self._native_in_flight:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f'{method}() cannot be called while this sender is in a native '
                 'operation (including from its OIDC diagnostic callback).')
+        # Read-only getters are safe in an idle listener, but a native call
+        # may hold a mutable borrow even while the listener is dispatched.
+        if allow_idle_callback or (
+                self._error_handler is None and self._connection_listener is None):
+            return 0
         # The QWP/WebSocket error handler runs synchronously on the flushing
         # thread while the native sender is borrowed; reentering it from the
         # handler would alias or free the live sender and abort the process.
@@ -9130,7 +9174,8 @@ cdef class Sender:
         Total connection events discarded by the listener inbox's
         drop-oldest policy. ``0`` when no listener is registered.
         """
-        self._check_not_in_own_callback('connection_events_dropped')
+        self._check_not_in_own_callback(
+            'connection_events_dropped', allow_idle_callback=True)
         if self._impl == NULL:
             return 0
         return line_sender_connection_events_dropped(self._impl)
@@ -9141,7 +9186,8 @@ cdef class Sender:
         Total connection events delivered to the listener. ``0`` when no
         listener is registered.
         """
-        self._check_not_in_own_callback('connection_events_delivered')
+        self._check_not_in_own_callback(
+            'connection_events_delivered', allow_idle_callback=True)
         if self._impl == NULL:
             return 0
         return line_sender_connection_events_delivered(self._impl)
@@ -9279,10 +9325,15 @@ cdef class PooledSender:
         self._batch_started_ms = 0
 
     cdef void_int _check_open(self, str method) except -1:
+        cdef unsigned long current = questdb_thread_ident()
         if self._qwp == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f"{method}() can't be called: Sender is closed.")
+        if current != self._owner_thread_id:
+            self._handle._transfer_db_use(self._owner_thread_id, current)
+            self._owner_thread_id = current
+        return 0
 
     cdef bint _should_auto_flush_locked(self) except -1:
         cdef auto_flush_mode_t* mode = &self._handle._auto_flush_mode

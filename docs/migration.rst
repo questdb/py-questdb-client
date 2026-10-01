@@ -95,7 +95,11 @@ needs none — it is additive, and an existing listener keeps working.
   instead of the connection failure that started the failover, as a failover
   that ran out of attempts already did. Code that branches on
   ``QuestDBError.code`` after a failed query should treat these codes as a
-  possible outcome of a timed-out failover.
+  possible outcome of a timed-out failover. These codes describe *why* the
+  query failed, not whether an immediate retry is safe or useful: wait for a
+  matching-role endpoint after ``RoleMismatch``. A late HTTP 401/403 is a
+  credential rejection (``AuthError``), not a transient socket failure; fix
+  the credentials before retrying. See :doc:`auth` for OIDC-specific handling.
 
 * **An abandoned** :class:`~questdb.QueryResult` **now reports its**
   ``ResourceWarning``. The finalizer previously swallowed it; it is now routed

@@ -174,6 +174,10 @@ cdef extern from "questdb/ingress/line_sender.h":
         const questdb_error* error
         ) noexcept nogil
 
+    bint questdb_error_is_qwp_ws_role_reject(
+        const questdb_error* error
+        ) noexcept nogil
+
     void questdb_error_free(
         questdb_error* error
         ) noexcept nogil

@@ -6026,8 +6026,8 @@ except ImportError:
 
 class _RolePolicyServer(QwpAckServer):
     """QWP/WS server answering each upgrade per ``policy(index, t)``:
-    ``'503'``, ``'401'``, ``'421'`` (with ``X-QuestDB-Role: REPLICA``) or
-    ``'serve'``."""
+    ``'503'``, ``'401'``, ``'421'`` (with ``X-QuestDB-Role: REPLICA``),
+    ``'421-unknown'`` (with an unrecognized role) or ``'serve'``."""
 
     def __init__(self, policy, **kwargs):
         super().__init__(**kwargs)
@@ -6056,8 +6056,10 @@ class _RolePolicyServer(QwpAckServer):
                 conn.sendall(b'HTTP/1.1 401 Unauthorized\r\n'
                              b'Content-Length: 0\r\nConnection: close\r\n\r\n')
             else:
+                role = (b'unknown' if action == '421-unknown'
+                        else b'REPLICA')
                 conn.sendall(b'HTTP/1.1 421 Misdirected Request\r\n'
-                             b'X-QuestDB-Role: REPLICA\r\n'
+                             b'X-QuestDB-Role: ' + role + b'\r\n'
                              b'Content-Length: 0\r\nConnection: close\r\n\r\n')
         except OSError:
             pass
@@ -6093,17 +6095,17 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
             'reconnect_max_backoff_millis=5000;')
 
     def _run(self, policy, server_out=None, wait_for_event_on_error=None,
-             **connect_kwargs):
+             *, durable_ack=False, conf_suffix='', **connect_kwargs):
         frame = _CountingArrowArray(
             _pa.record_batch({'v': _pa.array([1, 2, 3], _pa.int64())}))
         with OidcTestServer() as idp:
             auth = make_discovered_auth(idp)
             auth.sign_in()
-            with _RolePolicyServer(policy) as server:
+            with _RolePolicyServer(policy, durable_ack=durable_ack) as server:
                 if server_out is not None:
                     server_out.append(server)
                 with questdb.connect(
-                        self.CONF.format(port=server.port),
+                        self.CONF.format(port=server.port) + conf_suffix,
                         oidc_auth=auth, **connect_kwargs) as db:
                     try:
                         db.dataframe(
@@ -6200,6 +6202,23 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
             return '421' if t < 3.5 else 'serve'
 
         self._run(policy)
+
+    def test_durable_ack_unrecognized_role_is_retried_between_slices(self):
+        # Native marks the unknown-role 421 as a role rejection even though
+        # its public code is ProtocolVersionError. The OIDC foreground gate
+        # must consult that marker instead of treating the code as terminal.
+        first_retry = []
+
+        def policy(index, t):
+            if index == 0:
+                return '503'
+            if not first_retry:
+                first_retry.append(t)
+            return ('421-unknown' if t - first_retry[0] < 3.5
+                    else 'serve')
+
+        self._run(policy, durable_ack=True,
+                  conf_suffix='request_durable_ack=on;')
 
     def test_outage_prepares_the_frame_once_per_attempt(self):
         # Slicing the reconnect must not re-run dataframe preparation (an
