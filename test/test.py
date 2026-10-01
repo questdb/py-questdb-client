@@ -9338,16 +9338,22 @@ print('OK')
                     odd, table_name='attrs_stale', at='ts')
                 self.assertEqual(types['ip'], 0x18)
 
-        # Metadata of the wrong shape is ignored, not diagnosed. The
-        # version is part of the shape: it is checked rather than
-        # merely carried, so a mapping written without one is not a
-        # claim this client reads, and neither is a future one whose
-        # vocabulary it would have to guess at.
+        # Metadata of the wrong shape is ignored by the write, which
+        # goes ahead. The version is part of the shape: it is checked
+        # rather than merely carried, so a future one whose vocabulary
+        # this client would have to guess at is not read. A mapping
+        # without one reads as version 1, the only one there has been.
+        claim = {'columns': {'ip': {'kind': 'ipv4'}}}
+        odd = frame.copy()
+        odd.attrs = {'questdb': claim}
+        self.assertEqual(
+            self._dataframe_column_types(
+                odd, table_name='attrs_stale', at='ts')['ip'],
+            0x18)
         for junk in ('nonsense',
                      {'version': 1, 'columns': 'nope'},
                      {'version': 1, 'columns': {'ip': {'kind': 42}}},
                      {'version': 1, 'columns': {7: {'kind': 'ipv4'}}},
-                     {'columns': {'ip': {'kind': 'ipv4'}}},
                      {'version': 2, 'columns': {'ip': {'kind': 'ipv4'}}}):
             with self.subTest(junk=junk):
                 odd = frame.copy()
@@ -9496,7 +9502,8 @@ print('OK')
 
         The version is part of it. Both producers stamp one, so a frame
         carrying a version this client does not know must lose its
-        claim rather than have it applied under the old vocabulary.
+        claim rather than have it applied under the old vocabulary. A
+        mapping with no version reads as version 1.
         """
         cases = (
             ('a known version', {
@@ -9504,7 +9511,7 @@ print('OK')
             ('a future version', {
                 'version': 99, 'columns': {'ip': {'kind': 'ipv4'}}}, 0x05),
             ('no version at all', {
-                'columns': {'ip': {'kind': 'ipv4'}}}, 0x05),
+                'columns': {'ip': {'kind': 'ipv4'}}}, 0x18),
             ('an unhashable kind', {
                 'version': 1, 'columns': {'ip': {'kind': ['ipv4']}}}, 0x05),
             ('a non-string kind', {
@@ -9539,6 +9546,95 @@ print('OK')
                         self._dataframe_column_types(
                             frame, table_name='attrs_junk', at='ts')['ip'],
                         expected)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_roundtrip_attrs_that_are_not_read_are_logged(self):
+        """A claim the readers cannot parse is skipped and the write goes
+        ahead, but a skipped claim is also how a column reaches the
+        database as the wrong type, so each one is reported. A problem
+        with the claim as a whole is reported once; a problem with one
+        column's entry is reported for that column, and the other
+        entries still apply. Drift, and kinds a column carries by its
+        own type, stay quiet."""
+        stamps = pd.to_datetime(['2025-01-01'])
+
+        def frame(meta):
+            df = pd.DataFrame({
+                'ip': pd.array([0x01020304], dtype='uint32'),
+                'ts': stamps,
+            })
+            df.attrs['questdb'] = meta
+            return df
+
+        def unread(logs, marker):
+            return [line for line in logs.output if marker in line]
+
+        whole = (
+            ('nonsense', 'it is a str, not a mapping'),
+            ({'version': 2, 'columns': {'ip': {'kind': 'ipv4'}}},
+             "its 'version' is 2, and this client reads version 1"),
+            ({'version': True, 'columns': {'ip': {'kind': 'ipv4'}}},
+             "its 'version' is True"),
+            ({'version': 1, 'columns': 'nope'},
+             "its 'columns' entry is missing or not a mapping"),
+        )
+        for meta, reason in whole:
+            with self.subTest(meta=meta):
+                with self.assertLogs('questdb', 'WARNING') as logs:
+                    types = self._dataframe_column_types(
+                        frame(meta), table_name='attrs_unread', at='ts')
+                self.assertEqual(types['ip'], 0x05)
+                lines = unread(logs, "df.attrs['questdb'] is not read")
+                self.assertEqual(len(lines), 1, logs.output)
+                self.assertIn(reason, lines[0])
+
+        entries = (
+            ('ipv4', "the entry is 'ipv4', not a mapping"),
+            (('geohash', 20), "the entry is ('geohash', 20), not a mapping"),
+            ({'kind': ['ipv4']}, "its 'kind' is ['ipv4'], not a string"),
+            ({'kind': 'ipv6'}, "'ipv6' is not a kind this client knows"),
+        )
+        for entry, reason in entries:
+            with self.subTest(entry=entry):
+                df = frame(None)
+                df['other'] = pd.array([0x05060708], dtype='uint32')
+                df.attrs['questdb'] = {'version': 1, 'columns': {
+                    'ip': entry, 'other': {'kind': 'ipv4'}}}
+                with self.assertLogs('questdb', 'WARNING') as logs:
+                    types = self._dataframe_column_types(
+                        df, table_name='attrs_unread', at='ts')
+                self.assertEqual(types['ip'], 0x05)
+                # The well-formed entry beside it is still applied.
+                self.assertEqual(types['other'], 0x18)
+                lines = unread(logs, 'entry that is not read')
+                self.assertEqual(len(lines), 1, logs.output)
+                self.assertIn("column 'ip'", lines[0])
+                self.assertIn(reason, lines[0])
+
+        quiet = (
+            {'version': 1, 'columns': {'ip': {'kind': 'ipv4'}}},
+            {'columns': {'ip': {'kind': 'ipv4'}}},
+            {'version': 1, 'columns': {'gone': {'kind': 'ipv4'}}},
+            {'version': 1, 'columns': {
+                'ip': {'kind': 'ipv4'}, 'ts': {'kind': 'timestamp'}}},
+        )
+        for meta in quiet:
+            with self.subTest(meta=meta):
+                with self.assertNoLogs('questdb', 'WARNING'):
+                    self._dataframe_column_types(
+                        frame(meta), table_name='attrs_read', at='ts')
+
+        # The row-serializing route reports the same, once per write.
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            with self.assertLogs('questdb', 'WARNING') as logs:
+                sender.dataframe(
+                    frame({'version': 2, 'columns': {}}),
+                    table_name='attrs_unread', at='ts')
+        self.assertEqual(
+            len(unread(logs, "df.attrs['questdb'] is not read")), 1,
+            logs.output)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')

@@ -55,12 +55,14 @@ Breaking changes
   widths. To send them as BINARY there, pass an object-dtype column of
   ``bytes``.
 
-- **A ``df.attrs['questdb']`` claim must now include ``'version': 1``.** The
-  version is checked rather than just carried, so that a future claim
-  vocabulary is not applied under today's rules. Frames from
-  ``to_pandas()`` always have it. A hand-written mapping without it, or with
-  a different version, is ignored entirely. The full shape is documented on
-  ``QuestDB.dataframe()``::
+- **A ``df.attrs['questdb']`` claim with a version other than 1 is
+  ignored.** The version is checked rather than just carried, so that a
+  future claim vocabulary is not applied under today's rules. Frames from
+  ``to_pandas()`` always carry ``'version': 1``, and a hand-written mapping
+  without the key still reads as version 1. A claim that is not read, or a
+  column entry in it of the wrong shape or with an unknown kind, is
+  reported through the ``questdb`` logger and the write goes ahead. The
+  full shape is documented on ``QuestDB.dataframe()``::
 
       df.attrs['questdb'] = {'version': 1,
                              'columns': {'src_ip': {'kind': 'ipv4'}}}

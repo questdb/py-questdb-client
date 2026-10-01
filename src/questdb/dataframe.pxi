@@ -264,9 +264,10 @@ class _RoundtripClaim(dict):
 
         {'version': 1, 'columns': {'src_ip': {'kind': 'ipv4'}}}
 
-    ``version`` is required and is checked rather than merely carried,
-    so a mapping written without it is not a claim this client reads
-    and every column in it is ignored. To change what a frame claims,
+    ``version`` is checked rather than merely carried: a mapping with
+    any version other than 1 is not a claim this client reads, and
+    every column in it is ignored. A mapping without the key reads as
+    version 1. To change what a frame claims,
     assign a whole new mapping to ``df.attrs['questdb']``. The nested
     ``columns`` mapping is frozen too, so unpack that one as well::
 
@@ -357,6 +358,9 @@ cdef object _roundtrip_columns_meta(object frame):
     vocabulary can gain kinds, and a client that applied a version it
     does not understand would silently write the wrong column type --
     the outcome the claim exists to prevent.
+
+    Reading is silent; `_dataframe_log_claim_problems` reports what
+    this turns away, once per write.
     """
     cdef object attrs, qmeta, cols_meta
     attrs = getattr(frame, 'attrs', None)
@@ -365,14 +369,124 @@ cdef object _roundtrip_columns_meta(object frame):
     qmeta = attrs.get('questdb')
     if not isinstance(qmeta, dict):
         return None
-    version = qmeta.get('version')
-    if (not _is_integral_not_bool(version)
-            or int(version) != _ROUNDTRIP_META_VERSION):
+    if not _roundtrip_version_supported(qmeta):
         return None
     cols_meta = qmeta.get('columns')
     if not isinstance(cols_meta, dict):
         return None
     return cols_meta
+
+
+cdef bint _roundtrip_version_supported(object qmeta) except -1:
+    """Whether a claim's ``version`` is one this client reads.
+
+    A claim with no ``version`` key reads as version 1. Version 1 is the
+    only one there has been, so a mapping without the key can only be a
+    hand-written version-1 claim, and 5.0 read those. A version that is
+    present must be a whole number equal to 1: any other value is a
+    vocabulary this client would have to guess at.
+    """
+    if 'version' not in qmeta:
+        return True
+    version = qmeta['version']
+    return (_is_integral_not_bool(version)
+            and int(version) == _ROUNDTRIP_META_VERSION)
+
+
+# Every kind a claim can name: the ones the egress stamps, `'unknown'`
+# included for a column it could not name, plus the ones only a
+# hand-written claim states. Built on first use, because the egress
+# vocabulary is defined after this file is included.
+cdef object _ROUNDTRIP_KNOWN_KINDS = None
+
+
+cdef object _roundtrip_known_kinds():
+    global _ROUNDTRIP_KNOWN_KINDS
+    if _ROUNDTRIP_KNOWN_KINDS is None:
+        _ROUNDTRIP_KNOWN_KINDS = frozenset(
+            set(_KIND_NAMES.values())
+            | set(_ATTRS_OVERRIDE_KINDS)
+            | {'date', 'unknown'})
+    return _ROUNDTRIP_KNOWN_KINDS
+
+
+_ROUNDTRIP_CLAIM_SHAPE = (
+    "{'version': 1, 'columns': {'src_ip': {'kind': 'ipv4'}, "
+    "'pos': {'kind': 'geohash', 'precision_bits': 20}}}")
+
+
+cdef void_int _dataframe_log_claim_problems(object df) except -1:
+    """Log every part of ``df.attrs['questdb']`` that is not read.
+
+    The readers skip a claim they cannot parse, which is right for the
+    write -- the claim travels with the data, and a frame can carry
+    `attrs` its caller never looked at -- but a skipped claim is also
+    how a column reaches the database as the wrong type. This says what
+    was skipped and why.
+
+    A problem with the claim as a whole turns all of it away and is
+    reported once. A problem with one column's entry turns away only
+    that entry and is reported per column. A claimed column missing from
+    the frame is drift, which the claim rides out quietly, so it is not
+    reported here.
+
+    Called once per write, from `_dataframe` and `_direct_dataframe_run`,
+    rather than from the readers, which run several times per write.
+    """
+    cdef object attrs, qmeta, cols_meta, name, meta, kind
+    attrs = getattr(df, 'attrs', None)
+    if not isinstance(attrs, dict) or 'questdb' not in attrs:
+        return 0
+    qmeta = attrs['questdb']
+    if not isinstance(qmeta, dict):
+        _log_roundtrip_claim_unread(
+            f'it is a {type(qmeta).__name__}, not a mapping')
+        return 0
+    if not _roundtrip_version_supported(qmeta):
+        _log_roundtrip_claim_unread(
+            f"its 'version' is {qmeta['version']!r}, and this client "
+            'reads version 1')
+        return 0
+    cols_meta = qmeta.get('columns')
+    if not isinstance(cols_meta, dict):
+        _log_roundtrip_claim_unread(
+            "its 'columns' entry is missing or not a mapping")
+        return 0
+    for name, meta in cols_meta.items():
+        if not isinstance(meta, dict):
+            _log_roundtrip_claim_entry_unread(
+                name, f'the entry is {meta!r}, not a mapping')
+            continue
+        kind = meta.get('kind')
+        if not isinstance(kind, str):
+            _log_roundtrip_claim_entry_unread(
+                name, f"its 'kind' is {kind!r}, not a string")
+        elif kind not in _roundtrip_known_kinds():
+            _log_roundtrip_claim_entry_unread(
+                name, f'{kind!r} is not a kind this client knows')
+    return 0
+
+
+# Both notices are logged rather than warned, like every claim notice:
+# a claim the write cannot read leaves the write valid, and under
+# `-W error` a warning would abort it.
+cdef _log_roundtrip_claim_unread(str reason):
+    logging.getLogger('questdb').warning(
+        "questdb: df.attrs['questdb'] is not read, because %s. Every "
+        'type claim in it is ignored, and each column goes out as its '
+        'own type decides. The shape this client reads is %s.',
+        reason,
+        _ROUNDTRIP_CLAIM_SHAPE)
+
+
+cdef _log_roundtrip_claim_entry_unread(object name, str reason):
+    logging.getLogger('questdb').warning(
+        "questdb: column %r has a df.attrs['questdb'] entry that is not "
+        'read, because %s. Its claim is ignored, and the column goes out '
+        'as its own type decides. The shape this client reads is %s.',
+        name,
+        reason,
+        _ROUNDTRIP_CLAIM_SHAPE)
 
 
 cdef str _roundtrip_kind(object meta):
@@ -3838,6 +3952,7 @@ cdef void_int _dataframe(
         # Said before the plan is built, so a frame refused for its
         # shape still hears which of its claims this route would have
         # ignored.
+        _dataframe_log_claim_problems(df)
         _dataframe_log_claims_this_route_drops(df)
         _dataframe_plan_build(
             b,

@@ -71,12 +71,12 @@
  },
  "char | arrow/binary | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | arrow/binary | uuid | arrow": {
@@ -161,12 +161,12 @@
  },
  "char | arrow/fsb | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | arrow/fsb | uuid | arrow": {
@@ -251,12 +251,12 @@
  },
  "char | arrow/int | not_a_kind | arrow": {
   "wire_type": "INT",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | arrow/int | not_a_kind | numpy": {
   "wire_type": "INT",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | arrow/int | uuid | arrow": {
@@ -341,12 +341,12 @@
  },
  "char | arrow/native | not_a_kind | arrow": {
   "wire_type": "INT",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | arrow/native | not_a_kind | numpy": {
   "wire_type": "INT",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | arrow/native | uuid | arrow": {
@@ -431,12 +431,12 @@
  },
  "char | numpy/int | not_a_kind | arrow": {
   "wire_type": "INT",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | numpy/int | not_a_kind | numpy": {
   "wire_type": "INT",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | numpy/int | uuid | arrow": {
@@ -521,12 +521,12 @@
  },
  "char | object/py | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | object/py | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | object/py | uuid | arrow": {
@@ -611,12 +611,12 @@
  },
  "char | str/pandas | not_a_kind | arrow": {
   "wire_type": "VARCHAR",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | not_a_kind | numpy": {
   "wire_type": "VARCHAR",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "char | str/pandas | uuid | arrow": {
@@ -701,12 +701,12 @@
  },
  "geohash | arrow/binary | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/binary | uuid | arrow": {
@@ -791,12 +791,12 @@
  },
  "geohash | arrow/fsb | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/fsb | uuid | arrow": {
@@ -881,12 +881,12 @@
  },
  "geohash | arrow/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/int | uuid | arrow": {
@@ -971,12 +971,12 @@
  },
  "geohash | arrow/native | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/native | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | arrow/native | uuid | arrow": {
@@ -1061,12 +1061,12 @@
  },
  "geohash | numpy/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | numpy/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | numpy/int | uuid | arrow": {
@@ -1151,12 +1151,12 @@
  },
  "geohash | object/py | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | object/py | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | object/py | uuid | arrow": {
@@ -1241,12 +1241,12 @@
  },
  "geohash | str/pandas | not_a_kind | arrow": {
   "wire_type": "VARCHAR",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | not_a_kind | numpy": {
   "wire_type": "VARCHAR",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "geohash | str/pandas | uuid | arrow": {
@@ -1331,12 +1331,12 @@
  },
  "ipv4 | arrow/binary | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/binary | uuid | arrow": {
@@ -1421,12 +1421,12 @@
  },
  "ipv4 | arrow/fsb | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/fsb | uuid | arrow": {
@@ -1511,12 +1511,12 @@
  },
  "ipv4 | arrow/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/int | uuid | arrow": {
@@ -1601,12 +1601,12 @@
  },
  "ipv4 | arrow/native | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/native | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | arrow/native | uuid | arrow": {
@@ -1691,12 +1691,12 @@
  },
  "ipv4 | numpy/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | numpy/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | numpy/int | uuid | arrow": {
@@ -1781,12 +1781,12 @@
  },
  "ipv4 | object/py | not_a_kind | arrow": {
   "wire_type": "IPV4",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | object/py | not_a_kind | numpy": {
   "wire_type": "IPV4",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | object/py | uuid | arrow": {
@@ -1871,12 +1871,12 @@
  },
  "ipv4 | str/pandas | not_a_kind | arrow": {
   "wire_type": "VARCHAR",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | not_a_kind | numpy": {
   "wire_type": "VARCHAR",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "ipv4 | str/pandas | uuid | arrow": {
@@ -1961,12 +1961,12 @@
  },
  "long256 | arrow/binary | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/binary | uuid | arrow": {
@@ -2051,12 +2051,12 @@
  },
  "long256 | arrow/fsb | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/fsb | not_a_kind | numpy": {
   "wire_type": null,
-  "notices": 0,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | uuid | arrow": {
@@ -2141,12 +2141,12 @@
  },
  "long256 | arrow/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/int | uuid | arrow": {
@@ -2231,12 +2231,12 @@
  },
  "long256 | arrow/native | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "long256 | arrow/native | not_a_kind | numpy": {
   "wire_type": null,
-  "notices": 0,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | uuid | arrow": {
@@ -2321,12 +2321,12 @@
  },
  "long256 | numpy/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "long256 | numpy/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "long256 | numpy/int | uuid | arrow": {
@@ -2411,12 +2411,12 @@
  },
  "long256 | object/py | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "long256 | object/py | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "long256 | object/py | uuid | arrow": {
@@ -2501,12 +2501,12 @@
  },
  "long256 | str/pandas | not_a_kind | arrow": {
   "wire_type": "VARCHAR",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | not_a_kind | numpy": {
   "wire_type": "VARCHAR",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "long256 | str/pandas | uuid | arrow": {
@@ -2591,12 +2591,12 @@
  },
  "uuid | arrow/binary | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | not_a_kind | numpy": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/binary | uuid | arrow": {
@@ -2681,12 +2681,12 @@
  },
  "uuid | arrow/fsb | not_a_kind | arrow": {
   "wire_type": "BINARY",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/fsb | not_a_kind | numpy": {
   "wire_type": null,
-  "notices": 0,
+  "notices": 1,
   "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | uuid | arrow": {
@@ -2771,12 +2771,12 @@
  },
  "uuid | arrow/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/int | uuid | arrow": {
@@ -2861,12 +2861,12 @@
  },
  "uuid | arrow/native | not_a_kind | arrow": {
   "wire_type": "UUID",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | not_a_kind | numpy": {
   "wire_type": "UUID",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | arrow/native | uuid | arrow": {
@@ -2951,12 +2951,12 @@
  },
  "uuid | numpy/int | not_a_kind | arrow": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | numpy/int | not_a_kind | numpy": {
   "wire_type": "LONG",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | numpy/int | uuid | arrow": {
@@ -3041,12 +3041,12 @@
  },
  "uuid | object/py | not_a_kind | arrow": {
   "wire_type": "UUID",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | not_a_kind | numpy": {
   "wire_type": "UUID",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | object/py | uuid | arrow": {
@@ -3131,12 +3131,12 @@
  },
  "uuid | str/pandas | not_a_kind | arrow": {
   "wire_type": "VARCHAR",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | not_a_kind | numpy": {
   "wire_type": "VARCHAR",
-  "notices": 0,
+  "notices": 1,
   "error": null
  },
  "uuid | str/pandas | uuid | arrow": {

@@ -8168,6 +8168,9 @@ cdef void_int _direct_dataframe_run(
             'row (TimestampNanos / datetime), or the explicit '
             '`ServerTimestamp` sentinel to let the server assign each '
             'row\'s timestamp on arrival.')
+    # Once per call, ahead of the retry loop below, so a reconnect does
+    # not repeat it.
+    _dataframe_log_claim_problems(df)
     # Ahead of the choice between the Arrow and the NumPy route, so both
     # see the same signed GEOHASH columns.
     df = _dataframe_reinterpret_unsigned_geohash(df, schema_overrides)
@@ -9051,12 +9054,14 @@ cdef class QuestDB:
                 },
             }
 
-        ``version`` is required and must be ``1``: the claim's
-        vocabulary can gain kinds, and a client applying a version it
-        does not understand would write the wrong column type, which is
-        the outcome the claim exists to prevent. A mapping without it,
-        or carrying any other version, is not a claim this client can
-        read and every column in it is ignored. ``kind`` is one of
+        ``version`` must be ``1`` when present, and a mapping without it
+        reads as version 1. The claim's vocabulary can gain kinds, and a
+        client applying a version it does not understand would write the
+        wrong column type, which is the outcome the claim exists to
+        prevent, so a mapping carrying any other version is not read and
+        every column in it is ignored. A claim, or a column's entry in
+        it, that is not read is reported through the ``questdb`` logger;
+        the write goes ahead either way. ``kind`` is one of
         ``'uuid'``, ``'long256'``, ``'ipv4'``, ``'char'``, ``'geohash'``,
         or ``'date'`` — the types whose claim cannot always ride on a pandas
         dtype. ``precision_bits`` accompanies ``'geohash'`` alone. A
