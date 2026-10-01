@@ -8484,6 +8484,74 @@ print('OK')
         self._run_in_child_interpreter(
             self._FINALIZER_CLOSE_AS_CALL_STARTS_SCRIPT, timeout=60)
 
+    _INTERRUPT_DURING_TEARDOWN_SCRIPT = """
+import _thread
+import threading
+import time
+import questdb._client as qi
+from qwp_ws_ack_server import QwpAckServer
+
+ACK_DELAY_S = 2.0
+
+def on_error(err):
+    pass
+
+# Acks held back, so the native close spends ACK_DELAY_S draining the
+# frames a returned lease left in flight -- without the GIL.
+with QwpAckServer(ack_delay_s=ACK_DELAY_S) as server:
+    db = qi.QuestDB.from_conf(
+        f'ws::addr=127.0.0.1:{server.port};sender_pool_min=0;'
+        'query_pool_min=0;pool_reap=manual;',
+        error_handler=on_error)
+    lease = db.sender()
+    lease.row('t', columns={'v': 1}, at=qi.TimestampNanos(1))
+    lease.flush()
+    lease.close()
+    pinned = len(qi._LIVE_CALLBACK_REFS)
+    assert pinned >= 1, 'the error handler is not pinned'
+
+    # What a Ctrl-C does: the pending-signal flag, raised at the first
+    # Python bytecode after the native close gives the GIL back.
+    threading.Timer(0.5, _thread.interrupt_main).start()
+    started = time.monotonic()
+    try:
+        db.close()
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError('close() did not raise the interrupt')
+    took = time.monotonic() - started
+    # Raised after the drain, so it landed in the native teardown rather
+    # than in the Python before it.
+    assert took >= ACK_DELAY_S * 0.75, f'interrupt raised after {took:.2f}s'
+
+    # The interrupted close finished: a second one has nothing to wait
+    # for, and the callbacks are no longer pinned.
+    started = time.monotonic()
+    db.close(timeout=1)
+    took = time.monotonic() - started
+    assert took < 0.5, f'second close() took {took:.2f}s'
+    assert len(qi._LIVE_CALLBACK_REFS) == pinned - 1, qi._LIVE_CALLBACK_REFS
+print('OK')
+"""
+
+    @unittest.skipIf(
+        sys.implementation.name == 'pypy',
+        'the timing asserts rely on CPython raising a pending signal at '
+        'the first bytecode after the GIL comes back; PyPy runs signal '
+        'handlers from its own periodic actions')
+    def test_an_interrupt_during_the_native_close_still_finishes_it(self):
+        """A Ctrl-C while `QuestDB.close()` runs the native teardown is
+        raised at the first Python code after it. The close is published
+        as finished before any Python runs, so the interrupt comes out of
+        `close()` and leaves the handle closed: the next `close()`
+        returns at once and the callbacks are released.
+
+        Runs in a child interpreter, where a hang reads as a timeout and
+        the interrupt cannot reach the suite."""
+        self._run_in_child_interpreter(
+            self._INTERRUPT_DURING_TEARDOWN_SCRIPT, timeout=60)
+
     def _run_in_child_interpreter(self, script, timeout=120):
         """Run `script` in a fresh interpreter and require it to print OK.
 

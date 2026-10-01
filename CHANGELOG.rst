@@ -302,6 +302,14 @@ Fixed
   success against a handle that is still open — nor can the two ends of that
   window wait on each other.
 
+- **A Ctrl-C during ``QuestDB.close()`` no longer leaves the handle unable to
+  close.** The native teardown runs without the GIL, so a Ctrl-C there is
+  raised as soon as it finishes. That used to skip recording the close as
+  finished: every later ``close()`` then waited for a "concurrent close()"
+  that did not exist, and the handle's callbacks stayed referenced for good.
+  The close is now recorded first. The ``KeyboardInterrupt`` still comes out
+  of ``close()``, and a later ``close()`` returns at once.
+
 - **Returning a pooled sender to its pool cannot raise.** Every refusal a
   lease makes belongs to ``close()``, which runs them before it releases. The
   release path is also the deallocation path, where a raise would skip the

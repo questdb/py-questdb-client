@@ -9463,6 +9463,8 @@ cdef class QuestDB:
         cdef questdb_db* db = NULL
         cdef PyThreadState* gs = NULL
         cdef bint closed = False
+        cdef bint locked = False
+        cdef object interrupt = None
         cdef bint notice = False
         cdef size_t notice_leases = 0
         cdef size_t notice_calls = 0
@@ -9704,7 +9706,27 @@ cdef class QuestDB:
             # finished instead of waiting for it. Nothing needs the
             # callbacks by now: `questdb_db_close` has joined the
             # dispatchers, so no callback can run any more.
-            with self._state_cond:
+            #
+            # No Python code runs before the close is published. A
+            # Ctrl-C during the native close, which runs without the
+            # GIL, is held as a pending signal and raised at the first
+            # Python bytecode after it. `with self._state_cond:` would
+            # be that bytecode -- `Condition.__enter__` is written in
+            # Python -- and every later close() would then wait for
+            # this one for good, with the callbacks still pinned. So
+            # the lock is taken through `acquire`, which is the RLock's
+            # own C method, and the state is written by plain attribute
+            # assignment. A blocked acquire can still be interrupted by
+            # a further signal; it is retried, and the first interrupt
+            # is raised once everything here is done.
+            while not locked:
+                try:
+                    self._state_cond.acquire()
+                    locked = True
+                except BaseException as exc:
+                    if interrupt is None:
+                        interrupt = exc
+            try:
                 if closed:
                     self._conf_str = None
                 else:
@@ -9713,13 +9735,30 @@ cdef class QuestDB:
                     # handle stays closing either way.
                     self._db = db
                 self._close_running = False
-                self._state_cond.notify_all()
-            if closed:
-                _release_callback_refs(self._cb_refs_key)
-                self._cb_refs_key = 0
-                self._dispatch_context = None
-                self._error_handler = None
-                self._connection_listener = None
+                # The first Python code here, so a pending interrupt
+                # fires in it before anyone is woken. The interrupt
+                # has been taken by then, and a second call wakes the
+                # waiters; one that is still not woken rechecks within
+                # five seconds.
+                try:
+                    self._state_cond.notify_all()
+                except BaseException as exc:
+                    if interrupt is None:
+                        interrupt = exc
+                    try:
+                        self._state_cond.notify_all()
+                    except BaseException:
+                        pass
+            finally:
+                self._state_cond.release()
+                if closed:
+                    _release_callback_refs(self._cb_refs_key)
+                    self._cb_refs_key = 0
+                    self._dispatch_context = None
+                    self._error_handler = None
+                    self._connection_listener = None
+            if interrupt is not None:
+                raise interrupt
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """
