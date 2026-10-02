@@ -13,6 +13,11 @@ import platform
 
 PROJ_ROOT = pathlib.Path(__file__).parent
 
+# Every child process runs under the interpreter that started this
+# script, so a build and the tests that exercise it share one set of
+# installed packages.
+PYTHON = sys.executable
+
 
 def patch_mac_archflags_env():
     system = platform.system()
@@ -76,12 +81,12 @@ def command(fn):
 
 @command
 def build():
-    _run('python3', 'setup.py', 'build_ext', '--inplace')
+    _run(PYTHON, 'setup.py', 'build_ext', '--inplace')
 
 
 @command
 def build_fuzzing():
-    _run('python3', 'setup.py', 'build_ext', '--inplace',
+    _run(PYTHON, 'setup.py', 'build_ext', '--inplace',
         env={'TEST_QUESTDB_FUZZING': '1'})
 
 
@@ -91,8 +96,46 @@ def test(all=False, patch_path='1', *args):
     env = {'TEST_QUESTDB_PATCH_PATH': patch_path}
     if _arg2bool(all):
         env['TEST_QUESTDB_INTEGRATION'] = '1'
-    _run('python3', '-u', 'test/test.py', '-v', *args,
+    _run(PYTHON, '-u', 'test/test.py', '-v', *args,
          env=env)
+
+
+@command
+def grid(which='all', *args):
+    """Run the enumerated grids: `all` (default), `reentrancy`,
+    `concurrency`, or `claim`.
+
+    These are the harnesses that ended the review cycle. `reentrancy`
+    covers re-entry from inside a call, `concurrency` covers what one
+    thread sees while another holds an object in a given state, and
+    `claim` covers the round-trip claim vocabulary. They are slow --
+    minutes, one subprocess per cell in the first two -- so they are
+    not part of `proj.py test`; run them after any change to the guard,
+    claim, threading, or dataframe-planner areas, and read the diff.
+
+    Pass `--update` to rewrite an expected table once you have decided a
+    changed cell is right:
+
+        ./proj.py grid reentrancy --update
+    """
+    env = {'TEST_QUESTDB_PATCH_PATH': '1'}
+    scripts = {
+        'reentrancy': 'reentrancy_matrix.py',
+        'concurrency': 'concurrency_matrix.py',
+        'claim': 'claim_matrix.py',
+    }
+    if which == 'all':
+        chosen = list(scripts.values())
+    elif which in scripts:
+        chosen = [scripts[which]]
+    else:
+        sys.stderr.write(
+            f'unknown grid {which!r}; pick one of '
+            f'{", ".join(sorted(scripts))} or "all"\n')
+        sys.exit(2)
+    for script in chosen:
+        _run(PYTHON, '-u', script, *args,
+             env=env, cwd=PROJ_ROOT / 'test')
 
 
 @command
@@ -108,7 +151,7 @@ def test_fuzzing(*args):
         ld_preload += ':'
     ld_preload += str(lib_path)
     cmd = [
-        'python3',
+        PYTHON,
         'test/test_dataframe_fuzz.py'] + list(args)
     if not args:
         cmd.extend([
@@ -122,7 +165,7 @@ def test_fuzzing(*args):
 @command
 def benchmark(*args):
     env = {'TEST_QUESTDB_PATCH_PATH': '1'}
-    _run('python3', 'test/benchmark.py', '-v', *args, env=env)
+    _run(PYTHON, 'test/benchmark.py', '-v', *args, env=env)
 
 
 @command
@@ -137,14 +180,14 @@ def pandas_to_questdb_throughput(*args):
     deferred.
     """
     env = {'TEST_QUESTDB_PATCH_PATH': '1'}
-    _run('python3', 'test/benchmark_pandas_columnar.py', '--headline',
+    _run(PYTHON, 'test/benchmark_pandas_columnar.py', '--headline',
          '--schema', 's1-narrow', *args, env=env)
 
 
 @command
 def gdb_test(*args):
     env = {'TEST_QUESTDB_PATCH_PATH': '1', 'PYTHONMALLOC': 'malloc'}
-    _run('gdb', '-ex', 'r', '--args', 'python3', 'test/test.py', '-v', *args,
+    _run('gdb', '-ex', 'r', '--args', PYTHON, 'test/test.py', '-v', *args,
          env=env)
 
 
@@ -153,7 +196,7 @@ def valgrind_test(*args):
     env = {'TEST_QUESTDB_PATCH_PATH': '1', 'PYTHONMALLOC': 'malloc'}
     _run('valgrind', '--leak-check=full', '--show-leak-kinds=all',
          '--track-origins=yes', '--verbose',
-         'python3', 'test/test.py', '-v', *args,
+         PYTHON, 'test/test.py', '-v', *args,
          env=env)
 
 
@@ -170,7 +213,7 @@ def rr_test(*args):
     """
     env = {'TEST_QUESTDB_PATCH_PATH': '1'}
     try:
-        _run('rr', 'record', 'python3', 'test/test.py', '-v', *args,
+        _run('rr', 'record', PYTHON, 'test/test.py', '-v', *args,
              env=env)
     finally:
         sys.stdout.flush()
@@ -200,7 +243,7 @@ def open_browser(port):
 
 @command
 def doc(http_serve=False, port=None):
-    _run('python3', '-m', 'sphinx.cmd.build',
+    _run(PYTHON, '-m', 'sphinx.cmd.build',
          '-b', 'html', 'docs', 'build/docs',
          '-nW', '--keep-going', '-v',
          env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
@@ -214,7 +257,7 @@ def serve(port=None):
     import threading
     threading.Thread(target=open_browser, args=[port]).start()
     docs_dir = PROJ_ROOT / 'build' / 'docs'
-    _run('python3', '-m', 'http.server', port, cwd=docs_dir)
+    _run(PYTHON, '-m', 'http.server', port, cwd=docs_dir)
 
 
 @command
@@ -223,7 +266,7 @@ def cibuildwheel(*args):
         'win32': 'windows',
         'darwin': 'macos',
         'linux': 'linux'}[sys.platform]
-    python = 'python3'
+    python = PYTHON
     # if sys.platform == 'darwin':
     #     # Launching with version other than 3.8 will
     #     # fail saying the 3.8 wheel is unsupported.
@@ -232,8 +275,7 @@ def cibuildwheel(*args):
     #     #
     #     # NB: Make sure to update `cibuildwheel` on py3.8 too before running!
     #     python = '/Library/Frameworks/Python.framework/Versions/3.8/bin/python3'
-    _run(python, '-m',
-         'cibuildwheel',
+    _run(python, PROJ_ROOT / 'ci' / 'run_cibuildwheel.py',
          '--platform', plat,
          '--output-dir', 'dist',
          '--archs', platform.machine(),
@@ -242,12 +284,12 @@ def cibuildwheel(*args):
 
 @command
 def repl(*args):
-    _run('python3', env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
+    _run(PYTHON, env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
 
 
 @command
 def example(name, *args):
-    _run('python3', 'examples/' + name + '.py', *args,
+    _run(PYTHON, 'examples/' + name + '.py', *args,
          env={'PYTHONPATH': str(PROJ_ROOT / 'src')})
 
 
@@ -258,7 +300,7 @@ def cw(*args):
 
 @command
 def sdist():
-    _run('python3', 'setup.py', 'sdist')
+    _run(PYTHON, 'setup.py', 'sdist')
 
 
 @command
@@ -285,7 +327,7 @@ def venv():
     if pathlib.Path('venv').exists():
         sys.stderr.write('venv already exists, delete it, or run command clean\n')
         return
-    _run('python3', '-m', 'venv', 'venv')
+    _run(PYTHON, '-m', 'venv', 'venv')
     _run('venv/bin/python3', '-m', 'pip', 'install', '-U', 'pip')
     _run('venv/bin/python3', '-m', 'pip', 'install', '-r', 'dev_requirements.txt')
     sys.stdout.write('NOTE: remember to activate the environment: source venv/bin/activate\n')

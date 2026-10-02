@@ -104,6 +104,55 @@ decimal places or more than 12 total digits will cause errors.
 For more details on decimal types, see the
 `QuestDB DECIMAL documentation <https://questdb.com/docs/reference/sql/datatypes/#decimal>`_.
 
+.. _troubleshooting-qwp-column-types:
+
+UUID, IPV4, BINARY, CHAR, DATE, LONG256 and GEOHASH Column Errors
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These seven column types need a QWP sender and QuestDB server 10.0.0 or
+later, the first production QWP implementation. If a value of one of them is rejected, check the following:
+
+**Sender protocol**: they are QWP-only. Configure ``udp::``, ``ws::`` or
+``wss::``; the legacy ILP transports (``http``, ``https``, ``tcp``,
+``tcps``) have no such column types and reject the values rather than
+silently widening them.
+
+**GEOHASH precision**: the scalar and bulk paths deliberately have different
+value contracts.
+
+* :class:`Geohash <questdb.Geohash>` is strict: it requires
+  ``1 <= precision <= 60`` and ``0 <= bits < 2**precision``.
+  :meth:`Sender.row <questdb.Sender.row>` also pins the first GEOHASH
+  precision used for a column within one buffer's worth of rows. A later cell
+  at a different precision is rejected and that row is rewound. A flush clears
+  the client-side pin; it does not prove that the precision agrees with an
+  existing server column.
+* Bulk NumPy/Arrow ingestion validates the declared precision and carrier
+  width, but treats every value as a raw bit pattern. It does not check that
+  the pattern has no bits set above the declared precision. Thus ``32`` under
+  ``GEOHASH(5b)`` is accepted even though it needs six bits. If the declared
+  precision is wrong for the data, the write can succeed and store a different
+  GEOHASH location or ``NULL``. Only the low ``ceil(precision / 8)`` bytes are
+  encoded, and the exact result of an inconsistent value is unspecified.
+
+This unchecked bulk-value rule is a semantic data-integrity risk, not a
+memory-safety risk for otherwise valid NumPy/Arrow buffers. Validate bulk
+values before sending them. Malformed custom Arrow C Data structures remain
+invalid input and are outside this guarantee.
+
+**Fixed widths**: a ``'uuid'`` claim needs every non-null cell to be
+exactly 16 bytes and a ``'long256'`` claim exactly 32. An object column of
+Python ints under ``'long256'`` must satisfy ``0 <= value < 2**256``, and
+one under ``'ipv4'`` must fit ``uint32``.
+
+**Integer columns need naming**: ``IPV4``, ``CHAR`` and ``GEOHASH`` ride on
+integers, which say nothing about which type they are. Name them with
+``schema_overrides``, or let ``df.attrs['questdb']`` name them on a frame
+that came out of :meth:`QuestDB.query <questdb.QuestDB.query>`. Without
+either, the column lands as a plain integer.
+
+See :ref:`sender_qwp_column_types` for how each type is written.
+
 ILP/TCP Server disconnects
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
