@@ -7443,6 +7443,11 @@ print('OK')
         finally:
             qi._debug_set_close_lease_wait_limit_s(original)
 
+    @unittest.skipIf(
+        sys.implementation.name == 'pypy',
+        'the finalizer runs inside close() only because dropping the '
+        'last reference finalizes at once; PyPy has no reference counts '
+        'and finalizes at a later collection')
     def test_a_finalizer_that_closes_the_handle_during_close_returns(self):
         """Releasing the callbacks at the end of `close()` can run a
         finalizer on the closing thread. An object that passes its own
@@ -8472,6 +8477,11 @@ db.close()
 print('OK')
 """
 
+    @unittest.skipIf(
+        sys.implementation.name == 'pypy',
+        'the harness swaps a module global the compiled module reads '
+        'and needs gc.collect() to run finalizers on the spot; under '
+        'PyPy the swapped object never sees the write')
     def test_a_close_from_a_finalizer_as_a_call_starts_is_refused(self):
         """The first scoped call on a thread allocates its call table
         between reading the pool pointer and counting the call. A
