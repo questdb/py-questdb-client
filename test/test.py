@@ -4086,6 +4086,31 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 sender.close()
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_dataframe_object_column_python_bools_keep_their_values(self):
+        """Python bools in an object-dtype column reach the wire as the
+        values they hold. A bool column writes the same bytes as the
+        NumPy bool column with the same values, and a bool inside an
+        integer column writes the same bytes as the int it equals."""
+        ts = pd.to_datetime([1, 2, 3], unit='s')
+
+        def payload(values, dtype):
+            return self._dataframe_wire_payload(
+                pd.DataFrame({
+                    'x': pd.Series(values, dtype=dtype), 'ts': ts}),
+                table_name='obj_bools', at='ts')
+
+        for values in ([True, False, True], [True, True, True],
+                       [False, False, False]):
+            with self.subTest(column='bool', values=values):
+                self.assertEqual(
+                    payload(values, object), payload(values, bool))
+        for flag in (True, False):
+            with self.subTest(column='int', value=flag):
+                self.assertEqual(
+                    payload([5, flag, 7], object),
+                    payload([5, int(flag), 7], object))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_row_uuid_wire_bytes_match_dataframe_object_column(self):
         expected = self.UUID_VALUE.int.to_bytes(16, 'little')

@@ -259,6 +259,15 @@ New
 Fixed
 ~~~~~
 
+- **Python ``True`` in an object-dtype DataFrame column was written as
+  ``False``** by ``QuestDB.dataframe()``, ``PooledSender.dataframe()`` and
+  the WebSocket ``Sender.dataframe()`` in 5.0. An object column of Python
+  bools stored every row as ``false``, and a Python bool inside an
+  object column of integers stored ``0`` in place of ``1``. Nothing was
+  raised. NumPy and Arrow bool columns, and the ILP path, were not
+  affected. Rows written this way in 5.0 hold ``false`` or ``0`` where
+  the frame held ``True``; re-ingest them from the source if they matter.
+
 - Direct QWP DataFrame ingestion reports ``in_doubt=True`` when a failure
   follows an earlier batch that may have committed, including local validation
   and Arrow stream failures. Delivery status is aggregated by the DataFrame

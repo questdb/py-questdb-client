@@ -4195,7 +4195,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
             # bools are subclasses of int and PyLong_CheckExact returns
             # false for them; treat them as int (matches row-path).
             if PyBool_Check(cell):
-                value = 1 if cell == <PyObject*>True else 0
+                value = 1 if cell == Py_True else 0
             elif PyLong_CheckExact(cell):
                 value = <int64_t>PyLong_AsLongLongAndOverflow(
                     <object>cell, &overflow)
@@ -4427,7 +4427,7 @@ cdef pyobj_built_t* _dataframe_columnar_build_bool_pyobj(
         for i in range(row_count):
             cell = access[i]
             if PyBool_Check(cell):
-                if cell == <PyObject*>True:
+                if cell == Py_True:
                     bits[i >> 3] |= <uint8_t>(1 << (i & 7))
             elif _dataframe_is_null_pyobj(cell):
                 raise QuestDBError(
