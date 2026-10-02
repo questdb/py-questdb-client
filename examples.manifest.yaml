@@ -153,3 +153,13 @@
     python3 -m pip install -U questdb
     ```
   conf: http::addr=localhost:9000;
+- name: oidc-device-auth
+  lang: python
+  path: examples/oidc_device_auth.py
+  header: |-
+    Native OIDC device-flow authentication for QuestDB transports and PG-wire
+    adapters. Configure an OIDC-enabled QuestDB endpoint before running it.
+
+    ```
+    python3 -m pip install -U questdb sqlalchemy 'psycopg[binary]'
+    ```

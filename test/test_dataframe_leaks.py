@@ -5,6 +5,7 @@ import gc
 import ipaddress
 import unittest
 import uuid
+from unittest import mock
 
 
 def _limit_malloc_arenas():
@@ -23,6 +24,8 @@ _limit_malloc_arenas()
 import patch_path
 
 import questdb._client as qi
+from questdb.auth import OidcConfigError, OidcDeviceAuth, OidcError, Renderer
+from oidc_test_server import OidcTestServer
 
 try:
     import numpy as np
@@ -65,28 +68,164 @@ def _assert_no_leak(test, work, warmup, measure):
     # flattens. Take the smallest growth across the last half: if RSS held flat
     # for even one tail window, it has plateaued, so a transient multi-window
     # burst can't read as a leak — judging the shape, not an absolute size.
-    windows = 6
-    per = max(1, measure // windows)
+    # Free-threaded CPython may start an allocator-retention burst after the
+    # warmup and even after the first half of the measurement. If the normal
+    # six windows are inconclusive, give that burst at most three more windows
+    # to settle. A real leak keeps growing and still fails at the bounded cap.
+    min_windows = 6
+    max_windows = 9
+    per = max(1, measure // min_windows)
     for _ in range(warmup):
         work()
     gc.collect()
     prev = _rss()
     growths = []
-    for _ in range(windows):
+    for _ in range(max_windows):
         for _ in range(per):
             work()
         gc.collect()
         now = _rss()
         growths.append(now - prev)
         prev = now
-    half = max(1, windows // 2)
-    head = sorted(growths[:half])[half // 2]
-    tail = min(growths[-half:])
-    test.assertTrue(
-        tail <= 3 * 1024 * 1024 or tail * 2 <= head,
+        if len(growths) < min_windows:
+            continue
+        half = max(1, len(growths) // 2)
+        head = sorted(growths[:half])[half // 2]
+        tail = min(growths[-half:])
+        if tail <= 3 * 1024 * 1024 or tail * 2 <= head:
+            return
+    test.fail(
         f'RSS not plateauing: per-window growth {growths} bytes over '
-        f'{windows} windows of {per} iterations (head {head:.0f}, '
+        f'{len(growths)} windows of {per} iterations (head {head:.0f}, '
         f'tail {tail:.0f}); likely a leaked native buffer.')
+
+
+@unittest.skipUnless(psutil is not None, 'psutil not installed')
+class TestOidcNativeLeak(unittest.TestCase):
+    """RSS coverage for the OIDC native free sites a leak loop can reach.
+
+    Covered: the builder free (both constructors), the auth free, the token
+    free on success, and the ``questdb_error`` free in ``_oidc_err_to_py`` --
+    driven with a native error whose message carries the large payload, so a
+    dropped free is visible to the RSS harness. Not covered: the interrupt and
+    callback-cancel error frees, which need a signal or a renderer callback
+    landing mid-call on every iteration.
+    """
+
+    # Each native object owns a copy of this field. Twenty leaked objects in one
+    # RSS window exceed the harness's 3 MiB allocator-retention allowance while
+    # the correct implementation quickly reuses/returns the allocation.
+    PAYLOAD = 'x' * (256 * 1024)
+
+    def test_provider_builder_and_zeroizing_token_frees_plateau(self):
+        def direct_success():
+            auth = OidcDeviceAuth(
+                self.PAYLOAD,
+                'https://idp.example/device',
+                'https://idp.example/token',
+                interactive=False, open_browser=False)
+            auth.close()
+
+        def direct_failure():
+            try:
+                # Fail only after the large client ID has been copied into the
+                # native builder. A pre-validation encoding error leaves an
+                # almost-empty builder, too small for the RSS harness to
+                # distinguish if the exceptional-path free is removed.
+                OidcDeviceAuth(
+                    self.PAYLOAD,
+                    'https://idp.example/device',
+                    'https://idp.example/token',
+                    timeout=0,
+                    interactive=False, open_browser=False)
+            except OidcConfigError:
+                pass
+
+        def native_error():
+            try:
+                # Rejected by the native builder (an unexpanded leading `~`),
+                # whose error message quotes the whole path -- so each
+                # iteration allocates a large `questdb_error` that only
+                # `_oidc_err_to_py` frees. Every other loop here succeeds, or
+                # fails in Python before any native error exists.
+                OidcDeviceAuth(
+                    'questdb',
+                    'https://idp.example/device',
+                    'https://idp.example/token',
+                    ca_bundle='~' + self.PAYLOAD,
+                    interactive=False, open_browser=False)
+            except OidcError as exc:
+                assert len(str(exc)) > len(self.PAYLOAD), str(exc)[:200]
+
+        for name, work in (
+                ('direct builder/auth success', direct_success),
+                ('direct builder exception', direct_failure),
+                ('native error free', native_error)):
+            with self.subTest(path=name):
+                _assert_no_leak(self, work, warmup=8, measure=120)
+
+        with OidcTestServer(settings_config_overrides={
+                'acl.oidc.client.id': self.PAYLOAD}) as server:
+            def discovered_success():
+                auth = OidcDeviceAuth.from_questdb(
+                    server.url, interactive=False, open_browser=False,
+                    renderer=Renderer())
+                auth.close()
+
+            _assert_no_leak(
+                self, discovered_success, warmup=8, measure=120)
+
+        with OidcTestServer(initial_access_token=self.PAYLOAD) as server:
+            auth = OidcDeviceAuth.from_questdb(
+                server.url, interactive=True, open_browser=False,
+                renderer=Renderer(), timeout=5)
+            auth.sign_in()
+            self.assertEqual(len(auth.token()), len(self.PAYLOAD))
+            _assert_no_leak(self, auth.token, warmup=8, measure=120)
+
+            # The device-flow path allocates a device response, event views and
+            # token response strings that the cache-hit loop above never
+            # touches. Re-authorize the same provider so RSS measures those
+            # native free sites rather than only Python weakref bookkeeping.
+            auth.clear()
+
+            def sign_in_cycle():
+                auth.sign_in()
+                self.assertEqual(len(auth.token()), len(self.PAYLOAD))
+                auth.clear()
+
+            _assert_no_leak(self, sign_in_cycle, warmup=4, measure=60)
+
+
+class TestLeakHarness(unittest.TestCase):
+    def test_late_allocator_burst_gets_bounded_settling_window(self):
+        # CPython 3.14t manylinux produced the first six values in CI: three
+        # flat windows followed by a late retention burst that was already
+        # halving, but ended just above the 3 MiB plateau threshold. One more
+        # bounded sample observes the plateau instead of reporting a leak.
+        growths = [
+            167936, -270336, -65536, 11735040, 7135232, 3665920,
+            2 * 1024 * 1024,
+        ]
+        readings = [128 * 1024 * 1024]
+        for growth in growths:
+            readings.append(readings[-1] + growth)
+
+        with mock.patch(
+                f'{__name__}._rss', side_effect=readings) as rss:
+            _assert_no_leak(self, lambda: None, warmup=0, measure=6)
+
+        self.assertEqual(rss.call_count, len(readings))
+
+    def test_sustained_growth_fails_after_bounded_settling_windows(self):
+        growths = [4 * 1024 * 1024] * 9
+        readings = [128 * 1024 * 1024]
+        for growth in growths:
+            readings.append(readings[-1] + growth)
+
+        with mock.patch(f'{__name__}._rss', side_effect=readings):
+            with self.assertRaisesRegex(AssertionError, '9 windows'):
+                _assert_no_leak(self, lambda: None, warmup=0, measure=6)
 
 
 @unittest.skipUnless(pd is not None, 'pandas not installed')
@@ -166,9 +305,9 @@ class TestPyobjColumnarLeak(unittest.TestCase):
     """Guards the calloc'd ``pyobj_built_t`` builders
     (``_dataframe_columnar_build_{str,int,float,bool,uuid,ipv4,bytes}_pyobj``)
     reached by ``QuestDB.dataframe`` for object-dtype columns: every native
-    buffer (data, validity bitmap, str byte arena) must be freed on the
-    success and all-valid (bitmap-dropped) paths, and the pooled connection
-    must be returned on every call."""
+    buffer (data, validity bitmap, str byte arena) must be freed on success,
+    all-valid (bitmap-dropped), and exceptional paths, and the pooled
+    connection must be returned on every call."""
 
     ROWS = 2048
 
@@ -218,6 +357,40 @@ class TestPyobjColumnarLeak(unittest.TestCase):
             with qi.QuestDB.from_conf(conf) as client:
                 def work():
                     for df in frames:
+                        client.dataframe(
+                            df, table_name='t', at='ts', symbols=False)
+
+                self._assert_stable(work, warmup=150, measure=1800)
+
+    def test_uuid_width_error_path_no_leak(self):
+        """The malformed final row must free data, validity, and the builder."""
+        from qwp_ws_ack_server import QwpAckServer
+
+        class ShortInt(int):
+            def to_bytes(self, length, byteorder, *args, **kwargs):
+                return b'\xAA'
+
+        n = self.ROWS
+        values = [
+            None if i % 7 == 0 else uuid.UUID(int=i)
+            for i in range(n)
+        ]
+        malformed = uuid.uuid4()
+        object.__setattr__(malformed, 'int', ShortInt(0))
+        values[-1] = malformed
+        df = pd.DataFrame({
+            'ts': pd.Series(pd.to_datetime(np.arange(n), unit='s')),
+            'u': pd.Series(values, dtype=object),
+        })
+
+        with QwpAckServer() as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                    'query_pool_min=0;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def work():
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError, 'returned 1 bytes, expected 16'):
                         client.dataframe(
                             df, table_name='t', at='ts', symbols=False)
 
