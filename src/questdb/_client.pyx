@@ -5798,6 +5798,9 @@ cdef object _dataframe_reinterpret_unsigned_geohash(
     frame. A GEOHASH value is its bit pattern, so the server receives
     exactly the bits the unsigned column held. NumPy columns become
     views and Arrow columns views of each chunk, so no data is copied.
+    The exception is an 8- or 16-bit polars column on polars older
+    than 1.39, which refuses to reinterpret it; such a column is copied
+    by a wrapping cast (see `_polars_reinterpret_unsigned_geohash`).
 
     A column is bound for GEOHASH when `schema_overrides` names it
     ``('geohash', bits)``, or when it carries a GEOHASH claim in
@@ -5949,10 +5952,21 @@ cdef object _pyarrow_reinterpret_unsigned_geohash(
 cdef object _polars_reinterpret_unsigned_geohash(
         object df, object schema_overrides):
     """`_dataframe_reinterpret_unsigned_geohash` for a polars
-    `DataFrame` or `LazyFrame`; a `LazyFrame` stays lazy."""
+    `DataFrame` or `LazyFrame`; a `LazyFrame` stays lazy.
+
+    Each column keeps its bits. `reinterpret(signed=True)` does this
+    without copying, but polars older than 1.39 accepts it only on 32-
+    and 64-bit integers. On such a polars an 8- or 16-bit column takes
+    a wrapping cast to the signed type of its width instead: the cast
+    reduces each value modulo 2**width, which for the same width is
+    the same bit pattern, and it copies the column. Nulls stay null
+    either way.
+    """
     cdef object schema, name, dtype
     cdef tuple unsigned = (
         _POLARS.UInt8, _POLARS.UInt16, _POLARS.UInt32, _POLARS.UInt64)
+    cdef dict narrow = {_POLARS.UInt8: _POLARS.Int8,
+                        _POLARS.UInt16: _POLARS.Int16}
     cdef list exprs = []
     schema = (df.collect_schema() if hasattr(df, 'collect_schema')
               else df.schema)
@@ -5960,7 +5974,11 @@ cdef object _polars_reinterpret_unsigned_geohash(
         if (dtype in unsigned
                 and _geohash_override_bits(schema_overrides, name)
                 is not None):
-            exprs.append(_POLARS.col(name).reinterpret(signed=True))
+            if dtype in narrow and not _polars_reinterprets_narrow_ints():
+                exprs.append(_POLARS.col(name).cast(
+                    narrow[dtype], wrap_numerical=True))
+            else:
+                exprs.append(_POLARS.col(name).reinterpret(signed=True))
     if not exprs:
         return df
     return df.with_columns(exprs)
@@ -6883,6 +6901,30 @@ def _bench_dataframe_plan_and_populate_column_chunks(
 cdef object _POLARS = None
 cdef object _POLARS_DATAFRAME_T = None
 cdef object _POLARS_LAZYFRAME_T = None
+
+# Whether this polars reinterprets 8- and 16-bit integers (1.39+).
+# None until first asked. A plain module global, so tests can set it.
+_POLARS_NARROW_REINTERPRET = None
+
+
+cdef bint _polars_reinterprets_narrow_ints():
+    """Whether `reinterpret` works on an 8- or 16-bit polars column.
+
+    Probed once, by trying it, rather than read off the version string.
+    A `LazyFrame` raises only when collected, so the call that builds
+    the expression cannot tell. Any failure means "no": the exception
+    class differs across polars versions. Two threads that both find
+    the answer missing both probe and store the same value. Called only
+    after `_try_import_polars()` has set `_POLARS`.
+    """
+    global _POLARS_NARROW_REINTERPRET
+    if _POLARS_NARROW_REINTERPRET is None:
+        try:
+            _POLARS.Series([0], dtype=_POLARS.UInt8).reinterpret(signed=True)
+            _POLARS_NARROW_REINTERPRET = True
+        except Exception:
+            _POLARS_NARROW_REINTERPRET = False
+    return _POLARS_NARROW_REINTERPRET
 
 
 cdef bint _try_import_polars():

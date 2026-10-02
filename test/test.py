@@ -4800,12 +4800,6 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         does: the column is written as the signed integer of the same
         width holding the same bits. Each shape and width writes exactly
         the bytes of the signed column with the same override."""
-        widths = (
-            (pyarrow.uint8(), pyarrow.int8(), 8, [200, 5]),
-            (pyarrow.uint16(), pyarrow.int16(), 16, [60000, 5]),
-            (pyarrow.uint32(), pyarrow.int32(), 32, [4000000000, 5]),
-            (pyarrow.uint64(), pyarrow.int64(), 60, [(1 << 59) + 3, 5]),
-        )
         shapes = [
             ('pyarrow Table', lambda array: pyarrow.table({'gh': array})),
             ('pyarrow RecordBatch',
@@ -4821,33 +4815,125 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         except ImportError:
             pl = None
         if pl is not None:
-            shapes.append(
-                ('polars DataFrame',
-                 lambda array: pl.from_arrow(pyarrow.table({'gh': array}))))
-            shapes.append(
-                ('polars LazyFrame',
-                 lambda array: pl.from_arrow(
-                     pyarrow.table({'gh': array})).lazy()))
-        for unsigned, signed, bits, values in widths:
-            # A null travels with the bits in every one of these shapes.
-            array = pyarrow.array(values + [None], type=unsigned)
-            reference = array.view(signed)
+            shapes.extend(self._polars_unsigned_geohash_shapes(pl))
+        for unsigned, signed, bits, values in (
+                self._unsigned_geohash_widths()):
             for label, build in shapes:
                 with self.subTest(shape=label, width=str(unsigned)):
-                    overrides = {'gh': ('geohash', bits)}
-                    payload = self._dataframe_wire_payload(
-                        build(array), table_name='geo_override_unsigned',
-                        at=qi.ServerTimestamp, schema_overrides=overrides)
-                    self.assertEqual(
-                        dict(_first_qwp_table_column_types(payload))['gh'],
-                        0x0E)
-                    self.assertEqual(
-                        payload,
-                        self._dataframe_wire_payload(
-                            build(reference),
-                            table_name='geo_override_unsigned',
-                            at=qi.ServerTimestamp,
-                            schema_overrides=overrides))
+                    self._assert_unsigned_geohash_override_writes_signed(
+                        build, unsigned, signed, bits, values)
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_geohash_override_on_a_narrow_unsigned_polars_column_casts(self):
+        """On a polars that cannot reinterpret 8- and 16-bit integers
+        (before 1.39), an unsigned column of those widths takes a
+        wrapping cast instead, and writes the same bytes. The 32- and
+        64-bit columns still use `reinterpret`. The flag that records
+        what this polars can do is forced off, so the cast runs on any
+        polars, and a spy on `Expr.reinterpret` shows which way each
+        column went."""
+        pl = self._import_polars_or_skip()
+        self._set_polars_narrow_reinterpret(False)
+        reinterpreted = self._record_reinterpret_calls(
+            pl.Expr, lambda expr: expr.meta.output_name())
+        for unsigned, signed, bits, values in (
+                self._unsigned_geohash_widths()):
+            for label, build in self._polars_unsigned_geohash_shapes(pl):
+                with self.subTest(shape=label, width=str(unsigned)):
+                    reinterpreted.clear()
+                    self._assert_unsigned_geohash_override_writes_signed(
+                        build, unsigned, signed, bits, values)
+                    if unsigned.bit_width <= 16:
+                        self.assertNotIn('gh', reinterpreted)
+                    else:
+                        self.assertIn('gh', reinterpreted)
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_geohash_override_probes_polars_narrow_reinterpret_once(self):
+        """Whether polars reinterprets 8- and 16-bit integers is found
+        out by trying it, on the first write that needs to know, and
+        the answer is kept: a second such write does not probe again."""
+        pl = self._import_polars_or_skip()
+        self._set_polars_narrow_reinterpret(None)
+        expected = _parse_version(pl.__version__)[:2] >= (1, 39)
+        uint8 = self._unsigned_geohash_widths()[0]
+        build = self._polars_unsigned_geohash_shapes(pl)[0][1]
+        self._assert_unsigned_geohash_override_writes_signed(build, *uint8)
+        self.assertIs(qi._POLARS_NARROW_REINTERPRET, expected)
+        probes = self._record_reinterpret_calls(
+            pl.Series, lambda series: series.name)
+        self._assert_unsigned_geohash_override_writes_signed(build, *uint8)
+        self.assertEqual(probes, [])
+        self.assertIs(qi._POLARS_NARROW_REINTERPRET, expected)
+
+    @staticmethod
+    def _unsigned_geohash_widths():
+        """(unsigned type, signed type of the same width, precision bits,
+        values) for each width, with values that set the top bit."""
+        return (
+            (pyarrow.uint8(), pyarrow.int8(), 8, [200, 5]),
+            (pyarrow.uint16(), pyarrow.int16(), 16, [60000, 5]),
+            (pyarrow.uint32(), pyarrow.int32(), 32, [4000000000, 5]),
+            (pyarrow.uint64(), pyarrow.int64(), 60, [(1 << 59) + 3, 5]),
+        )
+
+    @staticmethod
+    def _polars_unsigned_geohash_shapes(pl):
+        return [
+            ('polars DataFrame',
+             lambda array: pl.from_arrow(pyarrow.table({'gh': array}))),
+            ('polars LazyFrame',
+             lambda array: pl.from_arrow(
+                 pyarrow.table({'gh': array})).lazy()),
+        ]
+
+    def _assert_unsigned_geohash_override_writes_signed(
+            self, build, unsigned, signed, bits, values):
+        """The unsigned column under a GEOHASH override is written as
+        GEOHASH, byte for byte as the signed column of the same width
+        holding the same bits."""
+        # A null travels with the bits in every shape built here.
+        array = pyarrow.array(values + [None], type=unsigned)
+        reference = array.view(signed)
+        overrides = {'gh': ('geohash', bits)}
+        payload = self._dataframe_wire_payload(
+            build(array), table_name='geo_override_unsigned',
+            at=qi.ServerTimestamp, schema_overrides=overrides)
+        self.assertEqual(
+            dict(_first_qwp_table_column_types(payload))['gh'], 0x0E)
+        self.assertEqual(
+            payload,
+            self._dataframe_wire_payload(
+                build(reference), table_name='geo_override_unsigned',
+                at=qi.ServerTimestamp, schema_overrides=overrides))
+
+    def _import_polars_or_skip(self):
+        try:
+            import polars
+        except ImportError:
+            self.skipTest('polars not installed')
+        return polars
+
+    def _set_polars_narrow_reinterpret(self, value):
+        previous = qi._POLARS_NARROW_REINTERPRET
+        qi._POLARS_NARROW_REINTERPRET = value
+        self.addCleanup(
+            setattr, qi, '_POLARS_NARROW_REINTERPRET', previous)
+
+    def _record_reinterpret_calls(self, cls, name_of):
+        """Wrap `cls.reinterpret` for the rest of the test; the returned
+        list collects `name_of(receiver)` for each call."""
+        original = cls.reinterpret
+        calls = []
+
+        def spy(receiver, *args, **kwargs):
+            calls.append(name_of(receiver))
+            return original(receiver, *args, **kwargs)
+
+        patcher = mock.patch.object(cls, 'reinterpret', spy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
