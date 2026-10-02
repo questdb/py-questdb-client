@@ -3,6 +3,7 @@ import subprocess
 import shlex
 import textwrap
 import platform
+import sysconfig
 import argparse
 import importlib.metadata
 
@@ -126,6 +127,8 @@ def main(args):
     else:
         try_pip_install('polars')
     try_pip_install('psutil')
+    # `TestManifest` reads `examples.manifest.yaml` and skips without it.
+    try_pip_install('pyyaml')
 
     on_linux_is_glibc = (
             (not platform.system() == 'Linux') or
@@ -133,6 +136,7 @@ def main(args):
     is_64bits = sys.maxsize > 2 ** 32
     is_cpython = platform.python_implementation() == 'CPython'
     is_final = sys.version_info.releaselevel == 'final'
+    is_free_threaded = bool(sysconfig.get_config_var('Py_GIL_DISABLED'))
     py_version = (sys.version_info.major, sys.version_info.minor)
     if on_linux_is_glibc and is_64bits and is_cpython and is_final:
         # Ensure that we've managed to install the expected dependencies.
@@ -144,6 +148,10 @@ def main(args):
         # Compat will still be tested on older releases.
         if py_version < (3, 14):
             import fastparquet
+
+        # PyYAML publishes no wheel for free-threaded 3.13.
+        if not (is_free_threaded and py_version == (3, 13)):
+            import yaml
 
 
 if __name__ == "__main__":

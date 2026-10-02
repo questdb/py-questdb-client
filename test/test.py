@@ -157,7 +157,7 @@ class TestManifest(unittest.TestCase):
         try:
             import yaml
         except ImportError:
-            self.skipTest('Python version does not support yaml')
+            self.skipTest('PyYAML not installed')
         repo_root = pathlib.Path(__file__).parent.parent
         with open(repo_root / 'examples.manifest.yaml', 'r') as f:
             return repo_root, yaml.safe_load(f)

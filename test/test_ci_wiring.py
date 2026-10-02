@@ -97,6 +97,25 @@ class TestPinnedCiDependencies(unittest.TestCase):
                     r'pyarrow==25\.0\.1 .* version 25\.0\.0 is installed'):
             self.deps.pip_install_required('pyarrow', '25.0.1')
 
+    def test_pyyaml_is_installed_for_the_manifest_tests(self):
+        """`TestManifest` skips without PyYAML, so every CI leg that
+        installs test dependencies through this script tries to install
+        it."""
+        # Reported as PyPy so that `main` skips its check that the
+        # required dependencies import.
+        with mock.patch.object(self.deps, 'ensure_timezone'), \
+                mock.patch.object(self.deps, 'pip_install'), \
+                mock.patch.object(self.deps, 'pip_install_required'), \
+                mock.patch.object(
+                    self.deps, 'install_default_pandas_and_numpy'), \
+                mock.patch.object(
+                    self.deps, 'try_pip_install') as try_install, \
+                mock.patch.object(
+                    self.deps.platform, 'python_implementation',
+                    return_value='PyPy'):
+            self.deps.main(self.deps.arg_parser.parse_args([]))
+        self.assertIn(mock.call('pyyaml'), try_install.call_args_list)
+
     def test_unpinned_optional_dependency_remains_best_effort(self):
         error = self.deps.UnsupportedDependency('no matching wheel')
         with mock.patch.object(
