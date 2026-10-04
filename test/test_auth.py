@@ -6569,6 +6569,102 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                 db.close()
 
 
+    def test_pool_close_from_background_diagnostic(self):
+        self._run_isolated('pool_close_from_background_diagnostic',
+                           lambda: self._exercise_background_pool_close(False),
+                           45)
+
+    def test_delegated_pool_close_from_background_diagnostic(self):
+        self._run_isolated('delegated_pool_close_from_background_diagnostic',
+                           lambda: self._exercise_background_pool_close(True),
+                           45)
+
+    def _exercise_background_pool_close(self, delegated):
+        # The foreground caller owns a lease and waits indefinitely for its
+        # frame to be acked. The isolated native token-provider worker cannot
+        # finish connecting until the diagnostic it emits on refresh returns.
+        # If logging calls db.close(), close must reject it, not wait for the
+        # lease (or join that very worker). Include a handler that delegates
+        # close to another thread and joins it: a thread-local guard alone
+        # would miss that same deadlock.
+        credential = [None]
+        sabotaged = threading.Event()
+        observed = []
+        caller_thread = threading.get_ident()
+
+        def fail_refresh_save():
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential[0]):
+                os.remove(credential[0])
+            os.mkdir(credential[0])
+            sabotaged.set()
+
+        def attempt_close():
+            try:
+                db.close()
+            except questdb.QuestDBError as exc:
+                observed.append((exc.code, threading.get_ident()))
+            else:
+                observed.append((None, threading.get_ident()))
+
+        class CloseOnWarning(logging.Handler):
+            def emit(self, record):
+                if 'token store save failed' not in record.getMessage():
+                    return
+                if delegated:
+                    worker = threading.Thread(target=attempt_close, daemon=True)
+                    worker.start()
+                    worker.join(5)
+                    if worker.is_alive():
+                        observed.append(('blocked', threading.get_ident()))
+                else:
+                    attempt_close()
+
+        logger = logging.getLogger('questdb')
+        old_level = logger.level
+        handler = CloseOnWarning()
+        with tempfile.TemporaryDirectory() as directory, \
+                OidcTestServer(initial_expires_in=4,
+                               refresh_request_hook=fail_refresh_save) as idp:
+            auth = make_discovered_auth(
+                idp, token_store=FileTokenStore.at(directory))
+            auth.sign_in()
+            credential[0] = os.path.join(directory, next(
+                name for name in os.listdir(directory)
+                if name.endswith('.json')))
+            with QwpAckServer(
+                    close_after_upgrade_unless_authorization=(
+                        'Bearer AT-refreshed')) as qdb:
+                db = questdb.connect(
+                    f'ws::addr=127.0.0.1:{qdb.port};'
+                    'lazy_connect=true;sender_pool_min=0;query_pool_min=0;'
+                    'reconnect_initial_backoff_millis=25;'
+                    'reconnect_max_backoff_millis=25;'
+                    'reconnect_max_duration_millis=10000;'
+                    'close_flush_timeout_millis=10000;',
+                    oidc_auth=auth)
+                sender = db.sender()
+                logger.setLevel(logging.WARNING)
+                logger.addHandler(handler)
+                try:
+                    sender.row('events', columns={'value': 42},
+                               at=questdb.ServerTimestamp)
+                    sender.flush(wait=False)
+                    sender.wait(0)
+                    self.assertTrue(sabotaged.is_set())
+                    self.assertEqual(len(observed), 1, observed)
+                    self.assertEqual(observed[0][0],
+                                     questdb.QuestDBErrorCode.InvalidApiCall)
+                    self.assertNotEqual(observed[0][1], caller_thread)
+                    self.assertEqual(qdb.snapshot()['binary_frames'], 1)
+                finally:
+                    logger.removeHandler(handler)
+                    logger.setLevel(old_level)
+                    sender.close()
+                    db.close()
+
+
 class OidcSenderReentryTest(unittest.TestCase):
     @unittest.skipUnless(os.name == 'posix',
                          'durable file token store requires POSIX')

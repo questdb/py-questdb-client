@@ -242,11 +242,14 @@ def _oidc_after_fork_in_child():
     """
     global _OIDC_MAIN_THREAD_IDENT, _OIDC_MAIN_PARKED
     global _OIDC_MAIN_PARK_SCHEDULED, _OIDC_MAIN_DIAGNOSTIC_DEPTH
-    global _OIDC_REGISTRY_LOCK
+    global _OIDC_REGISTRY_LOCK, _OIDC_DIAGNOSTICS_ACTIVE
     cdef unsigned long current = questdb_thread_ident()
     # The registry lock may have been held by a parent thread that disappeared.
     # Keep its entries, but never try to acquire the inherited lock in a child.
     _OIDC_REGISTRY_LOCK = threading.RLock()
+    # Any callback active in the parent either belonged to a vanished thread
+    # or cannot continue across fork. Do not reject pool closes in the child.
+    _OIDC_DIAGNOSTICS_ACTIVE = {}
     if current == _OIDC_MAIN_THREAD_IDENT:
         return
     _OIDC_MAIN_THREAD_IDENT = current
@@ -350,7 +353,23 @@ cdef void _oidc_rearm_keyboard_interrupt() noexcept:
 cdef object _OIDC_PROVIDERS = {}
 cdef object _OIDC_NATIVE_HANDLES = {}
 cdef object _OIDC_REGISTRY_LOCK = threading.RLock()
+# Count callbacks by the opaque provider id given to native, rather than by
+# thread: a logging handler may delegate db.close() to another thread and wait
+# for it. A pool close must not join a provider worker that is still inside its
+# own warning callback, even when no Python lease is currently outstanding.
+# Protected by _OIDC_REGISTRY_LOCK; keys never retain a provider.
+cdef dict _OIDC_DIAGNOSTICS_ACTIVE = {}
 cdef size_t _oidc_last_provider_id = 0
+
+
+cdef bint _oidc_diagnostic_active_for(object provider) except -1:
+    if provider is None:
+        return False
+    with _OIDC_REGISTRY_LOCK:
+        return _OIDC_DIAGNOSTICS_ACTIVE.get(
+            (<OidcDeviceAuth>provider)._provider_id, 0) != 0
+
+
 # Set before the atexit hook snapshots the registry. A provider whose native
 # build completes after that snapshot observes the flag under the same lock and
 # detaches its callbacks before construction returns, closing the new-provider
@@ -979,9 +998,10 @@ cdef class _OidcForegroundCall:
 
 
 # Per-thread stack of `_OidcForegroundCall` records. The diagnostic callback's
-# `user_data` is NULL -- it is shared by background token-provider workers,
-# which must never be handed a Python object -- so the current thread is the
-# only thing that can associate a diagnostic with the call it interrupted.
+# `user_data` is an opaque integer provider id, never a Python object; it
+# cannot identify which foreground call (if any) a background worker's warning
+# interrupted. Only the current thread can associate a diagnostic with that
+# call.
 # `with gil` on a thread that released the GIL through `PyEval_SaveThread`
 # resumes that thread's own state, so this sees the caller's record. A native
 # worker thread gets a fresh state and correctly sees none.
@@ -1233,13 +1253,20 @@ cdef void _oidc_park_event_interrupt(
 
 
 cdef void _oidc_diagnostic_dispatch(
+        void* user_data,
         const questdb_oidc_diagnostic* diagnostic) noexcept with gil:
     global _OIDC_MAIN_DIAGNOSTIC_DEPTH
+    cdef size_t provider_id = <size_t>user_data
     cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
+    cdef bint registered = False
     cdef object signal_codes = ()
     if on_main:
         _OIDC_MAIN_DIAGNOSTIC_DEPTH += 1
     try:
+        with _OIDC_REGISTRY_LOCK:
+            _OIDC_DIAGNOSTICS_ACTIVE[provider_id] = (
+                _OIDC_DIAGNOSTICS_ACTIVE.get(provider_id, 0) + 1)
+            registered = True
         try:
             # On the thread running sign_in(), token(), clear() or an attached
             # transport's token pull, this callback is where CPython runs the
@@ -1283,6 +1310,15 @@ cdef void _oidc_diagnostic_dispatch(
             # Otherwise the diagnostic remains best-effort: a logging handler
             # failure must not turn a usable token into an auth failure.
     finally:
+        if registered:
+            with _OIDC_REGISTRY_LOCK:
+                # Fork inside a logging handler resets the child's active
+                # callbacks; its inherited stack still runs this finally.
+                remaining = _OIDC_DIAGNOSTICS_ACTIVE.get(provider_id, 0)
+                if remaining > 1:
+                    _OIDC_DIAGNOSTICS_ACTIVE[provider_id] = remaining - 1
+                else:
+                    _OIDC_DIAGNOSTICS_ACTIVE.pop(provider_id, None)
         if on_main:
             _OIDC_MAIN_DIAGNOSTIC_DEPTH -= 1
             if _OIDC_MAIN_DIAGNOSTIC_DEPTH == 0:
@@ -1317,11 +1353,12 @@ cdef void _oidc_diagnostic_trampoline(
     # check below remains for an embedder that tears the interpreter down
     # without running `atexit`.
     #
-    # It is narrower than both in one respect: `user_data` is NULL, so nothing
-    # here dereferences a Python object from a native thread.
+    # `user_data` is only the provider's monotonic integer id, never a Python
+    # pointer. The dispatcher uses it to guard the attached pool's close path
+    # while a warning handler is running, including on a delegated thread.
     if qdb_py_is_finalizing():
         return
-    _oidc_diagnostic_dispatch(diagnostic)
+    _oidc_diagnostic_dispatch(user_data, diagnostic)
 
 
 cdef void _oidc_event_trampoline(
@@ -1963,9 +2000,10 @@ cdef class OidcDeviceAuth:
                     _oidc_user_data_release_trampoline,
                     &err):
                 raise _oidc_err_to_py(err)
-            # Persistence warnings use a separate stateless callback because
-            # they can originate on background provider threads. They never
-            # enter the user renderer or retain this Python object.
+            # Persistence warnings use a separate callback because they can
+            # originate on background provider threads. Its user_data carries
+            # only the provider id; it never retains a Python object or enters
+            # the user renderer.
             #
             # Installed only alongside a token store. Every native
             # `warn_persistence` site sits behind a store gate, so a provider
@@ -1978,8 +2016,8 @@ cdef class OidcDeviceAuth:
                 if not questdb_oidc_builder_diagnostic_handler(
                         builder,
                         _oidc_diagnostic_trampoline,
-                        NULL,
-                        NULL,
+                        <void*>provider_id,
+                        _oidc_user_data_release_trampoline,
                         &err):
                     raise _oidc_err_to_py(err)
             # Build into a thread-local C pointer while the GIL is released.

@@ -7464,12 +7464,21 @@ cdef class QuestDB:
         ``connection_listener``
         callbacks, it does not wait for a concurrent ``close()`` on
         another thread to finish; the in-flight callback completes after
-        that close returns.
+        that close returns. A persistence-warning handler for this pool's
+        OIDC provider may not close the pool (even by delegating the close to
+        another thread): it raises ``QuestDBError(InvalidApiCall)`` instead of
+        waiting for the worker delivering the warning or its sender leases.
         """
         cdef questdb_db* db = NULL
         cdef PyThreadState* gs = NULL
         cdef bint closed = False
         with self._state_cond:
+            if _oidc_diagnostic_active_for(self._oidc_auth):
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    'QuestDB.close() cannot run during its OIDC provider\'s '
+                    'persistence-warning callback. Return from the callback '
+                    'before closing the pool.')
             if self._uses_by_thread.get(_db_thread_token(), 0):
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,

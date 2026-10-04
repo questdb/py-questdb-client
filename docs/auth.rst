@@ -243,7 +243,13 @@ Cached token reads and provider ``cancel_sign_in()`` / ``close()`` remain
 callback-safe. An attached **Sender** may not be closed or mutated by a
 persistence-warning handler while it is performing a native flush: those
 operations raise ``QuestDBError(InvalidApiCall)`` rather than freeing the
-sender or changing its buffer while native code still holds it. The binding imports
+sender or changing its buffer while native code still holds it. Likewise, a
+persistence-warning handler must not close a :class:`~questdb.QuestDB` pool
+attached to the same provider: ``db.close()`` raises
+``QuestDBError(InvalidApiCall)`` while that warning is running, including if the
+handler delegates the close to another thread. A pool close would otherwise
+wait for a lease whose acknowledgement depends on the warning callback
+returning. Close the pool after the handler returns instead. The binding imports
 ``logging`` before registering its own shutdown hook, so the hook detaches OIDC
 callbacks while logging handlers are still live;
 ``logging.shutdown()`` runs afterwards. Diagnostics produced after the detach
@@ -363,13 +369,18 @@ different machine from the reader; pass ``True`` to open one anyway (a *local*
 ``jupyter lab``) or ``False`` to never open one.
 The custom renderer's prompt dictionary includes ``user_code``, both
 verification URLs, ``expires_in`` and ``interval`` in seconds, plus the vetted
-``browser_target``. Renderer callbacks must return promptly: interpreter
-shutdown suppresses later callbacks without waiting for one already running, so
-work left unfinished in a renderer is abandoned. Run ``sign_in()`` on a daemon
-thread if a callback can block for a long time, because a non-daemon worker is
-joined before the shutdown hook runs and would delay process exit. For the same
-reason a ``sign_in()`` started after that hook, from an ``atexit`` handler
-registered before ``questdb`` was imported, cannot show a prompt: it succeeds
+``browser_target``. On PyPy, a custom renderer holding a strong reference back
+to its ``OidcDeviceAuth`` creates a cycle that cpyext cannot collect. Use a weak
+back-reference or call ``auth.close()`` explicitly (for example via a ``with``
+block) to break the cycle; closing an attached provider is terminal for its
+transports, so plan their lifecycle accordingly. Renderer callbacks must return
+promptly: interpreter shutdown suppresses later callbacks without waiting for
+one already running, so work left unfinished in a renderer is abandoned. Run
+``sign_in()`` on a daemon thread if a callback can block for a long time:
+a non-daemon worker is joined before the shutdown hook runs and would delay
+process exit. For the same reason a ``sign_in()`` started after that hook,
+from an ``atexit`` handler registered before ``questdb`` was imported, cannot
+show a prompt: it succeeds
 from a cached or silently refreshable credential, and otherwise raises
 :class:`~questdb.auth.OidcInteractionRequired` at once unless the provider opens
 a browser.
