@@ -268,6 +268,23 @@ Fixed
   affected. Rows written this way in 5.0 hold ``false`` or ``0`` where
   the frame held ``True``; re-ingest them from the source if they matter.
 
+- **A column name containing a NUL character (``'\0'``) no longer aborts the
+  process or lands under a shortened name.** ``QuestDB.dataframe()``,
+  ``PooledSender.dataframe()`` and the WebSocket ``Sender.dataframe()`` pass
+  a polars, pyarrow or Arrow-backed pandas frame to the client through the
+  Arrow C Data Interface, which carries a name only up to its first NUL. In
+  5.0 such a name in a polars frame, including a struct field name, aborted
+  the Python process inside polars. In a pyarrow Table, RecordBatch or
+  RecordBatchReader, or an Arrow-backed pandas frame, the column was written
+  under the name cut at the NUL, so ``'a\0b'`` became ``a``. The same
+  happened to the name of a pandas index other than a ``RangeIndex``, which
+  that route writes as a column. These frames now raise
+  :class:`QuestDBError <questdb.QuestDBError>` before anything is sent. A
+  column or index name gets the ``InvalidName`` error that ``row()`` raises
+  for it, and a polars struct field name gets a ``BadDataFrame`` error. For
+  other Arrow sources (for example DuckDB, nanoarrow or arro3) the client
+  does not read the names before the export, so it cannot see the NUL.
+
 - Direct QWP DataFrame ingestion reports ``in_doubt=True`` when a failure
   follows an earlier batch that may have committed, including local validation
   and Arrow stream failures. Delivery status is aggregated by the DataFrame

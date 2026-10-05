@@ -3687,6 +3687,164 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertIn(name.encode('utf-8'), payload)
         self.assertIn(expected_micros.to_bytes(8, 'little'), payload)
 
+    _NUL_NAME_CONF = (
+        'ws::addr=127.0.0.1:{port};lazy_connect=true;'
+        'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+
+    def _assert_nul_column_name_refused(self, frame):
+        """`dataframe()` refuses `frame`, whose bad name is 'a\\0b', with
+        the error `row()` raises for that name, before it opens a
+        connection or sends anything."""
+        with self.assertRaises(qi.QuestDBError) as row_refusal:
+            qi.Buffer(protocol_version=2).row(
+                't', columns={'a\x00b': 1}, at=qi.ServerTimestamp)
+        with QwpAckServer(record_payloads=True) as server:
+            conf = self._NUL_NAME_CONF.format(port=server.port)
+            with qi.QuestDB.from_conf(conf) as client:
+                with self.assertRaises(qi.QuestDBError) as refusal:
+                    client.dataframe(
+                        frame, table_name='t', at=qi.ServerTimestamp)
+            stats = server.snapshot()
+        self.assertEqual(
+            refusal.exception.code, qi.QuestDBErrorCode.InvalidName)
+        self.assertEqual(str(refusal.exception), str(row_refusal.exception))
+        self.assertEqual(stats['accepted_connections'], 0)
+        self.assertEqual(stats['binary_payloads'], [])
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_nul_in_a_pyarrow_column_name_is_refused(self):
+        """The Arrow C Data Interface carries a name only up to its first
+        NUL, so pyarrow exports a column 'a\\0b' as `a`. A Table, a
+        RecordBatch and a RecordBatchReader with such a column are each
+        refused before anything is sent."""
+        if not hasattr(pyarrow.Table, '__arrow_c_stream__'):
+            self.skipTest('needs pyarrow 14+')
+        table = pyarrow.table(
+            {'a\x00b': pyarrow.array([1], pyarrow.int64())})
+        self._assert_nul_column_name_refused(table)
+        self._assert_nul_column_name_refused(table.to_batches()[0])
+        self._assert_nul_column_name_refused(
+            pyarrow.RecordBatchReader.from_batches(
+                table.schema, table.to_batches()))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_nul_in_an_arrow_backed_pandas_column_or_index_name_is_refused(
+            self):
+        """pandas exports an Arrow-backed frame through pyarrow, which
+        cuts a name at its first NUL. That covers a column label, a
+        bytes label (decoded as UTF-8) and the name of an index other
+        than a RangeIndex (exported as a column of its own), and each is
+        refused. An int label goes through, and so does the name of a
+        RangeIndex, which is not exported."""
+        if not (hasattr(pd.DataFrame, '__arrow_c_stream__')
+                and hasattr(pyarrow.Table, '__arrow_c_stream__')):
+            self.skipTest(
+                'needs pandas 2.2+ and pyarrow 14+: before them an '
+                'Arrow-backed frame takes the NumPy route')
+        arrow_int64 = pd.ArrowDtype(pyarrow.int64())
+        arrow_int = pd.array([1], dtype=arrow_int64)
+
+        self._assert_nul_column_name_refused(
+            pd.DataFrame({'a\x00b': arrow_int}))
+
+        # An object Index keeps the `np.str_`; a dict key would not.
+        str_subclass = pd.DataFrame(
+            [[1]], columns=pd.Index([np.str_('a\x00b')], dtype=object),
+        ).astype(arrow_int64)
+        self.assertIs(type(str_subclass.columns[0]), np.str_)
+        self.assertEqual(list(str_subclass.dtypes), [arrow_int64])
+        self._assert_nul_column_name_refused(str_subclass)
+
+        bytes_label = pd.DataFrame({b'a\x00b': arrow_int})
+        self.assertIs(type(bytes_label.columns[0]), bytes)
+        self.assertEqual(list(bytes_label.dtypes), [arrow_int64])
+        self._assert_nul_column_name_refused(bytes_label)
+
+        named_index = pd.DataFrame(
+            {'v': arrow_int}, index=pd.Index([10], name='a\x00b'))
+        self.assertNotIsInstance(named_index.index, pd.RangeIndex)
+        self._assert_nul_column_name_refused(named_index)
+
+        types = self._dataframe_column_types(
+            pd.DataFrame({5: arrow_int}),
+            table_name='t', at=qi.ServerTimestamp)
+        self.assertEqual(list(types), ['5'])
+
+        named_range = pd.DataFrame({'v': arrow_int})
+        named_range.index.name = 'a\x00b'
+        self.assertIsInstance(named_range.index, pd.RangeIndex)
+        types = self._dataframe_column_types(
+            named_range, table_name='t', at=qi.ServerTimestamp)
+        self.assertEqual(list(types), ['v'])
+
+    _NUL_NAME_POLARS_SCRIPT = f'CONF = {_NUL_NAME_CONF!r}\n' + r'''
+import polars as pl
+import questdb._client as qi
+from qwp_ws_ack_server import QwpAckServer
+
+NAME = 'a\x00b'
+try:
+    qi.Buffer(protocol_version=2).row(
+        't', columns={NAME: 1}, at=qi.ServerTimestamp)
+except qi.QuestDBError as exc:
+    EXPECTED = str(exc)
+else:
+    raise AssertionError('row() accepted a NUL in a column name')
+
+
+def refusal(frame):
+    """Write `frame` and return the error that refuses it. Nothing may
+    reach the server."""
+    with QwpAckServer(record_payloads=True) as server:
+        with qi.QuestDB.from_conf(CONF.format(port=server.port)) as client:
+            try:
+                client.dataframe(
+                    frame, table_name='t', at=qi.ServerTimestamp)
+            except qi.QuestDBError as exc:
+                caught = exc
+            else:
+                raise AssertionError(f'accepted: {frame!r}')
+        stats = server.snapshot()
+    assert stats['accepted_connections'] == 0, stats
+    assert stats['binary_payloads'] == [], stats
+    return caught
+
+
+for frame in (pl.DataFrame({NAME: [1]}), pl.LazyFrame({NAME: [1]})):
+    exc = refusal(frame)
+    assert exc.code == qi.QuestDBErrorCode.InvalidName, exc.code
+    assert str(exc) == EXPECTED, str(exc)
+
+# A plain column ahead of the nested one, so the message shows which
+# column the struct field belongs to.
+struct = pl.DataFrame({'v': [1], 's': [{NAME: 1}]})
+assert struct.schema['s'] == pl.Struct({NAME: pl.Int64}), struct.schema
+list_of_struct = pl.DataFrame({'v': [1], 's': [[{NAME: 1}]]})
+assert list_of_struct.schema['s'] == pl.List(
+    pl.Struct({NAME: pl.Int64})), list_of_struct.schema
+for frame in (struct, list_of_struct):
+    exc = refusal(frame)
+    assert exc.code == qi.QuestDBErrorCode.BadDataFrame, exc.code
+    assert str(exc).startswith(
+        "Bad column 's': struct field name 'a\\x00b'"), str(exc)
+
+print('OK')
+'''
+
+    def test_a_nul_in_a_polars_column_or_field_name_is_refused(self):
+        """polars panics when its Arrow export meets a name holding a
+        NUL, struct field names included, and the panic aborts the
+        process. Such a name is refused before the export: a column
+        name with the error `row()` raises for it, a struct field name
+        with BadDataFrame naming its column. Runs in a child
+        interpreter, where an abort reads as a failed exit and the rest
+        of the suite keeps running."""
+        polars = self._import_polars_or_skip()
+        if not hasattr(polars.DataFrame, '__arrow_c_stream__'):
+            self.skipTest('needs a polars with the Arrow PyCapsule export')
+        self._run_in_child_interpreter(self._NUL_NAME_POLARS_SCRIPT)
+
     def test_clear_from_inside_uuid_or_ipv4_conversion(self):
         """The conversion of a UUID or IPV4 value can re-enter the buffer
         while the row is half-written. `clear()` refuses to run there and

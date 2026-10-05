@@ -6971,6 +6971,95 @@ cdef void_int _reject_polars_object_columns(object frame) except -1:
     return 0
 
 
+cdef object _arrow_source_column_names(object frame):
+    """The names `frame`'s Arrow export gives its columns, as the Python
+    objects they come from: a pandas DataFrame's column labels, plus the
+    level names of an index other than a RangeIndex; a polars
+    DataFrame's columns; the schema names of a pyarrow Table,
+    RecordBatch or RecordBatchReader. None for any other type."""
+    cdef list names
+    if _is_pandas_dataframe_object(frame):
+        names = frame.columns.tolist()
+        # pyarrow's pandas conversion writes each level of an index
+        # other than a RangeIndex as a column named after the level.
+        _dataframe_may_import_deps()
+        if not isinstance(frame.index, _PANDAS.RangeIndex):
+            names.extend(frame.index.names)
+        return names
+    if _try_import_polars() and isinstance(frame, _POLARS_DATAFRAME_T):
+        return frame.columns
+    if _PYARROW is None and sys.modules.get('pyarrow') is None:
+        # A pyarrow object exists only once pyarrow is imported.
+        return None
+    _dataframe_require_pyarrow()
+    if isinstance(frame, (_PYARROW.Table, _PYARROW.RecordBatch,
+                          _PYARROW.RecordBatchReader)):
+        return frame.schema.names
+    return None
+
+
+cdef object _polars_struct_field_with_nul(object dtype):
+    """The first struct field name inside polars `dtype`, at any depth,
+    that holds a NUL; None when there is none."""
+    cdef object field
+    cdef object found
+    if isinstance(dtype, _POLARS.Struct):
+        for field in dtype.fields:
+            if '\0' in field.name:
+                return field.name
+            found = _polars_struct_field_with_nul(field.dtype)
+            if found is not None:
+                return found
+    elif isinstance(dtype, (_POLARS.List, _POLARS.Array)):
+        return _polars_struct_field_with_nul(dtype.inner)
+    return None
+
+
+cdef void_int _reject_nul_column_names(object frame) except -1:
+    """The Arrow C Data Interface carries each name as a NUL-terminated
+    string. pyarrow, and pandas through it, cut a name holding a NUL at
+    the NUL on export, so its column would land under the shorter name.
+    polars panics on such a name, struct field names included, and the
+    process aborts. The names are checked here, before the export: a
+    column name is refused with the error `row()` raises for it, and a
+    polars struct field name with a BadDataFrame error."""
+    cdef object names = _arrow_source_column_names(frame)
+    cdef object name
+    cdef object dtype
+    cdef object field
+    cdef Py_ssize_t i
+    cdef qdb_pystr_buf* b
+    cdef line_sender_column_name c_name
+    if names is None:
+        return 0
+    for name in names:
+        if isinstance(name, bytes):
+            # pyarrow writes a bytes label decoded as UTF-8.
+            name = name.decode('utf-8', 'replace')
+        if isinstance(name, str) and '\0' in name:
+            b = qdb_pystr_buf_new()
+            try:
+                # Raises: a column name can't contain '\0'.
+                str_to_column_name(b, str(name), &c_name)
+            finally:
+                qdb_pystr_buf_free(b)
+    if _POLARS is not None and isinstance(frame, _POLARS_DATAFRAME_T):
+        # `dtypes` is cheap to read, and `is_nested()` leaves the walk
+        # to the rare nested column. `names` is `frame.columns`, in the
+        # same order.
+        for i, dtype in enumerate(frame.dtypes):
+            if not dtype.is_nested():
+                continue
+            field = _polars_struct_field_with_nul(dtype)
+            if field is not None:
+                raise QuestDBError(
+                    QuestDBErrorCode.BadDataFrame,
+                    f'Bad column {names[i]!r}: struct field name '
+                    f"{field!r} contains a NUL character ('\\0'), which "
+                    f'polars cannot export.')
+    return 0
+
+
 
 
 cdef void_int _capsule_consume_stream(
@@ -7947,10 +8036,12 @@ cdef bint _dataframe_client_try_capsule_path(
             'datetime, ServerTimestamp, or None for Arrow-native DataFrame '
             'input.')
 
-    # An empty frame is a no-op: emit nothing and skip symbol-shape
-    # validation, which is moot with zero rows.
+    # An empty frame is a no-op: it emits nothing and is never exported,
+    # so it skips the name check and symbol-shape validation.
     if total_rows == 0:
         return True
+
+    _reject_nul_column_names(sliceable)
 
     symbol_overrides = _resolve_symbols_to_overrides(sliceable, symbols)
     if symbol_overrides is None:
