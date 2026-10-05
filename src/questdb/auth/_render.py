@@ -695,23 +695,24 @@ def format_prompt(resp: Dict[str, Any]) -> str:
     """Plain-text sign-in prompt (also used as the notebook fallback)."""
     # _display_url shows the IDNA/punycode host (and drops userinfo) so a
     # homoglyph / user@host can't spoof the host in the plain-text prompt either.
-    uri = _display_url(_verification_uri(resp))
-    if (_native_adjudicated(resp)
-            and _verification_target(resp) is None):
+    native = _native_adjudicated(resp)
+    target = _verification_target(resp) if native else None
+    # When native supplied a vetted plain URL, it may differ from the capped
+    # display-only string. Show the full URL in both the terminal and the
+    # notebook's text/plain fallback, so a text-only frontend can still sign
+    # in. A distinct complete URL remains a separate shortcut below.
+    complete = _matched_complete(resp)
+    shown_uri = (target if native and target and not complete
+                 else _verification_uri(resp))
+    uri = _display_url(shown_uri)
+    if native and target is None:
         uri = _defang_terminal_url(uri)
     code = _strip_control(str(resp.get('user_code') or ''))
     # Only offer the pre-filled "open directly" URL when it shares the shown
     # link's origin (see _matched_complete); a complete on a different host is
-    # dropped rather than shown, so the convenience URL can't point somewhere the
-    # primary link does not.
-    #
-    # For native events, _matched_complete also requires an exact match with
-    # browser_target: a truncated display URL may pass Python's origin check
-    # even though native refused to open the original complete URL.
-    complete = (
-        None if (_native_adjudicated(resp)
-                 and _verification_target(resp) is None)
-        else _matched_complete(resp))
+    # dropped rather than shown, so the convenience URL can't point somewhere
+    # the primary link does not. Native requires an exact browser_target match
+    # too: a shortened display URL is never promoted to a complete shortcut.
     lines = [
         '🔐 Sign in to QuestDB',
         f'   Open {uri}  and enter code:  {code}',
@@ -959,40 +960,32 @@ class JupyterRenderer(Renderer):
         URL. Returns the list of body HTML fragments.
         """
         resp = self._resp
-        # _render_link / _safe_target / _qr_img each strip + vet internally, so
-        # pass the raw fields and let the single canonical target drive the href,
-        # the QR and the displayed (IDNA-normalized) label uniformly.
         raw_uri = _verification_uri(resp)
-        # When native adjudicated these URLs and refused to vet one, nothing on
-        # this panel becomes actionable: the URL is still shown (inert, escaped,
-        # copyable) but carries no href, and the one-click affordance below is
-        # dropped. Falling back to the displayed value would hand the user the
-        # very destination native declined to offer -- and since native rejects
-        # an over-long URL rather than truncating it, that value may be a
-        # truncated string that parses as a valid *different* URL.
-        native_refused = (_native_adjudicated(resp)
-                          and _verification_target(resp) is None)
-        href = None if native_refused else raw_uri
+        native = _native_adjudicated(resp)
+        target = _verification_target(resp) if native else None
+        matched = _matched_complete(resp)
+        # A native verification_uri is display text, not an actionable URL:
+        # native may have truncated it BEFORE stripping invisible characters.
+        # Link only its vetted browser_target. If that target is the distinct
+        # complete shortcut, show the plain URL inertly and offer the complete
+        # link below instead; otherwise label the link with the actual target,
+        # never with a different, shortened display value. Preserve the local
+        # fallback only for custom renderers with no native verdict.
+        href = (None if matched else target) if native else raw_uri
+        label_url = href if native and href else raw_uri
         code = html.escape(_strip_control(str(resp.get('user_code') or '')))
         body = [
             '<div style="font-size:1.05em;font-weight:600;margin-bottom:6px">'
             '🔐 Sign in to QuestDB</div>',
-            f'<div>Open {_render_link(href, text=_display_url(raw_uri))} '
+            f'<div>Open {_render_link(href, text=_display_url(label_url))} '
             f'and enter code:</div>',
             f'<div style="font-size:1.6em;font-family:monospace;'
             f'letter-spacing:2px;margin:6px 0">{code}</div>',
         ]
-        # Offer the one-click link only for a same-origin complete that native
-        # actually vetted (or for the pure-Python fallback without a native
-        # verdict). A shortened display URL must never become an href.
-        #
-        # Name the host in the label rather than using fixed text. Both URLs
-        # come from the same identity-provider response, so an origin match
-        # between them proves only that they agree -- not that either is the
-        # IdP the user configured. A reader who can see where the click goes can
-        # notice a host that does not belong; one shown only "Click here to
-        # authorize directly" cannot.
-        matched = None if native_refused else _matched_complete(resp)
+        # Offer a complete shortcut only when native actually vetted it (or
+        # when the pure-Python fallback matched its origin). Name its host in
+        # the label: agreement between two IdP-provided URLs does not prove
+        # that either belongs to the IdP the user configured.
         if matched:
             matched_host = _display_host(matched)
             label = (

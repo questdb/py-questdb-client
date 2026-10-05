@@ -42,6 +42,7 @@ import threading
 import time
 import types
 import unittest
+import urllib.request
 import uuid
 import weakref
 from unittest import mock
@@ -5012,6 +5013,58 @@ class RenderSanitizerTest(unittest.TestCase):
         self.assertNotIn(display_complete, head)
         self.assertEqual(head.count('<a href'), 1)
 
+    def test_native_shortened_plain_url_links_only_to_full_browser_target(self):
+        # Exercise the native producer, not a hand-made response dict: its
+        # 256-character display cap runs before zero-width characters are
+        # stripped, while browser_target vets the full, stripped URL.
+        with OidcTestServer() as server:
+            target = server.url + '/verify/good'
+            raw_uri = server.url + '/verify/' + '\u200b' * 250 + 'good'
+            original_handle = server._handle
+
+            def long_device_uri(handler):
+                if handler.command == 'GET' and handler.path == '/verify/good':
+                    server._record(handler, b'')
+                    return server._bytes(handler, 200, b'ok', 'text/plain')
+                if handler.command != 'POST' or handler.path != '/device':
+                    return original_handle(handler)
+                length = int(handler.headers.get('Content-Length', '0'))
+                server._record(handler, handler.rfile.read(length))
+                server._json(handler, 200, {
+                    'device_code': 'DEV-CODE-123',
+                    'user_code': 'WXYZ-1234',
+                    'verification_uri': raw_uri,
+                    'expires_in': 600,
+                    'interval': 5,
+                })
+
+            server._handle = long_device_uri
+            recorder = RecordingRenderer()
+            auth = make_discovered_auth(server, renderer=recorder)
+            try:
+                auth.sign_in()
+                with urllib.request.urlopen(target, timeout=2) as reply:
+                    self.assertEqual(reply.status, 200)
+            finally:
+                auth.close()
+
+        prompt, = recorder.prompts
+        self.assertEqual(prompt['browser_target'], target)
+        self.assertNotEqual(prompt['verification_uri'], target)
+        self.assertIsNone(prompt['verification_uri_complete'])
+        renderer = _render.JupyterRenderer(qr=False)
+        renderer._resp = prompt
+        head = ''.join(renderer._prompt_head())
+        self.assertEqual(head.count('<a href'), 1)
+        self.assertIn(f'<a href="{target}"', head)
+        self.assertIn(f'>{target}</a>', head)
+        self.assertNotIn(prompt['verification_uri'] + '</a>', head)
+        # Text-only notebook frontends use this twin rather than the HTML.
+        # They need the same full address, not the native display-only cap.
+        plain = renderer._prompt_text('waiting')
+        self.assertIn(target, plain)
+        self.assertNotIn(prompt['verification_uri'], plain)
+
     def test_native_vetted_target_still_drives_the_link(self):
         # The fallback must not disturb a native-vetted complete shortcut.
         complete = 'https://idp.example.com/device?c=A'
@@ -5026,7 +5079,10 @@ class RenderSanitizerTest(unittest.TestCase):
         self.assertIn('open directly', _render.format_prompt(resp))
         renderer = _render.JupyterRenderer(qr=False)
         renderer._resp = resp
-        self.assertIn('authorize directly', ''.join(renderer._prompt_head()))
+        head = ''.join(renderer._prompt_head())
+        self.assertIn('authorize directly', head)
+        self.assertEqual(head.count('<a href'), 1)
+        self.assertIn(f'<a href="{complete}"', head)
 
     def test_custom_renderer_without_browser_target_keeps_fallback(self):
         # A pure-Python renderer builds its own dict with no browser_target
