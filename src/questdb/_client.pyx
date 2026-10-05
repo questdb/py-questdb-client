@@ -9538,7 +9538,18 @@ cdef class QuestDB:
             None if lease_limit is None else started + lease_limit)
         call_deadline = (
             None if call_limit is None else started + call_limit)
-        with self._state_cond:
+        # The lock is taken and released through `acquire` and `release`,
+        # the RLock's own C methods, here and at every other place
+        # `close()` and `__exit__` hold it. `Condition.__enter__` and
+        # `__exit__` are written in Python, and a pending Ctrl-C is
+        # raised at the start of the first Python function called after
+        # it arrives. Raised on entry to `Condition.__exit__`, before
+        # that releases the lock, it would leave this thread holding it,
+        # and every other thread using the handle would block on it for
+        # good. A blocked `acquire` can itself be interrupted; it then
+        # raises without taking the lock, before the `try` it guards.
+        self._state_cond.acquire()
+        try:
             # A close from inside one of this handle's own calls --
             # `dataframe()` reading `attrs`, a cell conversion, an
             # Arrow producer, a lease's own `row()` -- would wait on
@@ -9584,6 +9595,8 @@ cdef class QuestDB:
             # `call_deadline`, so the default and `None` clear the
             # budget, and the way out closes with the default limits.
             self._close_deadline = call_deadline
+        finally:
+            self._state_cond.release()
         # Each wait below holds the lock only to read state and to
         # wait on it, and emits its progress notice with the lock
         # released. A notice runs the caller's logging handlers, which
@@ -9595,7 +9608,18 @@ cdef class QuestDB:
         next_notice = started + 5.0
         while True:
             notice = False
-            with self._state_cond:
+            # Held through `acquire` and `release`, as above. Here it
+            # also keeps Python code out of the step from claiming the
+            # pointer to the native teardown: after the claim, the next
+            # code to run is the `release` below and then the `try`
+            # around `questdb_db_close`, so a Ctrl-C arriving in between
+            # stays pending until the teardown's own `finally`, which
+            # records the close first. A second Ctrl-C landing inside
+            # `Condition.wait`'s own re-acquire of the lock can still
+            # leave the lock in a bad state; nothing has been claimed
+            # while this thread waits, so no teardown is skipped.
+            self._state_cond.acquire()
+            try:
                 if self._db == NULL:
                     break
                 if self._lease_uses + self._call_uses == 0:
@@ -9644,6 +9668,8 @@ cdef class QuestDB:
                     now = time.monotonic()
                     next_notice = now + (
                         5.0 if now - started < 60.0 else 60.0)
+            finally:
+                self._state_cond.release()
             if notice:
                 # Logged rather than warned, like every other
                 # notice this client emits from a place the
@@ -9691,7 +9717,9 @@ cdef class QuestDB:
                             else time.monotonic() + lease_limit)
             while True:
                 notice = False
-                with self._state_cond:
+                # Held through `acquire` and `release`, as above.
+                self._state_cond.acquire()
+                try:
                     if not self._close_running:
                         # `_close_running` clearing says the close()
                         # that claimed the pointer has finished;
@@ -9727,6 +9755,8 @@ cdef class QuestDB:
                     if (not self._state_cond.wait(timeout=wait_s)
                             and self._close_running):
                         notice = True
+                finally:
+                    self._state_cond.release()
                 if notice:
                     logging.getLogger('questdb').warning(
                         'QuestDB.close() is still waiting for '
@@ -9749,18 +9779,20 @@ cdef class QuestDB:
             # callbacks by now: `questdb_db_close` has joined the
             # dispatchers, so no callback can run any more.
             #
-            # No Python code runs before the close is published. A
-            # Ctrl-C during the native close, which runs without the
-            # GIL, is held as a pending signal and raised at the first
-            # Python bytecode after it. `with self._state_cond:` would
-            # be that bytecode -- `Condition.__enter__` is written in
-            # Python -- and every later close() would then wait for
-            # this one for good, with the callbacks still pinned. So
-            # the lock is taken through `acquire`, which is the RLock's
-            # own C method, and the state is written by plain attribute
-            # assignment. A blocked acquire can still be interrupted by
-            # a further signal; it is retried, and the first interrupt
-            # is raised once everything here is done.
+            # No Python code runs from the claim of the pointer to the
+            # moment the close is published. A Ctrl-C during the native
+            # close, which runs without the GIL, or between the claim
+            # and it, is held as a pending signal and raised at the
+            # first Python function called after it. `with
+            # self._state_cond:` would be that call --
+            # `Condition.__enter__` is written in Python -- and every
+            # later close() would then wait for this one for good, with
+            # the callbacks still pinned. So the lock is taken through
+            # `acquire`, which is the RLock's own C method, and the
+            # state is written by plain attribute assignment. A blocked
+            # acquire can still be interrupted by a further signal; it
+            # is retried, and the first interrupt is raised once
+            # everything here is done.
             while not locked:
                 try:
                     self._state_cond.acquire()
@@ -9820,8 +9852,12 @@ cdef class QuestDB:
         :meth:`close` does -- a lease left open there is a leak worth
         hearing about.
         """
-        with self._state_cond:
+        # Held through `acquire` and `release`, as in `close()`.
+        self._state_cond.acquire()
+        try:
             deadline = self._close_deadline
+        finally:
+            self._state_cond.release()
         if deadline is None:
             timeout = _CLOSE_TIMEOUT_DEFAULT
         else:

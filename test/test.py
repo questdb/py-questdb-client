@@ -8673,6 +8673,357 @@ print('OK')
         self._run_in_child_interpreter(
             self._INTERRUPT_DURING_TEARDOWN_SCRIPT, timeout=60)
 
+    # Shared by the two sweeps below. A pending Ctrl-C is raised at the
+    # start of the first Python function the compiled code calls, so the
+    # trace hook raises `KeyboardInterrupt` at the start of the Nth one,
+    # for every N a run reaches. The hook is installed right before a
+    # compiled call -- `db.close()`, or the end of a `with` block, whose
+    # exit is the compiled `QuestDB.__exit__` -- so no frame of the
+    # harness itself is counted.
+    _CLOSE_INTERRUPT_SWEEP_HARNESS = """
+import gc
+import os
+import sys
+import threading
+import time
+import questdb._client as qi
+from qwp_ws_ack_server import QwpAckServer
+
+WAIT_CODE = threading.Condition.wait.__code__
+failures = []
+
+
+def on_error(err):
+    pass
+
+
+def connect(server):
+    return qi.QuestDB.from_conf(
+        f'ws::addr=127.0.0.1:{server.port};sender_pool_min=0;'
+        'query_pool_min=0;pool_reap=manual;',
+        error_handler=on_error)
+
+
+class Injector:
+    # Records each Python function entered on this thread and raises
+    # KeyboardInterrupt at the start of the `stop_at`-th one. `on_wait`
+    # runs when the thread enters Condition.wait, and again when the
+    # hook raises, so a helper waiting for either is always released.
+    def __init__(self, stop_at=None, on_wait=None):
+        self.stop_at = stop_at
+        self.on_wait = on_wait
+        self.entered = []
+        self.saw_wait = False
+        self.stopped_in = None
+
+    def __call__(self, frame, event, arg):
+        if event != 'call':
+            return None
+        code = frame.f_code
+        self.entered.append(
+            f'{os.path.basename(code.co_filename)}:{code.co_name}')
+        if code is WAIT_CODE:
+            self.saw_wait = True
+            if self.on_wait is not None:
+                self.on_wait()
+        if len(self.entered) == self.stop_at:
+            self.stopped_in = self.entered[-1]
+            sys.settrace(None)
+            if self.on_wait is not None:
+                self.on_wait()
+            raise KeyboardInterrupt
+        return None
+
+
+def lock_is_free(db, limit):
+    # Takes the handle's lock on another thread. Never hands out a
+    # lease, so it cannot give a later close() anything to wait for.
+    done = threading.Event()
+
+    def probe():
+        try:
+            db.connection_events_dropped
+        except qi.QuestDBError:
+            pass
+        done.set()
+
+    threading.Thread(target=probe, daemon=True).start()
+    return done.wait(limit)
+
+
+def is_closed(db):
+    try:
+        lease = db.sender()
+    except qi.QuestDBError as exc:
+        return (exc.code == qi.QuestDBErrorCode.InvalidApiCall
+                and 'QuestDB is closed' in str(exc))
+    lease.close()
+    return False
+
+
+def closes_at_once(db):
+    started = time.monotonic()
+    try:
+        db.close(timeout=5)
+    except qi.QuestDBError as exc:
+        return f'a later close() raised: {exc}'
+    took = time.monotonic() - started
+    if took >= 1.0:
+        return f'a later close() took {took:.2f}s'
+    return None
+
+
+def check_closed(db, problems):
+    if not is_closed(db):
+        problems.append('the handle is not closed')
+    if id(db) in qi._LIVE_CALLBACK_REFS:
+        problems.append('the callbacks are still referenced')
+
+
+def sweep(name, scenario, require_wait):
+    with scenario.server() as server:
+        reference, outcome, problems = scenario(server, None)
+        if problems:
+            failures.append(f'{name}, reference run ({outcome}): {problems}')
+            return
+        if require_wait and not reference.saw_wait:
+            failures.append(
+                f'{name}: the reference run never entered '
+                f'Condition.wait: {reference.entered}')
+            return
+        expected = reference.entered
+        for n in range(1, len(expected) + 1):
+            for _ in range(4):
+                injector, outcome, problems = scenario(server, n)
+                if injector.entered == expected[:n]:
+                    break
+            else:
+                failures.append(
+                    f'{name}, N={n}: calls differ from the reference run: '
+                    f'{injector.entered} vs {expected[:n]}')
+                continue
+            if problems:
+                failures.append(
+                    f'{name}, N={n}, stopped in {injector.stopped_in} '
+                    f'({outcome}): {"; ".join(problems)}')
+
+
+def finish():
+    if failures:
+        sys.stderr.write('\\n'.join(failures) + '\\n')
+        sys.stderr.flush()
+        os._exit(1)
+    print('OK')
+    sys.stdout.flush()
+    os._exit(0)
+"""
+
+    _INTERRUPT_ANYWHERE_IN_CLOSE_SCRIPT = _CLOSE_INTERRUPT_SWEEP_HARNESS + """
+
+def run_nothing_outstanding(server, stop_at, use_with):
+    injector = Injector(stop_at)
+    outcome = 'returned'
+    gc.collect()
+    gc.disable()
+    try:
+        if use_with:
+            with connect(server) as db:
+                # One idle pooled connection for the teardown.
+                db.sender().close()
+                sys.settrace(injector)
+        else:
+            db = connect(server)
+            db.sender().close()
+            sys.settrace(injector)
+            db.close()
+    except KeyboardInterrupt:
+        outcome = 'KeyboardInterrupt'
+    except qi.QuestDBError:
+        outcome = 'QuestDBError'
+    finally:
+        sys.settrace(None)
+        gc.enable()
+    problems = []
+    if not lock_is_free(db, 2):
+        problems.append('the lock is held')
+    problem = closes_at_once(db)
+    if problem:
+        problems.append(problem)
+    check_closed(db, problems)
+    return injector, outcome, problems
+
+
+def run_lease_outstanding(server, stop_at, use_with):
+    release = threading.Event()
+    injector = Injector(stop_at, on_wait=release.set)
+
+    def return_lease(lease):
+        release.wait()
+        lease.close()
+
+    outcome = 'returned'
+    helper = None
+    gc.collect()
+    gc.disable()
+    try:
+        if use_with:
+            with connect(server) as db:
+                helper = threading.Thread(
+                    target=return_lease, args=(db.sender(),), daemon=True)
+                helper.start()
+                sys.settrace(injector)
+        else:
+            db = connect(server)
+            helper = threading.Thread(
+                target=return_lease, args=(db.sender(),), daemon=True)
+            helper.start()
+            sys.settrace(injector)
+            db.close()
+    except KeyboardInterrupt:
+        outcome = 'KeyboardInterrupt'
+    except qi.QuestDBError:
+        outcome = 'QuestDBError'
+    finally:
+        sys.settrace(None)
+        gc.enable()
+    # Released here too: an interrupt before close() reached its wait
+    # leaves the helper waiting otherwise.
+    release.set()
+    helper.join(2)
+    problems = []
+    if helper.is_alive():
+        problems.append('the lease could not be returned')
+    if not lock_is_free(db, 2):
+        problems.append('the lock is held')
+    problem = closes_at_once(db)
+    if problem:
+        problems.append(problem)
+    check_closed(db, problems)
+    return injector, outcome, problems
+
+
+for use_with in (False, True):
+    how = 'with block' if use_with else 'close()'
+
+    def nothing_outstanding(server, stop_at, use_with=use_with):
+        return run_nothing_outstanding(server, stop_at, use_with)
+    nothing_outstanding.server = QwpAckServer
+
+    def lease_outstanding(server, stop_at, use_with=use_with):
+        return run_lease_outstanding(server, stop_at, use_with)
+    lease_outstanding.server = QwpAckServer
+
+    sweep(f'nothing outstanding, {how}', nothing_outstanding,
+          require_wait=False)
+    sweep(f'lease outstanding, {how}', lease_outstanding,
+          require_wait=True)
+finish()
+"""
+
+    _INTERRUPT_WHILE_WAITING_FOR_ANOTHER_CLOSE_SCRIPT = (
+        _CLOSE_INTERRUPT_SWEEP_HARNESS + """
+
+def close_quietly(db):
+    try:
+        db.close()
+    except BaseException:
+        pass
+
+
+def wait_for_another_close(server, stop_at):
+    injector = Injector(stop_at)
+    db = connect(server)
+    # Acks are held back, so the close on thread B spends about half a
+    # second draining this row without the GIL.
+    lease = db.sender()
+    lease.row('t', columns={'v': 1}, at=qi.TimestampNanos(1))
+    lease.flush()
+    lease.close()
+    outcome = 'returned'
+    gc.collect()
+    gc.disable()
+    closer = threading.Thread(target=close_quietly, args=(db,), daemon=True)
+    closer.start()
+    # `_begin_db_use` reports "closing" until a close() claims the
+    # pointer and "closed" from then on, while the teardown still runs.
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            db.connection_events_dropped
+        except qi.QuestDBError as exc:
+            if 'QuestDB is closed' in str(exc):
+                break
+        if time.monotonic() > deadline:
+            gc.enable()
+            return injector, outcome, [
+                'thread B did not claim the pointer within 2s']
+        time.sleep(0.001)
+    sys.settrace(injector)
+    try:
+        db.close()
+    except KeyboardInterrupt:
+        outcome = 'KeyboardInterrupt'
+    except qi.QuestDBError:
+        outcome = 'QuestDBError'
+    finally:
+        sys.settrace(None)
+        gc.enable()
+    problems = []
+    if not lock_is_free(db, 1):
+        problems.append('the lock is held')
+    closer.join(3)
+    if closer.is_alive():
+        problems.append("thread B's close() did not finish")
+    problem = closes_at_once(db)
+    if problem:
+        problems.append(problem)
+    return injector, outcome, problems
+
+
+def slow_ack_server():
+    return QwpAckServer(ack_delay_s=0.5)
+
+
+wait_for_another_close.server = slow_ack_server
+sweep('waiting for another close', wait_for_another_close,
+      require_wait=True)
+finish()
+""")
+
+    @unittest.skipIf(
+        sys.implementation.name == 'pypy',
+        'the sweep relies on CPython raising a pending signal at the '
+        'start of the next Python function; PyPy runs signal handlers '
+        'from its own periodic actions')
+    def test_an_interrupt_anywhere_in_close_leaves_the_handle_closable(self):
+        """A Ctrl-C can land at the start of any Python function
+        `QuestDB.close()` calls. Whichever one it is, the handle's lock
+        is released, a later `close()` finishes at once, and the handle
+        ends up closed with its callbacks released.
+
+        Swept over every such point, with nothing outstanding and with a
+        lease returned while `close()` waits for it, and for an explicit
+        `close()` as well as the one a `with` block makes on its way
+        out. Runs in a child interpreter, where a hang reads as a
+        timeout and the interrupt cannot reach the suite."""
+        self._run_in_child_interpreter(
+            self._INTERRUPT_ANYWHERE_IN_CLOSE_SCRIPT)
+
+    @unittest.skipIf(
+        sys.implementation.name == 'pypy',
+        'the sweep relies on CPython raising a pending signal at the '
+        'start of the next Python function; PyPy runs signal handlers '
+        'from its own periodic actions')
+    def test_an_interrupt_while_waiting_for_another_close_leaves_the_lock_free(
+            self):
+        """A `close()` that finds another thread's close running waits
+        for it. A Ctrl-C at any Python function that wait calls leaves
+        the lock free, the other close finishes, and a later `close()`
+        returns at once. Runs in a child interpreter."""
+        self._run_in_child_interpreter(
+            self._INTERRUPT_WHILE_WAITING_FOR_ANOTHER_CLOSE_SCRIPT,
+            timeout=60)
+
     def _run_in_child_interpreter(self, script, timeout=120):
         """Run `script` in a fresh interpreter and require it to print OK.
 

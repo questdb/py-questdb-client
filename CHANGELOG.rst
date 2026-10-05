@@ -319,6 +319,14 @@ Fixed
   The close is now recorded first. The ``KeyboardInterrupt`` still comes out
   of ``close()``, and a later ``close()`` returns at once.
 
+  The same holds for a Ctrl-C at any other point in ``close()``, or in the
+  close a ``with QuestDB(...)`` block makes on its way out. One landing just
+  as ``close()`` took over the handle used to skip the native teardown
+  altogether, leaving the same stuck handle and leaking its connections.
+  And one landing as ``close()`` let go of the handle's internal lock could
+  leave that lock held, so every other thread using the handle blocked for
+  good, which usually showed as a program that would not exit.
+
 - **Returning a pooled sender to its pool cannot raise.** Every refusal a
   lease makes belongs to ``close()``, which runs them before it releases. The
   release path is also the deallocation path, where a raise would skip the
