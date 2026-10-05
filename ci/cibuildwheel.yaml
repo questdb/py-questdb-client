@@ -108,6 +108,8 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -125,6 +127,8 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -142,6 +146,8 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -159,6 +165,8 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -176,6 +184,8 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -199,6 +209,8 @@ stages:
         pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -221,6 +233,8 @@ stages:
         pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -238,6 +252,8 @@ stages:
         pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -255,6 +271,8 @@ stages:
         pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -272,6 +290,8 @@ stages:
         pool: {vmImage: 'windows-2025'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -309,6 +329,8 @@ stages:
         pool: {vmImage: 'windows-2025'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
