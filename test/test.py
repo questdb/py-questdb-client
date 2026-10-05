@@ -10190,6 +10190,103 @@ finish()
         self.assertEqual(frame.attrs['questdb'], claim)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_plain_claim_is_copied_at_most_once_per_write(self):
+        """pandas deep-copies the whole of `df.attrs` into every Series it
+        derives, and a write derives one per column, in the planner or in
+        pandas' Arrow export. A claim that is a plain dict -- unpickled,
+        or written or replaced by hand -- would be copied once per
+        column, which makes the write quadratic in the column count.
+        `dataframe()` freezes it on a shallow copy of the frame, so each
+        write copies it once, and the caller's claim stays as it is."""
+
+        class CountingClaim(dict):
+            """A plain claim that counts its copies. Each copy counts its
+            own copies too, so a claim copied into a row slice and then
+            once per column in pandas' export shows every copy."""
+            copies = 0
+
+            def __deepcopy__(self, memo):
+                type(self).copies += 1
+                return type(self)(
+                    {key: copy.deepcopy(value, memo)
+                     for key, value in self.items()})
+
+        names = [f'c{index}' for index in range(50)]
+
+        def frame_of(column):
+            frame = pd.DataFrame({name: column() for name in names})
+            frame.attrs['questdb'] = CountingClaim(
+                version=1,
+                columns={name: {'kind': 'long'} for name in names})
+            return frame
+
+        def numpy_frame():
+            return frame_of(lambda: np.array([1, 2], dtype=np.int64))
+
+        probe = numpy_frame()
+        CountingClaim.copies = 0
+        _ = probe['c0']
+        if CountingClaim.copies == 0:
+            self.skipTest('this pandas does not deep-copy attrs')
+
+        def assert_copied_at_most_once(frame, write):
+            claim = frame.attrs['questdb']
+            CountingClaim.copies = 0
+            write(frame)
+            self.assertLessEqual(CountingClaim.copies, 1)
+            self.assertIs(frame.attrs['questdb'], claim)
+
+        with self.subTest(route='ILP'):
+            assert_copied_at_most_once(
+                numpy_frame(),
+                lambda frame: qi.Buffer(protocol_version=2).dataframe(
+                    frame, table_name='t', at=qi.ServerTimestamp))
+
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def write(frame):
+                    client.dataframe(
+                        frame, table_name='t', at=qi.ServerTimestamp)
+
+                with self.subTest(route='QWP NumPy'):
+                    assert_copied_at_most_once(numpy_frame(), write)
+
+                with self.subTest(route='QWP Arrow'):
+                    if not (pyarrow is not None
+                            and hasattr(pd.DataFrame, '__arrow_c_stream__')
+                            and hasattr(pyarrow.Table, '__arrow_c_stream__')):
+                        self.skipTest(
+                            'needs pyarrow, and pandas 2.2+ with pyarrow '
+                            '14+ for the Arrow route')
+                    assert_copied_at_most_once(
+                        frame_of(lambda: pd.array(
+                            [1, 2], dtype=pd.ArrowDtype(pyarrow.int64()))),
+                        write)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_plain_claim_that_contains_itself_still_writes(self):
+        """Freezing a claim rebuilds every mapping in it, so a claim that
+        contains itself cannot be frozen. pandas copies such a mapping
+        without trouble, so the claim is left plain and the write goes
+        ahead."""
+        claim = {'version': 1, 'columns': {'a': {'kind': 'long'}}}
+        claim['loop'] = claim
+        frame = pd.DataFrame({'a': np.array([1, 2], dtype=np.int64)})
+        frame.attrs['questdb'] = claim
+
+        buf = qi.Buffer(protocol_version=2)
+        buf.dataframe(frame, table_name='t', at=qi.ServerTimestamp)
+        self.assertIn(b'a=1i', bytes(buf))
+        self.assertEqual(
+            self._dataframe_column_types(
+                frame, table_name='t', at=qi.ServerTimestamp),
+            {'a': 0x05})
+        self.assertIs(frame.attrs['questdb'], claim)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_malformed_roundtrip_attrs_are_ignored_by_both_readers(self):
         """`df.attrs` is user data — hand-written, or reloaded from JSON

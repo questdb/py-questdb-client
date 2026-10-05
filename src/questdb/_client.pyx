@@ -8303,6 +8303,7 @@ cdef void_int _direct_dataframe_run(
             'row\'s timestamp on arrival.')
     # Once per call, ahead of the retry loop below, so a reconnect does
     # not repeat it.
+    df = _dataframe_freeze_claim(df)
     _dataframe_log_claim_problems(df)
     # Ahead of the choice between the Arrow and the NumPy route, so both
     # see the same signed GEOHASH columns.

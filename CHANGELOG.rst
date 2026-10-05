@@ -601,6 +601,19 @@ Fixed
 Faster
 ~~~~~~
 
+- **Writing a frame whose ``df.attrs['questdb']`` is a plain ``dict`` is no
+  longer quadratic in the column count.** pandas 2.2 and later deep-copy the
+  whole of ``attrs`` into every Series they derive, and writing a frame
+  derives one per column. A claim from ``to_pandas()`` declines to be copied,
+  but one that is a plain ``dict`` (from a pickle, or written or replaced by
+  hand) was copied in full once per column. ``dataframe()`` now freezes such
+  a claim for the length of the write, on a shallow copy of the frame; the
+  caller's frame and claim are left as they are. With pandas 3.0.3 and 1000
+  columns, ``Buffer.dataframe()`` drops from 944 ms to 63 ms, and
+  ``QuestDB.dataframe()`` from 1395 ms to 498 ms for a NumPy-backed frame
+  and from 1352 ms to 492 ms for an Arrow-backed one. Each is about the time
+  with no claim.
+
 - **Reading round-trip metadata is no longer quadratic in the column count.**
   Reading it off an Arrow schema and applying it to a pandas frame both
   re-read ``schema.names`` and ``frame.dtypes`` once per column. At 1024

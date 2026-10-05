@@ -312,10 +312,10 @@ class _RoundtripClaim(dict):
         # Pickled as a plain dict, nested mappings included, so a pickle
         # names no class of this package: a pickled frame loads wherever
         # pandas does, with or without this package installed. The frame
-        # it loads into carries an ordinary dict, which `dataframe()`
-        # reads the same way, and which pandas copies into each frame
-        # derived from it, so it needs neither the freezing nor the
-        # sharing this class exists for.
+        # it loads into carries an ordinary dict. `dataframe()` reads it
+        # the same way, and `_dataframe_freeze_claim` freezes it for the
+        # length of a write, so the per-column copies pandas makes stay
+        # cheap there too.
         return (dict, (_plain_mapping(self),))
 
     def _immutable(self, *args, **kwargs):
@@ -344,6 +344,42 @@ class _RoundtripClaim(dict):
     popitem = _immutable
     update = _immutable
     clear = _immutable
+
+
+cdef object _dataframe_freeze_claim(object df):
+    """`df`, or a shallow copy of it whose ``df.attrs['questdb']`` is a
+    `_RoundtripClaim`, when `df` is a pandas frame carrying its claim
+    as a plain ``dict``.
+
+    pandas deep-copies the whole of ``attrs`` into every frame and
+    Series derived from `df`, and a write derives a Series per column,
+    in the planner or in pandas' Arrow export, so a plain claim with an
+    entry per column makes the write quadratic in the column count. A
+    claim is a plain ``dict`` when its frame was unpickled, or when it
+    was written or replaced by hand. Frozen, it is shared rather than
+    copied, and both readers read it the same way.
+
+    The copy shares the frame's data and gets an ``attrs`` dict of its
+    own, so `df` and its claim are left as they are. A claim that
+    contains itself cannot be frozen; it stays plain, and pandas copies
+    it the way it copies any plain ``dict``.
+    """
+    cdef object attrs, claim, frozen, out
+    if not _is_pandas_dataframe_object(df):
+        return df
+    attrs = getattr(df, 'attrs', None)
+    if not isinstance(attrs, dict):
+        return df
+    claim = attrs.get('questdb')
+    if not isinstance(claim, dict) or isinstance(claim, _RoundtripClaim):
+        return df
+    try:
+        frozen = _RoundtripClaim(claim)
+    except RecursionError:
+        return df
+    out = df.copy(deep=False)
+    out.attrs = {**attrs, 'questdb': frozen}
+    return out
 
 
 cdef object _roundtrip_columns_meta(object frame):
@@ -3964,6 +4000,7 @@ cdef void_int _dataframe(
         raise MemoryError()
     owner._row_depth += 1
     try:
+        df = _dataframe_freeze_claim(df)
         # Said before the plan is built, so a frame refused for its
         # shape still hears which of its claims this route would have
         # ignored.
