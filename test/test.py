@@ -1876,6 +1876,9 @@ class TestQwpWebSocketApi(unittest.TestCase):
         def on_error(error):
             sender = holder[0]
             for call in (
+                    lambda: sender.row(
+                        'events', columns={'value': 2},
+                        at=qi.ServerTimestamp),
                     sender.published_fsn,
                     sender.acked_fsn,
                     sender.drive_once,
@@ -1920,6 +1923,50 @@ class TestQwpWebSocketApi(unittest.TestCase):
             all(code is qi.QuestDBErrorCode.InvalidApiCall
                 for code in captured),
             captured)
+
+    def test_sender_row_reentrancy_from_idle_listener(self):
+        # Unlike an in-flight native call, an idle listener is guarded by
+        # callback identity. A callback on another thread may run at the same
+        # time as row(), and must not make that thread's sender unusable.
+        entered = threading.Event()
+        release = threading.Event()
+        captured = []
+        sender = None
+
+        def on_event(event):
+            if event.host is not None:
+                return  # Ignore the sender's real connect event.
+            try:
+                sender.row(
+                    'events', columns={'value': 1}, at=qi.ServerTimestamp)
+            except qi.QuestDBError as exc:
+                captured.append(exc.code)
+            else:
+                captured.append(None)
+            entered.set()
+            release.wait(5)
+
+        with QwpAckServer() as server:
+            sender = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};auto_flush=off;',
+                connection_listener=on_event)
+            callback = threading.Thread(
+                target=lambda: qi._debug_connection_event_dispatch(
+                    qi.ConnectionEventKind.Connected.c_value, on_event),
+                daemon=True)
+            try:
+                sender.establish()
+                callback.start()
+                self.assertTrue(entered.wait(5))
+                self.assertEqual(captured, [qi.QuestDBErrorCode.InvalidApiCall])
+                # A callback is active, but not on this thread.
+                sender.row('events', columns={'value': 2}, at=qi.ServerTimestamp)
+            finally:
+                release.set()
+                if callback.ident is not None:
+                    callback.join(5)
+                sender.close(False)
+            self.assertFalse(callback.is_alive())
 
     def test_sender_pool_concurrent_borrow_flush(self):
         """Deterministic multi-thread exerciser for the sender pool:

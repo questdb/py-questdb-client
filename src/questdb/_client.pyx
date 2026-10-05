@@ -580,8 +580,9 @@ cdef uint64_t _OIDC_FOREGROUND_RETRY_SLICE_MS = 2000
 cdef uint64_t _OIDC_FOREGROUND_SLICE_EARLY_MARGIN_MS = 100
 
 # The codes native `reconnect_error_is_terminal` stops its reconnect loop on
-# (`qwp_ws_driver.rs`). Role rejects are exempt, including 421 responses
-# whose unrecognized role header gives them a ProtocolVersionError code.
+# (`qwp_ws_driver.rs`). Role rejects are exempt, including the
+# ProtocolVersionError synthesized when durable ACK is required and every
+# endpoint rejects by role. A 421 with a role header is RoleMismatch.
 _NATIVE_RECONNECT_TERMINAL_CODES = frozenset((
     QuestDBErrorCode.AuthError,
     QuestDBErrorCode.ConfigError,
@@ -2483,6 +2484,12 @@ cdef inline object _conn_event_str(const char* buf, size_t buf_len):
 
 
 _DISPATCH_THREAD = threading.local()
+# The common row-building path must not look up the Python thread-local on
+# every row. Only callbacks can populate its target stack; this GIL-protected
+# C counter lets all other calls bypass the Python lookup. It is deliberately
+# global (not per sender): a callback on another thread just takes the slow
+# path, which still checks the *current* thread's targets.
+cdef Py_ssize_t _ACTIVE_DISPATCH_CALLBACKS = 0
 
 
 # Module-level strong root for callback targets registered with the native
@@ -2520,8 +2527,9 @@ cdef list _dispatch_target_stack():
 
 
 cdef bint _on_dispatch_thread_for(object handler, object listener):
-    # Most ingest threads never dispatch a callback. Inspecting the local
-    # dictionary avoids raising an AttributeError for every Sender.row().
+    if _ACTIVE_DISPATCH_CALLBACKS == 0:
+        return False
+    # Check the current thread even when another thread is dispatching.
     stack = _DISPATCH_THREAD.__dict__.get('targets')
     if not stack:
         return False
@@ -2539,10 +2547,11 @@ cdef bint _WARNED_UNKNOWN_CONNECTION_EVENT = False
 cdef void _connection_event_dispatch(
         void* user_data,
         const questdb_connection_event* event) noexcept with gil:
-    global _WARNED_UNKNOWN_CONNECTION_EVENT
+    global _WARNED_UNKNOWN_CONNECTION_EVENT, _ACTIVE_DISPATCH_CALLBACKS
     listener = <object>user_data
     stack = _dispatch_target_stack()
     stack.append(listener)
+    _ACTIVE_DISPATCH_CALLBACKS += 1
     try:
         kind = None
         for entry in ConnectionEventKind:
@@ -2585,6 +2594,7 @@ cdef void _connection_event_dispatch(
         logging.getLogger("questdb").exception(
             "connection event listener failed")
     finally:
+        _ACTIVE_DISPATCH_CALLBACKS -= 1
         stack.pop()
 
 
@@ -2707,9 +2717,11 @@ def _default_error_handler(error):
 cdef void _sender_error_dispatch(
         void* user_data,
         const line_sender_qwpws_error_view* view) noexcept with gil:
+    global _ACTIVE_DISPATCH_CALLBACKS
     handler = <object>user_data
     stack = _dispatch_target_stack()
     stack.append(handler)
+    _ACTIVE_DISPATCH_CALLBACKS += 1
     try:
         handler(_sender_error_from_raw(
             c_sender_error_view_to_raw(view[0])))
@@ -2717,6 +2729,7 @@ cdef void _sender_error_dispatch(
         logging.getLogger("questdb").exception(
             "QWP/WebSocket error handler failed")
     finally:
+        _ACTIVE_DISPATCH_CALLBACKS -= 1
         stack.pop()
 
 
@@ -5899,15 +5912,15 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
     Between slices that terminal OIDC case ends the wait early, and so does
     any error its reconnect loop treats as terminal (``AuthError`` from a
     401/403 upgrade, ``ProtocolVersionError``, ...): recognised by its code,
-    or by the native call returning *before* its slice ran out, which native
-    can also do for a structured role rejection (exempted below). The code
-    check matters because native's
-    last pick runs at the slice deadline, so a terminal error from it arrives
-    on time. An unrecognized-role 421 also has a ProtocolVersionError code,
-    but its native role-rejection marker exempts it from the terminal gate.
-    That is the error, and the moment, at which the single native
-    call would have returned too. Re-dialling it would re-present a rejected credential
-    and repeat terminal connection events. Every other failure keeps retrying
+    or by the native call returning *before* its slice ran out. The code
+    check matters because native's last pick runs at the slice deadline, so
+    a terminal error from it arrives on time. A 421 with a role header is
+    ``RoleMismatch``; when durable ACK is required and every endpoint rejects
+    by role, native synthesizes ``ProtocolVersionError`` with a role-rejection
+    marker. That marker exempts it from the terminal gate: unlike terminal
+    errors, role rejections are retried until the slice deadline. Re-dialling
+    a terminal error would re-present a rejected credential and repeat
+    terminal connection events. Every other failure keeps retrying
     until the caller's budget is spent, exactly as the single native call
     does without a provider: a primary election
     (``RoleMismatch``) or pool contention (``InvalidApiCall`` "pool
@@ -5941,9 +5954,10 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
         _ensure_has_gil(&gs)
         if conn != NULL:
             return conn
-        # A 421 with an unrecognized X-QuestDB-Role uses the same public
-        # ProtocolVersionError code as a genuinely unsupported protocol.
-        # Capture its native role-rejection marker before freeing the error.
+        # A durable-ACK failure after *every* endpoint rejected by role has
+        # ProtocolVersionError code but is retryable, unlike a genuinely
+        # unsupported protocol. Capture its native role-rejection marker
+        # before freeing the error.
         role_reject = questdb_error_is_qwp_ws_role_reject(err)
         exc = c_err_to_py(err)
         err = NULL
@@ -5959,10 +5973,10 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
         now = time.monotonic()
         # Native started its slice deadline after `slice_start`, and returns
         # a retryable error only once that deadline has passed. Returning
-        # earlier means native gave up on a terminal error -- one whose code
-        # the check above may not know -- unless it carries a role rejection.
-        # The margin absorbs a coarse monotonic
-        # clock.
+        # earlier means native gave up on a terminal error whose code the
+        # check above may not know. The role-rejection exemption is defensive
+        # if native ever gains an early-return path for one. The margin
+        # absorbs a coarse monotonic clock.
         if not role_reject and now < slice_start + (
                 slice_ms - _OIDC_FOREGROUND_SLICE_EARLY_MARGIN_MS) / 1000.0:
             raise exc
@@ -6978,7 +6992,8 @@ cdef class QuestDB:
         Borrow a context-managed row-building sender from the pool.
 
         The lease participates in the handle's active-use count until it is
-        closed. :meth:`QuestDB.close` therefore waits for outstanding leases.
+        closed. :meth:`QuestDB.close` raises if the calling thread holds the
+        lease; a close on another thread waits for its return.
         """
         cdef questdb_db* db = NULL
         cdef qwp_sender* sender = NULL
@@ -7336,8 +7351,8 @@ cdef class QuestDB:
                     reset_symbol_dict=False).to_pandas()
 
         The lease participates in the handle's active-use count until it
-        is closed. :meth:`QuestDB.close` therefore waits for outstanding
-        leases.
+        is closed. :meth:`QuestDB.close` raises if the calling thread holds
+        the lease; a close on another thread waits for its return.
         """
         cdef _ReaderHandle reader_handle
         cdef PooledReader lease
@@ -8170,7 +8185,7 @@ cdef class Sender:
         Call :meth:`~questdb.auth.OidcDeviceAuth.sign_in` before the first
         flush: connect and reconnect load or silently refresh a token but never
         start an interactive device flow. Supported on HTTP(S) and
-        QWP/WebSocket; TCP is rejected.
+        QWP/WebSocket; TCP and UDP are rejected.
         """
 
         cdef line_sender_error* err = NULL
@@ -9844,9 +9859,10 @@ cdef class PooledReader:
     connection's SYMBOL dictionary warm across them instead of
     resetting it per query.
 
-    The lease counts as an active use of the :class:`QuestDB` handle
-    (``QuestDB.close()`` waits for it) and has thread affinity: use one
-    lease per thread, on the thread that created it. A
+    The lease counts as an active use of the :class:`QuestDB` handle:
+    ``QuestDB.close()`` raises on the lease's owning thread and waits for it
+    to be returned when called from another thread. The lease has thread
+    affinity: use one lease per thread, on the thread that created it. A
     :class:`QueryResult` returned by the lease may be handed to a worker
     under that result's thread hand-off rules; wait for it to finish
     before using the lease again.

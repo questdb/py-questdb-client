@@ -6204,9 +6204,10 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
         self._run(policy)
 
     def test_durable_ack_unrecognized_role_is_retried_between_slices(self):
-        # Native marks the unknown-role 421 as a role rejection even though
-        # its public code is ProtocolVersionError. The OIDC foreground gate
-        # must consult that marker instead of treating the code as terminal.
+        # A 421 with a role header is RoleMismatch. When durable ACK is
+        # required and *all* endpoints reject by role, native synthesizes
+        # ProtocolVersionError but retains the role-rejection marker. The
+        # foreground gate must not mistake it for a terminal protocol error.
         first_retry = []
 
         def policy(index, t):
@@ -6399,8 +6400,10 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
             def emit(self, record):
                 if 'token store save failed' not in record.getMessage():
                     return
-                actions = [('result.close', result.close),
-                           ('result.cancel', result.cancel)]
+                actions = []
+                if result is not None:
+                    actions.extend([('result.close', result.close),
+                                    ('result.cancel', result.cancel)])
                 if leased:
                     actions.extend([('lease.close', lease.close),
                                     ('db.close', db.close)])
@@ -6433,18 +6436,32 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                 oidc_auth=auth)
             lease = None
             result = None
+            timer = None
             try:
                 if leased:
                     lease = db.reader()
-                    result = lease.query('select v from t')
+                if consumer == 'execute':
+                    # execute() drains its cursor *inside* this call. Release
+                    # the first endpoint only after the token passes half-life
+                    # so reconnect emits the warning during _drain_cursor.
+                    self.assertTrue(leased)
+                    logger.addHandler(handler)
+                    timer = threading.Timer(
+                        max(0, 3.6 - (time.monotonic() - signed_at)),
+                        qdb.release_first.set)
+                    timer.start()
+                    self.assertIsNone(lease.execute('select v from t'))
                 else:
-                    result = db.query('select v from t')
-                logger.addHandler(handler)
-                # Force a token refresh while replaying after the first
-                # connection drops; the save failure emits synchronously
-                # inside the borrowed native cursor's next_batch call.
-                time.sleep(max(0, 3.6 - (time.monotonic() - signed_at)))
-                qdb.release_first.set()
+                    if leased:
+                        result = lease.query('select v from t')
+                    else:
+                        result = db.query('select v from t')
+                    logger.addHandler(handler)
+                    # Force a token refresh while replaying after the first
+                    # connection drops; the save failure emits synchronously
+                    # inside the borrowed native cursor's next_batch call.
+                    time.sleep(max(0, 3.6 - (time.monotonic() - signed_at)))
+                    qdb.release_first.set()
                 if consumer == 'pandas':
                     values = result.to_pandas()['v'].tolist()
                 elif consumer == 'iter_pandas':
@@ -6457,11 +6474,13 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                         values = reader.read_all().column(0).to_pylist()
                     finally:
                         reader.close()
-                else:
+                elif consumer != 'execute':
                     values = result.to_arrow().column(0).to_pylist()
-                self.assertEqual(values, [1, 2, 3])
+                if consumer != 'execute':
+                    self.assertEqual(values, [1, 2, 3])
                 self.assertTrue(sabotaged.is_set())
-                expected = ['result.close', 'result.cancel']
+                expected = ([] if consumer == 'execute' else
+                            ['result.close', 'result.cancel'])
                 if leased:
                     expected.extend(['lease.close', 'db.close'])
                 self.assertEqual(observed, [
@@ -6472,6 +6491,9 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                 self.assertEqual(qdb.errors, [])
             finally:
                 qdb.release_first.set()
+                if timer is not None:
+                    timer.cancel()
+                    timer.join(timeout=1)
                 logger.removeHandler(handler)
                 logger.setLevel(old_level)
                 if result is not None:
@@ -6479,6 +6501,13 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                 if lease is not None:
                     lease.close()
                 db.close()
+
+    def test_lease_close_during_execute_drain(self):
+        # Run in a subprocess: losing _drain_cursor's native-in-flight guard
+        # frees the reader during the callback and aborts the interpreter.
+        self._run_isolated('lease_close_during_execute_drain',
+                           lambda: self._exercise_cursor_reentry(
+                               True, consumer='execute'), 30)
 
     def test_result_close_during_cursor_pull(self):
         try:
