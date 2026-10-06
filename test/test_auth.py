@@ -3257,6 +3257,111 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertEqual(stats['binary_frames'], 1)
         self.assertEqual(stats['errors'], [])
 
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
+    def test_warning_handler_wait_on_second_sender_rejects_before_deadlock(self):
+        credential_path = [None]
+        sabotaged = threading.Event()
+        diagnostic_done = threading.Event()
+        nested = []
+        healthy_acks = []
+        second_fsn = [None]
+
+        def fail_save():
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential_path[0]):
+                os.remove(credential_path[0])
+            os.mkdir(credential_path[0])
+            sabotaged.set()
+
+        with tempfile.TemporaryDirectory() as directory, \
+                OidcTestServer(initial_expires_in=4,
+                               refresh_request_hook=fail_save) as idp, \
+                QwpAckServer(close_after_upgrade_unless_authorization=(
+                    'Bearer AT-refreshed')) as qwp, \
+                QwpAckServer() as healthy_server:
+            auth = make_discovered_auth(
+                idp, token_store=FileTokenStore.at(directory))
+            auth.sign_in()
+            credential_path[0] = os.path.join(directory, next(
+                name for name in os.listdir(directory)
+                if name.endswith('.json')))
+
+            def conf(port):
+                return (
+                    f'ws::addr=127.0.0.1:{port};lazy_connect=true;'
+                    'reconnect_initial_backoff_millis=25;'
+                    'reconnect_max_backoff_millis=25;'
+                    'reconnect_max_duration_millis=10000;'
+                    'close_flush_timeout_millis=10000;')
+
+            first = questdb.Sender.from_conf(
+                conf(qwp.port), oidc_auth=auth, auto_flush=False)
+            second = questdb.Sender.from_conf(
+                conf(qwp.port), oidc_auth=auth, auto_flush=False)
+            healthy = questdb.Sender.from_conf(
+                conf(healthy_server.port), oidc_auth=auth, auto_flush=False)
+
+            class ForwardWarning(logging.Handler):
+                def emit(self, record):
+                    if 'token store save failed' not in record.getMessage():
+                        return
+                    # A connected peer does not need a token and must remain
+                    # able to ACK during another sender's warning callback.
+                    healthy.row('warnings', columns={'value': 1},
+                                at=questdb.ServerTimestamp)
+                    healthy_fsn = healthy.flush_and_get_fsn()
+                    healthy_acks.append(
+                        healthy.await_acked_fsn(healthy_fsn, 1000))
+                    second.row('warnings', columns={'value': 1},
+                               at=questdb.ServerTimestamp)
+                    fsn = second.flush_and_get_fsn()
+                    second_fsn[0] = fsn
+                    started = time.monotonic()
+                    try:
+                        # Finite watchdog, but the callback-aware rejection
+                        # must win long before it. No ACK can arrive until the
+                        # warning returns and the shared refresh completes.
+                        acked = second.await_acked_fsn(fsn, 1500)
+                    except OidcInteractionRequired as exc:
+                        nested.append((exc, time.monotonic() - started))
+                    else:
+                        nested.append((acked, time.monotonic() - started))
+                    finally:
+                        diagnostic_done.set()
+
+            handler = ForwardWarning()
+            logger = logging.getLogger('questdb')
+            logger.addHandler(handler)
+            try:
+                first.establish()
+                second.establish()
+                healthy.establish()
+                first.row('events', columns={'value': 1},
+                          at=questdb.ServerTimestamp)
+                fsn = first.flush_and_get_fsn()
+                self.assertTrue(first.await_acked_fsn(fsn, 10000))
+                self.assertTrue(diagnostic_done.wait(2))
+                # The rejected in-callback wait did not drop B's publication:
+                # it can reconnect and ACK once the warning has returned.
+                self.assertTrue(
+                    second.await_acked_fsn(second_fsn[0], 10000))
+            finally:
+                logger.removeHandler(handler)
+                diagnostic_done.wait(2)
+                healthy.close(flush=False)
+                second.close(flush=False)
+                first.close(flush=False)
+                auth.close()
+
+        self.assertTrue(sabotaged.is_set())
+        self.assertEqual(healthy_acks, [True])
+        self.assertEqual(len(nested), 1)
+        self.assertIsInstance(nested[0][0], OidcInteractionRequired)
+        self.assertLess(nested[0][1], 1.0, 'callback waited for its own ACK')
+        self.assertEqual(qwp.snapshot()['binary_frames'], 2)
+
     def test_qwp_pool_authenticates_and_flushes(self):
         # The pool opens its QWP connection through questdb_db_connect_ex -- a
         # different native path than the standalone Sender's

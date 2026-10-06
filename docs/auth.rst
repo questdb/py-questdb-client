@@ -239,6 +239,12 @@ is logged at ``WARNING`` on the ``questdb`` logger during normal operation.
 Persistence-warning handlers must not call ``sign_in()``, ``clear()``, an
 uncached ``token()``, or an attached transport operation that needs a token from
 the same provider; those operations are rejected before they can deadlock.
+For QWP/WebSocket, publishing a frame may succeed before its background
+reconnect needs a token. An ACK wait inside the handler then raises
+:class:`~questdb.auth.OidcInteractionRequired` promptly if that reconnect
+is blocked by the warning's own token worker; the frame remains queued.
+Retry the ACK wait after the handler returns. A connected sender whose ACK
+does not need a token can still complete the wait inside the handler.
 Cached token reads and provider ``cancel_sign_in()`` / ``close()`` remain
 callback-safe. An attached **Sender** may not be closed or mutated by a
 persistence-warning handler while it is performing a native flush: those
