@@ -5,11 +5,12 @@ Migration Guide
 5.0 to 5.1
 ==========
 
-Eight changes need action: the two UUID / fixed-size-binary items below, the
+Nine changes need action: the two UUID / fixed-size-binary items below, the
 stricter ``schema_overrides`` tuple validation, caps on callback inbox
 capacities and config-string length, the exception a commit raises once its
-sender is closed, the error a query failover that runs out of time raises, and
-a warning an abandoned query result now surfaces instead of swallowing. The new ``ConnectionEventKind.CredentialUnavailable`` event kind
+sender is closed, the error a query failover that runs out of time raises, a
+warning an abandoned query result now surfaces instead of swallowing, and
+``QuestDB.close()`` raising instead of waiting for its own thread's lease. The new ``ConnectionEventKind.CredentialUnavailable`` event kind
 needs none — it is additive, and an existing listener keeps working.
 
 * **UUID bytes are canonical RFC 4122.** UUID values are read and written in
@@ -113,6 +114,28 @@ needs none — it is additive, and an existing listener keeps working.
           ...
 
   or filter :class:`ResourceWarning` if a suite runs with ``-W error``.
+
+* :meth:`QuestDB.close <questdb.QuestDB.close>` **raises instead of waiting
+  for a lease held by the calling thread.** It raises
+  ``QuestDBError(InvalidApiCall)`` while the calling thread owns an active pool
+  operation or a lease last used on it; 5.0 waited, which never ended for a
+  same-thread lease. A sender lease handed to a worker stays attributed to the
+  borrowing thread until the worker first uses it, so a ``close()`` there that
+  5.0 would have waited through now raises. Have the worker use the lease and
+  signal that before closing, or close from a thread that never held it::
+
+      sender = db.sender()
+      used = threading.Event()
+
+      def work():
+          with sender:
+              used.set()
+              sender.row('trades', columns={'price': 1.0},
+                         at=questdb.ServerTimestamp)
+
+      threading.Thread(target=work).start()
+      used.wait()
+      db.close()  # waits for the worker to return the lease
 
 4.x to 5.0
 ==========

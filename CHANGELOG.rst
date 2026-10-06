@@ -140,6 +140,23 @@ that runs out of *attempts* already raised. In every other case, including a
 query that ran past the budget before its first failure, the original failure
 is still raised unchanged.
 
+``QuestDB.close()`` no longer waits for a lease held by its own thread
+**********************************************************************
+
+:meth:`QuestDB.close <questdb.QuestDB.close>` used to wait for every
+outstanding lease. When the calling thread itself held one, that wait could
+never end. It now raises :class:`QuestDBError <questdb.QuestDBError>` with
+``code`` set to ``QuestDBErrorCode.InvalidApiCall`` instead of waiting while
+the calling thread owns an active pool operation or a lease last used on it.
+
+This also affects a sender lease taken on one thread and handed to a worker:
+the lease belongs to the borrowing thread until the worker first uses it. A
+``close()`` on the borrowing thread before that first use now raises where 5.0
+waited for the worker to return the lease. Have the worker use the lease (for
+example, enter its context) and signal that before closing the pool, or close
+the pool from a thread that never held the lease. A ``close()`` on another
+thread still waits for outstanding leases.
+
 Features
 ~~~~~~~~
 
