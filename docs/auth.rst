@@ -240,11 +240,16 @@ Persistence-warning handlers must not call ``sign_in()``, ``clear()``, an
 uncached ``token()``, or an attached transport operation that needs a token from
 the same provider; those operations are rejected before they can deadlock.
 For QWP/WebSocket, publishing a frame may succeed before its background
-reconnect needs a token. An ACK wait inside the handler then raises
-:class:`~questdb.auth.OidcInteractionRequired` promptly if that reconnect
-is blocked by the warning's own token worker; the frame remains queued.
+reconnect needs a token. An ACK wait made inside the handler then raises
+:class:`~questdb.auth.OidcInteractionRequired` promptly once that sender's
+reconnect needs a token the provider cannot supply until the handler returns,
+whichever sender's refresh raised the warning; the frame remains queued.
 Retry the ACK wait after the handler returns. A connected sender whose ACK
-does not need a token can still complete the wait inside the handler.
+does not need a token can still complete the wait inside the handler, and an
+ACK wait on any other thread is not rejected: it waits for the handler to
+return. Make the wait on the handler's own thread: a handler that hands the
+wait to another thread and blocks on its result can deadlock until the wait's
+timeout.
 Cached token reads and provider ``cancel_sign_in()`` / ``close()`` remain
 callback-safe. An attached **Sender** may not be closed or mutated by a
 persistence-warning handler while it is performing a native flush: those

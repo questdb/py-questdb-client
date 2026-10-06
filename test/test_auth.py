@@ -24,6 +24,7 @@
 
 """Python binding tests for the native OIDC implementation."""
 
+import contextlib
 import dataclasses
 from decimal import Decimal
 from fractions import Fraction
@@ -3361,6 +3362,146 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertIsInstance(nested[0][0], OidcInteractionRequired)
         self.assertLess(nested[0][1], 1.0, 'callback waited for its own ACK')
         self.assertEqual(qwp.snapshot()['binary_frames'], 2)
+
+    @contextlib.contextmanager
+    def _two_senders_through_failed_save_warning(self, on_warning):
+        """Attach two QWP senders to one auth whose refresh emits a
+        persistence warning, calling ``on_warning(senders)`` from inside the
+        ``questdb`` logging handler. The QWP server accepts only the refreshed
+        token, so a sender with a pending frame reconnects, and needs a token,
+        while the warning runs. Yields the senders by name."""
+        credential_path = [None]
+        sabotaged = threading.Event()
+        warned = threading.Event()
+
+        def fail_save():
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential_path[0]):
+                os.remove(credential_path[0])
+            os.mkdir(credential_path[0])
+            sabotaged.set()
+
+        class OnWarning(logging.Handler):
+            def emit(self, record):
+                if 'token store save failed' not in record.getMessage():
+                    return
+                try:
+                    on_warning(senders)
+                finally:
+                    warned.set()
+
+        senders = {}
+        with tempfile.TemporaryDirectory() as directory, \
+                OidcTestServer(initial_expires_in=4,
+                               refresh_request_hook=fail_save) as idp, \
+                QwpAckServer(close_after_upgrade_unless_authorization=(
+                    'Bearer AT-refreshed')) as qwp:
+            auth = make_discovered_auth(
+                idp, token_store=FileTokenStore.at(directory))
+            auth.sign_in()
+            credential_path[0] = os.path.join(directory, next(
+                name for name in os.listdir(directory)
+                if name.endswith('.json')))
+            conf = (
+                f'ws::addr=127.0.0.1:{qwp.port};lazy_connect=true;'
+                'reconnect_initial_backoff_millis=25;'
+                'reconnect_max_backoff_millis=25;'
+                'reconnect_max_duration_millis=10000;'
+                'close_flush_timeout_millis=10000;')
+            for name in ('a', 'b'):
+                senders[name] = questdb.Sender.from_conf(
+                    conf, oidc_auth=auth, auto_flush=False)
+            handler = OnWarning()
+            logger = logging.getLogger('questdb')
+            logger.addHandler(handler)
+            try:
+                for sender in senders.values():
+                    sender.establish()
+                yield senders
+                self.assertTrue(warned.wait(20), 'no persistence warning')
+            finally:
+                logger.removeHandler(handler)
+                warned.wait(20)
+                for sender in senders.values():
+                    sender.close(flush=False)
+                auth.close()
+        self.assertTrue(sabotaged.is_set())
+
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
+    def test_warning_handler_wait_rejects_for_owner_and_peer_senders(self):
+        # The warning comes from ONE sender's token worker. A wait inside the
+        # handler must be rejected for that sender as well as for its peer:
+        # neither can reconnect until the handler returns.
+        nested = {}
+        handler_fsns = {}
+        handled = threading.Event()
+
+        def on_warning(senders):
+            for name, sender in senders.items():
+                sender.row('warnings', columns={'value': 1},
+                           at=questdb.ServerTimestamp)
+                fsn = handler_fsns[name] = sender.flush_and_get_fsn()
+                started = time.monotonic()
+                try:
+                    # Finite watchdog only; a regression returns False here.
+                    outcome = sender.await_acked_fsn(fsn, 8000)
+                except OidcInteractionRequired as exc:
+                    outcome = exc
+                nested[name] = (outcome, time.monotonic() - started)
+            handled.set()
+
+        with self._two_senders_through_failed_save_warning(
+                on_warning) as senders:
+            for sender in senders.values():
+                sender.row('events', columns={'value': 1},
+                           at=questdb.ServerTimestamp)
+                sender.flush_and_get_fsn()
+            # Stay off the senders until the handler has used them.
+            self.assertTrue(handled.wait(20), 'no persistence warning')
+            for name, sender in senders.items():
+                # The rejected waits kept every frame queued.
+                self.assertTrue(sender.await_acked_fsn(
+                    handler_fsns[name], 15000), name)
+        self.assertEqual(set(nested), {'a', 'b'})
+        for name, (outcome, elapsed) in nested.items():
+            self.assertIsInstance(outcome, OidcInteractionRequired, name)
+            self.assertLess(elapsed, 1.0, f'{name} waited for its own ACK')
+
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
+    def test_warning_handler_does_not_reject_waits_on_other_threads(self):
+        # A slow handler that touches no sender must not make an ACK wait on
+        # an ordinary thread fail: it only has to outlast the handler.
+        warning_seen = threading.Event()
+
+        def on_warning(senders):
+            warning_seen.set()
+            time.sleep(1.0)
+
+        outcomes = {}
+
+        def wait(name):
+            sender = senders[name]
+            sender.row('events', columns={'value': 1},
+                       at=questdb.ServerTimestamp)
+            fsn = sender.flush_and_get_fsn()
+            try:
+                outcomes[name] = sender.await_acked_fsn(fsn, 15000)
+            except BaseException as exc:
+                outcomes[name] = exc
+
+        with self._two_senders_through_failed_save_warning(
+                on_warning) as senders:
+            threads = [threading.Thread(target=wait, args=(name,))
+                       for name in senders]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(30)
+        self.assertTrue(warning_seen.is_set())
+        self.assertEqual(outcomes, {'a': True, 'b': True})
 
     def test_qwp_pool_authenticates_and_flushes(self):
         # The pool opens its QWP connection through questdb_db_connect_ex -- a
