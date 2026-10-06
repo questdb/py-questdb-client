@@ -16,7 +16,9 @@ Breaking changes
   UUID column. If your code byte-swapped to match QuestDB's old wire layout,
   remove that swapping. Passing ``uuid.UUID`` objects is unaffected, in
   ``row()``, in object-dtype columns, and as query binds — so are the UUIDs
-  ``to_pandas()`` gives you.
+  that plain ``to_pandas()``, without ``dtype_backend``, gives you.
+  Arrow-shaped results you saved from 5.0 need a one-time fix before you
+  write them back; see *UUIDs in Arrow-shaped results saved from 5.0* below.
 
 - **A 16- or 32-byte Arrow column is no longer assumed to be a UUID or a
   LONG256.** Width alone no longer decides the type. On the Arrow columnar
@@ -54,6 +56,51 @@ Breaking changes
   planner, which has no such argument; rather than guess, it refuses both
   widths. To send them as BINARY there, pass an object-dtype column of
   ``bytes``.
+
+- **UUIDs in Arrow-shaped results saved from 5.0 are stored reversed when
+  written back.** In 5.0, ``to_arrow()``, ``iter_arrow()``,
+  ``pa.table(result)``, and ``to_pandas()`` / ``iter_pandas()`` with
+  ``dtype_backend='pyarrow'`` or ``types_mapper=pd.ArrowDtype`` returned UUID
+  columns as ``arrow.uuid`` values in QuestDB's old wire layout, and 5.0's
+  ``dataframe()`` wrote those bytes back unchanged. This release reads every
+  ``arrow.uuid`` column as RFC 4122. If you kept such a result from 5.0, in a
+  Parquet, Feather or Arrow IPC file or pickled, every UUID in it is stored
+  reversed when you write it back now. Nothing raises and nothing is logged.
+  The saved result has the same Arrow type and metadata as one from this
+  release, so the client cannot tell the two apart and fix it for you.
+  ``to_polars()`` returned the same bytes as ``Binary``. Those land as
+  BINARY, and are stored reversed too once you add
+  ``schema_overrides={'col': 'uuid'}``.
+
+  Fix each saved 5.0 result once, before you write it back. Results read
+  with this release are already in the right order, and so are the
+  ``uuid.UUID`` values that plain ``to_pandas()`` gave you in 5.0. With
+  pyarrow 18 or newer::
+
+      import uuid
+      import pyarrow as pa
+
+      def fixed_uuids(column):
+          return pa.array(
+              [None if v is None else uuid.UUID(bytes=v.bytes[::-1])
+               for v in column.to_pylist()],
+              pa.uuid())
+
+      # A pyarrow Table
+      table = table.set_column(table.schema.get_field_index('col'), 'col',
+                               fixed_uuids(table['col']))
+      # A pandas frame from to_pandas(dtype_backend='pyarrow')
+      df['col'] = pd.arrays.ArrowExtensionArray(
+          fixed_uuids(pa.array(df['col'])))
+      # A polars frame from to_polars(); write it with
+      # schema_overrides={'col': 'uuid'}
+      pl_df = pl_df.with_columns(pl.col('col').map_elements(
+          lambda b: b[::-1], return_dtype=pl.Binary))
+
+  Keep the pandas column Arrow-backed, as above. An object column of
+  ``uuid.UUID`` would send the frame to the NumPy planner, which refuses any
+  LONG256 column in it. On the Arrow path such a LONG256 column lands as
+  BINARY unless you pass ``schema_overrides={'col': 'long256'}``.
 
 - **A ``df.attrs['questdb']`` claim with a version other than 1 is
   ignored.** The version is checked rather than just carried, so that a
@@ -212,9 +259,10 @@ New
 - **Query results keep their column types when you write them back.**
   ``to_pandas(dtype_backend=...)`` and ``iter_pandas(dtype_backend=...)`` now
   attach ``df.attrs['questdb']``, which plain ``to_pandas()`` already
-  carried, and ``dataframe()`` reads it. Without it, UUID, LONG256, IPV4,
-  CHAR and GEOHASH columns went back out as BINARY and plain integers, and a
-  new destination table was created with the wrong types.
+  carried, and ``dataframe()`` reads it. Without it, IPV4, CHAR and GEOHASH
+  columns went back out as plain integers, and with ``'numpy_nullable'``
+  UUID and LONG256 went back out as BINARY too, so a new destination table
+  was created with the wrong types.
 
   All three built-in backends round-trip these five types, in whatever shape
   they hand them back — Arrow-backed columns, NumPy columns, and the object
