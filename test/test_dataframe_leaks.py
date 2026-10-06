@@ -611,6 +611,36 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
         self.assertEqual(frames, 0)
         self.assertEqual(stats['errors'], [])
 
+    def test_fsb8_refusal_leaks_nothing(self):
+        """The 8-byte fixed-size binary refusal (the shape of a polars
+        `Object` column) happens on the client, after the stream's schema
+        is imported and before its first batch is read. The stream, its
+        schema and the borrowed connection must all be released."""
+        from qwp_ws_ack_server import QwpAckServer
+        frame = pa.table({
+            'handles': pa.array([b'\x00' * 8], type=pa.binary(8)),
+            'ts': pa.array([0], type=pa.timestamp('us')),
+        })
+        # Idle for the whole run, as in `test_rejected_stream_leaks_nothing`.
+        with QwpAckServer(idle_timeout_s=None) as server:
+            conf = (f'ws::addr=127.0.0.1:{server.port};'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                    'query_pool_min=0;')
+            with qi.QuestDB.from_conf(conf) as client:
+                def work():
+                    with self.assertRaises(qi.QuestDBError) as raised:
+                        client.dataframe(
+                            frame, table_name='caps', at='ts')
+                    self.assertEqual(
+                        raised.exception.code,
+                        qi.QuestDBErrorCode.ArrowUnsupportedColumnKind)
+
+                _assert_no_leak(self, work, warmup=20000, measure=900000)
+            frames = server.wait_binary_frames_settled()
+            stats = server.snapshot()
+        self.assertEqual(frames, 0)
+        self.assertEqual(stats['errors'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

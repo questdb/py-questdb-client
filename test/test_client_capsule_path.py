@@ -11,6 +11,7 @@ import decimal
 import os
 import struct
 import unittest
+import uuid
 
 import patch_path
 
@@ -351,13 +352,88 @@ class TestCapsulePathPolars(unittest.TestCase):
             client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
                 with self.assertRaisesRegex(
-                        qi.QuestDBError, 'polars Object dtype'):
+                        qi.QuestDBError, 'polars Object dtype') as raised:
                     client.dataframe(df, table_name='obj_t', at='ts')
             finally:
                 client.close()
             stats = server.snapshot()
+        self.assertEqual(
+            raised.exception.code,
+            qi.QuestDBErrorCode.ArrowUnsupportedColumnKind)
         self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['binary_payloads'], [])
+
+    # A polars `Object` column leaves polars as `fixed_size_binary(8)` of
+    # in-process handles with nothing else marking it, and polars infers
+    # `Object` for a list of `uuid.UUID` values. Each shape below carries
+    # that column past the polars type check, so each is refused by its
+    # width instead, with the code 5.0 refused all of them with. Nothing
+    # may reach the server.
+
+    def _assert_object_handles_refused(self, frame, message):
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, message) as raised:
+                    client.dataframe(
+                        frame, table_name='obj_t', at=qi.ServerTimestamp)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(
+            raised.exception.code,
+            qi.QuestDBErrorCode.ArrowUnsupportedColumnKind)
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_payloads'], [])
+
+    def _uuid_object_frame(self):
+        frame = pl.DataFrame({'id': [uuid.uuid4(), uuid.uuid4()]})
+        self.assertEqual(frame.schema['id'], pl.Object)
+        return frame
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_object_series_rejected(self):
+        series = self._uuid_object_frame()['id']
+        self._assert_object_handles_refused(series, 'polars Object dtype')
+
+    @unittest.skipIf(pl is None or pa is None, 'polars/pyarrow not installed')
+    def test_polars_object_column_exported_to_pyarrow_rejected(self):
+        table = self._uuid_object_frame().to_arrow()
+        self.assertEqual(table.schema.field('id').type, pa.binary(8))
+        self._assert_object_handles_refused(
+            table, "Bad column 'id': its values are 8 bytes each")
+
+    @unittest.skipIf(pl is None or pa is None, 'polars/pyarrow not installed')
+    def test_polars_object_column_through_record_batch_reader_rejected(self):
+        reader = pa.RecordBatchReader.from_stream(self._uuid_object_frame())
+        self._assert_object_handles_refused(
+            reader, "Bad column 'id': its values are 8 bytes each")
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_object_column_through_stream_wrapper_rejected(self):
+        """A third-party frame type that hands out a polars frame's
+        Arrow stream, as a dataframe-agnostic wrapper does."""
+        class Wrapper:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __arrow_c_stream__(self, requested_schema=None):
+                return self._inner.__arrow_c_stream__(requested_schema)
+
+        self._assert_object_handles_refused(
+            Wrapper(self._uuid_object_frame()),
+            "Bad column 'id': its values are 8 bytes each")
+
+    @unittest.skipIf(
+        pl is None or pa is None or pd is None,
+        'polars/pyarrow/pandas not installed')
+    def test_polars_object_column_in_arrow_backed_pandas_rejected(self):
+        frame = self._uuid_object_frame().to_arrow().to_pandas(
+            types_mapper=pd.ArrowDtype)
+        self.assertEqual(frame['id'].dtype, pd.ArrowDtype(pa.binary(8)))
+        self._assert_object_handles_refused(
+            frame, "Bad column 'id': its values are 8 bytes each")
 
 
 class TestServerTimestampAt(unittest.TestCase):
@@ -1142,19 +1218,24 @@ class TestSchemaOverrides(unittest.TestCase):
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_schema_overrides_uuid_rejects_wrong_width(self):
-        """A UUID claim requires 16-byte values; an 8-byte column is
-        rejected rather than sending malformed rows."""
+        """A UUID claim requires 16-byte values; a 12-byte column is
+        rejected rather than sending malformed rows. Twelve rather than
+        eight: an 8-byte column is refused before any override is read
+        (it is the shape of a polars `Object` column), so it would not
+        reach the rule this test is about."""
         schema = pa.schema([
-            pa.field('u', pa.binary(8)),
+            pa.field('u', pa.binary(12)),
             pa.field('ts', pa.timestamp('us')),
         ])
         table = pa.Table.from_pydict({
-            'u': [b'\x00' * 8], 'ts': [_ts_us(2025, 1, 1)],
+            'u': [b'\x00' * 12], 'ts': [_ts_us(2025, 1, 1)],
         }, schema=schema)
         with QwpAckServer() as server:
             client = qi.QuestDB.from_conf(_client_conf(server.port))
             try:
-                with self.assertRaises(qi.QuestDBError):
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        "override 'uuid' is not applicable") as raised:
                     client.dataframe(
                         table,
                         table_name='t',
@@ -1162,6 +1243,8 @@ class TestSchemaOverrides(unittest.TestCase):
                         schema_overrides={'u': 'uuid'})
             finally:
                 client.close()
+        self.assertEqual(
+            raised.exception.code, qi.QuestDBErrorCode.ArrowIngest)
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_unclaimed_fsb16_is_binary_on_the_wire(self):
@@ -1190,6 +1273,67 @@ class TestSchemaOverrides(unittest.TestCase):
             if int.from_bytes(p[6:8], 'little') > 0)
         self.assertIn(b'u\x17', payload)  # column name, then BINARY tag
         self.assertIn(value.bytes, payload)
+
+    def _binary_column_payload(self, column):
+        """Write a one-column table and return the frame that carries its
+        row; the column must have gone out as BINARY (`0x17`)."""
+        table = pa.table({'v': column})
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    table, table_name='opaque', at=qi.ServerTimestamp)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        payload = next(
+            p for p in stats['binary_payloads']
+            if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(b'v\x17', payload)  # column name, then BINARY tag
+        return payload
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_unclaimed_fsb_widths_other_than_8_are_binary_on_the_wire(self):
+        """No fixed-size width claims a type: 4 and 12 bytes go out as
+        BINARY, verbatim."""
+        for width in (4, 12):
+            with self.subTest(width=width):
+                value = bytes(range(1, width + 1))
+                payload = self._binary_column_payload(
+                    pa.array([value], pa.binary(width)))
+                self.assertIn(value, payload)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_fsb8_is_refused_and_variable_binary_is_its_remedy(self):
+        """An 8-byte fixed-size column is refused, labelled or not: it is
+        the shape of a polars `Object` column's handles, and nothing else
+        tells genuine 8-byte values apart. The message points at
+        variable-length binary, and the same values cast to it land as
+        BINARY, verbatim."""
+        value = b'\x01\x02\x03\x04\x05\x06\x07\x08'
+        column = pa.array([value], pa.binary(8))
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        r"Bad column 'v': its values are 8 bytes each"
+                        r"(.|\n)*pa\.binary\(\)") as raised:
+                    client.dataframe(
+                        pa.table({'v': column}), table_name='opaque',
+                        at=qi.ServerTimestamp)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(
+            raised.exception.code,
+            qi.QuestDBErrorCode.ArrowUnsupportedColumnKind)
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_payloads'], [])
+
+        payload = self._binary_column_payload(column.cast(pa.binary()))
+        self.assertIn(value, payload)
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_schema_overrides_rejects_unknown_kind(self):
@@ -1438,6 +1582,37 @@ class TestWriterMixingInOneChunk(unittest.TestCase):
 class TestPandasPlannerRouting(unittest.TestCase):
     """Pandas object columns use the manual dataframe planner; Arrow-backed
     pandas columns can use the capsule route."""
+
+    @unittest.skipIf(
+        pl is None or pa is None or pd is None,
+        'polars/pyarrow/pandas not installed')
+    def test_planner_refuses_polars_object_handles(self):
+        """An 8-byte fixed-size binary column -- here a polars `Object`
+        column's handles carried into pandas -- is refused by the manual
+        planner, which a NumPy column alongside it selects. It never
+        reaches the stream schema check, so the planner holds the same
+        rule, with the code 5.0 refused it with."""
+        import numpy as np
+        frame = pl.DataFrame({'id': [uuid.uuid4(), uuid.uuid4()]})
+        df = frame.to_arrow().to_pandas(types_mapper=pd.ArrowDtype)
+        df['k'] = np.array([1, 2], dtype='int64')
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        "Bad column 'id': its values are 8 bytes each"
+                        ) as raised:
+                    client.dataframe(
+                        df, table_name='obj_t', at=qi.ServerTimestamp)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(
+            raised.exception.code,
+            qi.QuestDBErrorCode.ArrowUnsupportedColumnKind)
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_payloads'], [])
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_arrow_backed_pandas_uses_capsule_without_overrides(self):

@@ -117,10 +117,6 @@ Breaking changes
   the reason and give the fix: ``value.ip`` for ``row()``, and
   ``df['col'] = df['col'].map(lambda value: value.ip)`` for ``dataframe()``.
 
-- **polars ``Object`` columns are rejected** with a clear error. They export
-  as 8-byte handles to in-process memory, which would have been stored as
-  meaningless BINARY blobs.
-
 - **``Buffer.clear()`` now raises while a row is being written.** A column
   value whose conversion runs Python code — a ``uuid.UUID`` or an
   ``ipaddress.IPv4Address`` subclass — can call back into the buffer that
@@ -271,12 +267,13 @@ Fixed
 - **A column name containing a NUL character (``'\0'``) no longer aborts the
   process or lands under a shortened name.** ``QuestDB.dataframe()``,
   ``PooledSender.dataframe()`` and the WebSocket ``Sender.dataframe()`` pass
-  a polars, pyarrow or Arrow-backed pandas frame to the client through the
-  Arrow C Data Interface, which carries a name only up to its first NUL. In
-  5.0 such a name in a polars frame, including a struct field name, aborted
-  the Python process inside polars. In a pyarrow Table, RecordBatch or
-  RecordBatchReader, or an Arrow-backed pandas frame, the column was written
-  under the name cut at the NUL, so ``'a\0b'`` became ``a``. The same
+  a polars, pyarrow or Arrow-backed pandas frame, or a polars Series, to the
+  client through the Arrow C Data Interface, which carries a name only up to
+  its first NUL. In 5.0 such a name in a polars frame or Series, including a
+  struct field name, aborted the Python process inside polars. In a pyarrow
+  Table, RecordBatch or RecordBatchReader, or an Arrow-backed pandas frame,
+  the column was written under the name cut at the NUL, so ``'a\0b'``
+  became ``a``. The same
   happened to the name of a pandas index other than a ``RangeIndex``, which
   that route writes as a column. These frames now raise
   :class:`QuestDBError <questdb.QuestDBError>` before anything is sent. A
@@ -284,6 +281,26 @@ Fixed
   for it, and a polars struct field name gets a ``BadDataFrame`` error. For
   other Arrow sources (for example DuckDB, nanoarrow or arro3) the client
   does not read the names before the export, so it cannot see the NUL.
+
+- **A polars ``Object`` column gets a clear error on every DataFrame
+  route.** polars infers ``Object`` for a list of ``uuid.UUID`` or
+  ``ipaddress.IPv4Address`` values and exports it as an Arrow
+  ``fixed_size_binary(8)`` column of handles to objects in its own process,
+  with nothing else marking it. Stored, those would be meaningless BINARY
+  blobs. ``QuestDB.dataframe()``, ``PooledSender.dataframe()`` and the
+  WebSocket ``Sender.dataframe()`` refuse such a column with
+  ``QuestDBErrorCode.ArrowUnsupportedColumnKind``, the code 5.0 refused it
+  with, and now say why and what to do instead. That covers a polars
+  ``DataFrame``, ``LazyFrame`` or ``Series`` with an ``Object`` column, and
+  an 8-byte fixed-size binary column from any other source: a pyarrow
+  ``Table`` such as ``df.to_arrow()`` of a polars frame, a
+  ``RecordBatchReader``, a pandas ``ArrowDtype`` column, or any object with
+  ``__arrow_c_stream__``. To write the UUIDs or addresses, pass
+  ``df.to_pandas()`` instead, or convert them first: UUIDs to 16-byte
+  ``pl.Binary`` with ``schema_overrides={'col': 'uuid'}``, addresses to
+  ``pl.UInt32`` with ``schema_overrides={'col': 'ipv4'}``. Genuine 8-byte
+  values land as BINARY once the column is variable-length binary:
+  ``pa.binary()``, ``pl.Binary``, or an object column of ``bytes``.
 
 - Direct QWP DataFrame ingestion reports ``in_doubt=True`` when a failure
   follows an earlier batch that may have committed, including local validation
@@ -600,6 +617,20 @@ Fixed
 
 Faster
 ~~~~~~
+
+- **Writing rows over QWP/WebSocket is no longer quadratic in the number of
+  rows buffered.** ``row()`` sets a rewind point before each row, so that a
+  row which fails part-way can be taken back out of the buffer. On a
+  WebSocket buffer, setting that point copied everything already buffered,
+  so each row cost more than the one before it, and filling a batch took
+  time proportional to the square of its size. The rewind point now records
+  only lengths; the change is in the bundled ``c-questdb-client``. This
+  applies to ``Sender.row()`` over ``ws::`` and ``wss::``, to
+  ``PooledSender.row()`` on a lease from ``QuestDB.sender()``, and to a
+  buffer from such a sender's ``new_buffer()``. With CPython 3.14 on an
+  arm64 Mac, a row of one symbol and five columns cost about 5 µs with
+  2,000 rows buffered and about 62 µs with 40,000; it now costs under 1 µs
+  at either size. ILP buffers were not affected.
 
 - **Writing a frame whose ``df.attrs['questdb']`` is a plain ``dict`` is no
   longer quadratic in the column count.** pandas 2.2 and later deep-copy the

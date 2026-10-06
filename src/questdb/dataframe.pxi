@@ -1840,6 +1840,95 @@ cdef void_int _dataframe_series_as_arrow(
 cdef str _ARROW_EXT_UUID = 'arrow.uuid'
 
 
+# polars exports its `Object` dtype as `fixed_size_binary(8)`: one 8-byte
+# handle to an object in its own process per cell, with no field or
+# schema metadata saying so, and it refuses to nest `Object` inside a
+# struct or list. Once the column has left polars -- through `to_arrow()`,
+# a `RecordBatchReader`, a wrapper's `__arrow_c_stream__`, or a pandas
+# `ArrowDtype` -- that top-level width is all there is to recognise it by.
+# The column-QWP routes therefore refuse every 8-byte fixed-size binary
+# column with `ArrowUnsupportedColumnKind`, the code 5.0 raises for the
+# same inputs; storing it would write meaningless BINARY blobs.
+cdef const char* _ARROW_FMT_FSB8 = "w:8"
+cdef const char* _ARROW_FMT_STRUCT = "+s"
+
+# The most top-level columns the native Arrow importer accepts. It mirrors
+# `MAX_ARROW_TOP_LEVEL_COLUMNS` in `questdb-rs-ffi/src/lib.rs`, which the
+# importer checks before it reads a single child pointer.
+cdef int64_t _ARROW_MAX_TOP_LEVEL_COLUMNS = 4095
+
+
+cdef str _polars_object_remedy(object name):
+    """How to write the values a polars `Object` column holds. The column
+    may reach the client still in polars, or already converted to pyarrow
+    or to a pandas `ArrowDtype`; either way the fix starts from the polars
+    frame."""
+    return (
+        f'For uuid.UUID or ipaddress.IPv4Address values, convert the '
+        f'polars frame with `df.to_pandas()` (for a Series, '
+        f'`series.to_frame().to_pandas()`), without a `types_mapper`, and '
+        f'pass the result: its object column lands as UUID or IPV4. Or '
+        f'convert the values in polars first: UUIDs to 16-byte '
+        f'`pl.Binary` with `schema_overrides={{{name!r}: \'uuid\'}}`, '
+        f'addresses to `pl.UInt32` with '
+        f'`schema_overrides={{{name!r}: \'ipv4\'}}`. Convert any other '
+        f'objects to a type QuestDB stores.')
+
+
+cdef str _fsb8_refusal_message(object name):
+    return (
+        f'Bad column {name!r}: its values are 8 bytes each (Arrow type '
+        f'fixed_size_binary(8)), the shape polars exports its Object '
+        f'dtype in: handles to objects in its own process rather than '
+        f'data. Such a column is refused rather than stored as BINARY, '
+        f'whatever its label. If it came from a polars Object column, '
+        f'start from the polars frame. '
+        + _polars_object_remedy(name)
+        + f' If it holds genuine 8-byte values, make it variable-length '
+        f'binary (`pa.binary()`, `pl.Binary`, or a pandas object column '
+        f'of `bytes`) to store it as BINARY. A UUID or LONG256 claim '
+        f'needs 16- or 32-byte values.')
+
+
+cdef void_int _refuse_fsb8_column(const ArrowSchema* col) except -1:
+    cdef str name = ''
+    if col.format == NULL or strncmp(col.format, _ARROW_FMT_FSB8, 4) != 0:
+        return 0
+    if col.name != NULL:
+        name = (<bytes>col.name).decode('utf-8', 'replace')
+    raise QuestDBError(
+        QuestDBErrorCode.ArrowUnsupportedColumnKind,
+        _fsb8_refusal_message(name))
+
+
+cdef void_int _refuse_fsb8_columns(const ArrowSchema* schema) except -1:
+    """Refuse a top-level 8-byte fixed-size binary column in an exported
+    Arrow stream schema.
+
+    A struct root is a table, whose fields are its columns; that includes
+    a struct-typed polars Series. Any other root is a single column, as a
+    polars Series of another type exports. Comparing four bytes includes
+    the terminator, so `"w:8"` matches exactly.
+
+    The schema comes straight from the producer and the native importer
+    has not validated it yet, so a declared child count is trusted only
+    within the bound the importer itself enforces before reading any
+    child. Outside it -- negative, or over the column cap -- this walk
+    reads nothing and leaves the importer to refuse the schema."""
+    cdef int64_t i
+    if (schema.format != NULL
+            and strncmp(schema.format, _ARROW_FMT_STRUCT, 3) == 0):
+        if (schema.children == NULL
+                or schema.n_children < 0
+                or schema.n_children > _ARROW_MAX_TOP_LEVEL_COLUMNS):
+            return 0
+        for i in range(schema.n_children):
+            if schema.children[i] != NULL:
+                _refuse_fsb8_column(schema.children[i])
+        return 0
+    return _refuse_fsb8_column(schema)
+
+
 cdef const char* _ARROW_FMT_INT8 = "c"
 cdef const char* _ARROW_FMT_INT16 = "s"
 cdef const char* _ARROW_FMT_INT32 = "i"
@@ -1988,6 +2077,20 @@ cdef void_int _dataframe_series_resolve_arrow(
             f'first, or every UUID will be stored reversed. To store '
             f'plain binary data, make it a column of Python `bytes` '
             f'objects.')
+
+    # Eight bytes is the shape of a polars `Object` column's handles (see
+    # `_ARROW_FMT_FSB8`), refused whatever its label. The two widths above
+    # raise `BadDataFrame`; this one raises `ArrowUnsupportedColumnKind`,
+    # the code 5.0 raises for this width, so callers written against 5.0
+    # see the same code. Without this check the column would reach the
+    # native writer through `col_source_arrow_passthrough` and land as
+    # BINARY.
+    if (qwp_planner
+            and arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
+            and arrowtype.byte_width == 8):
+        raise QuestDBError(
+            QuestDBErrorCode.ArrowUnsupportedColumnKind,
+            _fsb8_refusal_message(pandas_col.name))
 
     cdef object t_dec32 = getattr(_PYARROW.lib, 'Type_DECIMAL32', None)
     cdef object t_dec64 = getattr(_PYARROW.lib, 'Type_DECIMAL64', None)

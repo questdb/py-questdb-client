@@ -3811,7 +3811,9 @@ def refusal(frame):
     return caught
 
 
-for frame in (pl.DataFrame({NAME: [1]}), pl.LazyFrame({NAME: [1]})):
+# A Series exports as one column named after it.
+for frame in (pl.DataFrame({NAME: [1]}), pl.LazyFrame({NAME: [1]}),
+              pl.Series(NAME, [1])):
     exc = refusal(frame)
     assert exc.code == qi.QuestDBErrorCode.InvalidName, exc.code
     assert str(exc) == EXPECTED, str(exc)
@@ -3823,7 +3825,9 @@ assert struct.schema['s'] == pl.Struct({NAME: pl.Int64}), struct.schema
 list_of_struct = pl.DataFrame({'v': [1], 's': [[{NAME: 1}]]})
 assert list_of_struct.schema['s'] == pl.List(
     pl.Struct({NAME: pl.Int64})), list_of_struct.schema
-for frame in (struct, list_of_struct):
+struct_series = pl.Series('s', [{NAME: 1}])
+assert struct_series.dtype == pl.Struct({NAME: pl.Int64}), struct_series.dtype
+for frame in (struct, list_of_struct, struct_series):
     exc = refusal(frame)
     assert exc.code == qi.QuestDBErrorCode.BadDataFrame, exc.code
     assert str(exc).startswith(
@@ -3835,7 +3839,8 @@ print('OK')
     def test_a_nul_in_a_polars_column_or_field_name_is_refused(self):
         """polars panics when its Arrow export meets a name holding a
         NUL, struct field names included, and the panic aborts the
-        process. Such a name is refused before the export: a column
+        process; a Series' own name counts as a column name, since it
+        exports as one. Such a name is refused before the export: a column
         name with the error `row()` raises for it, a struct field name
         with BadDataFrame naming its column. Runs in a child
         interpreter, where an abort reads as a failed exit and the rest

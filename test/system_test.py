@@ -5536,17 +5536,24 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         return col.to_pylist()
 
     def test_uuid_claim_on_wrong_width_is_rejected(self):
-        """A UUID claim requires 16-byte values; an 8-byte column
-        fails client-side rather than sending malformed rows."""
+        """A UUID claim requires 16-byte values; a 12-byte column
+        fails client-side rather than sending malformed rows. Twelve
+        rather than eight: an 8-byte column is refused before any
+        override is read (it is the shape of a polars `Object` column),
+        so it would not reach the rule this test is about."""
         import pyarrow as pa
         self._require_qwp_ws()
         table = self._table()
-        values = pa.array([b'\x00' * 8, b'\xff' * 8], type=pa.binary(8))
+        values = pa.array([b'\x00' * 12, b'\xff' * 12], type=pa.binary(12))
         df = self._make_df_with_ts('v', values, 2)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.QuestDBError):
+            with self.assertRaisesRegex(
+                    qi.QuestDBError,
+                    "override 'uuid' is not applicable") as raised:
                 client.dataframe(df, table_name=table, at='ts',
                                  schema_overrides={'v': 'uuid'})
+        self.assertEqual(
+            raised.exception.code, qi.QuestDBErrorCode.ArrowIngest)
 
     def test_uuid_string_into_uuid_column_via_server_coercion(self):
         """Strict-mirror policy: `pa.string()` always maps to
@@ -6352,14 +6359,16 @@ class TestColumnIngressQwpRowTypes(unittest.TestCase):
     def test_fsb_other_size_lands_as_binary(self):
         """``FixedSizeBinary(k)`` carries no QuestDB type claim at any
         width, so it is opaque bytes and auto-creates a BINARY column
-        holding the rows verbatim. Auto-create (no ``_create_table``)
+        holding the rows verbatim. The one exception is width 8, which
+        is refused: it is the shape of a polars ``Object`` column's
+        handles. Auto-create (no ``_create_table``)
         pins the wire type; a pre-created BINARY column would assert
         only that the server accepted the rows. Order by ``timestamp``:
         auto-create renames ``ts``, and BINARY is not orderable."""
         import pyarrow as pa
         table = self._table()
-        rows = [b'\x00' * 8, b'\xff' * 8]
-        values = pa.array(rows, type=pa.binary(8))
+        rows = [b'\x00' * 12, b'\xff' * 12]
+        values = pa.array(rows, type=pa.binary(12))
         df = self._make_df_with_ts('v', values, 2)
         with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')

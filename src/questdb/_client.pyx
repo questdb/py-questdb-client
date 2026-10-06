@@ -6901,6 +6901,7 @@ def _bench_dataframe_plan_and_populate_column_chunks(
 cdef object _POLARS = None
 cdef object _POLARS_DATAFRAME_T = None
 cdef object _POLARS_LAZYFRAME_T = None
+cdef object _POLARS_SERIES_T = None
 
 # Whether this polars reinterprets 8- and 16-bit integers (1.39+).
 # None until first asked. A plain module global, so tests can set it.
@@ -6929,6 +6930,7 @@ cdef bint _polars_reinterprets_narrow_ints():
 
 cdef bint _try_import_polars():
     global _POLARS, _POLARS_DATAFRAME_T, _POLARS_LAZYFRAME_T
+    global _POLARS_SERIES_T
     if _POLARS is not None:
         return True
     try:
@@ -6937,6 +6939,7 @@ cdef bint _try_import_polars():
         return False
     _POLARS_DATAFRAME_T = polars.DataFrame
     _POLARS_LAZYFRAME_T = polars.LazyFrame
+    _POLARS_SERIES_T = polars.Series
     _POLARS = polars
     return True
 
@@ -6947,27 +6950,46 @@ cdef bint _is_polars_dataframe_or_lazy(object obj):
     return isinstance(obj, (_POLARS_DATAFRAME_T, _POLARS_LAZYFRAME_T))
 
 
+cdef object _polars_named_dtypes(object frame):
+    """`(name, dtype)` for each column a polars DataFrame or Series
+    exports, in order; None for any other object. A Series exports as a
+    single column named after it. Call only after `_try_import_polars()`
+    has returned True."""
+    if isinstance(frame, _POLARS_DATAFRAME_T):
+        return list(frame.schema.items())
+    if isinstance(frame, _POLARS_SERIES_T):
+        return [(frame.name, frame.dtype)]
+    return None
+
+
 cdef void_int _reject_polars_object_columns(object frame) except -1:
     """polars exports an ``Object`` column as ``fixed_size_binary(8)``
     holding in-process handles, which the server would store as BINARY
-    blobs of raw memory addresses. Reject such a column before the
-    Arrow export, mirroring the Rust polars API."""
+    blobs of raw memory addresses. Reject such a column of a polars
+    DataFrame or Series before the Arrow export, mirroring the Rust
+    polars API. The code is `ArrowUnsupportedColumnKind`, the one 5.0
+    raises for these inputs. The same column reaching the client in any
+    other shape is refused by its width, in `_refuse_fsb8_columns`."""
     cdef object object_dtype
+    cdef object columns
     cdef object name
     cdef object dtype
     if not _try_import_polars():
         return 0
-    if not isinstance(frame, _POLARS_DATAFRAME_T):
+    columns = _polars_named_dtypes(frame)
+    if columns is None:
         return 0
     object_dtype = getattr(_POLARS, 'Object', None)
     if object_dtype is None:
         return 0
-    for name, dtype in frame.schema.items():
+    for name, dtype in columns:
         if dtype == object_dtype:
             raise QuestDBError(
-                QuestDBErrorCode.BadDataFrame,
+                QuestDBErrorCode.ArrowUnsupportedColumnKind,
                 f'Bad column {name!r}: polars Object dtype is not '
-                f'supported; cast it to a supported dtype before ingest.')
+                f'supported; it exports as handles to objects in this '
+                f'process rather than as data. '
+                + _polars_object_remedy(name))
     return 0
 
 
@@ -6975,8 +6997,9 @@ cdef object _arrow_source_column_names(object frame):
     """The names `frame`'s Arrow export gives its columns, as the Python
     objects they come from: a pandas DataFrame's column labels, plus the
     level names of an index other than a RangeIndex; a polars
-    DataFrame's columns; the schema names of a pyarrow Table,
-    RecordBatch or RecordBatchReader. None for any other type."""
+    DataFrame's columns; a polars Series' own name; the schema names of a
+    pyarrow Table, RecordBatch or RecordBatchReader. None for any other
+    type."""
     cdef list names
     if _is_pandas_dataframe_object(frame):
         names = frame.columns.tolist()
@@ -6986,8 +7009,11 @@ cdef object _arrow_source_column_names(object frame):
         if not isinstance(frame.index, _PANDAS.RangeIndex):
             names.extend(frame.index.names)
         return names
-    if _try_import_polars() and isinstance(frame, _POLARS_DATAFRAME_T):
-        return frame.columns
+    if _try_import_polars():
+        if isinstance(frame, _POLARS_DATAFRAME_T):
+            return frame.columns
+        if isinstance(frame, _POLARS_SERIES_T):
+            return [frame.name]
     if _PYARROW is None and sys.modules.get('pyarrow') is None:
         # A pyarrow object exists only once pyarrow is imported.
         return None
@@ -7020,12 +7046,14 @@ cdef void_int _reject_nul_column_names(object frame) except -1:
     string. pyarrow, and pandas through it, cut a name holding a NUL at
     the NUL on export, so its column would land under the shorter name.
     polars panics on such a name, struct field names included, and the
-    process aborts. The names are checked here, before the export: a
-    column name is refused with the error `row()` raises for it, and a
-    polars struct field name with a BadDataFrame error."""
+    process aborts, whether the name belongs to a DataFrame column or to
+    a Series. The names are checked here, before the export: a column
+    name is refused with the error `row()` raises for it, and a polars
+    struct field name with a BadDataFrame error."""
     cdef object names = _arrow_source_column_names(frame)
     cdef object name
     cdef object dtype
+    cdef object dtypes
     cdef object field
     cdef Py_ssize_t i
     cdef qdb_pystr_buf* b
@@ -7043,11 +7071,17 @@ cdef void_int _reject_nul_column_names(object frame) except -1:
                 str_to_column_name(b, str(name), &c_name)
             finally:
                 qdb_pystr_buf_free(b)
-    if _POLARS is not None and isinstance(frame, _POLARS_DATAFRAME_T):
+    if _POLARS is not None and isinstance(
+            frame, (_POLARS_DATAFRAME_T, _POLARS_SERIES_T)):
         # `dtypes` is cheap to read, and `is_nested()` leaves the walk
-        # to the rare nested column. `names` is `frame.columns`, in the
-        # same order.
-        for i, dtype in enumerate(frame.dtypes):
+        # to the rare nested column. `names` is in the same order:
+        # `frame.columns` for a DataFrame, the Series' own name for a
+        # Series.
+        if isinstance(frame, _POLARS_DATAFRAME_T):
+            dtypes = frame.dtypes
+        else:
+            dtypes = [frame.dtype]
+        for i, dtype in enumerate(dtypes):
             if not dtype.is_nested():
                 continue
             field = _polars_struct_field_with_nul(dtype)
@@ -7104,6 +7138,11 @@ cdef void_int _capsule_consume_stream(
                 QuestDBErrorCode.InvalidApiCall,
                 f'Arrow stream get_schema failed: '
                 f'{stream_err.decode("utf-8", errors="replace") if stream_err != NULL else "unknown"}')
+        # Before the first batch is read: every Arrow source reaches the
+        # client through this one schema, so a polars `Object` column is
+        # caught here however it was exported. The caller releases
+        # `c_schema`.
+        _refuse_fsb8_columns(c_schema)
 
     while True:
         memset(&batch, 0, sizeof(ArrowArray))
@@ -9062,6 +9101,15 @@ cdef class QuestDB:
           16- or 32-byte width on its own claims nothing, so an
           unlabeled fixed-size column is opaque bytes rather than a
           UUID or a LONG256.
+
+          The one exception is ``pa.fixed_size_binary(8)``, which both
+          planners refuse with ``ArrowUnsupportedColumnKind``, labelled
+          or not. polars exports its ``Object`` dtype in exactly that
+          shape, as handles to objects in its own process rather than
+          data, and once exported nothing else marks it. To store
+          genuine 8-byte values as BINARY, make the column
+          variable-length binary: ``pa.binary()``, ``pl.Binary``, or an
+          object column of ``bytes``.
 
           The two planners differ here, and deliberately. On the Arrow
           columnar path an unlabeled 16- or 32-byte column lands as
