@@ -1179,8 +1179,15 @@ class TestSchemaOverrides(unittest.TestCase):
             def to_bytes(self, length, byteorder, *args, **kwargs):
                 return bytearray(16)
 
+        class _NoBytes:
+            # A `bytes`-typed Cython variable accepts None: the width check
+            # must not hand it to PyBytes_GET_SIZE.
+            def to_bytes(self, length, byteorder, *args, **kwargs):
+                return None
+
         for bad, expected in ((_ShortInt(0), qi.QuestDBError),
-                              (_NotBytes(), TypeError)):
+                              (_NotBytes(), TypeError),
+                              (_NoBytes(), qi.QuestDBError)):
             with self.subTest(bad=type(bad).__name__):
                 value = uuid_mod.uuid4()
                 object.__setattr__(value, 'int', bad)

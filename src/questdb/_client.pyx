@@ -3734,12 +3734,15 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
                 # otherwise copy adjacent heap onto the wire. Same guard
                 # as the query-bind twin in `egress.pxi`.
                 be_bytes = (<object>cell).int.to_bytes(16, 'big')
-                if PyBytes_GET_SIZE(be_bytes) != 16:
+                # A `bytes`-typed variable also accepts None, which
+                # PyBytes_GET_SIZE must never see.
+                if be_bytes is None or PyBytes_GET_SIZE(be_bytes) != 16:
                     raise QuestDBError(
                         QuestDBErrorCode.BadDataFrame,
                         f'Bad column {df_col_name!r} at row {i}: '
                         f'uuid.UUID.int.to_bytes returned '
-                        f'{PyBytes_GET_SIZE(be_bytes)} bytes, expected 16.')
+                        + ('None, expected 16 bytes.' if be_bytes is None
+                           else f'{len(be_bytes)} bytes, expected 16.'))
                 memcpy(buf + i * 16, PyBytes_AsString(be_bytes), 16)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
