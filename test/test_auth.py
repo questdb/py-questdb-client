@@ -2115,6 +2115,9 @@ class NativeOidcIntegrationTest(unittest.TestCase):
 
         self.assertEqual(len(result), 1)
         self.assertIsInstance(result[0], OidcCancelledError)
+        # Native emits no FAILURE event on cancellation; the binding reports the
+        # end so the painted prompt does not stay on "waiting".
+        self.assertEqual(renderer.failures, ['Sign-in cancelled.'])
         # clear() is excluded: it is pure teardown and must outlive close(),
         # which drops the in-memory credential but leaves the persisted entry.
         auth.clear()
@@ -2808,13 +2811,15 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         pending = (400, {'error': 'authorization_pending'}, None)
         with OidcTestServer(
                 device_token_response=pending, device_expires_in=20) as server:
-            auth = make_discovered_auth(server, renderer=CancellingRenderer())
+            renderer = CancellingRenderer()
+            auth = make_discovered_auth(server, renderer=renderer)
             holder.append(auth)
             started = time.monotonic()
             with self.assertRaises(OidcCancelledError):
                 auth.sign_in()
             self.assertLess(time.monotonic() - started, 10)
             self.assertEqual(outcome[:1], ['cancelled'])
+            self.assertEqual(renderer.failures, ['Sign-in cancelled.'])
             with self.assertRaises(OidcInteractionRequired):
                 auth.token()
 
@@ -2823,6 +2828,10 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             server.device_token_response = None
             auth.sign_in()
             self.assertEqual(auth.token(), server.initial_access_token)
+            # A completed sign-in gets its SUCCESS event only, never a
+            # synthesized failure.
+            self.assertEqual(renderer.failures, ['Sign-in cancelled.'])
+            self.assertEqual(len(renderer.successes), 1)
 
     def test_renderer_can_close_the_provider_from_its_callback(self):
         # Permanent close remains callback-safe for renderers that explicitly

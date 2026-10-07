@@ -1150,6 +1150,30 @@ cdef void _oidc_park_pending_signals() noexcept:
             _oidc_park_foreground_interrupt(exc)
 
 
+cdef _oidc_report_unfinished_prompt(object renderer, object exc):
+    """Tell a renderer whose prompt got no SUCCESS/FAILURE event that the
+    sign-in ended.
+
+    Native emits no terminal event when a device flow is cancelled, its
+    provider is closed, or Ctrl-C interrupts it, so without this the renderer's
+    output keeps showing the waiting status and a link that no client will
+    redeem. Best-effort, like every renderer callback.
+    """
+    if renderer is None:
+        return
+    errors = _oidc_errors_module()
+    if exc is None or (errors is not None
+                       and isinstance(exc, errors.OidcCancelledError)):
+        message = 'Sign-in cancelled.'
+    else:
+        message = str(exc) or 'OIDC sign-in failed.'
+    try:
+        renderer.on_failure(message)
+    except Exception:
+        logging.getLogger('questdb').exception(
+            'OIDC renderer callback failed')
+
+
 cdef void _oidc_event_dispatch(
         void* user_data,
         const questdb_oidc_event* event) noexcept with gil:
@@ -1206,6 +1230,7 @@ cdef void _oidc_event_dispatch(
                     event.browser_target, event.browser_target_len)
             if _oidc_event_has_interval(event.struct_size):
                 interval_seconds = event.interval_seconds
+            (<OidcDeviceAuth>provider)._prompt_renderer = renderer
             renderer.on_prompt({
                 'user_code': _oidc_text(event.user_code, event.user_code_len),
                 'verification_uri': _oidc_text(
@@ -1228,10 +1253,12 @@ cdef void _oidc_event_dispatch(
         elif event.kind == QUESTDB_OIDC_EVENT_WAITING:
             renderer.on_waiting(event.seconds_left)
         elif event.kind == QUESTDB_OIDC_EVENT_SUCCESS:
+            (<OidcDeviceAuth>provider)._prompt_renderer = None
             renderer.on_success(
                 _oidc_text(event.identity, event.identity_len),
                 event.expires_in_seconds)
         elif event.kind == QUESTDB_OIDC_EVENT_FAILURE:
+            (<OidcDeviceAuth>provider)._prompt_renderer = None
             renderer.on_failure(
                 _oidc_text(event.message, event.message_len) or
                 'OIDC sign-in failed.')
@@ -1614,6 +1641,11 @@ cdef class OidcDeviceAuth:
     # A KeyboardInterrupt/SystemExit delivered inside a renderer callback,
     # parked for the sole active sign_in() to re-raise once native returns.
     cdef object _interrupt
+    # The renderer that was shown a device-code prompt in the running
+    # sign_in() and has not yet received its SUCCESS/FAILURE event. A sign-in
+    # that ends without one (cancel, close, Ctrl-C) reports the end to it, so
+    # its output does not stay on "waiting" with a live link.
+    cdef object _prompt_renderer
     # Native serializes acquisition, but a second native call can regain the
     # GIL before the callback-owning call and steal `_interrupt`. Reject it
     # before releasing the GIL so callback exceptions remain invocation-owned.
@@ -1630,6 +1662,7 @@ cdef class OidcDeviceAuth:
         self._renderer = None
         self._closed = False
         self._interrupt = None
+        self._prompt_renderer = None
         self._sign_in_lock = threading.Lock()
         self._opens_browser = False
 
@@ -2156,6 +2189,7 @@ cdef class OidcDeviceAuth:
             # non-blocking lock above prevents another sign_in() from entering
             # native and winning the race to consume the provider field.
             self._interrupt = None
+            self._prompt_renderer = None
             # Lets a persistence diagnostic on this thread find this provider:
             # its callback carries no user_data.
             call = _oidc_foreground_enter(self)
@@ -2165,14 +2199,19 @@ cdef class OidcDeviceAuth:
             _oidc_foreground_exit(call)
             interrupt = self._interrupt
             self._interrupt = None
+            prompted = self._prompt_renderer
+            self._prompt_renderer = None
             if interrupt is not None:
                 # The interrupt is what the user asked for; the native error is
                 # just the cancellation it caused.
                 if err != NULL:
                     questdb_error_free(err)
+                _oidc_report_unfinished_prompt(prompted, None)
                 raise interrupt
             if not ok:
-                raise _oidc_err_to_py(err)
+                exc = _oidc_err_to_py(err)
+                _oidc_report_unfinished_prompt(prompted, exc)
+                raise exc
         finally:
             self._sign_in_lock.release()
 

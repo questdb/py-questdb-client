@@ -822,8 +822,12 @@ class Renderer:
         ``expires_in`` is the token's remaining lifetime in seconds."""
 
     def on_failure(self, message: str) -> None:
-        """Report a failed or expired sign-in with a human-readable
-        ``message`` (which may interpolate an untrusted IdP error string)."""
+        """Report a failed, expired or cancelled sign-in with a human-readable
+        ``message`` (which may interpolate an untrusted IdP error string).
+
+        Called once a prompt was shown and the sign-in ends without success,
+        including when it is cancelled, its provider is closed, or ``Ctrl-C``
+        interrupts it (``message`` is then ``'Sign-in cancelled.'``)."""
 
 
 class TerminalRenderer(Renderer):

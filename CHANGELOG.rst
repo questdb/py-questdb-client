@@ -230,8 +230,6 @@ Highlights:
   dropped by the stricter check applied when the store is read back — which
   left the credential unusable after a restart while the plaintext file stayed
   on disk.
-* OIDC prompt callbacks expose the bounded device-code lifetime and polling
-  interval, matching the complete Java device challenge.
 * Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes plaintext
   credentials atomically and coordinates refresh across processes. Its
   directories/files are owner-only (``0700``/``0600``) on Unix. Non-Unix
@@ -305,8 +303,11 @@ Highlights:
   ``QuestDBErrorCode.InvalidApiCall`` and clears nothing, so cancel the sign-in
   first or retry once it completes.
 * Renderer prompts receive the device code's bounded lifetime and polling
-  interval (``expires_in`` / ``interval``) plus ``browser_target``, the single
-  natively vetted URL that built-in renderers use for links and QR codes.
+  interval (``expires_in`` / ``interval``), matching the complete Java device
+  challenge, plus ``browser_target``, the single natively vetted URL that
+  built-in renderers use for links and QR codes. A prompted sign-in that is
+  cancelled, closed or interrupted reports ``on_failure('Sign-in cancelled.')``
+  so the renderer's output does not stay on "waiting".
 * OIDC requires no additional Python dependency; ``sqlalchemy`` / ``psycopg`` /
   ``qrcode`` / ``IPython`` are imported lazily for optional conveniences.
 
