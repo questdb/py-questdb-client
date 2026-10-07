@@ -181,6 +181,28 @@ while the sender is inside a native call such as ``flush()``. Write listener
 events to a different sender or queue them for the owning thread, and read the
 counters when the sender is not flushing.
 
+``SenderTransaction.commit()`` after its sender was closed
+**********************************************************
+
+Calling :meth:`SenderTransaction.commit <questdb.SenderTransaction.commit>`
+after its sender was closed now raises
+:class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+``QuestDBErrorCode.InvalidApiCall`` instead of leaking an internal
+``TypeError``. Code that caught ``TypeError`` there must catch
+``QuestDBError`` instead.
+
+An abandoned ``QueryResult`` reports its ``ResourceWarning``
+************************************************************
+
+A ``QueryResult`` left to the garbage collector now reports the
+``ResourceWarning`` about its unreleased cursor instead of swallowing it: the
+finalizer routes it through ``sys.unraisablehook``. Suites running with
+warnings-as-errors will see a new failure, and because it is raised whenever
+collection happens to run, pytest attributes it to the test that was executing
+rather than to the one that abandoned the result. Close results
+deterministically (``with db.query(...) as result:``) or filter
+``ResourceWarning``.
+
 Features
 ~~~~~~~~
 
@@ -389,24 +411,11 @@ opts in by handling the new kind.
 Other changes
 ~~~~~~~~~~~~~
 
-- Calling :meth:`SenderTransaction.commit
-  <questdb.SenderTransaction.commit>` after its sender was closed now raises
-  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-  ``QuestDBErrorCode.InvalidApiCall`` instead of leaking an internal
-  ``TypeError``.
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a
   ``PooledReader``, keep that reader on its original thread until processing
   finishes.
-- A ``QueryResult`` left to the garbage collector now reports the
-  ``ResourceWarning`` about its unreleased cursor instead of swallowing it: the
-  finalizer routes it through ``sys.unraisablehook``. Suites running with
-  warnings-as-errors will see a new failure, and because it is raised whenever
-  collection happens to run, pytest attributes it to the test that was
-  executing rather than to the one that abandoned the result. Close results
-  deterministically (``with db.query(...) as result:``) or filter
-  ``ResourceWarning``.
 - WebSocket connections keep a dictionary of ``SYMBOL`` values to avoid sending
   repeated text in full. Repeated values do not grow it, but a long-lived
   connection fills it after 2,000,000 distinct values or 256 MiB of symbol
