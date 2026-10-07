@@ -367,7 +367,10 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
                                 frame.slice(prefix), table_name='t_validation_prefix',
                                 at='ts', max_rows_per_batch=1)
                         self.assertFalse(fresh.exception.in_doubt)
-                    stats = server.snapshot()
+                    # The frames since the last checkpoint went out
+                    # deferred and unacked, so the server may still be
+                    # reading them when the client returns.
+                    stats = server.snapshot_when_closed()
                 self.assertEqual(stats['binary_frames'], prefix + (prefix // 100))
 
     def test_stream_error_after_checkpoint_covers_whole_dataframe(self):
@@ -384,7 +387,9 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
                 reader = pa.RecordBatchReader.from_batches(schema, batches())
                 with self.assertRaises(qi.QuestDBError) as raised:
                     client.dataframe(reader, table_name='t_stream_error', at='ts')
-            stats = server.snapshot()
+            # The frame after the checkpoint went out deferred and
+            # unacked, so the server may still be reading it.
+            stats = server.snapshot_when_closed()
         self.assertEqual(raised.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
         self.assertTrue(raised.exception.in_doubt)
         self.assertIn('source failed after checkpoint', str(raised.exception))

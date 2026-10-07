@@ -133,6 +133,27 @@ class QwpAckServer:
                 "tls_handshake_failures": self.tls_handshake_failures,
             }
 
+    def snapshot_when_closed(self, timeout_s=5.0):
+        """Return :meth:`snapshot` once every accepted connection has
+        finished. Call it after the client has closed.
+
+        A handler counts each frame as it reads it, on its own thread,
+        so a frame the client sent without waiting for an ack -- a
+        deferred frame under ``defer_aware_acks`` -- can still be unread
+        when the client call returns. A closed client's connections each
+        reach EOF once their frames are read, so the counts are final
+        when every handler has exited. Unlike
+        :meth:`wait_binary_frames_settled`, this has no quiet-period
+        fallback, which a slow runner's handler thread can outlast.
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            with self._lock:
+                finished = self.finished_count == self.accept_count
+            if finished or time.monotonic() >= deadline:
+                return self.snapshot()
+            time.sleep(0.001)
+
     def wait_binary_frames_settled(self, quiet_s=0.02, timeout_s=5.0):
         """Return the ``binary_frames`` count once no more are in flight.
 
