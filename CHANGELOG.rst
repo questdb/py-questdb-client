@@ -4,7 +4,7 @@
 Changelog
 =========
 
-5.1.0 (unreleased)
+6.0.0 (unreleased)
 ------------------
 
 Breaking changes
@@ -23,9 +23,9 @@ Breaking changes
 - **A 16- or 32-byte Arrow column is no longer assumed to be a UUID or a
   LONG256.** Width alone no longer decides the type. On the Arrow columnar
   path such a column is opaque bytes and lands as BINARY; the NumPy planner
-  refuses both widths outright, as the fourth entry below explains. To get
-  the old behaviour back, say what the column is: build it with
-  ``pa.uuid()``, attach ``questdb.column_type`` field metadata, or pass
+  refuses both widths outright, as *The two DataFrame planners* below
+  explains. To get the old behaviour back, say what the column is: build it
+  with ``pa.uuid()``, attach ``questdb.column_type`` field metadata, or pass
   ``schema_overrides={'col': 'uuid'}`` (or ``'long256'``).
 
   ``pa.uuid()`` needs pyarrow 18 or newer, and the column must carry the
@@ -101,6 +101,30 @@ Breaking changes
   ``uuid.UUID`` would send the frame to the NumPy planner, which refuses any
   LONG256 column in it. On the Arrow path such a LONG256 column lands as
   BINARY unless you pass ``schema_overrides={'col': 'long256'}``.
+
+- **Arrow field metadata that does not fit the column's Arrow type is
+  refused.** Every column of a result from ``to_arrow()``, ``iter_arrow()``
+  or ``pa.table(result)`` carries a ``questdb.column_type`` metadata key
+  naming its QuestDB type. The key stays on the field when you change the
+  column's type with ``Table.cast`` and a schema built by
+  ``field.with_type(...)``, or with ``pa.concat_tables(...,
+  promote_options='permissive')``. 5.0's ``dataframe()`` ignored a key that
+  no longer fitted and wrote the column by its Arrow type. It now raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.ArrowIngest`` and sends nothing. An INT column widened
+  to ``pa.int64()``, for example, gives::
+
+      [column='n'] column 'n' has column_type='int', which is not applicable to Arrow type Int64
+
+  The check covers BYTE, SHORT, INT, CHAR, IPV4, SYMBOL, UUID, LONG256 and
+  GEOHASH columns. A ``df.attrs['questdb']`` claim that does not fit is
+  logged instead and the write goes ahead; see *A claim the column's type
+  can never carry is now logged* under *Fixed*. Once you change a column's
+  type, drop its stale metadata::
+
+      i = table.schema.get_field_index('col')
+      table = table.cast(table.schema.set(
+          i, table.schema.field(i).remove_metadata()))
 
 - **A ``df.attrs['questdb']`` claim with a version other than 1 is
   ignored.** The version is checked rather than just carried, so that a
@@ -179,31 +203,6 @@ Breaking changes
   ``in_flight_window``, remove it. These options are no longer supported and now
   raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.ConfigError`` during startup.
-
-- **A claim a string column cannot carry is now logged on the Arrow path
-  too.** A ``df.attrs['questdb']`` claim naming ``uuid``, ``long256``,
-  ``ipv4``, ``char`` or ``geohash`` on a column whose dtype holds no Arrow
-  type was dropped there without a word, while the NumPy planner said so.
-  On pandas 3 that includes an ordinary string column, and those reach the
-  Arrow columnar path, so this is the common way to meet it. Both planners
-  now emit a warning-level record on the ``questdb`` logger.
-
-  Its message starts with ``questdb: column``. It is deliberately a log
-  record rather than a ``UserWarning``: ``-W error`` must not turn a valid
-  frame into ``QuestDBErrorCode.InvalidApiCall`` or stop its write. Logging
-  has no warnings-style deduplication: every write emits one record for every
-  claim it cannot apply, so repeated writes of the same frame repeat the
-  notice. Cast the column to a type the kind fits, name the type outright
-  with ``schema_overrides``, or drop the claim. To silence these notices
-  instead, configure the standard-library logger::
-
-      import logging
-
-      logging.getLogger('questdb').setLevel(logging.ERROR)
-
-  A claim whose column has been dropped or renamed is still ignored in
-  silence. That is ordinary schema drift, and surviving it quietly is what
-  the claim is for.
 
 - **``QuestDB.close()`` stops waiting for leases after 60 seconds.** It used
   to wait for every ``sender()`` and ``reader()`` lease however long it
@@ -606,6 +605,31 @@ Fixed
   nothing, such as a float column under ``geohash``, is a mistake
   rather than drift, and the two were indistinguishable in silence. A claim
   the column does carry, and one whose column has gone, stay quiet.
+
+- **A claim a string column cannot carry is now logged on the Arrow path
+  too.** A ``df.attrs['questdb']`` claim naming ``uuid``, ``long256``,
+  ``ipv4``, ``char`` or ``geohash`` on a column whose dtype holds no Arrow
+  type was dropped there without a word, while the NumPy planner said so.
+  On pandas 3 that includes an ordinary string column, and those reach the
+  Arrow columnar path, so this is the common way to meet it. Both planners
+  now emit a warning-level record on the ``questdb`` logger.
+
+  Its message starts with ``questdb: column``. It is deliberately a log
+  record rather than a ``UserWarning``: ``-W error`` must not turn a valid
+  frame into ``QuestDBErrorCode.InvalidApiCall`` or stop its write. Logging
+  has no warnings-style deduplication: every write emits one record for every
+  claim it cannot apply, so repeated writes of the same frame repeat the
+  notice. Cast the column to a type the kind fits, name the type outright
+  with ``schema_overrides``, or drop the claim. To silence these notices
+  instead, configure the standard-library logger::
+
+      import logging
+
+      logging.getLogger('questdb').setLevel(logging.ERROR)
+
+  A claim whose column has been dropped or renamed is still ignored in
+  silence. That is ordinary schema drift, and surviving it quietly is what
+  the claim is for.
 
 - **An object pretending to be a ``decimal.Decimal`` is refused.** DECIMAL
   cells are encoded by reading the object's raw memory, and the check in
