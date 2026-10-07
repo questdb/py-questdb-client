@@ -118,6 +118,8 @@ def connect(
     ``oidc_auth`` accepts :class:`questdb.auth.OidcDeviceAuth`. Call
     ``oidc_auth.sign_in()`` before ``connect``; pooled connections and
     reconnects only load or silently refresh tokens and never prompt.
+    Use ``wss::``: over plain ``ws::`` to a non-loopback host the token is
+    sent in cleartext.
 
     By default ``connect()`` opens the warm minimums up front and fails
     fast when the server is unreachable or rejects the credentials. Set

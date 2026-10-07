@@ -30,7 +30,11 @@ QUESTDB_URL = 'https://questdb.example.com:9000'
 
 
 def _sender_conf(url: str) -> str:
-    """Translate the discovery URL's origin to an ILP/HTTP config string."""
+    """Translate the discovery URL's origin to an ILP/HTTP config string.
+
+    Keep ``https``: an ``http`` URL yields ``http::``, which sends the Bearer
+    token in cleartext -- acceptable only for a loopback server.
+    """
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in ('http', 'https') or parsed.hostname is None:
         raise ValueError('QuestDB URL must be an absolute http(s) URL')

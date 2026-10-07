@@ -6743,6 +6743,9 @@ cdef class QuestDB:
         :meth:`~questdb.auth.OidcDeviceAuth.sign_in` method before constructing
         the pool; connection and reconnect paths never start an interactive
         device flow.
+        Use ``wss::``: over plain ``ws::`` to a non-loopback host the token is
+        sent in cleartext. A closed provider raises
+        :class:`~questdb.auth.OidcCancelledError`.
 
         The connection pool is opened eagerly unless configuration selects a
         lazy connection. Dataframe ingestion always uses the direct
@@ -6883,7 +6886,7 @@ cdef class QuestDB:
                 if (<OidcDeviceAuth>oidc_auth)._raw == NULL:
                     raise ValueError('"oidc_auth" is not initialized')
                 if (<OidcDeviceAuth>oidc_auth)._closed:
-                    raise ValueError('"oidc_auth" is closed')
+                    _raise_oidc_auth_closed()
             if oidc_auth is not None:
                 # Same conflict as the Sender path. Name the keys the caller
                 # wrote rather than letting native report the internal provider
@@ -7834,7 +7837,7 @@ cdef class Sender:
             if (<OidcDeviceAuth>oidc_auth)._raw == NULL:
                 raise ValueError('"oidc_auth" is not initialized')
             if (<OidcDeviceAuth>oidc_auth)._closed:
-                raise ValueError('"oidc_auth" is closed')
+                _raise_oidc_auth_closed()
             # Reject the conflict here, in terms of the parameters the caller
             # actually wrote. Native enforces it too, but reports the internal
             # config key it knows -- "qwp_ws_token_provider" or
@@ -8198,6 +8201,8 @@ cdef class Sender:
         :class:`questdb.auth.OidcDeviceAuth` and the :ref:`oidc_auth` guide. It
         is a Python argument only, with no configuration-string equivalent, and
         is mutually exclusive with ``token``, ``username`` and ``password``.
+        Use ``https::`` or ``wss::``: over plain ``http::`` or ``ws::`` to a
+        non-loopback host the token is sent in cleartext.
         Call :meth:`~questdb.auth.OidcDeviceAuth.sign_in` before the first
         flush: connect and reconnect load or silently refresh a token but never
         start an interactive device flow. Supported on HTTP(S) and
@@ -8392,6 +8397,8 @@ cdef class Sender:
         credential that must be supplied here rather than through
         ``QDB_CLIENT_CONF``, and it is mutually exclusive with ``token``,
         ``username`` and ``password``.
+        Use ``https::`` or ``wss::``: over plain ``http::`` or ``ws::`` to a
+        non-loopback host the token is sent in cleartext.
         """
         cdef str conf_str = os.environ.get('QDB_CLIENT_CONF')
         if conf_str is None:

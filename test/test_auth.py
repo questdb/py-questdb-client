@@ -615,15 +615,29 @@ class NativeOidcTest(unittest.TestCase):
         # The other closed state: a real provider that close() disabled. The
         # attach guards gained a `_closed` check that only this covers -- the
         # uninitialized case above exercises the null native handle instead.
+        # Attaching reports the same typed OidcCancelledError as the
+        # provider's own operations and an already-attached transport, so one
+        # `except OidcError` covers every path -- not a builtin ValueError.
         auth = make_auth()
         auth.close()
-        with self.assertRaisesRegex(ValueError, 'closed'):
-            questdb.Sender(
+        attaches = {
+            'Sender': lambda: questdb.Sender(
                 questdb.Protocol.Http, '127.0.0.1', 9000,
-                oidc_auth=auth, auto_flush=False)
-        with self.assertRaisesRegex(ValueError, 'closed'):
-            questdb.connect(
-                'ws::addr=127.0.0.1:9000;lazy_connect=true;', oidc_auth=auth)
+                oidc_auth=auth, auto_flush=False),
+            'Sender.from_conf': lambda: questdb.Sender.from_conf(
+                'http::addr=127.0.0.1:9000;', oidc_auth=auth),
+            'connect': lambda: questdb.connect(
+                'ws::addr=127.0.0.1:9000;lazy_connect=true;', oidc_auth=auth),
+            'QuestDB.from_conf': lambda: questdb.QuestDB.from_conf(
+                'ws::addr=127.0.0.1:9000;lazy_connect=true;', oidc_auth=auth),
+        }
+        for name, attach in attaches.items():
+            with self.subTest(attach=name):
+                with self.assertRaisesRegex(OidcCancelledError, 'closed') as ctx:
+                    attach()
+                self.assertIsInstance(ctx.exception, questdb.QuestDBError)
+        with self.assertRaisesRegex(OidcCancelledError, 'closed'):
+            auth.token()
         # config stays readable: it is immutable native state that close does
         # not invalidate.
         self.assertEqual(auth.config.client_id, 'questdb')
@@ -1331,6 +1345,41 @@ class NativeOidcTest(unittest.TestCase):
         self.assertEqual(
             FileTokenStore(os.path.join('~', 'qdb-oidc-test')).directory,
             os.path.join(os.path.expanduser('~'), 'qdb-oidc-test'))
+
+    @unittest.skipUnless(os.name == 'posix', 'symlinks with POSIX ..')
+    def test_store_directory_leaves_dotdot_to_the_kernel_like_native(self):
+        # `abspath` collapsed `link/..` by string, while the native client lets
+        # the kernel resolve `..` after following `link`. With a symlinked
+        # component the two then wrote different directories: two stores for
+        # one setting, each with its own plaintext refresh token, and a
+        # clear() on one side left the other's on disk.
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, 'real', 'inner'))
+            os.symlink(os.path.join(root, 'real', 'inner'),
+                       os.path.join(root, 'link'))
+            value = os.path.join(root, 'link', '..', 'store')
+            kernel = os.path.join(os.path.realpath(root), 'real', 'store')
+            with mock.patch.dict(
+                    os.environ, {'QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR': value}):
+                default = FileTokenStore.at_default_location().directory
+            explicit = FileTokenStore(value).directory
+            for name, directory in (('default', default),
+                                    ('explicit', explicit)):
+                with self.subTest(store=name):
+                    self.assertEqual(directory, value)
+                    os.makedirs(directory, exist_ok=True)
+                    self.assertEqual(os.path.realpath(directory), kernel)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows drive semantics')
+    def test_drive_less_store_override_is_rejected_like_native(self):
+        # Before Python 3.13 `ntpath.isabs('\\tokens')` was True, so Python
+        # accepted a drive-less override (and resolved it against the current
+        # drive) that the native client rejects.
+        for bad in ('\\tokens', '/tokens', 'C:tokens'):
+            with self.subTest(override=bad), mock.patch.dict(
+                    os.environ, {'QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR': bad}):
+                with self.assertRaisesRegex(OidcConfigError, 'absolute'):
+                    FileTokenStore.at_default_location()
 
     def test_renderer_must_implement_interface(self):
         with self.assertRaisesRegex(OidcConfigError, 'renderer'):
@@ -2151,8 +2200,8 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         # timeout would notice.
         with OidcTestServer(
                 device_token_response=pending, device_expires_in=20) as server:
-            auth = make_discovered_auth(
-                server, renderer=InterruptingRenderer())
+            renderer = InterruptingRenderer()
+            auth = make_discovered_auth(server, renderer=renderer)
             # Attach before the interruption: the regression was specifically
             # that cancelling a re-auth killed every pre-existing transport.
             sender = questdb.Sender.from_conf(
@@ -2164,6 +2213,10 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                     auth.sign_in()
                 # Promptly, not after the device code expires.
                 self.assertLess(time.monotonic() - started, 10)
+                # The prompt was shown, so the renderer is told the sign-in
+                # ended -- the terminal countdown line is terminated and a
+                # notebook panel stops showing "waiting" with a live link.
+                self.assertEqual(renderer.failures, ['Sign-in cancelled.'])
                 # The attempt ended, not the provider. With no token yet an
                 # attached consumer sees the ordinary recoverable condition.
                 with self.assertRaises(OidcInteractionRequired):
@@ -3699,7 +3752,15 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         handled = threading.Event()
 
         def on_warning(leases):
-            for name, lease in leases.items():
+            # Wait on the blocked lease(s) first. Its rejection proves the
+            # failed reconnect has already been recorded, so the healthy
+            # lease's wait -- flushed only afterwards, its ACK still in
+            # flight -- deterministically consults that state. In the other
+            # order the healthy ACK usually lands before the sibling's
+            # reconnect fails, and a blocked state shared between siblings
+            # went unnoticed.
+            ordered = sorted(leases.items(), key=lambda item: item[0] == 'healthy')
+            for name, lease in ordered:
                 lease.row('warnings', columns={'value': 1},
                           at=questdb.ServerTimestamp)
                 fsn = handler_fsns[name] = lease.flush_and_get_fsn()

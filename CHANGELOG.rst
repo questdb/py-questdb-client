@@ -275,8 +275,12 @@ Highlights:
   and made absolute at construction; one whose leading ``~`` cannot be
   expanded (an unknown ``~user``, or no resolvable home directory) is refused
   rather than creating a directory literally named ``~`` under the working
-  directory and leaving a plaintext refresh token in it. The
-  ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` override must already be absolute.
+  directory and leaving a plaintext refresh token in it. On POSIX ``..``
+  components are left for the operating system to resolve, as the native
+  client does, so a path through a symlink names the same directory in both.
+  The ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` override must already be
+  absolute -- on Windows with a drive letter or UNC prefix, as the native
+  client requires -- and is passed on unchanged.
 * Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
   :func:`~questdb.auth.psycopg_connect`) that wire the token into PG-wire as the
   ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
@@ -306,7 +310,8 @@ Highlights:
 * :meth:`~questdb.auth.OidcDeviceAuth.close` permanently closes a provider and
   cancels a device flow, silent-refresh coordination, or token-store lock wait
   running on another thread; ``OidcDeviceAuth`` is also a context manager.
-  Operations on a closed provider raise the new
+  Operations on a closed provider -- including attaching it to a new
+  ``Sender``, pool or reader -- raise the new
   :class:`~questdb.auth.OidcCancelledError`, except
   :meth:`~questdb.auth.OidcDeviceAuth.clear`, which stays available so the
   persisted credential can still be removed;

@@ -44,6 +44,42 @@ from ._errors import OidcConfigError
 TOKEN_STORE_DIR_ENV = 'QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR'
 
 
+def _is_native_absolute(path: str) -> bool:
+    """Whether the native client's ``Path::is_absolute`` accepts ``path``.
+
+    On Windows that needs a drive *and* a root (``C:\\x``) or a UNC/device
+    prefix (``\\\\server\\share``). Before Python 3.13 ``ntpath.isabs`` also
+    accepted a drive-less rooted ``\\x``, which the native client rejects and
+    which Python would resolve against whatever drive is current -- so the two
+    clients disagreed about the same setting.
+    """
+    if os.name != 'nt':
+        return os.path.isabs(path)
+    drive, rest = os.path.splitdrive(path)
+    if drive[:2] in ('\\\\', '//'):
+        return True
+    return bool(drive) and rest[:1] in ('\\', '/')
+
+
+def _absolute_unresolved(path: str) -> str:
+    """Make ``path`` absolute without resolving ``..`` lexically.
+
+    ``os.path.abspath`` collapses ``link/..`` by string manipulation, while the
+    native client hands the path to the kernel, which resolves ``..`` after
+    following ``link``. With a symlinked component the two then named
+    different directories -- two stores, each with its own plaintext refresh
+    token, for one setting. On POSIX only join a relative path onto the
+    working directory and leave ``..`` to the kernel, as native does. Windows
+    path APIs normalise ``..`` lexically themselves, so ``abspath`` matches
+    there.
+    """
+    if os.name == 'nt':
+        return os.path.abspath(path)
+    if os.path.isabs(path):
+        return path
+    return os.path.join(os.getcwd(), path)
+
+
 def _default_token_store_directory() -> str:
     """Resolve the shared native/Python default token-store directory.
 
@@ -53,17 +89,18 @@ def _default_token_store_directory() -> str:
     """
     override = os.environ.get(TOKEN_STORE_DIR_ENV)
     if override:
-        if not os.path.isabs(override):
+        if not _is_native_absolute(override):
             raise OidcConfigError(
                 f'{TOKEN_STORE_DIR_ENV} must be an absolute path, not '
                 f'{override!r}. A relative path follows the working '
-                'directory, and `~` is expanded by shells rather than by '
-                'the QuestDB clients, so neither names one store shared '
-                'with the native client. Use an absolute path, or pass '
-                'FileTokenStore(dir) explicitly.')
+                'directory (on Windows, a path without a drive letter '
+                'follows the current drive), and `~` is expanded by shells '
+                'rather than by the QuestDB clients, so none names one '
+                'store shared with the native client. Use an absolute '
+                'path, or pass FileTokenStore(dir) explicitly.')
         return override
     home = os.environ.get('USERPROFILE' if os.name == 'nt' else 'HOME')
-    if not home or not os.path.isabs(home):
+    if not home or not _is_native_absolute(home):
         raise OidcConfigError(
             'could not resolve the home directory for the default OIDC '
             f'token-store location; set {TOKEN_STORE_DIR_ENV} to an '
@@ -99,7 +136,9 @@ class FileTokenStore:
 
     ``directory`` is expanded (``~``) and made absolute at construction, so a
     later :func:`os.chdir` cannot move the store; read back the resolved value
-    from :attr:`directory`.
+    from :attr:`directory`. On POSIX ``..`` components are left for the
+    operating system to resolve, exactly as the native client resolves them,
+    so the same path names the same directory in both.
     """
 
     def __init__(self, directory: Any):
@@ -136,7 +175,7 @@ class FileTokenStore:
             raise OidcConfigError(
                 f'could not resolve the home directory in {os.fsdecode(path)!r} '
                 'for the OIDC token store; pass an absolute path')
-        self._directory = os.path.abspath(expanded)
+        self._directory = _absolute_unresolved(expanded)
 
     @classmethod
     def at(cls, directory: Any) -> 'FileTokenStore':
@@ -163,5 +202,8 @@ class FileTokenStore:
 
     @property
     def directory(self) -> str:
-        """The expanded absolute directory passed to the native token store."""
+        """The expanded absolute directory passed to the native token store.
+
+        ``..`` components are preserved on POSIX (see the class docstring).
+        """
         return self._directory

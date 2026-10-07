@@ -45,6 +45,14 @@ The pool and sender retain shared native ownership of the provider. Every
 connect and reconnect asks it for a current token, including silent refresh,
 without copying a fixed token into the connection configuration.
 
+.. warning::
+
+   Use ``https::`` or ``wss::``. Over plain ``http::`` or ``ws::`` to a
+   non-loopback host, the IdP-issued token is sent as an ``Authorization:
+   Bearer`` header in cleartext on every HTTP flush or WebSocket
+   (re)connect, and can be captured in transit. Nothing rejects or warns
+   about that configuration; reserve plaintext for a loopback server.
+
 Token lifecycle
 ===============
 
@@ -68,8 +76,10 @@ The lifecycle is deliberately split:
   publication store is terminalized with accepted frames still queued.
   Disk-backed store-and-forward slots stay drainable by a later process.
   Recovering means building a new provider *and* rebuilding every transport
-  that used the old one. ``OidcDeviceAuth`` is also a context manager, so a
-  ``with`` block has the same effect at exit.
+  that used the old one. Attaching a closed provider to a new transport raises
+  :class:`~questdb.auth.OidcCancelledError`, like the provider's own
+  operations. ``OidcDeviceAuth`` is also a context manager, so a ``with``
+  block has the same effect at exit.
 
 This prevents a reconnect, SQLAlchemy pool worker, or ingestion background
 thread from unexpectedly launching a browser flow. Applications should call
@@ -190,6 +200,16 @@ Explicit keyword arguments override discovered values. Or skip discovery:
         groups_in_token=True,
         audience="questdb")
 
+The two credential endpoints must share one origin (scheme, host and port),
+however they were obtained: the device code and refresh token are posted to
+both. When you pass both endpoints explicitly *and* an ``issuer``, both
+endpoints must also be on the issuer's origin. Some providers host their
+endpoints on a different origin from their issuer -- Google's issuer is
+``https://accounts.google.com`` while its endpoints are on
+``https://oauth2.googleapis.com`` -- so configure those without ``issuer``.
+Either violation raises :class:`~questdb.auth.OidcConfigError` at
+construction.
+
 ``groups_in_token=True`` selects the ID token but preserves ``scope`` exactly;
 include ``openid`` explicitly when the identity provider requires it to issue
 an ID token. Otherwise the provider returns the access token, matching the
@@ -219,12 +239,16 @@ and native clients share. (Java spells the same setting
 ``questdb.client.oidc.token.store.dir``, but as a JVM system property
 ``-Dquestdb.client.oidc.token.store.dir=...``, which does not reach this
 process's environment; set both if you need one store across all three.)
-That override **must be an absolute path**: a relative one follows the
-working directory, and ``~`` is expanded by shells rather than by any QuestDB
-client, so neither names a single store the clients would actually share.
-Both are rejected rather than silently resolved. A path passed straight to
-``FileTokenStore(...)`` is a Python path, not the shared setting, and is
-expanded and absolutised as usual. The native client writes plaintext JSON
+That override **must be an absolute path** -- on Windows one with a drive
+letter or a UNC prefix: a relative one follows the working directory, a
+drive-less ``\tokens`` follows the current drive, and ``~`` is expanded by
+shells rather than by any QuestDB client, so none names a single store the
+clients would actually share. All are rejected rather than silently resolved.
+The value is passed on unchanged, so ``..`` is resolved by the operating
+system exactly as the native client resolves it. A path passed straight to
+``FileTokenStore(...)`` is a Python path, not the shared setting: ``~`` is
+expanded and a relative path is made absolute against the working directory,
+but ``..`` is likewise left for the operating system to resolve. The native client writes plaintext JSON
 using atomic replacement and cross-process coordination; on POSIX, directories
 are mode ``0700`` and files mode ``0600``. An existing directory is tightened to
 ``0700`` on first use, and one that was group- or other-writable is swept before
@@ -446,6 +470,9 @@ Security notes
   tokens only.
 * IdP credential endpoints require HTTPS, except loopback HTTP for local
   development. ``insecure=True`` applies only to QuestDB discovery transport.
+* Attach the provider to ``https::`` / ``wss::`` transports. Over plaintext
+  ``http::`` / ``ws::`` to a non-loopback host the Bearer token travels in
+  cleartext; nothing rejects or warns about that configuration.
 * Renderer callbacks receive bounded, native display-normalized but still
   untrusted IdP text. Prompt fields are single-line and visibly ASCII-escaped;
   identity/failure text may retain ordinary Unicode and HTML metacharacters.

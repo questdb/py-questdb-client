@@ -921,6 +921,18 @@ cdef object _oidc_exc_from_view(
     return exc
 
 
+cdef int _raise_oidc_auth_closed() except -1:
+    """Raise the error every use of a closed provider reports.
+
+    Its own operations and attaching it to a transport report the same typed
+    `OidcCancelledError` -- the error native raises for a closed provider, and
+    the one a transport already attached to it raises once it is closed --
+    so one `except OidcError` covers every path.
+    """
+    from questdb.auth._errors import OidcCancelledError
+    raise OidcCancelledError('The OIDC authentication provider is closed.')
+
+
 cdef object _oidc_err_to_py(questdb_error* err):
     if err == NULL:
         return _oidc_err_to_py_unowned(err)
@@ -1712,9 +1724,7 @@ cdef class OidcDeviceAuth:
             # the same state as closed, which is reported below.
             raise RuntimeError('OidcDeviceAuth is not initialized')
         if self._closed:
-            from questdb.auth._errors import OidcCancelledError
-            raise OidcCancelledError(
-                'The OIDC authentication provider is closed.')
+            _raise_oidc_auth_closed()
 
     def __init__(
             self,
@@ -1757,9 +1767,16 @@ cdef class OidcDeviceAuth:
           preserves the scope originally granted, as required by RFC 6749
           section 6.
         * ``audience`` / ``issuer`` — optional, but must be non-empty when
-          provided. ``issuer`` additionally pins the credential endpoints: one
-          advertised by a QuestDB server must either sit under the issuer's
-          origin and path, or be confirmed by the IdP's own discovery document.
+          provided. ``issuer`` additionally pins the credential endpoints:
+          here both explicit endpoints must be on the issuer's origin (scheme,
+          host and port). Some providers host their endpoints on a different
+          origin from their issuer (Google: issuer
+          ``https://accounts.google.com``, endpoints on
+          ``https://oauth2.googleapis.com``); configure those without
+          ``issuer``.
+        * ``device_authorization_endpoint`` and ``token_endpoint`` must share
+          one origin; construction raises
+          :class:`~questdb.auth.OidcConfigError` otherwise.
         * ``insecure`` — permits plaintext HTTP for the **QuestDB discovery
           request only**. The identity provider is always held to HTTPS (or
           loopback); this flag never relaxes that.
