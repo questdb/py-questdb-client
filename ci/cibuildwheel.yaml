@@ -214,7 +214,12 @@ stages:
           - bash: python3 ci/run_cibuildwheel.py --output-dir wheelhouse .
             displayName: Build wheels
             env:
-              CIBW_BUILD: pp*
+              # List versions explicitly, as the other jobs do. A `pp*`
+              # wildcard picks up every PyPy that cibuildwheel adds: 4.3.0
+              # added pp312, and NumPy (a build dependency) has no PyPy 3.12
+              # wheels. Its source build fails under PyPy 3.12, so pp312 is
+              # left out until NumPy supports it.
+              CIBW_BUILD: "pp310-* pp311-*"
               CIBW_ENABLE: pypy pypy-eol
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
