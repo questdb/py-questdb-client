@@ -1384,6 +1384,16 @@ cdef void _oidc_diagnostic_dispatch(
             # Otherwise the diagnostic remains best-effort: a logging handler
             # failure must not turn a usable token into an auth failure.
     finally:
+        # Everything up to the notification is C-level and runs no bytecode,
+        # so no pending signal handler can interrupt it. `notify_all()` is
+        # Python code: a handler that raises there (Ctrl-C, a SIGALRM
+        # deadline) must neither skip this bookkeeping -- leaving this thread
+        # marked as inside the callback, which made every later main-thread
+        # pool close fail, and the main-thread depth stuck above zero -- nor
+        # be lost in this `noexcept` callback. Park it like any other
+        # interrupt delivered here.
+        if thread_ids is not None and thread_ids:
+            thread_ids.pop()
         if registered:
             with _OIDC_REGISTRY_LOCK:
                 # Fork inside a logging handler resets the child's active
@@ -1393,13 +1403,29 @@ cdef void _oidc_diagnostic_dispatch(
                     _OIDC_DIAGNOSTICS_ACTIVE[provider_id] = remaining - 1
                 else:
                     _OIDC_DIAGNOSTICS_ACTIVE.pop(provider_id, None)
-                _OIDC_DIAGNOSTICS_DRAINED.notify_all()
-            if thread_ids is not None and thread_ids:
-                thread_ids.pop()
+                _oidc_notify_diagnostics_drained()
         if on_main:
             _OIDC_MAIN_DIAGNOSTIC_DEPTH -= 1
             if _OIDC_MAIN_DIAGNOSTIC_DEPTH == 0:
                 _oidc_schedule_parked_main()
+
+
+cdef void _oidc_notify_diagnostics_drained() noexcept:
+    """Wake pool closes waiting for a diagnostic, parking any interrupt.
+
+    Caller holds `_OIDC_REGISTRY_LOCK`. An interrupt raised at the first
+    bytecode of `notify_all()` may preempt the wake-up, so retry once after
+    running and parking the remaining pending handlers; a waiter that still
+    misses it re-checks the count when its bounded wait times out.
+    """
+    cdef int attempt
+    for attempt in range(2):
+        try:
+            _OIDC_DIAGNOSTICS_DRAINED.notify_all()
+            return
+        except BaseException as exc:
+            _oidc_park_foreground_interrupt(exc)
+            _oidc_park_pending_signals()
 
 
 cdef void _oidc_diagnostic_trampoline(
