@@ -1534,8 +1534,11 @@ class NativeOidcTest(unittest.TestCase):
     def test_ca_bundle_rejects_unexpanded_home_prefix(self):
         for bad in ('~', '~/ca.pem', '~\\ca.pem'):
             with self.subTest(path=bad):
+                # The typed config error, like every other misconfiguration
+                # of the same constructor (a missing file, an empty client_id).
                 with self.assertRaisesRegex(
-                        OidcError, 'already-expanded absolute path') as caught:
+                        OidcConfigError,
+                        'already-expanded absolute path') as caught:
                     make_auth(ca_bundle=bad)
                 self.assertIs(
                     caught.exception.code,
@@ -3511,6 +3514,237 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 thread.join(30)
         self.assertTrue(warning_seen.is_set())
         self.assertEqual(outcomes, {'a': True, 'b': True})
+
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
+    def test_warning_handler_wait_rejects_for_a_manual_progress_sender(self):
+        # A manual-progress sender has no I/O thread: the handler's own ACK
+        # wait drives its reconnect, and so pulls the token on the handler's
+        # thread. It must be rejected like a background sender's wait, not
+        # spin until its timeout while the handler it runs in waits on it.
+        credential_path = [None]
+        sabotaged = threading.Event()
+        handled = threading.Event()
+        nested = {}
+        handler_fsns = {}
+        senders = {}
+
+        def fail_save():
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential_path[0]):
+                os.remove(credential_path[0])
+            os.mkdir(credential_path[0])
+            sabotaged.set()
+
+        class OnWarning(logging.Handler):
+            def emit(self, record):
+                if ('token store save failed' not in record.getMessage()
+                        or handled.is_set()):
+                    return
+                try:
+                    for name in ('manual', 'background'):
+                        sender = senders[name]
+                        sender.row('warnings', columns={'value': 1},
+                                   at=questdb.ServerTimestamp)
+                        fsn = handler_fsns[name] = (
+                            sender.flush_and_get_fsn())
+                        started = time.monotonic()
+                        try:
+                            # Finite watchdog only; a regression returns
+                            # False here after the full timeout.
+                            outcome = sender.await_acked_fsn(fsn, 8000)
+                        except OidcInteractionRequired as exc:
+                            outcome = exc
+                        nested[name] = (outcome, time.monotonic() - started)
+                finally:
+                    handled.set()
+
+        with tempfile.TemporaryDirectory() as directory, \
+                OidcTestServer(initial_expires_in=4,
+                               refresh_request_hook=fail_save) as idp, \
+                QwpAckServer(close_after_upgrade_unless_authorization=(
+                    'Bearer AT-refreshed')) as qwp:
+            auth = make_discovered_auth(
+                idp, token_store=FileTokenStore.at(directory))
+            auth.sign_in()
+            credential_path[0] = os.path.join(directory, next(
+                name for name in os.listdir(directory)
+                if name.endswith('.json')))
+            conf = (
+                f'ws::addr=127.0.0.1:{qwp.port};'
+                'reconnect_initial_backoff_millis=25;'
+                'reconnect_max_backoff_millis=25;'
+                'reconnect_max_duration_millis=10000;'
+                'close_flush_timeout_millis=10000;')
+            # Connected while the initial token is valid; the server drops
+            # that session, so the manual sender must reconnect later.
+            senders['manual'] = questdb.Sender.from_conf(
+                conf, oidc_auth=auth, auto_flush=False,
+                qwp_ws_progress=questdb.QwpWsProgress.Manual)
+            senders['manual'].establish()
+            # The background sender's refresh raises the warning.
+            senders['background'] = questdb.Sender.from_conf(
+                conf + 'lazy_connect=true;', oidc_auth=auth,
+                auto_flush=False)
+            handler = OnWarning()
+            logger = logging.getLogger('questdb')
+            logger.addHandler(handler)
+            try:
+                senders['background'].establish()
+                senders['background'].row(
+                    'events', columns={'value': 1},
+                    at=questdb.ServerTimestamp)
+                senders['background'].flush_and_get_fsn()
+                self.assertTrue(handled.wait(20), 'no persistence warning')
+                for name, sender in senders.items():
+                    # The rejected waits kept every frame queued.
+                    self.assertTrue(sender.await_acked_fsn(
+                        handler_fsns[name], 15000), name)
+            finally:
+                logger.removeHandler(handler)
+                for sender in senders.values():
+                    sender.close(flush=False)
+                auth.close()
+        self.assertTrue(sabotaged.is_set())
+        self.assertEqual(set(nested), {'manual', 'background'})
+        for name, (outcome, elapsed) in nested.items():
+            self.assertIsInstance(outcome, OidcInteractionRequired, name)
+            self.assertLess(elapsed, 2.0, f'{name} waited for its own ACK')
+
+    def _pool_leases_through_failed_save_warning(
+            self, on_warning, healthy_lease):
+        """Like `_two_senders_through_failed_save_warning`, but with leases
+        of one `questdb.connect()` pool, whose senders share one provider
+        configuration. With `healthy_lease`, the first lease connects with the
+        initial token and stays connected; the second must reconnect."""
+        gated = 'Bearer AT-refreshed'
+        credential_path = [None]
+        sabotaged = threading.Event()
+        handled = threading.Event()
+        leases = {}
+
+        def fail_save():
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential_path[0]):
+                os.remove(credential_path[0])
+            os.mkdir(credential_path[0])
+            sabotaged.set()
+
+        class OnWarning(logging.Handler):
+            def emit(self, record):
+                if ('token store save failed' not in record.getMessage()
+                        or handled.is_set()):
+                    return
+                try:
+                    on_warning(leases)
+                finally:
+                    handled.set()
+
+        with tempfile.TemporaryDirectory() as directory, \
+                OidcTestServer(initial_expires_in=4,
+                               refresh_request_hook=fail_save) as idp, \
+                QwpAckServer(close_after_upgrade_unless_authorization=(
+                    None if healthy_lease else gated)) as qwp:
+            auth = make_discovered_auth(
+                idp, token_store=FileTokenStore.at(directory))
+            auth.sign_in()
+            credential_path[0] = os.path.join(directory, next(
+                name for name in os.listdir(directory)
+                if name.endswith('.json')))
+            conf = (
+                f'ws::addr=127.0.0.1:{qwp.port};lazy_connect=true;'
+                f'sender_pool_min={1 if healthy_lease else 2};'
+                'query_pool_min=0;auto_flush=off;'
+                'reconnect_initial_backoff_millis=25;'
+                'reconnect_max_backoff_millis=25;'
+                'reconnect_max_duration_millis=10000;'
+                'close_flush_timeout_millis=10000;')
+            handler = OnWarning()
+            logger = logging.getLogger('questdb')
+            logger.addHandler(handler)
+            db = questdb.connect(conf, oidc_auth=auth)
+            try:
+                if healthy_lease:
+                    healthy = leases['healthy'] = db.sender()
+                    healthy.row('events', columns={'value': 1},
+                                at=questdb.ServerTimestamp)
+                    self.assertTrue(healthy.await_acked_fsn(
+                        healthy.flush_and_get_fsn(), 10000))
+                    qwp.close_after_upgrade_unless_authorization = gated
+                    leases['blocked'] = db.sender()
+                else:
+                    leases['a'] = db.sender()
+                    leases['b'] = db.sender()
+                for name, lease in leases.items():
+                    if name != 'healthy':
+                        lease.row('events', columns={'value': 1},
+                                  at=questdb.ServerTimestamp)
+                        lease.flush_and_get_fsn()
+                yield leases
+                self.assertTrue(handled.wait(20), 'no persistence warning')
+            finally:
+                logger.removeHandler(handler)
+                handled.wait(20)
+                for lease in leases.values():
+                    lease.close(flush=False)
+                db.close()
+                auth.close()
+        self.assertTrue(sabotaged.is_set())
+
+    def _pool_handler_waits(self, healthy_lease):
+        nested = {}
+        handler_fsns = {}
+        handled = threading.Event()
+
+        def on_warning(leases):
+            for name, lease in leases.items():
+                lease.row('warnings', columns={'value': 1},
+                          at=questdb.ServerTimestamp)
+                fsn = handler_fsns[name] = lease.flush_and_get_fsn()
+                started = time.monotonic()
+                try:
+                    # Finite watchdog only; a regression returns False here.
+                    outcome = lease.await_acked_fsn(fsn, 8000)
+                except OidcInteractionRequired as exc:
+                    outcome = exc
+                nested[name] = (outcome, time.monotonic() - started)
+            handled.set()
+
+        with contextlib.contextmanager(
+                self._pool_leases_through_failed_save_warning)(
+                    on_warning, healthy_lease) as leases:
+            # Stay off the leases until the handler has used them.
+            self.assertTrue(handled.wait(20), 'no persistence warning')
+            for name, lease in leases.items():
+                # The rejected waits kept every frame queued.
+                self.assertTrue(lease.await_acked_fsn(
+                    handler_fsns[name], 15000), name)
+        return nested
+
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
+    def test_warning_handler_wait_rejects_for_blocked_pool_leases(self):
+        # Store-and-forward pool leases wait through their own ACK loop; a
+        # wait inside the handler must be rejected there as well.
+        nested = self._pool_handler_waits(healthy_lease=False)
+        self.assertEqual(set(nested), {'a', 'b'})
+        for name, (outcome, elapsed) in nested.items():
+            self.assertIsInstance(outcome, OidcInteractionRequired, name)
+            self.assertLess(elapsed, 2.0, f'{name} waited for its own ACK')
+
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
+    def test_warning_handler_healthy_pool_lease_is_not_rejected(self):
+        # Pool leases share one provider configuration but not their
+        # blocked state: a connected lease completes its wait even though
+        # its sibling failed to reconnect inside the same handler.
+        nested = self._pool_handler_waits(healthy_lease=True)
+        self.assertEqual(set(nested), {'healthy', 'blocked'})
+        self.assertIsInstance(
+            nested['blocked'][0], OidcInteractionRequired)
+        self.assertIs(nested['healthy'][0], True)
 
     def test_qwp_pool_authenticates_and_flushes(self):
         # The pool opens its QWP connection through questdb_db_connect_ex -- a
@@ -7334,6 +7568,81 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
         self._flush_with_signal(
             signal.SIGALRM, on_alarm, handler_failure=True)
         self.assertTrue(self._handler_called.is_set())
+
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
+    def test_interrupt_while_waking_pool_closers_reaches_the_caller(self):
+        # The diagnostic's last step wakes pool closes waiting for it, which
+        # runs Python code (`Condition.notify_all`): a pending signal handler
+        # runs there. Its exception must reach the call the diagnostic ran
+        # inside, and must not leave the main thread marked as inside the
+        # callback -- which failed every later main-thread pool close.
+        import _thread
+        armed = [False]
+        fired = []
+        original_notify_all = threading.Condition.notify_all
+
+        def notify_all(cond):
+            if armed[0] and threading.current_thread() is \
+                    threading.main_thread():
+                armed[0] = False
+                fired.append(True)
+                # Only marks SIGINT pending: the handler runs at the next
+                # bytecode, inside the original notify_all.
+                _thread.interrupt_main()
+            return original_notify_all(cond)
+
+        class Arm(logging.Handler):
+            def emit(self, record):
+                if 'token store save failed' in record.getMessage():
+                    armed[0] = True
+
+        credential = [None]
+        sabotaged = threading.Event()
+
+        def fail_save():
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential[0]):
+                os.remove(credential[0])
+            os.mkdir(credential[0])
+            sabotaged.set()
+
+        logger = logging.getLogger('questdb')
+        arm = Arm()
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            with tempfile.TemporaryDirectory() as directory, \
+                    OidcTestServer(initial_expires_in=4,
+                                   refresh_request_hook=fail_save) as idp, \
+                    QwpAckServer() as qwp:
+                auth = make_discovered_auth(
+                    idp, token_store=FileTokenStore.at(directory))
+                auth.sign_in()
+                credential[0] = os.path.join(directory, next(
+                    n for n in os.listdir(directory) if n.endswith('.json')))
+                db = questdb.connect(
+                    f'ws::addr=127.0.0.1:{qwp.port};lazy_connect=true;',
+                    oidc_auth=auth)
+                logger.addHandler(arm)
+                threading.Condition.notify_all = notify_all
+                try:
+                    with self.assertRaises(KeyboardInterrupt):
+                        deadline = time.monotonic() + 20
+                        # A main-thread refresh: its failed save reports the
+                        # diagnostic on this thread.
+                        while not fired:
+                            self.assertLess(time.monotonic(), deadline)
+                            auth.token()
+                            time.sleep(0.05)
+                finally:
+                    threading.Condition.notify_all = original_notify_all
+                    logger.removeHandler(arm)
+                self.assertTrue(sabotaged.is_set())
+                db.close()
+                auth.close()
+        finally:
+            signal.signal(signal.SIGINT, previous)
 
     def test_other_threads_diagnostic_does_not_delay_the_exception(self):
         # Another thread is inside its own persistence diagnostic, blocked in
