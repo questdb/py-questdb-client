@@ -519,7 +519,13 @@ class SenderTransaction:
 
         A rollback is also automatic at the end of a failed `with` block.
 
-        This will clear the buffer.
+        This will clear the buffer. When ``rollback()`` is called from
+        code that a ``row()`` or ``dataframe()`` runs while it writes to
+        the sender, such as a column value's conversion, the buffer is
+        cleared when that call returns. Until then, ``row()`` on the
+        sender or on another transaction raises
+        :class:`QuestDBError <questdb.QuestDBError>` (``InvalidApiCall``)
+        rather than write a row the clear would discard.
         """
 
 

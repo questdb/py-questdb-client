@@ -5615,6 +5615,125 @@ print('OK')
             self.assertEqual(len(sender), 0)
             self.assertEqual(server.requests, [])
 
+    @staticmethod
+    def _frame_that_rolls_back(txn, then):
+        """A two-row frame whose first `attrs` read inside `dataframe()`
+        rolls `txn` back and then calls `then()`."""
+
+        class HostileFrame(pd.DataFrame):
+            armed = False
+            fired = False
+
+            @property
+            def attrs(self):
+                if HostileFrame.armed and not HostileFrame.fired:
+                    HostileFrame.fired = True
+                    txn.rollback()
+                    then()
+                return {}
+
+            @attrs.setter
+            def attrs(self, value):
+                pass
+
+        frame = HostileFrame({
+            'v': [1, 2],
+            'ts': pd.to_datetime([0, 1], unit='s')})
+        HostileFrame.armed = True
+        return frame
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_row_written_after_a_reentered_rollback_is_refused(self):
+        """A rollback re-entered from a `dataframe()` clears the buffer
+        when the frame returns, so a row written in between would be
+        cleared with it after reporting success. It is refused instead,
+        on the sender and through another transaction alike, and the
+        sender takes rows again once the frame has returned.
+        """
+        errors = []
+        with HttpServer() as server:
+            with qi.Sender(
+                    qi.Protocol.Http, '127.0.0.1', server.port,
+                    auto_flush=False) as sender:
+                txn = sender.transaction('rolled_back')
+                # Made before the frame starts, because `transaction()`
+                # is refused while a frame is being written.
+                other = sender.transaction('other')
+
+                def write_both():
+                    for write in (
+                            lambda: sender.row(
+                                'audit', columns={'v': 1},
+                                at=qi.ServerTimestamp),
+                            lambda: other.row(
+                                columns={'v': 1}, at=qi.ServerTimestamp)):
+                        try:
+                            write()
+                        except qi.QuestDBError as e:
+                            errors.append(e)
+
+                frame = self._frame_that_rolls_back(txn, write_both)
+                with txn:
+                    txn.dataframe(frame, at='ts')
+
+                self.assertEqual(len(sender), 0)
+                sender.row(
+                    'after', columns={'kept': 1}, at=qi.ServerTimestamp)
+
+            self.assertEqual(server.requests, [b'after kept=1i\n'])
+        self.assertEqual(
+            [e.code for e in errors],
+            [qi.QuestDBErrorCode.InvalidApiCall] * 2)
+        for e in errors:
+            self.assertIn('rolled back', str(e))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_refused_row_after_a_reentered_rollback_ends_the_frame(self):
+        """The same refusal, left uncaught, ends the frame: the `with`
+        block raises it unchanged, nothing from the frame is sent, and
+        the sender takes rows again afterwards. A signal handler that
+        rolls back and then records a row has this shape.
+        """
+        for target in ('sender', 'other transaction'):
+            with self.subTest(target=target), HttpServer() as server:
+                raised = []
+                with qi.Sender(
+                        qi.Protocol.Http, '127.0.0.1', server.port,
+                        auto_flush=False) as sender:
+                    txn = sender.transaction('rolled_back')
+                    other = sender.transaction('other')
+
+                    def write():
+                        try:
+                            if target == 'sender':
+                                sender.row(
+                                    'audit', columns={'v': 1},
+                                    at=qi.ServerTimestamp)
+                            else:
+                                other.row(
+                                    columns={'v': 1},
+                                    at=qi.ServerTimestamp)
+                        except qi.QuestDBError as e:
+                            raised.append(e)
+                            raise
+
+                    frame = self._frame_that_rolls_back(txn, write)
+                    with self.assertRaises(qi.QuestDBError) as cm:
+                        with txn:
+                            txn.dataframe(frame, at='ts')
+
+                    self.assertEqual(len(raised), 1)
+                    self.assertIs(cm.exception, raised[0])
+                    self.assertEqual(
+                        cm.exception.code,
+                        qi.QuestDBErrorCode.InvalidApiCall)
+                    self.assertEqual(len(sender), 0)
+                    sender.row(
+                        'after', columns={'kept': 1},
+                        at=qi.ServerTimestamp)
+
+                self.assertEqual(server.requests, [b'after kept=1i\n'])
+
     def test_a_completed_transaction_cannot_be_reused(self):
         """Completion is an absorbing state for every transaction method.
 

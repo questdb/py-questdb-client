@@ -1347,7 +1347,13 @@ cdef class SenderTransaction:
 
         A rollback is also automatic at the end of a failed `with` block.
 
-        This will clear the buffer.
+        This will clear the buffer. When ``rollback()`` is called from
+        code that a ``row()`` or ``dataframe()`` runs while it writes to
+        the sender, such as a column value's conversion, the buffer is
+        cleared when that call returns. Until then, ``row()`` on the
+        sender or on another transaction raises
+        :class:`QuestDBError <questdb.QuestDBError>` (``InvalidApiCall``)
+        rather than write a row the clear would discard.
         """
         if self._complete:
             raise QuestDBError(
@@ -2042,6 +2048,18 @@ cdef class Buffer:
         """
         cdef bint wrote_fields = False
         self._check_impl()
+        # A rollback that arrives while a `row()` or `dataframe()` is
+        # still writing into this buffer clears the whole buffer once
+        # that call returns. A row written in between would be cleared
+        # with it after reporting success, so it is refused here, before
+        # the marker and the depth change it would otherwise have to undo.
+        if self._clear_on_row_complete:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                "row() can't be called until the row() or dataframe() "
+                "call in progress returns. A transaction was rolled back "
+                "while that call was writing, and the buffer is cleared "
+                "when it returns, which would discard this row too.")
         self._set_marker()
         # A column value whose conversion runs Python code can call back
         # into whatever owns this buffer. `_row_depth` is how those owners
