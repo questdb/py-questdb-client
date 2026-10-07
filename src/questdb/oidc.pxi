@@ -428,6 +428,12 @@ def _debug_oidc_registry_snapshot():
                 frozenset(_OIDC_NATIVE_HANDLES))
 
 
+def _debug_oidc_registry_lock():
+    """Internal test hook: the lock guarding the provider registry and the
+    persistence-diagnostic counts."""
+    return _OIDC_REGISTRY_LOCK
+
+
 def _debug_oidc_last_provider_id():
     """Internal test hook: the most recently allocated provider id.
 
@@ -1342,13 +1348,17 @@ cdef void _oidc_diagnostic_dispatch(
     cdef bint registered = False
     cdef object signal_codes = ()
     cdef object thread_ids = None
+    cdef object lock
     if on_main:
         _OIDC_MAIN_DIAGNOSTIC_DEPTH += 1
     try:
-        with _OIDC_REGISTRY_LOCK:
+        lock = _oidc_registry_lock_acquire()
+        try:
             _OIDC_DIAGNOSTICS_ACTIVE[provider_id] = (
                 _OIDC_DIAGNOSTICS_ACTIVE.get(provider_id, 0) + 1)
             registered = True
+        finally:
+            lock.release()
         thread_ids = getattr(_OIDC_DIAGNOSTIC_LOCAL, 'ids', None)
         if thread_ids is None:
             thread_ids = _OIDC_DIAGNOSTIC_LOCAL.ids = []
@@ -1396,18 +1406,20 @@ cdef void _oidc_diagnostic_dispatch(
             # Otherwise the diagnostic remains best-effort: a logging handler
             # failure must not turn a usable token into an auth failure.
     finally:
-        # Everything up to the notification is C-level and runs no bytecode,
-        # so no pending signal handler can interrupt it. `notify_all()` is
-        # Python code: a handler that raises there (Ctrl-C, a SIGALRM
+        # Apart from waiting for the registry lock and the notification,
+        # everything here is C-level and runs no bytecode, so no pending signal
+        # handler can interrupt it. A contended lock wait and `notify_all()`
+        # both run pending handlers: one that raises there (Ctrl-C, a SIGALRM
         # deadline) must neither skip this bookkeeping -- leaving this thread
-        # marked as inside the callback, which made every later main-thread
-        # pool close fail, and the main-thread depth stuck above zero -- nor
-        # be lost in this `noexcept` callback. Park it like any other
-        # interrupt delivered here.
+        # marked as inside the callback, which made every later pool close
+        # fail, and the main-thread depth stuck above zero -- nor be lost in
+        # this `noexcept` callback. Park it like any other interrupt delivered
+        # here.
         if thread_ids is not None and thread_ids:
             thread_ids.pop()
         if registered:
-            with _OIDC_REGISTRY_LOCK:
+            lock = _oidc_registry_lock_acquire()
+            try:
                 # Fork inside a logging handler resets the child's active
                 # callbacks; its inherited stack still runs this finally.
                 remaining = _OIDC_DIAGNOSTICS_ACTIVE.get(provider_id, 0)
@@ -1416,10 +1428,31 @@ cdef void _oidc_diagnostic_dispatch(
                 else:
                     _OIDC_DIAGNOSTICS_ACTIVE.pop(provider_id, None)
                 _oidc_notify_diagnostics_drained()
+            finally:
+                lock.release()
         if on_main:
             _OIDC_MAIN_DIAGNOSTIC_DEPTH -= 1
             if _OIDC_MAIN_DIAGNOSTIC_DEPTH == 0:
                 _oidc_schedule_parked_main()
+
+
+cdef object _oidc_registry_lock_acquire():
+    """Acquire `_OIDC_REGISTRY_LOCK` from a diagnostic callback; return it.
+
+    A contended acquire waits with the GIL released and runs pending signal
+    handlers. Whatever one raises is parked for the call the diagnostic runs
+    inside, and the wait resumes: the callback's bookkeeping must still run.
+    Returns the lock acquired, so the caller releases that same object even if
+    a fork in between replaced the module's lock.
+    """
+    while True:
+        lock = _OIDC_REGISTRY_LOCK
+        try:
+            lock.acquire()
+            return lock
+        except BaseException as exc:
+            _oidc_park_foreground_interrupt(exc)
+            _oidc_park_pending_signals()
 
 
 cdef void _oidc_notify_diagnostics_drained() noexcept:

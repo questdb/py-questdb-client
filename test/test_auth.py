@@ -7705,6 +7705,88 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
         finally:
             signal.signal(signal.SIGINT, previous)
 
+    def test_interrupt_while_waiting_for_the_registry_lock_reaches_the_caller(
+            self):
+        # The diagnostic's last step takes the registry lock. Another thread
+        # can hold it (a pool close waiting for diagnostics, another
+        # provider's callback), and a contended acquire runs pending signal
+        # handlers. The exception must reach the call the diagnostic ran
+        # inside, and the bookkeeping must still run: it used to be printed as
+        # unraisable, and every later close of a pool on that provider failed.
+        registry_lock = _client._debug_oidc_registry_lock()
+        main_ident = threading.main_thread().ident
+        armed = [True]
+        fired = []
+        holders = []
+
+        def hold_lock_and_interrupt(acquired):
+            with registry_lock:
+                acquired.set()
+                time.sleep(0.2)
+                signal.pthread_kill(main_ident, signal.SIGINT)
+                time.sleep(0.3)
+
+        class Contend(logging.Handler):
+            def emit(self, record):
+                if armed[0] and \
+                        'token store save failed' in record.getMessage():
+                    armed[0] = False
+                    fired.append(True)
+                    acquired = threading.Event()
+                    holder = threading.Thread(
+                        target=hold_lock_and_interrupt, args=(acquired,))
+                    holders.append(holder)
+                    holder.start()
+                    acquired.wait()
+
+        credential = [None]
+        sabotaged = threading.Event()
+
+        def fail_save():
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential[0]):
+                os.remove(credential[0])
+            os.mkdir(credential[0])
+            sabotaged.set()
+
+        logger = logging.getLogger('questdb')
+        contend = Contend()
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            with tempfile.TemporaryDirectory() as directory, \
+                    OidcTestServer(initial_expires_in=4,
+                                   refresh_request_hook=fail_save) as idp, \
+                    QwpAckServer() as qwp:
+                auth = make_discovered_auth(
+                    idp, token_store=FileTokenStore.at(directory))
+                auth.sign_in()
+                credential[0] = os.path.join(directory, next(
+                    n for n in os.listdir(directory) if n.endswith('.json')))
+                db = questdb.connect(
+                    f'ws::addr=127.0.0.1:{qwp.port};lazy_connect=true;',
+                    oidc_auth=auth)
+                logger.addHandler(contend)
+                try:
+                    with self.assertRaises(KeyboardInterrupt):
+                        deadline = time.monotonic() + 20
+                        while not fired:
+                            self.assertLess(time.monotonic(), deadline)
+                            auth.token()
+                            time.sleep(0.05)
+                        # The diagnostic is over: an interrupt it lost would
+                        # not surface here either.
+                        time.sleep(1.0)
+                finally:
+                    logger.removeHandler(contend)
+                    for holder in holders:
+                        holder.join()
+                self.assertTrue(sabotaged.is_set())
+                db.close()
+                auth.close()
+        finally:
+            signal.signal(signal.SIGINT, previous)
+
     def test_other_threads_diagnostic_does_not_delay_the_exception(self):
         # Another thread is inside its own persistence diagnostic, blocked in
         # a slow logging handler, while the main thread's flush parks the
