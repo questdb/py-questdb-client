@@ -570,11 +570,11 @@ Fixed
   rollback that ends such a block then discarded it. Rolling back a
   transaction that was never entered discarded the frame the same way.
 
-- **Bulk GEOHASH values retain the permissive narrowing contract.** The
-  client validates the declared precision and the integer carrier width, but
-  does not scan individual NumPy or Arrow values against that precision.
-  A wrong precision can therefore be accepted and store a different GEOHASH
-  location or ``NULL``: for example, ``32`` is accepted under
+- **Bulk GEOHASH values retain the permissive narrowing contract.** The client
+  validates the declared precision and the integer carrier width, but does not
+  check individual NumPy, Arrow or object-column values against that
+  precision. A wrong precision can therefore be accepted and store a different
+  GEOHASH location or ``NULL``: for example, ``32`` is accepted under
   ``GEOHASH(5b)`` even though it needs six bits. Only the low
   ``ceil(precision / 8)`` bytes are encoded, and the exact result is
   unspecified. This is a semantic data-integrity risk, not a memory-safety

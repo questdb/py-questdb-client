@@ -127,13 +127,14 @@ value contracts.
   at a different precision is rejected and that row is rewound. A flush clears
   the client-side pin; it does not prove that the precision agrees with an
   existing server column.
-* Bulk NumPy/Arrow ingestion validates the declared precision and carrier
-  width, but treats every value as a raw bit pattern. It does not check that
-  the pattern has no bits set above the declared precision. Thus ``32`` under
-  ``GEOHASH(5b)`` is accepted even though it needs six bits. If the declared
-  precision is wrong for the data, the write can succeed and store a different
-  GEOHASH location or ``NULL``. Only the low ``ceil(precision / 8)`` bytes are
-  encoded, and the exact result of an inconsistent value is unspecified.
+* Bulk ingestion, from NumPy, Arrow and object columns alike, validates the
+  declared precision and carrier width, but treats every value as a raw bit
+  pattern. It does not check that the pattern has no bits set above the
+  declared precision. Thus ``32`` under ``GEOHASH(5b)`` is accepted even
+  though it needs six bits. If the declared precision is wrong for the data,
+  the write can succeed and store a different GEOHASH location or ``NULL``.
+  Only the low ``ceil(precision / 8)`` bytes are encoded, and the exact result
+  of an inconsistent value is unspecified.
 
 This unchecked bulk-value rule is a semantic data-integrity risk, not a
 memory-safety risk for otherwise valid NumPy/Arrow buffers. Validate bulk

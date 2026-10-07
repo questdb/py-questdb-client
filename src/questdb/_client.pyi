@@ -420,8 +420,8 @@ class Geohash:
 
     ``bits`` is the value and ``precision`` its width in bits, 1 to 60.
     This scalar wrapper requires ``0 <= bits < 2**precision``. Bulk
-    NumPy/Arrow GEOHASH columns deliberately do not perform that
-    per-value check; see :meth:`QuestDB.dataframe`.
+    GEOHASH columns, whether NumPy, Arrow or object, deliberately do
+    not perform that per-value check; see :meth:`QuestDB.dataframe`.
 
     Precision is pinned per column within one buffer's worth of rows: a
     later cell disagreeing with the first is rejected by ``row()``

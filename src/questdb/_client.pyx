@@ -989,8 +989,9 @@ cdef class Geohash:
 
     This scalar wrapper is strict: ``precision`` must be in ``1..=60``
     and ``bits`` must satisfy ``0 <= bits < 2**precision``. Bulk
-    NumPy/Arrow GEOHASH columns have a different, unchecked value
-    contract; see :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`.
+    GEOHASH columns, whether NumPy, Arrow or object, deliberately have
+    a different, unchecked value contract; see
+    :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`.
 
     Precision is pinned per column within one buffer's worth of rows.
     The first GEOHASH cell written to a column fixes the precision for
@@ -4191,10 +4192,30 @@ cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
             elem_size = 2
             narrow_max = 0xFFFF
             narrow_type = 'CHAR'
-        # GEOHASH deliberately keeps the int64 slot without checking
-        # values against the claimed precision. The native bulk encoder
-        # encodes the low storage bytes; inconsistent bits are therefore
-        # garbage-in/garbage-out rather than a local error.
+        # GEOHASH has no per-value range check here, by design. That is
+        # the documented bulk GEOHASH contract (`QuestDB.dataframe`,
+        # docs/sender.rst): every DataFrame input shape -- NumPy, Arrow
+        # and this object route -- takes a value as a raw bit pattern,
+        # checks only the precision and the carrier width, and leaves
+        # the values to the caller. The native encoder follows the same
+        # rule and writes the low ceil(precision / 8) bytes, so a value
+        # with bits above the precision lands as a different GEOHASH or
+        # as NULL.
+        #
+        # The check would cost nothing in this per-cell loop. It is left
+        # out so that one frame gets one answer: a masked pandas column
+        # arrives here as Python ints, and plain `to_pandas()` returns a
+        # GEOHASH column as a masked column when it holds a null and as
+        # a NumPy column when it does not. A check on this route alone
+        # would refuse an edited frame whose column holds a null and
+        # write the same frame without one. IPV4 and CHAR get a range
+        # check because their NumPy and Arrow carriers, uint32 and
+        # uint16, cannot hold an out-of-range value either, so it gives
+        # this route the same range as theirs.
+        #
+        # `test_roundtrip_claim_forwards_arbitrary_geohash_values` pins
+        # this on every shape. Changing it changes the public contract,
+        # docs and CHANGELOG included; it is not a local fix.
 
     try:
         values = <uint8_t*>calloc(
@@ -9215,9 +9236,15 @@ cdef class QuestDB:
         cannot hold — an integer past ``2**32-1`` under ``ipv4``, a cell
         that is not exactly 16 or 32 bytes under ``uuid`` or ``long256``
         — is refused rather than written into a column of the claimed
-        type.
+        type. GEOHASH is the deliberate exception, described next.
 
-        Bulk GEOHASH values are raw bit patterns. The declared precision
+        Bulk GEOHASH values are raw bit patterns, whatever the column is
+        stored as: NumPy, Arrow, or an object column of Python ints,
+        which is also what a pandas masked column becomes. This is a
+        deliberate contract, the same for every shape, so that whether a
+        frame is written does not depend on whether a GEOHASH column
+        holds a null; plain :meth:`QueryResult.to_pandas` returns a
+        column that does as a masked column. The declared precision
         must be in ``1..=60`` and fit the signed integer carrier, but no
         per-value check verifies that the pattern has no bits set above
         that precision. For example, ``32`` under ``GEOHASH(5b)`` is

@@ -4710,9 +4710,16 @@ print('OK')
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_roundtrip_claim_forwards_arbitrary_geohash_values(self):
-        # Bulk GEOHASH claims validate the precision and carrier width,
-        # not individual values. Every supported integer shape and both
-        # planners therefore forward values outside the logical range.
+        # This is the bulk GEOHASH contract, chosen deliberately: a claim
+        # checks the precision and the carrier width, and every value
+        # goes out as a raw bit pattern, on every input shape and both
+        # planners. The object and masked shapes are where a range check
+        # would cost least, and they follow the same rule so that a
+        # GEOHASH column from plain `to_pandas()`, which comes back
+        # masked when it holds a null, gets the same answer with or
+        # without one. A failure here is a change to the documented
+        # contract (`QuestDB.dataframe`, docs/sender.rst, CHANGELOG),
+        # not a local fix.
         shapes = (
             ('arrow int8', pd.ArrowDtype(pyarrow.int8()), 4),
             ('arrow int16', pd.ArrowDtype(pyarrow.int16()), 12),
@@ -4722,6 +4729,7 @@ print('OK')
             ('numpy int32', np.int32, 20),
             ('numpy int16', np.int16, 12),
             ('object int', object, 20),
+            ('masked Int16', 'Int16', 12),
         )
         for label, dtype, bits in shapes:
             for mixed in (False, True):
