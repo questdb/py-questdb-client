@@ -5,6 +5,7 @@ sys.dont_write_bytecode = True
 import ast
 import gc
 import importlib
+import logging
 import os
 import unittest
 from unittest import mock
@@ -1950,9 +1951,12 @@ class TestQwpWebSocketApi(unittest.TestCase):
             sender = qi.Sender.from_conf(
                 f'ws::addr=127.0.0.1:{server.port};auto_flush=off;',
                 connection_listener=on_event)
+            # Dispatch the target the native dispatcher was registered
+            # with, as the sender's own dispatcher thread would.
+            listener = qi._debug_registered_connection_listener(sender)
             callback = threading.Thread(
                 target=lambda: qi._debug_connection_event_dispatch(
-                    qi.ConnectionEventKind.Connected.c_value, on_event),
+                    qi.ConnectionEventKind.Connected.c_value, listener),
                 daemon=True)
             try:
                 sender.establish()
@@ -1967,6 +1971,71 @@ class TestQwpWebSocketApi(unittest.TestCase):
                     callback.join(5)
                 sender.close(False)
             self.assertFalse(callback.is_alive())
+
+    def test_peer_sender_appends_from_default_rejection_handler(self):
+        # Every handler-less ws sender and pool shares the module's default
+        # rejection handler. While one of them dispatches it, a different,
+        # idle sender is not inside its own callback: a logging handler that
+        # ships the rejection record through that peer must be able to append.
+        outcomes = []
+
+        class PeerWriter(logging.Handler):
+            def __init__(self, peer):
+                super().__init__(logging.WARNING)
+                self.peer = peer
+
+            def emit(self, record):
+                if 'server rejection' not in record.getMessage():
+                    return
+                calls = [lambda: self.peer.row(
+                    'client_log', columns={'value': 1},
+                    at=qi.ServerTimestamp)]
+                if pd is not None:
+                    calls.append(lambda: self.peer.dataframe(
+                        pd.DataFrame({'value': [2]}),
+                        table_name='client_log',
+                        at=qi.ServerTimestamp))
+                for call in calls:
+                    try:
+                        call()
+                    except qi.QuestDBError as exc:
+                        outcomes.append(exc.code)
+                    else:
+                        outcomes.append(None)
+
+        with QwpAckServer(error_status=0x03) as rejecting, \
+                QwpAckServer() as healthy:
+            rejected = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{rejecting.port};auto_flush=off;'
+                'close_flush_timeout_millis=0;')
+            peer = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{healthy.port};auto_flush=off;'
+                'close_flush_timeout_millis=0;')
+            writer = PeerWriter(peer)
+            questdb_logger = logging.getLogger('questdb')
+            questdb_logger.addHandler(writer)
+            try:
+                rejected.establish()
+                peer.establish()
+                rejected.row(
+                    'events', columns={'value': 1}, at=qi.ServerTimestamp)
+                rejected.flush()
+                deadline = time.monotonic() + 10
+                while not outcomes:
+                    self.assertLess(
+                        time.monotonic(), deadline,
+                        'the default handler never dispatched the rejection')
+                    try:
+                        # Drains the rejection on this thread.
+                        rejected.flush()
+                    except qi.QuestDBError:
+                        pass
+                    time.sleep(0.01)
+            finally:
+                questdb_logger.removeHandler(writer)
+                rejected.close(False)
+                peer.close(False)
+        self.assertEqual(outcomes, [None] * (1 if pd is None else 2))
 
     def test_sender_pool_concurrent_borrow_flush(self):
         """Deterministic multi-thread exerciser for the sender pool:

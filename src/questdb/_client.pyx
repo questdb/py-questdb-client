@@ -2518,6 +2518,31 @@ cdef _release_callback_refs(size_t key):
         _LIVE_CALLBACK_REFS.pop(key, None)
 
 
+@cython.final
+@cython.no_gc_clear
+cdef class _DispatchTarget:
+    """One owner's registration of a user (or default) callback.
+
+    The native dispatchers receive this object, not the callable, so the
+    target identity pushed by `_sender_error_dispatch` and
+    `_connection_event_dispatch` names the sender or pool being dispatched.
+    Every sender without an ``error_handler`` shares
+    `_default_error_handler`, and a caller may register one function with
+    several senders; comparing those callables would treat an idle sender as
+    inside its own callback whenever any of its peers dispatched.
+
+    ``no_gc_clear`` for the reason `_LIVE_CALLBACK_REFS` exists: a dispatch
+    must never find its callback cleared by the cycle collector.
+    """
+    cdef readonly object callback
+
+    def __cinit__(self, object callback):
+        self.callback = callback
+
+    def __call__(self, arg):
+        return self.callback(arg)
+
+
 cdef list _dispatch_target_stack():
     stack = getattr(_DISPATCH_THREAD, 'targets', None)
     if stack is None:
@@ -6911,7 +6936,7 @@ cdef class QuestDB:
                 # pre-opened by connect cannot emit events before the listener
                 # exists. The handle keeps the callback target alive until
                 # close() has stopped and joined the dispatcher.
-                db._connection_listener = connection_listener
+                db._connection_listener = _DispatchTarget(connection_listener)
                 connection_listener_data = <void*>db._connection_listener
                 connection_event_cb = _connection_event_trampoline
             # A rejection handler is always installed (defaulting to the
@@ -6919,7 +6944,7 @@ cdef class QuestDB:
             # Rust `log` facade, which is not bridged into Python logging.
             if error_handler is None:
                 error_handler = _default_error_handler
-            db._error_handler = error_handler
+            db._error_handler = _DispatchTarget(error_handler)
             # Convert to C integers while still holding the GIL: a bad
             # value must raise here, not inside the nogil region below.
             #
@@ -7758,7 +7783,7 @@ cdef class Sender:
         if _is_qwp_ws_protocol(self._c_protocol):
             if error_handler is None:
                 error_handler = _default_error_handler
-            self._error_handler = error_handler
+            self._error_handler = _DispatchTarget(error_handler)
             if not line_sender_opts_qwpws_error_handler(
                     self._opts,
                     _sender_error_trampoline,
@@ -7800,7 +7825,7 @@ cdef class Sender:
             # The Sender owns the only strong reference the trampoline
             # relies on; the dispatcher joins its thread when the sender
             # closes, so no delivery outlives this reference.
-            self._connection_listener = connection_listener
+            self._connection_listener = _DispatchTarget(connection_listener)
             if not line_sender_opts_connection_event_handler(
                     self._opts,
                     _connection_event_trampoline,
@@ -10097,3 +10122,9 @@ def _debug_new_pooled_reader_finalizer_owner(
         lease._attach(handle, reader, owner_token)
     lease._last_cursor = cursor_handle
     return lease
+
+
+def _debug_registered_connection_listener(Sender sender):
+    """Internal test seam: the target the native dispatcher receives for
+    ``sender``'s ``connection_listener``, or ``None``."""
+    return sender._connection_listener
