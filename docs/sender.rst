@@ -377,6 +377,17 @@ round-trip, in whatever shape they hand the columns back. A column you
 dropped, renamed or retyped simply loses its claim, and ``symbols`` /
 ``schema_overrides`` outrank it.
 
+A ``pa.Table`` from ``to_arrow()`` carries the claim in each field's
+``questdb.column_type`` metadata instead, under a deliberately stricter
+rule. If you change a column's type and keep its old field, for example
+with ``field.with_type(...)`` or
+``pa.concat_tables(..., promote_options='permissive')``, a claim the new
+type cannot carry fails the write with ``QuestDBErrorCode.ArrowIngest``
+before anything is sent. Drop the field's metadata with
+``field.remove_metadata()`` once you retype it.
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` explains why the two
+routes differ.
+
 Populating Designated Timestamps
 --------------------------------
 

@@ -119,8 +119,12 @@ Breaking changes
   The check covers BYTE, SHORT, INT, CHAR, IPV4, SYMBOL, UUID, LONG256 and
   GEOHASH columns. A ``df.attrs['questdb']`` claim that does not fit is
   logged instead and the write goes ahead; see *A claim the column's type
-  can never carry is now logged* under *Fixed*. Once you change a column's
-  type, drop its stale metadata::
+  can never carry is now logged* under *Fixed*. The difference is
+  deliberate. The refusal is the native client's rule for Arrow field
+  metadata in every language, and a field claim goes stale only when a
+  retyped column keeps its old field, while ``df.attrs`` survives
+  ``astype`` and arithmetic. Once you change a column's type, drop its
+  stale metadata::
 
       i = table.schema.get_field_index('col')
       table = table.cast(table.schema.set(

@@ -6235,6 +6235,11 @@ cdef _log_roundtrip_claim_dropped(object name, str kind, object shape):
     16-bit integer claimed at 20 bits -- is a mistake the caller wants
     to hear about. Naming the claim and the type
     that turned it away tells them apart without failing either.
+
+    This leniency covers ``df.attrs`` claims alone. The same claim in
+    Arrow field metadata (``questdb.column_type``) is refused when the
+    field's type cannot carry it, deliberately; `_capsule_consume_stream`
+    says why the two routes differ.
     """
     # A stale claim does not invalidate the frame. Unlike the naive-datetime
     # and reconnect warnings, it is not a migration/performance pattern the
@@ -7182,6 +7187,29 @@ cdef void_int _capsule_consume_stream(
         # caught here however it was exported. The caller releases
         # `c_schema`.
         _refuse_fsb8_columns(c_schema)
+        # Field metadata goes on to the native client unchanged, by
+        # design. A `questdb.column_type` claim the field's Arrow type
+        # cannot carry -- 'short' on int32, 'ipv4' on int64 -- makes the
+        # native Arrow ingest refuse the write with ArrowIngest before
+        # anything is sent. That refusal is the intended contract for
+        # this route, and the client neither strips such a claim nor
+        # turns the refusal into a log record.
+        #
+        # A `df.attrs['questdb']` claim that no longer fits is logged and
+        # dropped instead (`_log_roundtrip_claim_dropped`), and the two
+        # routes differ on purpose. Field metadata is the input contract
+        # of the native Arrow ingest, which refuses such a field for
+        # every language that uses it (c-questdb-client #186). A field
+        # claim also goes stale only when the caller carries the old
+        # field onto a new type -- `field.with_type(...)`, or a
+        # permissive `pa.concat_tables` with the claimed table first --
+        # whereas `df.attrs` belongs to the whole frame and survives
+        # `astype` and arithmetic, so a stale claim there is the normal
+        # case.
+        #
+        # `test_stale_arrow_field_claim_is_refused` pins this. Changing
+        # it changes the public contract (`QuestDB.dataframe`,
+        # docs/sender.rst, CHANGELOG); it is not a local fix.
 
     while True:
         memset(&batch, 0, sizeof(ArrowArray))
@@ -9297,6 +9325,34 @@ cdef class QuestDB:
         ``'date'`` claim restores the DATE type after plain pandas has
         represented it as NumPy ``datetime64[ms]``. Naming a column that is
         not in the frame is not an error; the entry is skipped.
+
+        A ``pa.Table`` or ``pa.RecordBatch`` from
+        :meth:`QueryResult.to_arrow` or :meth:`QueryResult.iter_arrow`
+        carries the same claims in Arrow field metadata, as a
+        ``questdb.column_type`` key on every field, and this method
+        passes that metadata to the native client unchanged. A field
+        claim the field's Arrow type cannot carry — ``'short'`` on
+        ``pa.int32()``, ``'ipv4'`` on ``pa.int64()`` — makes this method
+        raise :class:`QuestDBError <questdb.QuestDBError>`, with ``code``
+        set to ``QuestDBErrorCode.ArrowIngest``, before anything is sent.
+        This stricter rule is deliberate. Field metadata is the input
+        contract of the native Arrow ingest, which refuses such a field
+        in every language that uses it. A field claim also goes stale
+        only when the old field is carried onto a new type: ``Table.cast``
+        with a schema built from ``field.with_type(...)``, or
+        ``pa.concat_tables(..., promote_options='permissive')`` with the
+        claimed table first. Casting to a schema built from scratch,
+        ``set_column`` by name, and a polars or pandas round trip all
+        build fields without the key. ``df.attrs`` belongs to the whole
+        frame and survives ``astype`` and arithmetic, so a stale claim
+        there is the normal case and is logged instead. To write a
+        retyped column, drop its metadata:
+
+        .. code-block:: python
+
+            i = table.schema.get_field_index('col')
+            table = table.cast(table.schema.set(
+                i, table.schema.field(i).remove_metadata()))
 
         ``max_rows_per_batch`` sets the pipelining granularity, not a
         safety limit: any batch exceeding the negotiated per-batch byte

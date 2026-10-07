@@ -1414,6 +1414,15 @@ class QuestDB:
         Validate bulk values before sending them. Malformed custom Arrow C
         Data structures remain invalid input.
 
+        Arrow field metadata reaches the native client unchanged. A
+        ``questdb.column_type`` field claim the field's Arrow type cannot
+        carry, such as a ``'short'`` claim left on a column cast to
+        ``pa.int32()``, raises :class:`QuestDBError` with ``code`` set to
+        ``QuestDBErrorCode.ArrowIngest`` before anything is sent. The
+        refusal is deliberate; a ``df.attrs['questdb']`` claim that no
+        longer fits is logged and dropped instead. Drop a retyped field's
+        metadata with ``field.remove_metadata()`` to write it.
+
         ``at`` names the designated timestamp column (by name or index),
         or a fixed ``TimestampNanos`` / ``datetime`` shared by every row,
         or the explicit ``ServerTimestamp`` sentinel to let the server

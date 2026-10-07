@@ -9996,6 +9996,73 @@ finish()
         self.assertEqual(types['u'], 0x0C)
         self.assertEqual(types['ch'], 0x16)
 
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_stale_arrow_field_claim_is_refused(self):
+        # The counterpart of the test above, and deliberately its
+        # opposite: a `questdb.column_type` claim in Arrow field metadata
+        # that the field's type cannot carry fails the write before
+        # anything is sent, where a `df.attrs['questdb']` claim is logged
+        # and dropped. The native Arrow ingest refuses such a field for
+        # every language that uses it, and the client passes field
+        # metadata through unchanged. A failure here is a change to the
+        # documented contract (`QuestDB.dataframe`, docs/sender.rst,
+        # CHANGELOG), not a local fix.
+        def claimed(name, values, ty, kind):
+            return pyarrow.table(
+                {name: pyarrow.array(values, ty)},
+                schema=pyarrow.schema([pyarrow.field(
+                    name, ty,
+                    metadata={'questdb.column_type': kind})]))
+
+        short = claimed('v', [1, 2], pyarrow.int16(), 'short')
+        cases = [
+            ('field.with_type', 'v', 'short', 'Int32', short.cast(
+                short.schema.set(
+                    0, short.schema.field(0).with_type(pyarrow.int32())))),
+            ('ipv4 on int64', 'ip', 'ipv4', 'Int64',
+             claimed('ip', [1], pyarrow.int64(), 'ipv4')),
+        ]
+        if int(pyarrow.__version__.split('.')[0]) >= 14:
+            # The claimed table comes first, so its field, metadata and
+            # all, is the one the promoted column keeps.
+            cases.append(('permissive concat', 'v', 'short', 'Int32',
+                          pyarrow.concat_tables(
+                              [short,
+                               pyarrow.table({'v': pyarrow.array(
+                                   [70000], pyarrow.int32())})],
+                              promote_options='permissive')))
+        for label, name, kind, arrow_type, table in cases:
+            with self.subTest(label):
+                with QwpAckServer(record_payloads=True) as server:
+                    conf = (
+                        f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;sender_pool_min=1;'
+                        'sender_pool_max=1;pool_reap=manual;')
+                    with qi.QuestDB.from_conf(conf) as client:
+                        with self.assertRaises(qi.QuestDBError) as cm:
+                            client.dataframe(
+                                table, table_name='stale_field_claim',
+                                at=qi.ServerTimestamp)
+                    stats = server.snapshot()
+                self.assertEqual(
+                    cm.exception.code, qi.QuestDBErrorCode.ArrowIngest)
+                self.assertIn(
+                    f"column '{name}' has column_type='{kind}', which is "
+                    f"not applicable to Arrow type {arrow_type}",
+                    str(cm.exception))
+                self.assertEqual(stats['binary_payloads'], [])
+                self.assertEqual(stats['errors'], [])
+                # The documented remedy: drop the field's metadata, and
+                # the column goes out as its Arrow type implies.
+                i = table.schema.get_field_index(name)
+                stripped = table.cast(table.schema.set(
+                    i, table.schema.field(i).remove_metadata()))
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        stripped, table_name='stale_field_claim',
+                        at=qi.ServerTimestamp)[name],
+                    0x05)
+
     def _nullable_roundtrip_frame(self):
         """The rows of :meth:`_roundtrip_frame` in the shape
         ``to_pandas(dtype_backend='numpy_nullable')`` returns them:
