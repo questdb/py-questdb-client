@@ -7475,6 +7475,83 @@ class OidcSenderReentryTest(unittest.TestCase):
         finally:
             logger.removeHandler(handler)
 
+    @unittest.skipUnless(os.name == 'posix',
+                         'durable file token store requires POSIX')
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_persistence_warning_cannot_close_sender_inside_dataframe(self):
+        # dataframe()'s auto-flush runs the same native flush, so the same
+        # diagnostic reaches a handler while native borrows the sender. Closing
+        # it there freed the sender under that borrow: a crash, not an error.
+        credential = [None]
+        sabotaged = threading.Event()
+        rejected = []
+        sender_ref = [None]
+
+        def fail_save():
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential[0]):
+                os.remove(credential[0])
+            os.mkdir(credential[0])
+            sabotaged.set()
+
+        class Reenter(logging.Handler):
+            def emit(self, _record):
+                sender = sender_ref[0]
+                for name, action in (
+                    ('close', lambda: sender.close()),
+                    ('row', lambda: sender.row(
+                        'from_handler', columns={'v': 1},
+                        at=questdb.ServerTimestamp)),
+                    ('len', lambda: len(sender)),
+                ):
+                    try:
+                        action()
+                    except questdb.QuestDBError as exc:
+                        rejected.append((name, exc.code))
+
+        logger = logging.getLogger('questdb')
+        handler = Reenter()
+        try:
+            with tempfile.TemporaryDirectory() as directory, \
+                    OidcTestServer(initial_expires_in=4,
+                                   refresh_request_hook=fail_save) as server:
+                auth = make_discovered_auth(
+                    server, token_store=FileTokenStore.at(directory))
+                auth.sign_in()
+                credential[0] = os.path.join(directory, next(
+                    name for name in os.listdir(directory)
+                    if name.endswith('.json')))
+                sender = questdb.Sender.from_conf(
+                    f'http::addr=127.0.0.1:{server.port};auto_flush_rows=1;'
+                    'auto_flush_interval=off;protocol_version=2;',
+                    oidc_auth=auth)
+                sender.establish()
+                sender_ref[0] = sender
+                logger.addHandler(handler)
+                try:
+                    deadline = time.monotonic() + 15
+                    while not rejected:
+                        self.assertLess(time.monotonic(), deadline)
+                        sender.dataframe(
+                            pd.DataFrame({'v': [1]}), table_name='t',
+                            at=questdb.ServerTimestamp)
+                        time.sleep(0.05)
+                    self.assertEqual(rejected, [
+                        ('close', questdb.QuestDBErrorCode.InvalidApiCall),
+                        ('row', questdb.QuestDBErrorCode.InvalidApiCall),
+                        ('len', questdb.QuestDBErrorCode.InvalidApiCall),
+                    ])
+                    self.assertFalse(any(
+                        b'from_handler' in request['body']
+                        for request in server.requests(
+                            path='/write', method='POST')))
+                finally:
+                    logger.removeHandler(handler)
+                    sender.close(flush=False)
+        finally:
+            logger.removeHandler(handler)
+
 
 @unittest.skipUnless(
     hasattr(signal, 'pthread_kill') and hasattr(signal, 'SIGALRM'),
