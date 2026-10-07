@@ -243,10 +243,12 @@ def _oidc_after_fork_in_child():
     global _OIDC_MAIN_THREAD_IDENT, _OIDC_MAIN_PARKED
     global _OIDC_MAIN_PARK_SCHEDULED, _OIDC_MAIN_DIAGNOSTIC_DEPTH
     global _OIDC_REGISTRY_LOCK, _OIDC_DIAGNOSTICS_ACTIVE
+    global _OIDC_DIAGNOSTICS_DRAINED
     cdef unsigned long current = questdb_thread_ident()
     # The registry lock may have been held by a parent thread that disappeared.
     # Keep its entries, but never try to acquire the inherited lock in a child.
     _OIDC_REGISTRY_LOCK = threading.RLock()
+    _OIDC_DIAGNOSTICS_DRAINED = threading.Condition(_OIDC_REGISTRY_LOCK)
     # Any callback active in the parent either belonged to a vanished thread
     # or cannot continue across fork. Do not reject pool closes in the child.
     _OIDC_DIAGNOSTICS_ACTIVE = {}
@@ -353,21 +355,51 @@ cdef void _oidc_rearm_keyboard_interrupt() noexcept:
 cdef object _OIDC_PROVIDERS = {}
 cdef object _OIDC_NATIVE_HANDLES = {}
 cdef object _OIDC_REGISTRY_LOCK = threading.RLock()
-# Count callbacks by the opaque provider id given to native, rather than by
+# Count callbacks by the opaque provider id given to native, as well as by
 # thread: a logging handler may delegate db.close() to another thread and wait
 # for it. A pool close must not join a provider worker that is still inside its
 # own warning callback, even when no Python lease is currently outstanding.
 # Protected by _OIDC_REGISTRY_LOCK; keys never retain a provider.
 cdef dict _OIDC_DIAGNOSTICS_ACTIVE = {}
+# Notified whenever a provider's count drops, so a close on a thread that is
+# not itself inside the callback can wait for it instead of failing.
+cdef object _OIDC_DIAGNOSTICS_DRAINED = threading.Condition(_OIDC_REGISTRY_LOCK)
+# The provider ids whose diagnostic is being dispatched on the current thread.
+cdef object _OIDC_DIAGNOSTIC_LOCAL = threading.local()
 cdef size_t _oidc_last_provider_id = 0
 
+# How long a pool close waits for a persistence-warning callback of its
+# provider that runs on another thread. Bounded, because a callback that
+# delegated this very close and joins it can never return first: the wait must
+# give up so that callback can. Unrelated closers simply wait it out.
+cdef double _OIDC_CLOSE_DIAGNOSTIC_WAIT_SECS = 2.0
 
-cdef bint _oidc_diagnostic_active_for(object provider) except -1:
+
+cdef bint _oidc_diagnostic_on_this_thread(object provider) except -1:
     if provider is None:
         return False
-    with _OIDC_REGISTRY_LOCK:
-        return _OIDC_DIAGNOSTICS_ACTIVE.get(
-            (<OidcDeviceAuth>provider)._provider_id, 0) != 0
+    ids = getattr(_OIDC_DIAGNOSTIC_LOCAL, 'ids', None)
+    return bool(ids) and (<OidcDeviceAuth>provider)._provider_id in ids
+
+
+cdef bint _oidc_wait_diagnostics_drained(
+        object provider, double timeout) except -1:
+    """Wait until no persistence-warning callback for ``provider`` runs.
+
+    Returns False if one is still running after ``timeout`` seconds. Never
+    call it while holding a lock that callback might need.
+    """
+    if provider is None:
+        return True
+    provider_id = (<OidcDeviceAuth>provider)._provider_id
+    deadline = time.monotonic() + timeout
+    with _OIDC_DIAGNOSTICS_DRAINED:
+        while _OIDC_DIAGNOSTICS_ACTIVE.get(provider_id, 0) != 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _OIDC_DIAGNOSTICS_DRAINED.wait(remaining)
+    return True
 
 
 # Set before the atexit hook snapshots the registry. A provider whose native
@@ -1270,6 +1302,7 @@ cdef void _oidc_diagnostic_dispatch(
     cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
     cdef bint registered = False
     cdef object signal_codes = ()
+    cdef object thread_ids = None
     if on_main:
         _OIDC_MAIN_DIAGNOSTIC_DEPTH += 1
     try:
@@ -1277,6 +1310,10 @@ cdef void _oidc_diagnostic_dispatch(
             _OIDC_DIAGNOSTICS_ACTIVE[provider_id] = (
                 _OIDC_DIAGNOSTICS_ACTIVE.get(provider_id, 0) + 1)
             registered = True
+        thread_ids = getattr(_OIDC_DIAGNOSTIC_LOCAL, 'ids', None)
+        if thread_ids is None:
+            thread_ids = _OIDC_DIAGNOSTIC_LOCAL.ids = []
+        thread_ids.append(provider_id)
         try:
             # On the thread running sign_in(), token(), clear() or an attached
             # transport's token pull, this callback is where CPython runs the
@@ -1329,6 +1366,9 @@ cdef void _oidc_diagnostic_dispatch(
                     _OIDC_DIAGNOSTICS_ACTIVE[provider_id] = remaining - 1
                 else:
                     _OIDC_DIAGNOSTICS_ACTIVE.pop(provider_id, None)
+                _OIDC_DIAGNOSTICS_DRAINED.notify_all()
+            if thread_ids is not None and thread_ids:
+                thread_ids.pop()
         if on_main:
             _OIDC_MAIN_DIAGNOSTIC_DEPTH -= 1
             if _OIDC_MAIN_DIAGNOSTIC_DEPTH == 0:

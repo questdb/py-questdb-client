@@ -1435,9 +1435,11 @@ class QuestDB:
         ``error_handler`` / ``connection_listener`` callbacks, it does
         not wait for a concurrent ``close()`` on another thread to
         finish; the in-flight callback completes after that close
-        returns. Closing a pool while its OIDC provider's persistence-warning
-        callback is running raises ``QuestDBError(InvalidApiCall)``, including
-        when that callback delegates the close to another thread.
+        returns. Closing a pool from inside its OIDC provider's
+        persistence-warning callback raises ``QuestDBError(InvalidApiCall)``.
+        A close on any other thread waits for that callback to return, and
+        gives up with the same error after two seconds; that is how a close
+        the callback delegated to another thread, and waits for, is released.
         """
 
     def __exit__(self, exc_type, _exc_val, _exc_tb): ...

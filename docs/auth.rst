@@ -258,11 +258,14 @@ persistence-warning handler while it is performing a native flush: those
 operations raise ``QuestDBError(InvalidApiCall)`` rather than freeing the
 sender or changing its buffer while native code still holds it. Likewise, a
 persistence-warning handler must not close a :class:`~questdb.QuestDB` pool
-attached to the same provider: ``db.close()`` raises
-``QuestDBError(InvalidApiCall)`` while that warning is running, including if the
-handler delegates the close to another thread. A pool close would otherwise
-wait for a lease whose acknowledgement depends on the warning callback
-returning. Close the pool after the handler returns instead. The binding imports
+attached to the same provider: ``db.close()`` called from the handler raises
+``QuestDBError(InvalidApiCall)``, because the close would otherwise wait for a
+lease whose acknowledgement depends on the warning callback returning. A
+``db.close()`` on any other thread waits for the handler to return, and gives
+up with the same error after two seconds. That bound is what releases a close
+the handler delegated to another thread and joins; it also means an unrelated
+close fails, and can simply be retried, if a handler runs for longer. Close the
+pool after the handler returns instead. The binding imports
 ``logging`` before registering its own shutdown hook, so the hook detaches OIDC
 callbacks while logging handlers are still live;
 ``logging.shutdown()`` runs afterwards. Diagnostics produced after the detach

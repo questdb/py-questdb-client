@@ -6900,6 +6900,81 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                 db.close()
 
 
+    def test_unrelated_pool_close_waits_for_a_diagnostic_elsewhere(self):
+        self._run_isolated('unrelated_pool_close_waits_for_a_diagnostic_elsewhere',
+                           self._exercise_unrelated_pool_close, 30)
+
+    def _exercise_unrelated_pool_close(self):
+        # A persistence warning for the pool's provider is being logged on
+        # thread B, which never touches the pool. A close on an unrelated
+        # thread C is not inside that callback and was not delegated by it:
+        # it must wait for the handler to return rather than fail and leave
+        # the pool open.
+        entered = threading.Event()
+        release = threading.Event()
+        outcome = []
+
+        class Blocking(logging.Handler):
+            def emit(self, record):
+                if ('token store' not in record.getMessage()
+                        or entered.is_set()):
+                    return
+                entered.set()
+                release.wait(10)
+
+        logger = logging.getLogger('questdb')
+        old_level = logger.level
+        handler = Blocking()
+        with tempfile.TemporaryDirectory() as parent, OidcTestServer() as idp:
+            directory = os.path.join(parent, 'tokens')
+            os.mkdir(directory)
+            auth = make_discovered_auth(
+                idp, token_store=FileTokenStore.at(directory))
+            db = questdb.connect(
+                'ws::addr=127.0.0.1:65530;lazy_connect=true;'
+                'sender_pool_min=0;query_pool_min=0;', oidc_auth=auth)
+            os.rmdir(directory)
+            with open(directory, 'w') as output:
+                output.write('not-a-directory')
+            logger.setLevel(logging.WARNING)
+            logger.addHandler(handler)
+
+            def token_on_b():
+                try:
+                    auth.token()
+                except BaseException:  # noqa: BLE001
+                    pass
+
+            def close_on_c():
+                try:
+                    db.close()
+                    outcome.append(None)
+                except questdb.QuestDBError as exc:
+                    outcome.append(exc.code)
+
+            b = threading.Thread(target=token_on_b, daemon=True)
+            c = threading.Thread(target=close_on_c, daemon=True)
+            try:
+                b.start()
+                self.assertTrue(entered.wait(10))
+                c.start()
+                # C waits for the handler instead of failing at once.
+                c.join(0.5)
+                self.assertTrue(c.is_alive())
+                release.set()
+                c.join(10)
+                self.assertFalse(c.is_alive())
+                self.assertEqual(outcome, [None])
+                with self.assertRaises(questdb.QuestDBError):
+                    db.connection_events_dropped
+            finally:
+                release.set()
+                b.join(10)
+                logger.removeHandler(handler)
+                logger.setLevel(old_level)
+                db.close()
+                auth.close()
+
     def test_pool_close_from_background_diagnostic(self):
         self._run_isolated('pool_close_from_background_diagnostic',
                            lambda: self._exercise_background_pool_close(False),
