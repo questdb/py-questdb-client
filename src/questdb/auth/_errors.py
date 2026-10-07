@@ -171,7 +171,7 @@ class OidcInteractionRequired(OidcError):
     """
     Interactive sign-in is required, but raised instead of hanging in a
     non-interactive context (``papermill``, cron, CI). If
-    :attr:`acquisition_busy` is true, another thread is doing the sign-in or
+    ``acquisition_busy`` is true, another thread is doing the sign-in or
     token acquisition; defer the operation rather than calling ``sign_in()``
     again. Otherwise arrange interactive sign-in outside a callback. Use a
     QuestDB service-account REST token or the OAuth2 client-credentials grant

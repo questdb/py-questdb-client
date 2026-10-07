@@ -157,6 +157,25 @@ example, enter its context) and signal that before closing the pool, or close
 the pool from a thread that never held the lease. A ``close()`` on another
 thread still waits for outstanding leases.
 
+A sender's own callbacks can no longer drive that sender
+********************************************************
+
+A :class:`Sender <questdb.Sender>`'s own ``connection_listener`` or
+``error_handler`` could already not call ``flush()`` or ``close()`` on it. The
+same now applies to ``row()``, ``dataframe()``, ``new_buffer()``,
+``establish()``, ``transaction()`` and every
+:class:`SenderTransaction <questdb.SenderTransaction>` operation: called from
+the sender's own callback they raise :class:`QuestDBError <questdb.QuestDBError>`
+with ``code`` set to ``QuestDBErrorCode.InvalidApiCall``, even while the sender
+is idle. Before, ``row()`` from a listener succeeded, so a 5.0 listener that
+records its events through its own sender now logs
+``connection event listener failed`` and drops those rows. Separately, the read-only ``max_name_len``,
+``protocol_version``, ``connection_events_dropped`` and
+``connection_events_delivered`` now raise the same error, from any thread,
+while the sender is inside a native call such as ``flush()``. Write listener
+events to a different sender or queue them for the owning thread, and read the
+counters when the sender is not flushing.
+
 Features
 ~~~~~~~~
 
@@ -189,10 +208,11 @@ Highlights:
   path remain non-interactive, silently refreshing when possible and otherwise
   raising :class:`~questdb.auth.OidcInteractionRequired`.
 * Auth failures are typed :class:`~questdb.auth.OidcError` subclasses of
-  :class:`~questdb.QuestDBError`, whose ``code`` mirrors the client's own
-  classification (``AuthError`` when terminal, ``SocketError`` when the failure
-  is retryable, ``ConfigError`` for a misconfiguration), so retry logic keying
-  on ``code`` treats an auth failure like any other. A
+  :class:`~questdb.QuestDBError`. Their ``code`` reports the failing call's
+  native error category, not a recovery instruction: a flush with no usable
+  credential reports ``SocketError`` although only a sign-in fixes it, so catch
+  :class:`~questdb.auth.OidcInteractionRequired` (and check its
+  ``acquisition_busy``) before retry logic keyed on ``code``. A
   transport attached with ``oidc_auth=`` can raise one from the same
   ``flush`` / ``dataframe`` / ``row`` / ``query`` / :func:`questdb.connect`
   call, so an existing ``except QuestDBError`` retry or dead-letter handler

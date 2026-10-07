@@ -5,12 +5,13 @@ Migration Guide
 5.0 to 5.1
 ==========
 
-Nine changes need action: the two UUID / fixed-size-binary items below, the
+Ten changes need action: the two UUID / fixed-size-binary items below, the
 stricter ``schema_overrides`` tuple validation, caps on callback inbox
 capacities and config-string length, the exception a commit raises once its
 sender is closed, the error a query failover that runs out of time raises, a
-warning an abandoned query result now surfaces instead of swallowing, and
-``QuestDB.close()`` raising instead of waiting for its own thread's lease. The new ``ConnectionEventKind.CredentialUnavailable`` event kind
+warning an abandoned query result now surfaces instead of swallowing,
+``QuestDB.close()`` raising instead of waiting for its own thread's lease, and
+a sender's own callbacks no longer being able to append to it. The new ``ConnectionEventKind.CredentialUnavailable`` event kind
 needs none — it is additive, and an existing listener keeps working.
 
 * **UUID bytes are canonical RFC 4122.** UUID values are read and written in
@@ -136,6 +137,25 @@ needs none — it is additive, and an existing listener keeps working.
       threading.Thread(target=work).start()
       used.wait()
       db.close()  # waits for the worker to return the lease
+
+* **A sender's own callbacks can no longer append to it.** Called from the
+  sender's own ``connection_listener`` or ``error_handler``, ``row()``,
+  ``dataframe()``, ``new_buffer()``, ``establish()``, ``transaction()`` and the
+  :class:`~questdb.SenderTransaction` operations raise
+  ``QuestDBError(InvalidApiCall)``, as ``flush()`` and ``close()`` already did,
+  even while the sender is idle. 5.0 accepted ``row()`` there. The read-only
+  ``max_name_len``, ``protocol_version``, ``connection_events_dropped`` and
+  ``connection_events_delivered`` also raise, from any thread, while the sender
+  is inside a native call such as ``flush()``. Hand listener events to another
+  sender or to the owning thread instead::
+
+      events = queue.SimpleQueue()
+      sender = Sender.from_conf(conf, connection_listener=events.put)
+      ...
+      while not events.empty():  # on the sender's own thread
+          event = events.get()
+          sender.row('conn_events', symbols={'kind': event.kind.tag},
+                     at=questdb.ServerTimestamp)
 
 4.x to 5.0
 ==========

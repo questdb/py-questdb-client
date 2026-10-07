@@ -365,7 +365,7 @@ It is mutually exclusive with the fixed credentials above: passing it
 alongside ``token``, ``username`` or ``password`` raises
 :class:`~questdb.QuestDBError` with ``code`` set to
 ``QuestDBErrorCode.ConfigError``. Supported on HTTP(S) and QWP/WebSocket; TCP
-is rejected.
+and UDP are rejected.
 
 See the :ref:`oidc_auth` guide.
 

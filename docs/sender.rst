@@ -473,12 +473,13 @@ section for more details.
    failures; catch ``OidcError`` (or a typed subclass) *before*
    ``QuestDBError`` to handle auth failures specifically.
 
-   Its ``code`` mirrors the client's own classification rather than being
-   fixed: ``QuestDBErrorCode.AuthError`` for a terminal auth failure,
-   ``SocketError`` for one the client treats as retryable (a transient token
-   pull on a reconnect), and ``ConfigError`` for a misconfiguration. Retry
-   logic keyed on ``code`` therefore handles an OIDC failure exactly as it
-   handles any other — do not assume ``AuthError``. See :ref:`oidc_auth`.
+   Its ``code`` reports the failing call's native error category, not a
+   recovery instruction: a flush with no usable credential raises
+   :class:`~questdb.auth.OidcInteractionRequired` with ``code`` set to
+   ``SocketError``, yet retrying cannot succeed until someone signs in. Catch
+   ``OidcInteractionRequired`` before any retry logic keyed on ``code``, and
+   use its ``acquisition_busy`` flag to tell a transient wait for another
+   thread (retry) from a missing credential (sign in). See :ref:`oidc_auth`.
 
 .. _sender_transaction:
 
