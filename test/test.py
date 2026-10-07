@@ -10485,6 +10485,59 @@ finish()
             {'a': 0x05})
         self.assertIs(frame.attrs['questdb'], claim)
 
+    _UNFREEZABLE_CLAIM_ON_A_SMALL_STACK_SCRIPT = r'''
+import threading
+import numpy as np
+import pandas as pd
+import questdb._client as qi
+
+looped = {'version': 1, 'columns': {'a': {'kind': 'long'}}}
+looped['loop'] = looped
+deep = {'version': 1, 'columns': {'a': {'kind': 'long'}}}
+level = deep
+for _ in range(64):
+    level['next'] = {}
+    level = level['next']
+
+failures = []
+
+def write_each():
+    for label, claim in (('contains itself', looped), ('64 deep', deep)):
+        frame = pd.DataFrame({'a': np.array([1, 2], dtype=np.int64)})
+        frame.attrs['questdb'] = claim
+        buf = qi.Buffer(protocol_version=2)
+        try:
+            buf.dataframe(frame, table_name='t', at=qi.ServerTimestamp)
+        except Exception as exc:
+            failures.append(f'{label}: {exc!r}')
+        else:
+            if b'a=1i' not in bytes(buf):
+                failures.append(f'{label}: the row is missing')
+
+try:
+    threading.stack_size(1 << 20)
+except (ValueError, RuntimeError):
+    pass
+thread = threading.Thread(target=write_each)
+thread.start()
+thread.join()
+print(failures or 'OK')
+'''
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_an_unfreezable_claim_writes_on_a_small_stack(self):
+        """Whether a claim can be frozen is decided before freezing
+        starts, so a claim that contains itself, or nests too deep,
+        never recurses far. A Windows main thread has a stack of a few
+        megabytes at most, and on Python 3.12 and 3.13 a deep recursion
+        through compiled code runs it out before `RecursionError` is
+        raised, which kills the interpreter. A 1 MiB thread stands in
+        for it on every platform. Runs in a child interpreter, where a
+        crash reads as a failed exit and the rest of the suite keeps
+        running."""
+        self._run_in_child_interpreter(
+            self._UNFREEZABLE_CLAIM_ON_A_SMALL_STACK_SCRIPT)
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_malformed_roundtrip_attrs_are_ignored_by_both_readers(self):

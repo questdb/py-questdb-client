@@ -346,6 +346,44 @@ class _RoundtripClaim(dict):
     clear = _immutable
 
 
+# A claim is three mappings deep: the claim, its `columns` mapping and a
+# column's entry. `_RoundtripClaim` freezes one mapping per level of C
+# recursion, so a bound well above that keeps the recursion shallow
+# however little stack the calling thread has.
+cdef int _CLAIM_FREEZE_MAX_DEPTH = 16
+
+
+cdef bint _claim_nesting_is_bounded(object claim) except -1:
+    """Whether no mapping in `claim` sits more than
+    `_CLAIM_FREEZE_MAX_DEPTH` levels down.
+
+    `_RoundtripClaim` freezes a claim by recursing into every mapping it
+    holds, so the depth has to be known before freezing starts. On
+    Python 3.12 and 3.13 that recursion counts against a C-level limit
+    that does not track the real stack, so on a stack of a few
+    megabytes -- a Windows main thread's, for one -- the interpreter
+    dies of a stack overflow before `RecursionError` can be raised. This
+    walk keeps its own list of pending mappings, so it uses no C stack
+    per level.
+
+    A claim that contains itself has no bottom, so its depth runs past
+    the bound and the walk stops there. A mapping that two entries
+    share is not a cycle; it is walked once per entry, the way the
+    freeze copies it once per entry.
+    """
+    cdef list pending = [(claim, 1)]
+    cdef object mapping, value
+    cdef int depth
+    while pending:
+        mapping, depth = pending.pop()
+        if depth > _CLAIM_FREEZE_MAX_DEPTH:
+            return False
+        for _, value in mapping.items():
+            if isinstance(value, dict):
+                pending.append((value, depth + 1))
+    return True
+
+
 cdef object _dataframe_freeze_claim(object df):
     """`df`, or a shallow copy of it whose ``df.attrs['questdb']`` is a
     `_RoundtripClaim`, when `df` is a pandas frame carrying its claim
@@ -361,8 +399,9 @@ cdef object _dataframe_freeze_claim(object df):
 
     The copy shares the frame's data and gets an ``attrs`` dict of its
     own, so `df` and its claim are left as they are. A claim that
-    contains itself cannot be frozen; it stays plain, and pandas copies
-    it the way it copies any plain ``dict``.
+    contains itself, or nests deeper than `_CLAIM_FREEZE_MAX_DEPTH`,
+    cannot be frozen; it stays plain, and pandas copies it the way it
+    copies any plain ``dict``.
     """
     cdef object attrs, claim, frozen, out
     if not _is_pandas_dataframe_object(df):
@@ -373,10 +412,9 @@ cdef object _dataframe_freeze_claim(object df):
     claim = attrs.get('questdb')
     if not isinstance(claim, dict) or isinstance(claim, _RoundtripClaim):
         return df
-    try:
-        frozen = _RoundtripClaim(claim)
-    except RecursionError:
+    if not _claim_nesting_is_bounded(claim):
         return df
+    frozen = _RoundtripClaim(claim)
     out = df.copy(deep=False)
     out.attrs = {**attrs, 'questdb': frozen}
     return out
