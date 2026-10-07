@@ -4248,11 +4248,11 @@ class NativeTransportAttachmentTest(unittest.TestCase):
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_pool_dataframe_waits_behind_a_peer_sign_in_found_by_the_probe(self):
         # The single probe can land while a peer sign_in() sits between
-        # device-flow polls. A direct token() refusal there is busy but carries
-        # AuthError -- only a transport's own pull is reclassified to
-        # SocketError -- and the retryable-code check raised it at once, although
-        # the gate documents a peer sign-in as transient. The call must instead
-        # wait inside its budget and succeed once the sign-in completes.
+        # device-flow polls. A direct token() refusal there is busy, and the
+        # gate documents a peer sign-in as transient: the call must wait inside
+        # its budget and succeed once the sign-in completes, not fail at once.
+        # The refusal carries the same retryable SocketError whether the probe
+        # met the sign-in between polls or inside its callback.
         pending = (400, {'error': 'authorization_pending'}, None)
         polled = threading.Event()
         probe_errors = []
@@ -4310,7 +4310,7 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                     db.close()
                     auth.close()
         self.assertEqual(peer, ['ok'])
-        self.assertIn((questdb.QuestDBErrorCode.AuthError, True), probe_errors)
+        self.assertIn((questdb.QuestDBErrorCode.SocketError, True), probe_errors)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_pool_dataframe_surfaces_the_probe_failure_not_the_original(self):

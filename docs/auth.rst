@@ -90,7 +90,9 @@ lifecycle are :class:`~questdb.auth.OidcError` subclasses —
 failing call's native category, **not** a recovery instruction. For example,
 ``OidcInteractionRequired`` reports ``AuthError`` from ``auth.token()`` or the
 PG adapters, but ``SocketError`` from an HTTP sender flush in the very same
-state (no sign-in yet). The sender cannot recover by retrying until someone
+state (no sign-in yet). While another thread's sign-in or callback holds the
+provider, every caller instead gets ``SocketError`` with ``acquisition_busy``
+set. The sender cannot recover by retrying until someone
 signs in. Catch ``OidcInteractionRequired`` before general error-code-based
 retry logic. Its public ``acquisition_busy`` property is true when another
 thread is acquiring a token or rendering a callback: defer the operation

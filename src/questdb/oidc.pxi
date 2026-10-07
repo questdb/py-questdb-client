@@ -571,13 +571,23 @@ cdef inline bint _oidc_error_view_has_v1(size_t struct_size) noexcept nogil:
     return struct_size >= _oidc_error_view_v1_size()
 
 
+cdef inline size_t _oidc_error_view_size() noexcept nogil:
+    # Mirrors native's `QUESTDB_OIDC_ERROR_VIEW_SIZE`: the prefix through
+    # `acquisition_busy`, which is what a current library writes back. Not
+    # `sizeof`: the trailing `bool` leaves padding a later field can occupy
+    # without changing `sizeof`, so native reports the end of the field.
+    cdef questdb_oidc_error_view layout
+    return (<size_t>(<char*>&layout.acquisition_busy - <char*>&layout)
+            + sizeof(cbool))
+
+
 cdef inline bint _oidc_error_view_has_acquisition_busy(
         size_t struct_size) noexcept nogil:
     # The appended tail. Gated separately: a library that predates it still
     # reports a complete, classifiable v1 prefix, and collapsing that to a bare
     # OidcError would drop the kind the foreground fail-fast gate and every
     # `except OidcInteractionRequired` / `except OidcTimeoutError` key on.
-    return struct_size >= sizeof(questdb_oidc_error_view)
+    return struct_size >= _oidc_error_view_size()
 
 
 cdef inline bint _oidc_config_view_is_full(size_t struct_size):
@@ -599,7 +609,7 @@ def _debug_oidc_view_prefix_support(size_t error_size, size_t config_size):
 def _debug_oidc_view_sizes():
     """Internal test hook: ``(error_v1, error_full, config_full)`` sizes."""
     return (_oidc_error_view_v1_size(),
-            sizeof(questdb_oidc_error_view),
+            _oidc_error_view_size(),
             sizeof(questdb_oidc_config_view))
 
 

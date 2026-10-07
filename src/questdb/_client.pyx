@@ -6434,12 +6434,11 @@ cdef void_int _direct_dataframe_run(
                     continue
             # FailoverRetry = transient flush/sync; SocketError = a
             # re-borrow that has not reached a live primary yet. A *busy*
-            # OIDC refusal is transient whatever its code: a direct
-            # `oidc_auth.token()` probe made while a peer sign_in() is between
-            # device-flow polls carries AuthError (only the transport's own pull
-            # is reclassified to SocketError), yet it clears as soon as that
-            # sign-in finishes. Raising it here failed the call at once instead
-            # of waiting behind the sign-in, as the gate above promises.
+            # OIDC refusal is transient whatever its code: it clears as soon
+            # as the peer sign-in finishes, and must wait behind it as the gate
+            # above promises. Native reports it as SocketError today; keying on
+            # the busy flag as well keeps that promise independent of the
+            # code.
             if exc.code not in (
                     QuestDBErrorCode.FailoverRetry,
                     QuestDBErrorCode.SocketError) and not bool(
