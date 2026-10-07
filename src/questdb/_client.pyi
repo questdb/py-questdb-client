@@ -1431,7 +1431,11 @@ class QuestDB:
         """
         Close the client and its connection pool.
 
-        Idempotent. When called from inside one of this handle's own
+        Idempotent. Raises ``QuestDBError(InvalidApiCall)`` instead of
+        waiting while the calling thread owns an active pool operation or a
+        lease attributed to it: a sender lease belongs to the thread that last
+        used it, a reader lease always to the thread that borrowed it.
+        When called from inside one of this handle's own
         ``error_handler`` / ``connection_listener`` callbacks, it does
         not wait for a concurrent ``close()`` on another thread to
         finish; the in-flight callback completes after that close

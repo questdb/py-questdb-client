@@ -147,15 +147,20 @@ is still raised unchanged.
 outstanding lease. When the calling thread itself held one, that wait could
 never end. It now raises :class:`QuestDBError <questdb.QuestDBError>` with
 ``code`` set to ``QuestDBErrorCode.InvalidApiCall`` instead of waiting while
-the calling thread owns an active pool operation or a lease last used on it.
+the calling thread owns an active pool operation or a lease attributed to it.
+A sender lease is attributed to the thread that last used it; a reader lease
+always to the thread that borrowed it.
 
 This also affects a sender lease taken on one thread and handed to a worker:
 the lease belongs to the borrowing thread until the worker first uses it. A
 ``close()`` on the borrowing thread before that first use now raises where 5.0
 waited for the worker to return the lease. Have the worker use the lease (for
 example, enter its context) and signal that before closing the pool, or close
-the pool from a thread that never held the lease. A ``close()`` on another
-thread still waits for outstanding leases.
+the pool from a thread that never held the lease. A reader lease does not
+move with use, so 5.0 code that borrowed a reader on one thread, used it on a
+worker and closed the pool on the borrowing thread must close from another
+thread instead; reader leases were always documented as thread-affine. A
+``close()`` on another thread still waits for outstanding leases.
 
 A sender's own callbacks can no longer drive that sender
 ********************************************************

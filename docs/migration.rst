@@ -119,11 +119,14 @@ needs none — it is additive, and an existing listener keeps working.
 * :meth:`QuestDB.close <questdb.QuestDB.close>` **raises instead of waiting
   for a lease held by the calling thread.** It raises
   ``QuestDBError(InvalidApiCall)`` while the calling thread owns an active pool
-  operation or a lease last used on it; 5.0 waited, which never ended for a
+  operation or a lease attributed to it; 5.0 waited, which never ended for a
   same-thread lease. A sender lease handed to a worker stays attributed to the
   borrowing thread until the worker first uses it, so a ``close()`` there that
-  5.0 would have waited through now raises. Have the worker use the lease and
-  signal that before closing, or close from a thread that never held it::
+  5.0 would have waited through now raises. A reader lease (``db.reader()``)
+  stays attributed to the borrowing thread however it is used, so close the
+  pool from another thread while one is open. For a sender lease, have the
+  worker use the lease and signal that before closing, or close from a thread
+  that never held it::
 
       sender = db.sender()
       used = threading.Event()

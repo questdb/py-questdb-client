@@ -7381,8 +7381,10 @@ cdef class QuestDB:
                     reset_symbol_dict=False).to_pandas()
 
         The lease participates in the handle's active-use count until it
-        is closed. :meth:`QuestDB.close` raises if the calling thread holds
-        the lease; a close on another thread waits for its return.
+        is closed. It stays attributed to the thread that called
+        ``reader()``, even if another thread uses it: :meth:`QuestDB.close`
+        raises on that thread while the lease is open, and a close on any
+        other thread waits for its return.
         """
         cdef _ReaderHandle reader_handle
         cdef PooledReader lease
@@ -7498,13 +7500,16 @@ cdef class QuestDB:
         Close the client and its connection pool.
 
         This method is idempotent. Calling it while this thread owns an
-        active pool operation or a lease last used on this thread raises
-        ``QuestDBError`` instead of waiting for itself. A sender lease handed
-        to another thread is attributed to that thread when it first uses the
-        sender, so a close here can wait for its return. Synchronize that
-        first use (for example by entering the sender's context on the worker)
-        before closing on the former owner: an unused handoff is
-        indistinguishable from an unreturned same-thread lease. When called
+        active pool operation or a lease attributed to this thread raises
+        ``QuestDBError`` instead of waiting for itself. A sender lease is
+        attributed to the thread that last used it: one handed to another
+        thread moves to that thread when it first uses the sender, so a close
+        here can wait for its return. Synchronize that first use (for example
+        by entering the sender's context on the worker) before closing on the
+        former owner: an unused handoff is indistinguishable from an
+        unreturned same-thread lease. A reader lease (:meth:`reader`) has
+        thread affinity and stays attributed to the thread that borrowed it,
+        so close the pool from another thread while it is open. When called
         from inside one of this handle's own ``error_handler`` /
         ``connection_listener``
         callbacks, it does not wait for a concurrent ``close()`` on
