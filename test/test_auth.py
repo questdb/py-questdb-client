@@ -4024,7 +4024,14 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                     pd.DataFrame({'value': [1]}),
                     table_name='oidc_auto_flush',
                     at=questdb.ServerTimestamp)
-        self.assertIn(' - See https://', str(caught.exception))
+        exc = caught.exception
+        self.assertIn(' - See https://', str(exc))
+        # The re-frame must reuse the native exception, not rebuild it: a
+        # rebuilt one keeps the class but falls back to the class-default code
+        # and loses the native-only attributes.
+        self.assertIs(exc.code, questdb.QuestDBErrorCode.SocketError)
+        self.assertTrue(hasattr(exc, '_acquisition_busy'))
+        self.assertFalse(exc.acquisition_busy)
 
     def test_native_holds_no_python_reference_for_its_callback(self):
         # Regression: the event handler's user_data used to be an INCREF'd
