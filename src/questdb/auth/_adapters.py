@@ -111,12 +111,21 @@ def _safe_urlparse(url: str) -> urllib.parse.ParseResult:
 _LEGAL_HOST_RE = re.compile(r'\A[A-Za-z0-9._:-]+\Z')
 
 
-def _pg_module():
-    try:
-        import psycopg  # type: ignore  # psycopg v3
-        return psycopg
-    except ImportError:
-        pass
+def _pg_module(allow_psycopg3: bool = True):
+    if allow_psycopg3:
+        try:
+            import psycopg  # type: ignore  # psycopg v3
+            return psycopg
+        except ImportError:
+            pass
+    else:
+        try:
+            import psycopg2  # type: ignore
+            return psycopg2
+        except ImportError as e:
+            raise ImportError(
+                'SQLAlchemy 1.x has no psycopg (v3) dialect: install '
+                '`psycopg2-binary`, or upgrade to SQLAlchemy 2.') from e
     try:
         import psycopg2  # type: ignore
         return psycopg2
@@ -124,6 +133,16 @@ def _pg_module():
         raise ImportError(
             'A PostgreSQL driver is required: install `psycopg` (v3) or '
             '`psycopg2-binary`.') from e
+
+
+def _sqlalchemy_has_psycopg3_dialect() -> bool:
+    """Whether the installed SQLAlchemy has ``postgresql+psycopg``: 2.0+."""
+    import sqlalchemy
+    try:
+        major = int(str(sqlalchemy.__version__).split('.', 1)[0])
+    except (AttributeError, ValueError):
+        return True  # Not a released version string: assume a current one.
+    return major >= 2
 
 
 def _require_host(url: str, host: Optional[str] = None) -> str:
@@ -383,7 +402,9 @@ def sqlalchemy_engine(
     :param pg_port: PG-wire port (default ``8812``).
     :param database: Database name (default ``"qdb"``).
     :param drivername: SQLAlchemy driver; defaults to ``postgresql+psycopg``
-        (v3) or ``postgresql+psycopg2`` depending on what is installed. A
+        (v3) or ``postgresql+psycopg2`` depending on what is installed.
+        SQLAlchemy 1.x has no psycopg (v3) dialect, so there the default is
+        always ``postgresql+psycopg2``. A
         driver not built on libpq (``postgresql+pg8000``, say) takes no
         ``sslmode``: pass ``sslmode=None`` with it and configure its own TLS
         through ``connect_args``, or construction raises
@@ -441,7 +462,7 @@ def sqlalchemy_engine(
             'install it with `pip install sqlalchemy`.') from e
 
     if drivername is None:
-        mod = _pg_module()
+        mod = _pg_module(allow_psycopg3=_sqlalchemy_has_psycopg3_dialect())
         drivername = (
             'postgresql+psycopg'
             if mod.__name__ == 'psycopg'

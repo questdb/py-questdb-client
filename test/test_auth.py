@@ -6083,6 +6083,48 @@ class AdapterTest(unittest.TestCase):
             auth.token.assert_not_called()
             sqlalchemy.create_engine.assert_not_called()
 
+    def test_sqlalchemy_default_driver_matches_the_sqlalchemy_version(self):
+        # SQLAlchemy 1.x has no `postgresql+psycopg` dialect: defaulting to it
+        # whenever psycopg 3 was importable failed every default call there,
+        # even with psycopg2 installed.
+        def fake_modules(version, *drivers):
+            sqlalchemy = types.ModuleType('sqlalchemy')
+            sqlalchemy.__version__ = version
+            sqlalchemy.create_engine = mock.Mock(
+                return_value=types.SimpleNamespace(
+                    dialect=types.SimpleNamespace(connect=mock.Mock())))
+            sqlalchemy_engine = types.ModuleType('sqlalchemy.engine')
+            sqlalchemy_engine.URL = mock.Mock()
+            modules = {
+                'sqlalchemy': sqlalchemy,
+                'sqlalchemy.engine': sqlalchemy_engine,
+            }
+            for name in ('psycopg', 'psycopg2'):
+                modules[name] = (
+                    types.ModuleType(name) if name in drivers else None)
+            return modules, sqlalchemy_engine.URL
+
+        url = 'https://questdb.example.com:9000'
+        for version, drivers, expected in (
+                ('2.0.36', ('psycopg', 'psycopg2'), 'postgresql+psycopg'),
+                ('2.0.36', ('psycopg2',), 'postgresql+psycopg2'),
+                ('1.4.54', ('psycopg', 'psycopg2'), 'postgresql+psycopg2'),
+                ('1.4.54', ('psycopg2',), 'postgresql+psycopg2')):
+            with self.subTest(version=version, drivers=drivers):
+                modules, url_type = fake_modules(version, *drivers)
+                with mock.patch.dict(sys.modules, modules):
+                    _adapters.sqlalchemy_engine(mock.Mock(), url)
+                self.assertEqual(
+                    url_type.create.call_args.kwargs['drivername'], expected)
+
+        modules, url_type = fake_modules('1.4.54', 'psycopg')
+        auth = mock.Mock()
+        with mock.patch.dict(sys.modules, modules):
+            with self.assertRaisesRegex(ImportError, 'SQLAlchemy 1.x'):
+                _adapters.sqlalchemy_engine(auth, url)
+        url_type.create.assert_not_called()
+        auth.token.assert_not_called()
+
     def test_sqlalchemy_rejects_non_libpq_driver_while_sslmode_is_set(self):
         # pg8000 and other non-libpq drivers take no `sslmode`: injecting it
         # failed every pooled connection with a bare TypeError. Refuse at
