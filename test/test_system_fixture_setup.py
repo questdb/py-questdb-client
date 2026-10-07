@@ -58,7 +58,7 @@ class TestSystemFixtureSetup(unittest.TestCase):
 
     def test_egress_seed_sql_uses_longer_timeout(self):
         case = system_test.TestEgressFailover(
-            'test_polars_from_arrow_dead_then_live_endpoint')
+            'test_polars_dataframe_dead_then_live_endpoint')
         fixture = mock.Mock(host='127.0.0.1', http_server_port=9000)
         fixture.http_headers.return_value = {}
         case.qdb_plain = fixture

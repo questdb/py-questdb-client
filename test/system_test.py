@@ -2504,7 +2504,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
-    def test_polars_from_arrow_consumes_capsule(self):
+    def test_polars_dataframe_consumes_capsule(self):
         """``QuestDB.query`` exposes ``__arrow_c_stream__`` directly off
         the Rust cursor, so polars can consume it without pyarrow being
         the import-time mediator. Pins that contract: the polars frame
@@ -2529,7 +2529,10 @@ class TestEgressWithDatabase(unittest.TestCase):
                 with client.query(
                         f'SELECT lg, vc FROM {table_name} ORDER BY lg DESC'
                         ) as result:
-                    df = pl.from_arrow(result)
+                    # The DataFrame constructor, not `pl.from_arrow`: on
+                    # polars >= 2.0 that returns a Series of structs for a
+                    # bare Arrow C stream.
+                    df = pl.DataFrame(result)
             self.assertEqual(df.shape, (2, 2))
             self.assertEqual(df['lg'].to_list(), [42, 7])
             self.assertEqual(df['vc'].to_list(), ['hello', 'world'])
@@ -6257,7 +6260,7 @@ class TestEgressFailover(unittest.TestCase):
             df = client.query(f'SELECT v FROM {table} ORDER BY ts').to_polars()
         self.assertEqual(df['v'].to_list(), list(range(n)))
 
-    def test_polars_from_arrow_dead_then_live_endpoint(self):
+    def test_polars_dataframe_dead_then_live_endpoint(self):
         """The pyarrow-free Polars capsule path also borrows through the
         same multi-endpoint reader pool before Polars starts consuming
         the Arrow stream."""
@@ -6275,7 +6278,7 @@ class TestEgressFailover(unittest.TestCase):
                            target='primary',
                            failover_max_duration_ms='60000')) as client:
             with client.query(f'SELECT v FROM {table} ORDER BY ts') as result:
-                df = pl.from_arrow(result)
+                df = pl.DataFrame(result)
         self.assertEqual(df['v'].to_list(), list(range(n)))
 
     def test_iter_arrow_surfaces_failover_would_duplicate(self):

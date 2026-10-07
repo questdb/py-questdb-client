@@ -35,7 +35,7 @@ ingestion and query results**, the other two ``dataframe()`` /
   byte-reversing workaround, on every Arrow-backed reader —
   :meth:`questdb.QueryResult.to_arrow`, :meth:`~questdb.QueryResult.to_polars`,
   :meth:`~questdb.QueryResult.iter_arrow`, :meth:`~questdb.QueryResult.iter_polars`,
-  ``__arrow_c_stream__`` (so ``polars.from_arrow(db.query(...))`` too), and
+  ``__arrow_c_stream__`` (so ``polars.DataFrame(db.query(...))`` too), and
   :meth:`~questdb.QueryResult.to_pandas` / :meth:`~questdb.QueryResult.iter_pandas`
   whenever ``dtype_backend`` or ``types_mapper`` is passed — including
   ``dtype_backend="numpy_nullable"``, which leaves a UUID column as raw

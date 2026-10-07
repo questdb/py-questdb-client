@@ -156,7 +156,7 @@ token for each flush:
    ``row()``, ``query()``, materializing a query result with ``to_pandas()``
    or ``to_arrow()``, or :func:`questdb.connect`. If you instead consume a
    query result through the zero-copy Arrow C-stream interface
-   (``__arrow_c_stream__`` — e.g. ``polars.from_arrow(db.query(sql))`` or a
+   (``__arrow_c_stream__`` — e.g. ``polars.DataFrame(db.query(sql))`` or a
    ``pyarrow.RecordBatchReader``), a token failure that happens *mid-stream*
    (a failover reconnect between batches needing a fresh token) surfaces as a
    generic Arrow / ``OSError`` from the consumer, **not** an ``OidcError``:
