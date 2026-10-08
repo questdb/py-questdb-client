@@ -5322,6 +5322,18 @@ class RenderSanitizerTest(unittest.TestCase):
         self.assertNotIn('<a ', html)    # never linkified
         self.assertNotIn('<img', html)   # markup is html-escaped, not live
 
+    def test_render_link_escapes_the_vetted_url_in_its_href(self):
+        # Vetting checks scheme and host, not the path/query, so a quote there
+        # must not close the attribute and smuggle in an event handler.
+        url = 'https://ok.example/a"onmouseover="alert(1)&b=<x>'
+        self.assertIsNotNone(_render._safe_target(url))
+        html = _render._render_link(url)
+        self.assertIn(
+            '<a href="https://ok.example/a&quot;onmouseover=&quot;alert(1)'
+            '&amp;b=&lt;x&gt;"', html)
+        self.assertNotIn('onmouseover="', html)
+        self.assertNotIn('<x>', html)
+
     # -- _verification_target: the single canonical actionable URL --
     def test_verification_target_prefers_native_browser_target(self):
         self.assertEqual(
@@ -5705,6 +5717,40 @@ class RenderSanitizerTest(unittest.TestCase):
         self.assertNotIn('<script>', html)
         self.assertIn('&lt;img', html)                # message markup escaped
         self.assertNotIn('href="javascript:', html)   # dangerous scheme inert
+
+    def test_jupyter_renderer_escapes_markup_in_the_user_code(self):
+        # Native strips control characters from user_code but keeps printable
+        # ASCII such as < > & ", so a tampered IdP response can carry markup.
+        captured = []
+
+        class _FakeHTML:
+            def __init__(self, data):
+                self.data = data
+
+        class _FakeHandle:
+            def update(self, obj, raw=False):
+                captured.append(obj['text/html'])
+
+        def _fake_display(obj, display_id=None, raw=False):
+            captured.append(obj['text/html'])
+            return _FakeHandle()
+
+        ipython = types.ModuleType('IPython')
+        display_mod = types.ModuleType('IPython.display')
+        display_mod.HTML = _FakeHTML
+        display_mod.display = _fake_display
+        ipython.display = display_mod
+        with mock.patch.dict(
+                sys.modules,
+                {'IPython': ipython, 'IPython.display': display_mod}):
+            renderer = _render.JupyterRenderer(qr=False)
+            renderer.on_prompt({
+                'user_code': '<img src=x onerror=alert(1)>&"',
+                'verification_uri': 'https://idp.example/device'})
+        html = '\n'.join(captured)
+        self.assertTrue(captured, 'renderer emitted nothing')
+        self.assertIn('&lt;img src=x onerror=alert(1)&gt;&amp;&quot;', html)
+        self.assertNotIn('<img', html)
 
     def test_jupyter_renderer_publishes_the_code_as_plain_text(self):
         # A kernel cannot tell what its frontend renders. `jupyter console`,
@@ -7628,6 +7674,112 @@ class OidcSenderReentryTest(unittest.TestCase):
                         ('row', questdb.QuestDBErrorCode.InvalidApiCall),
                         ('len', questdb.QuestDBErrorCode.InvalidApiCall),
                     ])
+                    self.assertFalse(any(
+                        b'from_handler' in request['body']
+                        for request in server.requests(
+                            path='/write', method='POST')))
+                finally:
+                    logger.removeHandler(handler)
+                    sender.close(flush=False)
+        finally:
+            logger.removeHandler(handler)
+
+    @unittest.skipUnless(os.name == 'posix',
+                         'durable file token store requires POSIX')
+    def test_persistence_warning_cannot_drive_the_flushing_sender(self):
+        # Every sender entry point guarded against running while native
+        # borrows the sender. Each would otherwise alias the borrowed sender
+        # (new_buffer), rebuild or free it (establish), or write to and flush
+        # its internal buffer and clear the in-flight flag that keeps a later
+        # close() from freeing the sender under the borrow (dataframe, the
+        # transaction operations): a crash or silent row loss, not an error.
+        credential = [None]
+        sabotaged = threading.Event()
+        outcomes = []
+        sender_ref = [None]
+        txn_ref = [None]
+
+        def fail_save():
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential[0]):
+                os.remove(credential[0])
+            os.mkdir(credential[0])
+            sabotaged.set()
+
+        class Reenter(logging.Handler):
+            def emit(self, _record):
+                sender = sender_ref[0]
+                txn = txn_ref[0]
+                actions = [
+                    ('new_buffer', lambda: sender.new_buffer()),
+                    ('establish', lambda: sender.establish()),
+                    ('transaction', lambda: sender.transaction('from_handler')),
+                    ('transaction.__enter__', lambda: txn.__enter__()),
+                    ('transaction.row', lambda: txn.row(
+                        columns={'v': 1}, at=questdb.ServerTimestamp)),
+                    ('transaction.commit', lambda: txn.commit()),
+                    ('transaction.rollback', lambda: txn.rollback()),
+                ]
+                if pd is not None:
+                    actions[4:4] = [
+                        ('dataframe', lambda: sender.dataframe(
+                            pd.DataFrame({'v': [1]}),
+                            table_name='from_handler',
+                            at=questdb.ServerTimestamp)),
+                        ('transaction.dataframe', lambda: txn.dataframe(
+                            pd.DataFrame({'v': [1]}),
+                            at=questdb.ServerTimestamp)),
+                    ]
+                for name, action in actions:
+                    try:
+                        action()
+                    except questdb.QuestDBError as exc:
+                        outcomes.append((
+                            name, exc.code, 'native operation' in str(exc)))
+                    else:
+                        outcomes.append((name, None, False))
+
+        logger = logging.getLogger('questdb')
+        handler = Reenter()
+        try:
+            with tempfile.TemporaryDirectory() as directory, \
+                    OidcTestServer(initial_expires_in=4,
+                                   refresh_request_hook=fail_save) as server:
+                auth = make_discovered_auth(
+                    server, token_store=FileTokenStore.at(directory))
+                auth.sign_in()
+                credential[0] = os.path.join(directory, next(
+                    name for name in os.listdir(directory)
+                    if name.endswith('.json')))
+                sender = questdb.Sender.from_conf(
+                    f'http::addr=127.0.0.1:{server.port};protocol_version=2;',
+                    oidc_auth=auth, auto_flush=False)
+                sender.establish()
+                sender_ref[0] = sender
+                # Created (not entered) up front: only the operations are
+                # under test, and the flush below is outside any transaction.
+                txn_ref[0] = sender.transaction('from_handler')
+                buffer = sender.new_buffer()
+                logger.addHandler(handler)
+                try:
+                    deadline = time.monotonic() + 15
+                    while not outcomes:
+                        self.assertLess(time.monotonic(), deadline)
+                        buffer.row('t', columns={'v': 1},
+                                   at=questdb.ServerTimestamp)
+                        sender.flush(buffer)
+                        time.sleep(0.05)
+                    expected = [
+                        'new_buffer', 'establish', 'transaction',
+                        'transaction.__enter__', 'transaction.row',
+                        'transaction.commit', 'transaction.rollback']
+                    if pd is not None:
+                        expected[4:4] = ['dataframe', 'transaction.dataframe']
+                    self.assertEqual(outcomes, [
+                        (name, questdb.QuestDBErrorCode.InvalidApiCall, True)
+                        for name in expected])
+                    self.assertEqual(len(sender), 0)
                     self.assertFalse(any(
                         b'from_handler' in request['body']
                         for request in server.requests(
