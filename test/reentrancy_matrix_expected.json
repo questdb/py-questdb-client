@@ -6220,8 +6220,8 @@
   "outer_outcome": "completed"
  },
  "SenderTransaction.dataframe | SenderTransaction.rollback": {
-  "result": "clean",
-  "reason": "",
+  "result": "refused",
+  "reason": "rollback() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it call",
   "outer_outcome": "completed"
  },
  "SenderTransaction.dataframe | SenderTransaction.row": {
@@ -6665,8 +6665,8 @@
   "outer_outcome": "completed"
  },
  "SenderTransaction.row | SenderTransaction.rollback": {
-  "result": "clean",
-  "reason": "",
+  "result": "refused",
+  "reason": "rollback() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it call",
   "outer_outcome": "completed"
  },
  "SenderTransaction.row | SenderTransaction.row": {

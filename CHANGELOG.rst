@@ -428,19 +428,15 @@ Fixed
   again now gets ``Transaction already completed`` where it previously made
   a second attempt.
 
-- **A rollback requested while a row or dataframe is being written is still
-  terminal.** A re-entrant ``rollback()`` used to reach ``Buffer.clear()``
-  while the buffer held a row rewind marker and raise before it marked the
-  transaction complete. If the value conversion swallowed that refusal, the
-  successful ``with``-block exit committed the rows the caller had asked to
-  roll back. Rollback now records completion immediately and defers the
-  physical clear until the serializer releases its marker, so none of those
-  rows can survive into a later flush. Until the interrupted ``row()`` or
-  ``dataframe()`` returns, a row written on the sender or through another
-  transaction is refused with ``InvalidApiCall``, since the clear would
-  discard it. The deferral covers only rows written while the transaction
-  is open; a rollback of a transaction that was never entered is refused
-  while a row or dataframe is being written.
+- **A rollback requested while a row or dataframe is being written is
+  refused.** In 5.0.0, a ``rollback()`` called from code that ``row()``
+  runs while writing, such as a column value's conversion, cleared the
+  buffer under the row being written, and the interrupted ``row()`` then
+  failed with ``Can't rewind to the marker``. Now ``rollback()`` called from
+  code that ``row()`` or ``dataframe()`` runs while writing raises
+  ``InvalidApiCall`` before it changes anything. When that error
+  propagates, the ``with`` block rolls the transaction back as usual. If the
+  caller catches it and the block exits normally, the transaction commits.
 
 - **A completed transaction object cannot append rows outside a transaction
   or be entered again.** ``row()``, ``dataframe()`` and ``__enter__()`` now

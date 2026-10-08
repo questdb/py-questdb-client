@@ -1163,9 +1163,7 @@ cdef class SenderTransaction:
         # part-way through its plan build still has -- it has written
         # nothing yet. A transaction opened there would take in rows the
         # caller wrote outside any transaction, and its rollback would
-        # discard them. Refusing here also means that any row in
-        # progress while this transaction is open is one it started,
-        # which is what makes `rollback()` safe to defer its clear.
+        # discard them.
         if self._sender._buffer is not None:
             self._sender._buffer._check_not_in_row('__enter__')
         if self._sender._buffer is not None and len(self._sender._buffer):
@@ -1349,12 +1347,10 @@ cdef class SenderTransaction:
         A rollback is also automatic at the end of a failed `with` block.
 
         This will clear the buffer. When ``rollback()`` is called from
-        code that a ``row()`` or ``dataframe()`` runs while it writes to
-        the sender, such as a column value's conversion, the buffer is
-        cleared when that call returns. Until then, ``row()`` on the
-        sender or on another transaction raises
+        code that a ``row()`` or ``dataframe()`` on this sender runs
+        while it writes, such as a column value's conversion, it raises
         :class:`QuestDBError <questdb.QuestDBError>` (``InvalidApiCall``)
-        rather than write a row the clear would discard.
+        and leaves the transaction as it was.
         """
         if self._complete:
             raise QuestDBError(
@@ -1364,23 +1360,16 @@ cdef class SenderTransaction:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 "Transaction commit is already in progress, can't rollback.")
-        # The clear below waits for a row in progress to finish, which
-        # is right only when that row belongs to this transaction.
-        # `__enter__` is refused mid-row, so while this transaction is
-        # open every row in progress is its own. A transaction that was
-        # never entered owns no rows, so a row in progress then belongs
-        # to an ordinary write, and the deferred clear would discard it
-        # once it finished.
-        if not self._entered and self._sender._buffer is not None:
+        # A rollback from code running inside a `row()` or `dataframe()` on
+        # this buffer is refused before anything changes: clearing there
+        # would discard what that call is writing. Every call that would
+        # change what an in-progress call writes is refused the same way.
+        if self._sender._buffer is not None:
             self._sender._buffer._check_not_in_row('rollback')
-        # Completion is an absorbing state, even when rollback is called
-        # re-entrantly from a value conversion while the buffer cannot yet
-        # be cleared. Publishing it before cleanup keeps `__exit__` from
-        # turning a swallowed cleanup refusal into an automatic commit.
         self._sender._in_txn = False
         self._complete = True
         if self._sender._buffer is not None:
-            self._sender._buffer._clear_or_defer()
+            self._sender._buffer._clear_now()
 
 cdef class Buffer:
     """
@@ -1397,7 +1386,6 @@ cdef class Buffer:
     cdef bint _qwp
     cdef bint _marker_set
     cdef int _row_depth
-    cdef bint _clear_on_row_complete
     cdef object _row_complete_sender
 
     def __cinit__(self):
@@ -1408,7 +1396,6 @@ cdef class Buffer:
         self._qwp = False
         self._marker_set = False
         self._row_depth = 0
-        self._clear_on_row_complete = False
         self._row_complete_sender = None
 
     def __init__(
@@ -1518,18 +1505,8 @@ cdef class Buffer:
         line_sender_buffer_clear(self._impl)
         qdb_pystr_buf_clear(self._b)
 
-    cdef inline void _clear_or_defer(self) noexcept:
-        """Clear after the outermost in-progress row has unwound."""
-        if self._row_depth == 0:
-            self._clear_now()
-        else:
-            self._clear_on_row_complete = True
-
     cdef inline void _leave_row(self) noexcept:
         self._row_depth -= 1
-        if self._row_depth == 0 and self._clear_on_row_complete:
-            self._clear_on_row_complete = False
-            self._clear_now()
 
     def __len__(self) -> int:
         """
@@ -2049,18 +2026,6 @@ cdef class Buffer:
         """
         cdef bint wrote_fields = False
         self._check_impl()
-        # A rollback that arrives while a `row()` or `dataframe()` is
-        # still writing into this buffer clears the whole buffer once
-        # that call returns. A row written in between would be cleared
-        # with it after reporting success, so it is refused here, before
-        # the marker and the depth change it would otherwise have to undo.
-        if self._clear_on_row_complete:
-            raise QuestDBError(
-                QuestDBErrorCode.InvalidApiCall,
-                "row() can't be called until the row() or dataframe() "
-                "call in progress returns. A transaction was rolled back "
-                "while that call was writing, and the buffer is cleared "
-                "when it returns, which would discard this row too.")
         self._set_marker()
         # A column value whose conversion runs Python code can call back
         # into whatever owns this buffer. `_row_depth` is how those owners
