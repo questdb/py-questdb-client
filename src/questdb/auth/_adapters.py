@@ -81,6 +81,15 @@ _AUTO_SSLMODE = 'auto'
 _DESTINATION_PARAMS = frozenset({
     'host', 'hostaddr', 'port', 'service', 'dsn', 'conninfo'})
 
+# Driver parameters naming the login identity or database, which the adapters
+# set themselves (`_sso`, the token, `database=`). Not a security boundary --
+# the destination is still vetted -- but a passthrough value would either
+# collide with the adapter's own keyword (a bare `TypeError` from psycopg, after
+# a token had already been fetched) or, merged by SQLAlchemy over the URL's
+# values, silently log in as someone other than `_sso` or drop the caller's
+# password. Rejected up front as one typed error.
+_IDENTITY_PARAMS = frozenset({'user', 'password', 'dbname', 'database'})
+
 
 def _safe_urlparse(url: str) -> urllib.parse.ParseResult:
     try:
@@ -243,8 +252,9 @@ def _coerce_port(pg_port: Any) -> int:
     return port
 
 
-def _destination_overrides(params: Any) -> list:
-    """The destination-changing keys present in a driver passthrough mapping."""
+def _destination_overrides(
+        params: Any, names: frozenset = _DESTINATION_PARAMS) -> list:
+    """The keys from ``names`` present in a driver passthrough mapping."""
     if not params:
         return []
     try:
@@ -255,15 +265,23 @@ def _destination_overrides(params: Any) -> list:
         return []
     return sorted(
         str(key) for key in keys
-        if isinstance(key, str) and key.lower() in _DESTINATION_PARAMS)
+        if isinstance(key, str) and key.lower() in names)
 
 
 def _reject_destination_overrides(params: Any, passthrough: str) -> None:
-    """Refuse a driver passthrough that re-points the connection.
+    """Refuse a driver passthrough that re-points the connection or sets the
+    login identity.
 
     Raised BEFORE any token is acquired, so a redirected connection never even
     reaches the point where the credential would be attached.
     """
+    identity = _destination_overrides(params, _IDENTITY_PARAMS)
+    if identity:
+        raise OidcConfigError(
+            f'{passthrough} must not set the login identity or database '
+            f'({", ".join(identity)}). These adapters always authenticate '
+            'as `_sso` with the current token as the password; pass the '
+            'database name as `database=`.')
     offending = _destination_overrides(params)
     if not offending:
         return
@@ -428,7 +446,10 @@ def sqlalchemy_engine(
         over the arguments built from the validated URL, so such a value would
         re-point the connection — and the bearer token travelling as its
         password — at a peer this adapter never vetted. Use ``host=`` and
-        ``pg_port=`` instead. SQLAlchemy ``do_connect`` listeners must leave
+        ``pg_port=`` instead. Nor may it set the login (``user``,
+        ``password``, ``dbname``, ``database``): the adapter always connects
+        as ``_sso`` with the token as the password; pass ``database=``.
+        SQLAlchemy ``do_connect`` listeners must leave
         ``host`` and ``port`` in the driver keyword arguments and must not add
         positional connection arguments: otherwise the adapter refuses to
         fetch or attach the bearer token. A listener that returns its own
@@ -437,9 +458,10 @@ def sqlalchemy_engine(
     :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
         has no host; if the resolved host carries connection-string
         metacharacters; if ``pg_port`` is not a valid TCP port; if
-        ``drivername`` is not a libpq driver while ``sslmode`` is set; or if
-        ``connect_args`` (or a foreign ``do_connect`` listener) sets a
-        connection destination other than the validated one.
+        ``drivername`` is not a libpq driver while ``sslmode`` is set; if
+        ``connect_args`` sets the login or database; or if ``connect_args``
+        (or a foreign ``do_connect`` listener) sets a connection destination
+        other than the validated one.
     :raises OidcError: if token acquisition fails while SQLAlchemy opens a
         connection.
     :raises ImportError: if SQLAlchemy or a PostgreSQL driver is unavailable.
@@ -551,11 +573,14 @@ def psycopg_connect(
         :func:`sqlalchemy_engine`, a connection *destination* (``host``,
         ``hostaddr``, ``port``, ``service``, ``dsn``, ``conninfo``) is rejected:
         the token is a bearer credential and only the validated peer may
-        receive it. Use ``host=`` and ``pg_port=`` instead.
+        receive it. Use ``host=`` and ``pg_port=`` instead. The login
+        (``user``, ``password``, ``dbname``, ``database``) is rejected too:
+        the adapter always connects as ``_sso`` with the token; pass
+        ``database=``.
     :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
         has no host; if the resolved host carries connection-string
         metacharacters; if ``pg_port`` is not a valid TCP port; or if
-        ``connect_kwargs`` sets a connection destination.
+        ``connect_kwargs`` sets a connection destination, login or database.
     :raises OidcError: if token acquisition fails.
     :raises ImportError: if neither psycopg nor psycopg2 is installed.
         Driver connection, TLS and server-authentication exceptions otherwise
@@ -564,9 +589,10 @@ def psycopg_connect(
     resolved_host = _require_host(url, host)
     sslmode = _effective_sslmode(resolved_host, sslmode)
     pg_port = _coerce_port(pg_port)
-    # `host=`/`port=` here would be a bare TypeError (duplicate keyword), but
-    # `hostaddr` / `service` / `dsn` / `conninfo` would silently redirect the
-    # connection. Rejected together, as one typed error, before `auth.token()`.
+    # `host=`/`port=`/`user=`/`password=`/`dbname=` here would be a bare
+    # TypeError (duplicate keyword), and `hostaddr` / `service` / `dsn` /
+    # `conninfo` would silently redirect the connection. Rejected together, as
+    # one typed error, before `auth.token()`.
     _reject_destination_overrides(connect_kwargs, 'connect_kwargs')
     mod = _pg_module()
     token = auth.token()

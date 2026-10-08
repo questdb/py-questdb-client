@@ -339,7 +339,11 @@ Highlights:
   the driver passthrough (``connect_args`` / ``connect_kwargs``) raises
   ``OidcConfigError`` before any token is acquired, because the token is a
   bearer credential and SQLAlchemy merges ``connect_args`` over the arguments
-  built from the validated URL. Pass ``host=`` / ``pg_port=`` instead.
+  built from the validated URL. Pass ``host=`` / ``pg_port=`` instead. They
+  also own the login: a ``user``, ``password``, ``dbname`` or ``database`` in
+  the passthrough raises ``OidcConfigError`` up front too, instead of a bare
+  ``TypeError`` after a token fetch (``psycopg_connect``) or a silent login as
+  someone other than ``_sso`` (``sqlalchemy_engine``); pass ``database=``.
   Libpq connections explicitly pass an empty ``hostaddr`` to suppress an
   inherited ``PGHOSTADDR`` that could otherwise redirect the bearer password
   despite the validated ``host``. This is applied on every pooled connection.

@@ -6014,6 +6014,50 @@ class AdapterTest(unittest.TestCase):
             driver.connect.call_args.kwargs['sslrootcert'],
             '/etc/ssl/questdb-ca.pem')
 
+    def test_adapters_reject_a_login_in_the_driver_passthrough(self):
+        # The adapters always log in as `_sso` with the token. A passthrough
+        # login either collided with psycopg_connect's own keyword (a bare
+        # TypeError after a token fetch) or, merged by SQLAlchemy over the
+        # URL, silently logged in as another user.
+        sqlalchemy = types.ModuleType('sqlalchemy')
+        sqlalchemy.create_engine = mock.Mock()
+        sqlalchemy.event = mock.Mock()
+        sqlalchemy_engine_module = types.ModuleType('sqlalchemy.engine')
+        sqlalchemy_engine_module.URL = mock.Mock()
+        modules = {
+            'sqlalchemy': sqlalchemy,
+            'sqlalchemy.engine': sqlalchemy_engine_module,
+        }
+        url = 'https://questdb.example.com:9000'
+        for key, value in (
+                ('user', 'admin'),
+                ('password', 'quest'),
+                ('dbname', 'other'),
+                ('database', 'other'),
+                ('USER', 'admin')):
+            with self.subTest(key=key):
+                auth = mock.Mock()
+                with mock.patch.dict(sys.modules, modules):
+                    with self.assertRaisesRegex(
+                            OidcConfigError, 'login identity or database'):
+                        _adapters.sqlalchemy_engine(
+                            auth, url, connect_args={key: value})
+                auth.token.assert_not_called()
+                sqlalchemy.create_engine.assert_not_called()
+
+                if key == 'database':
+                    # `database=` is psycopg_connect's OWN parameter.
+                    continue
+                auth = mock.Mock()
+                driver = mock.Mock()
+                with mock.patch.object(
+                        _adapters, '_pg_module', return_value=driver):
+                    with self.assertRaisesRegex(
+                            OidcConfigError, 'login identity or database'):
+                        _adapters.psycopg_connect(auth, url, **{key: value})
+                auth.token.assert_not_called()
+                driver.connect.assert_not_called()
+
     def test_sqlalchemy_final_connect_refuses_a_redirected_connection(self):
         # A do_connect listener may change the destination before the dialect
         # sees it. The final guard must reject it without fetching a token.
