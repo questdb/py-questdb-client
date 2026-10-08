@@ -461,20 +461,32 @@ section for more details.
 
 .. note::
 
-   **OIDC auth failures surface as a typed exception.** When a transport
-   is configured with an :class:`~questdb.auth.OidcDeviceAuth` provider (via
-   ``oidc_auth=``), a connect, reconnect, or flush that cannot obtain a token
-   raises an :class:`~questdb.auth.OidcError` (for example
+   **OIDC auth failures surface as a typed exception from calls that fetch
+   a token.** When a transport is configured with an
+   :class:`~questdb.auth.OidcDeviceAuth` provider (via ``oidc_auth=``), a
+   call that must obtain a token itself and cannot raises an
+   :class:`~questdb.auth.OidcError` (for example
    :class:`~questdb.auth.OidcInteractionRequired` when explicit sign-in has
-   lapsed), from the same ``flush()``, ``dataframe()``, ``row()``,
-   ``query()``, or :func:`questdb.connect` call. ``OidcError`` **is** a
-   subclass of :class:`QuestDBError <questdb.QuestDBError>`, so an existing
-   ``except QuestDBError`` retry or dead-letter handler keeps catching auth
-   failures; catch ``OidcError`` (or a typed subclass) *before*
-   ``QuestDBError`` to handle auth failures specifically.
+   lapsed). Those calls are an ILP/HTTP ``flush()`` (HTTP fetches a token on
+   every flush), an eager :func:`questdb.connect` or ``establish()``, and the
+   foreground connects of ``dataframe()`` and ``query()``. ``OidcError``
+   **is** a subclass of :class:`QuestDBError <questdb.QuestDBError>`, so an
+   existing ``except QuestDBError`` retry or dead-letter handler keeps
+   catching auth failures; catch ``OidcError`` (or a typed subclass)
+   *before* ``QuestDBError`` to handle auth failures specifically.
+
+   A QWP/WebSocket sender's ``row()`` and ``flush()`` do **not** raise it:
+   they only queue frames locally, and the background reconnect that needs
+   the token keeps retrying instead. It reports each failed attempt as a
+   ``ConnectionEventKind.CredentialUnavailable`` event (register a
+   ``connection_listener`` to see it). An ACK wait on a pooled sender
+   (``wait()`` or ``flush(wait=True)``) eventually fails with an ordinary
+   timeout ``QuestDBError``, and ``Sender.await_acked_fsn()`` returns
+   ``False``. The queued rows are sent once :meth:`OidcDeviceAuth.sign_in
+   <questdb.auth.OidcDeviceAuth.sign_in>` succeeds.
 
    Its ``code`` reports the failing call's native error category, not a
-   recovery instruction: a flush with no usable credential raises
+   recovery instruction: an HTTP flush with no usable credential raises
    :class:`~questdb.auth.OidcInteractionRequired` with ``code`` set to
    ``SocketError``, yet retrying cannot succeed until someone signs in. Catch
    ``OidcInteractionRequired`` before any retry logic keyed on ``code``, and
