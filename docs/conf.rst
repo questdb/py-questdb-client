@@ -369,6 +369,9 @@ and UDP are rejected. Use ``https::`` or ``wss::``: over plain ``http::`` or
 ``ws::`` to a non-loopback host the token is sent in cleartext on every flush
 or (re)connect.
 
+Resolving a fresh token is bounded by the provider's own ``timeout``, not by
+``request_timeout`` or ``retry_timeout``: see :ref:`auth-token-wait`.
+
 See the :ref:`oidc_auth` guide.
 
 .. _sender_conf_tls:

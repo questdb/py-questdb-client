@@ -318,7 +318,18 @@ Highlights:
   client does, so a path through a symlink names the same directory in both.
   The ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` override must already be
   absolute -- on Windows with a drive letter or UNC prefix, as the native
-  client requires -- and is passed on unchanged.
+  client requires -- and is passed on unchanged. The ``ca_bundle`` argument
+  of :class:`~questdb.auth.OidcDeviceAuth` takes the same path forms
+  (``str``, ``bytes`` or any ``os.PathLike``) and is expanded and made
+  absolute the same way.
+* An OIDC flush or connect that needs a fresh token can wait up to the
+  provider's ``timeout`` for the refresh -- or six times it behind a refresh
+  already running on another thread -- regardless of the sender's
+  ``request_timeout`` and ``retry_timeout``; see :ref:`auth-token-wait`.
+* A persistence-warning handler or renderer callback that uses a
+  :class:`~questdb.PooledSender` lease another thread is blocked in (for
+  example ``wait()``) gives up after two seconds with
+  ``QuestDBError(InvalidApiCall)`` instead of deadlocking both threads.
 * Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
   :func:`~questdb.auth.psycopg_connect`) that wire the token into PG-wire as the
   ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed

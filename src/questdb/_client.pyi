@@ -52,6 +52,7 @@ __all__ = [
     "WARN_HIGH_RECONNECTS",
 ]
 
+import os
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
@@ -91,7 +92,7 @@ class OidcDeviceAuth:
         audience: Optional[str] = None,
         issuer: Optional[str] = None,
         insecure: bool = False,
-        ca_bundle: Optional[str] = None,
+        ca_bundle: Optional[Union[str, bytes, os.PathLike]] = None,
         open_browser: Optional[bool] = None,
         interactive: Optional[bool] = None,
         qr: bool = False,
@@ -114,7 +115,7 @@ class OidcDeviceAuth:
         token_endpoint: Optional[str] = None,
         device_authorization_endpoint: Optional[str] = None,
         insecure: bool = False,
-        ca_bundle: Optional[str] = None,
+        ca_bundle: Optional[Union[str, bytes, os.PathLike]] = None,
         open_browser: Optional[bool] = None,
         interactive: Optional[bool] = None,
         qr: bool = False,

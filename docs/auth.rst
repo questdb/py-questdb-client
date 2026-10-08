@@ -100,9 +100,12 @@ lifecycle are :class:`~questdb.auth.OidcError` subclasses —
 failing call's native category, **not** a recovery instruction. For example,
 ``OidcInteractionRequired`` reports ``AuthError`` from ``auth.token()`` or the
 PG adapters, but ``SocketError`` from an HTTP sender flush in the very same
-state (no sign-in yet). While another thread's sign-in or callback holds the
-provider, every caller instead gets ``SocketError`` with ``acquisition_busy``
-set. The sender cannot recover by retrying until someone
+state (no sign-in yet). While another thread's interactive device flow or a
+callback holds the provider, every caller instead gets ``SocketError`` with
+``acquisition_busy`` set. A *silent* refresh running on another thread (a
+``token()`` call, a transport's reconnect, or the token-refresh phase of
+``sign_in()`` before any prompt) is waited for instead; see
+:ref:`auth-token-wait`. The sender cannot recover by retrying until someone
 signs in. Catch ``OidcInteractionRequired`` before general error-code-based
 retry logic. Its public ``acquisition_busy`` property is true when another
 thread is acquiring a token or rendering a callback: defer the operation
@@ -218,6 +221,26 @@ and remains part of the persisted token identity. Refresh requests omit
 ``scope``, which tells the identity provider to preserve the scope originally
 granted.
 
+.. _auth-token-wait:
+
+Token waits and sender timeouts
+===============================
+
+A flush, connect or reconnect that needs a fresh credential resolves it before
+its first request. A valid cached token is used at once. Otherwise the call
+refreshes the token itself -- one identity-provider request, bounded by the
+provider's ``timeout`` (default 30 seconds) -- or, when another thread is
+already refreshing the same provider, waits for that refresh for up to six
+times ``timeout`` (three minutes at the default, twelve at the 120-second
+maximum). ``auth.token()`` behaves the same way.
+
+That wait is bounded by the OIDC ``timeout`` alone. The sender's
+``request_timeout``, ``retry_timeout``, ``connect_timeout`` and reconnect
+budget do not cap it, so a ``flush()`` can take longer than those settings
+suggest while the identity provider is slow. Size ``timeout`` for the longest
+stall a flush may absorb, and call ``sign_in()`` before starting the sender to
+avoid the first, longest acquisition.
+
 Persistence
 ===========
 
@@ -276,6 +299,13 @@ ACK wait on any other thread is not rejected: it waits for the handler to
 return. Make the wait on the handler's own thread: a handler that hands the
 wait to another thread and blocks on its result can deadlock until the wait's
 timeout.
+The same applies to a :class:`~questdb.PooledSender` lease (``db.sender()``)
+that another thread is using -- for example one blocked in ``wait()``,
+``flush(wait=True)``, ``await_acked_fsn()`` or ``close(wait=True)``: a
+persistence-warning handler or renderer callback that calls any method of
+that lease waits at most two seconds for it and then raises
+``QuestDBError(InvalidApiCall)`` instead of deadlocking, because the other
+thread's ACK may be waiting for this very callback to return.
 Cached token reads and provider ``cancel_sign_in()`` / ``close()`` remain
 callback-safe. An attached **Sender** may not be closed or mutated by a
 persistence-warning handler while it is performing a native flush: those

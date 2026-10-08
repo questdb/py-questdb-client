@@ -7255,13 +7255,16 @@ cdef class QuestDB:
         input (``pa.RecordBatchReader``) is not re-batched — the producer's
         batch size governs its checkpoint window.
         """
-        cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
+        cdef qdb_pystr_buf* b = NULL
         cdef dataframe_plan_t plan = dataframe_plan_blank()
         cdef questdb_db* db = NULL
         cdef bint db_use = False
         cdef direct_conn_source_t src
+        # Allocate only once the use is registered: `_begin_db_use` raises on
+        # a closed handle, outside the `finally` below that frees the buffer.
         db = self._begin_db_use('dataframe')
         db_use = True
+        b = qdb_pystr_buf_new()
         try:
             src.db = db
             src.opts = NULL
@@ -9482,6 +9485,32 @@ cdef class PooledSender:
             self._owner_thread_token = current
         return 0
 
+    cdef void_int _lock_enter(self, str method) except -1:
+        """Take this lease's lock; the caller releases it in ``finally``.
+
+        Another thread may hold the lock across a native ACK wait (``wait()``,
+        ``flush(wait=True)``, ``await_acked_fsn()``, ``close(wait=True)``)
+        whose reconnect needs an OIDC token. The provider cannot supply one
+        until its persistence-warning or renderer callback returns, so a
+        callback that blocked here would never return and both threads would
+        hang. From inside such a callback, wait a bounded time and then raise
+        instead, as ``QuestDB.close()`` does.
+        """
+        # Uncontended (or re-entrant) is the per-row common case: one call.
+        if self._lock.acquire(False):
+            return 0
+        if not _oidc_callback_on_this_thread():
+            self._lock.acquire()
+            return 0
+        if self._lock.acquire(True, _OIDC_CLOSE_DIAGNOSTIC_WAIT_SECS):
+            return 0
+        raise QuestDBError(
+            QuestDBErrorCode.InvalidApiCall,
+            f'{method}() cannot wait for this sender lease inside an OIDC '
+            'callback: another thread is using the lease and may be waiting '
+            'for this callback to return. Return from the callback before '
+            'using the lease.')
+
     cdef bint _should_auto_flush_locked(self) except -1:
         cdef auto_flush_mode_t* mode = &self._handle._auto_flush_mode
         cdef size_t row_count
@@ -9585,8 +9614,11 @@ cdef class PooledSender:
             handle._end_db_use(self._owner_thread_token)
 
     def __enter__(self):
-        with self._lock:
+        self._lock_enter('__enter__')
+        try:
             self._check_open('__enter__')
+        finally:
+            self._lock.release()
         return self
 
     def row(
@@ -9620,7 +9652,8 @@ cdef class PooledSender:
                 QuestDBErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or "
                 "ServerTimestamp")
-        with self._lock:
+        self._lock_enter('row')
+        try:
             self._check_open('row')
             starts_batch = (
                 line_sender_buffer_row_count(self._buffer._impl) == 0)
@@ -9650,6 +9683,8 @@ cdef class PooledSender:
                 self._buffer._clear_marker()
                 raise
             self._buffer._clear_marker()
+        finally:
+            self._lock.release()
         return self
 
     def dataframe(
@@ -9678,9 +9713,12 @@ cdef class PooledSender:
         Arguments mirror :meth:`QuestDB.dataframe`.
         """
         cdef QuestDB handle
-        with self._lock:
+        self._lock_enter('dataframe')
+        try:
             self._check_open('dataframe')
             handle = self._handle
+        finally:
+            self._lock.release()
         handle.dataframe(
             df,
             table_name=table_name,
@@ -9693,9 +9731,12 @@ cdef class PooledSender:
 
     def __len__(self):
         """Number of buffered (unpublished) rows."""
-        with self._lock:
+        self._lock_enter('__len__')
+        try:
             self._check_open('__len__')
             return line_sender_buffer_row_count(self._buffer._impl)
+        finally:
+            self._lock.release()
 
     def flush(self, *, bint wait=False):
         """
@@ -9709,8 +9750,11 @@ cdef class PooledSender:
         (default: the ``questdb`` logger) instead; retriable ones are
         replayed by the store-and-forward queue.
         """
-        with self._lock:
+        self._lock_enter('flush')
+        try:
             self._flush_locked(wait)
+        finally:
+            self._lock.release()
         return self
 
     def wait(self, timeout_millis=0):
@@ -9728,9 +9772,12 @@ cdef class PooledSender:
             raise TypeError('"timeout_millis" must be a non-negative int.')
         if timeout_millis < 0:
             raise ValueError('timeout_millis must be non-negative.')
-        with self._lock:
+        self._lock_enter('wait')
+        try:
             self._check_open('wait')
             self._wait_locked(<uint64_t>timeout_millis)
+        finally:
+            self._lock.release()
         return self
 
     def flush_and_get_fsn(self):
@@ -9751,7 +9798,8 @@ cdef class PooledSender:
         cdef PyThreadState* gs = NULL
         cdef line_sender_qwpws_fsn fsn
         cdef bint ok = False
-        with self._lock:
+        self._lock_enter('flush_and_get_fsn')
+        try:
             self._check_open('flush_and_get_fsn')
             _ensure_doesnt_have_gil(&gs)
             ok = qwp_sender_flush_buffer_and_get_fsn(
@@ -9761,6 +9809,8 @@ cdef class PooledSender:
                 raise c_err_to_py(err)
             qdb_pystr_buf_clear(self._buffer._b)
             self._batch_started_ms = 0
+        finally:
+            self._lock.release()
         return fsn.value if fsn.has_value else None
 
     def flush_and_keep_and_get_fsn(self):
@@ -9772,7 +9822,8 @@ cdef class PooledSender:
         cdef PyThreadState* gs = NULL
         cdef line_sender_qwpws_fsn fsn
         cdef bint ok = False
-        with self._lock:
+        self._lock_enter('flush_and_keep_and_get_fsn')
+        try:
             self._check_open('flush_and_keep_and_get_fsn')
             _ensure_doesnt_have_gil(&gs)
             ok = qwp_sender_flush_buffer_and_keep_and_get_fsn(
@@ -9782,6 +9833,8 @@ cdef class PooledSender:
                 raise c_err_to_py(err)
             if fsn.has_value:
                 self._batch_started_ms = line_sender_now_micros() // 1000
+        finally:
+            self._lock.release()
         return fsn.value if fsn.has_value else None
 
     def poll_error(self):
@@ -9797,7 +9850,8 @@ cdef class PooledSender:
         cdef line_sender_error* err = NULL
         cdef line_sender_qwpws_error* c_error = NULL
         cdef line_sender_qwpws_error_view view
-        with self._lock:
+        self._lock_enter('poll_error')
+        try:
             self._check_open('poll_error')
             if not qwp_sender_poll_error(self._qwp, &c_error, &err):
                 raise c_err_to_py(err)
@@ -9809,6 +9863,8 @@ cdef class PooledSender:
                     c_sender_error_view_to_raw(view))
             finally:
                 line_sender_qwpws_error_free(c_error)
+        finally:
+            self._lock.release()
 
     def error_events_dropped(self):
         """
@@ -9817,11 +9873,14 @@ cdef class PooledSender:
         """
         cdef line_sender_error* err = NULL
         cdef uint64_t dropped = 0
-        with self._lock:
+        self._lock_enter('error_events_dropped')
+        try:
             self._check_open('error_events_dropped')
             if not qwp_sender_error_events_dropped(
                     self._qwp, &dropped, &err):
                 raise c_err_to_py(err)
+        finally:
+            self._lock.release()
         return dropped
 
     def published_fsn(self):
@@ -9831,10 +9890,13 @@ cdef class PooledSender:
         """
         cdef line_sender_error* err = NULL
         cdef line_sender_qwpws_fsn fsn
-        with self._lock:
+        self._lock_enter('published_fsn')
+        try:
             self._check_open('published_fsn')
             if not qwp_sender_published_fsn(self._qwp, &fsn, &err):
                 raise c_err_to_py(err)
+        finally:
+            self._lock.release()
         return fsn.value if fsn.has_value else None
 
     def acked_fsn(self):
@@ -9846,10 +9908,13 @@ cdef class PooledSender:
         """
         cdef line_sender_error* err = NULL
         cdef line_sender_qwpws_fsn fsn
-        with self._lock:
+        self._lock_enter('acked_fsn')
+        try:
             self._check_open('acked_fsn')
             if not qwp_sender_acked_fsn(self._qwp, &fsn, &err):
                 raise c_err_to_py(err)
+        finally:
+            self._lock.release()
         return fsn.value if fsn.has_value else None
 
     def await_acked_fsn(self, fsn, timeout_millis=0):
@@ -9877,7 +9942,8 @@ cdef class PooledSender:
             raise ValueError('"timeout_millis" must be a non-negative int.')
         c_fsn = fsn
         c_timeout_millis = timeout_millis
-        with self._lock:
+        self._lock_enter('await_acked_fsn')
+        try:
             self._check_open('await_acked_fsn')
             if not qwp_sender_acked_fsn(self._qwp, &acked, &err):
                 raise c_err_to_py(err)
@@ -9903,6 +9969,8 @@ cdef class PooledSender:
             if not qwp_sender_acked_fsn(self._qwp, &acked, &err):
                 raise c_err_to_py(err)
             return bool(acked.has_value and acked.value >= c_fsn)
+        finally:
+            self._lock.release()
 
     def close(self, flush: bool=True, wait: bool=False):
         """
@@ -9915,12 +9983,15 @@ cdef class PooledSender:
         rejection of this lease's rows is reported through the pool's
         ``error_handler`` (default: the ``questdb`` logger).
         """
-        with self._lock:
+        self._lock_enter('close')
+        try:
             try:
                 if flush and self._qwp != NULL:
                     self._flush_locked(wait)
             finally:
                 self._release_locked()
+        finally:
+            self._lock.release()
 
     def __exit__(self, exc_type, _exc_val, _exc_tb):
         self.close(exc_type is None, False)

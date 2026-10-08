@@ -207,9 +207,19 @@ cdef class _CursorHandle:
         0 when it freed a drained one or there was nothing to free, and -1 when
         the lock was busy and it did nothing. The lock holder need not be a
         freeing operation; ``__dealloc__`` remains the eventual fallback.
+
+        "Busy" includes a lock held by the calling thread itself. The lock is
+        re-entrant, so a plain non-blocking acquire succeeds there -- and the
+        holder may be a decoder on this very thread reading the cursor's
+        borrowed batch buffers (``_NumpyBatchIter.__next__``,
+        ``_numpy_frame_from_cursor``) when the cyclic GC collects the lease
+        that owns this cursor. Freeing the cursor then left the decoder
+        reading freed memory.
         """
         cdef bint undrained
-        if self._native_in_flight or not self._lock.acquire(False):
+        if (self._native_in_flight
+                or self._lock._is_owned()
+                or not self._lock.acquire(False)):
             return -1
         try:
             if self._native_in_flight:

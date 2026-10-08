@@ -32,6 +32,7 @@ import gc
 import io
 import logging
 import os
+import pathlib
 import platform
 import shutil
 import signal
@@ -1580,23 +1581,44 @@ class NativeOidcTest(unittest.TestCase):
         # covering the post-registration path.
         self.assertIn('CA bundle', str(caught.exception))
 
-    def test_ca_bundle_rejects_unexpanded_home_prefix(self):
-        for bad in ('~', '~/ca.pem', '~\\ca.pem'):
-            with self.subTest(path=bad):
-                # The typed config error, like every other misconfiguration
-                # of the same constructor (a missing file, an empty client_id).
-                with self.assertRaisesRegex(
-                        OidcConfigError,
-                        'already-expanded absolute path') as caught:
+    def test_ca_bundle_accepts_path_like_and_expands_home(self):
+        # `ca_bundle` takes the same path forms as `FileTokenStore`: a
+        # `pathlib.Path`, bytes, and a leading `~` all work.
+        from qwp_ws_ack_server import TLS_CA
+        for value in (TLS_CA, str(TLS_CA), os.fsencode(str(TLS_CA))):
+            with self.subTest(value=value):
+                make_auth(ca_bundle=value).close()
+        home = os.path.expanduser('~')
+        with tempfile.TemporaryDirectory(dir=home) as directory:
+            target = os.path.join(directory, 'ca.pem')
+            shutil.copyfile(TLS_CA, target)
+            relative = os.path.join(
+                '~', os.path.relpath(target, home))
+            make_auth(ca_bundle=relative).close()
+            make_auth(ca_bundle=pathlib.Path(relative)).close()
+        # The expanded path is what native opens and reports.
+        with self.assertRaises(OidcError) as caught:
+            make_auth(ca_bundle='~/questdb-oidc-review-missing/ca.pem')
+        self.assertIn(home, str(caught.exception))
+
+    def test_ca_bundle_rejects_unresolvable_home_and_non_paths(self):
+        with self.assertRaisesRegex(
+                OidcConfigError, 'could not resolve the home directory') \
+                as caught:
+            make_auth(ca_bundle='~questdb-no-such-user-0x51/ca.pem')
+        self.assertIs(
+            caught.exception.code, questdb.QuestDBErrorCode.ConfigError)
+        for bad in (0, False, object()):
+            with self.subTest(value=bad):
+                with self.assertRaisesRegex(OidcConfigError, 'path-like'):
                     make_auth(ca_bundle=bad)
-                self.assertIs(
-                    caught.exception.code,
-                    questdb.QuestDBErrorCode.ConfigError)
-        # A tilde away from the leading path component is not expansion syntax;
-        # it reaches the ordinary build-time file-open error instead.
+        with self.assertRaisesRegex(OidcConfigError, 'required'):
+            make_auth(ca_bundle='')
+        # A tilde away from the leading path component is not expansion
+        # syntax; it reaches the ordinary build-time file-open error instead.
         with self.assertRaises(OidcError) as caught:
             make_auth(ca_bundle='dir/has~tilde.pem')
-        self.assertNotIn('already-expanded', str(caught.exception))
+        self.assertNotIn('home directory', str(caught.exception))
 
     def test_insecure_gates_plaintext_discovery(self):
         # `insecure` was only ever type-checked: nothing asserted it DOES
@@ -7477,6 +7499,95 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
         self._run_isolated('delegated_pool_close_from_background_diagnostic',
                            lambda: self._exercise_background_pool_close(True),
                            45)
+
+    def test_lease_close_from_background_diagnostic(self):
+        self._run_isolated(
+            'lease_close_from_background_diagnostic',
+            lambda: self._exercise_lease_call_from_background_diagnostic(
+                lambda lease: lease.close()),
+            45)
+
+    def test_lease_len_from_background_diagnostic(self):
+        self._run_isolated(
+            'lease_len_from_background_diagnostic',
+            lambda: self._exercise_lease_call_from_background_diagnostic(
+                len),
+            45)
+
+    def _exercise_lease_call_from_background_diagnostic(self, action):
+        # The foreground thread holds its lease's lock across an indefinite
+        # ACK wait whose reconnect needs a refreshed token. The warning that
+        # refresh raises runs a logging handler on the token-provider worker.
+        # A handler that touched the same lease used to block on that lock
+        # forever: the ACK needed the refresh, and the refresh needed the
+        # handler to return. It must give up with InvalidApiCall instead.
+        credential = [None]
+        sabotaged = threading.Event()
+        observed = []
+        lease_ref = [None]
+
+        def fail_refresh_save():
+            if sabotaged.is_set():
+                return
+            if os.path.isfile(credential[0]):
+                os.remove(credential[0])
+            os.mkdir(credential[0])
+            sabotaged.set()
+
+        class TouchLeaseOnWarning(logging.Handler):
+            def emit(self, record):
+                if 'token store save failed' not in record.getMessage():
+                    return
+                try:
+                    action(lease_ref[0])
+                except questdb.QuestDBError as exc:
+                    observed.append((exc.code, str(exc)))
+                else:
+                    observed.append((None, ''))
+
+        logger = logging.getLogger('questdb')
+        old_level = logger.level
+        handler = TouchLeaseOnWarning()
+        with tempfile.TemporaryDirectory() as directory, \
+                OidcTestServer(initial_expires_in=4,
+                               refresh_request_hook=fail_refresh_save) as idp:
+            auth = make_discovered_auth(
+                idp, token_store=FileTokenStore.at(directory))
+            auth.sign_in()
+            credential[0] = os.path.join(directory, next(
+                name for name in os.listdir(directory)
+                if name.endswith('.json')))
+            with QwpAckServer(
+                    close_after_upgrade_unless_authorization=(
+                        'Bearer AT-refreshed')) as qdb:
+                db = questdb.connect(
+                    f'ws::addr=127.0.0.1:{qdb.port};'
+                    'lazy_connect=true;sender_pool_min=0;query_pool_min=0;'
+                    'reconnect_initial_backoff_millis=25;'
+                    'reconnect_max_backoff_millis=25;'
+                    'reconnect_max_duration_millis=10000;'
+                    'close_flush_timeout_millis=10000;',
+                    oidc_auth=auth)
+                lease = lease_ref[0] = db.sender()
+                logger.setLevel(logging.WARNING)
+                logger.addHandler(handler)
+                try:
+                    lease.row('events', columns={'value': 42},
+                              at=questdb.ServerTimestamp)
+                    lease.flush(wait=False)
+                    lease.wait(0)
+                    self.assertTrue(sabotaged.is_set())
+                    self.assertEqual(len(observed), 1, observed)
+                    self.assertEqual(observed[0][0],
+                                     questdb.QuestDBErrorCode.InvalidApiCall)
+                    self.assertIn('inside an OIDC callback', observed[0][1])
+                    self.assertEqual(qdb.snapshot()['binary_frames'], 1)
+                finally:
+                    logger.removeHandler(handler)
+                    logger.setLevel(old_level)
+                    lease.close()
+                    db.close()
+                    auth.close()
 
     def _exercise_background_pool_close(self, delegated):
         # The foreground caller owns a lease and waits indefinitely for its

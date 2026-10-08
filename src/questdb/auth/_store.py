@@ -80,6 +80,47 @@ def _absolute_unresolved(path: str) -> str:
     return os.path.join(os.getcwd(), path)
 
 
+def _expand_path_argument(value: Any, name: str, purpose: str) -> str:
+    """Normalise a user-supplied path argument the way the bindings document.
+
+    Accepts ``str``, ``bytes`` or any ``os.PathLike``, expands a leading ``~``
+    and makes the result absolute (without resolving ``..``). ``name`` and
+    ``purpose`` only shape the error messages.
+    """
+    # Reject a non-path type (0, False, an arbitrary object) as "must be
+    # path-like" before the emptiness check, so only a genuinely missing or
+    # empty value (None, '', b'') reports "required" -- and neither escapes
+    # the package's typed-error contract with a bare TypeError.
+    try:
+        path = os.fspath(value) if value is not None else None
+    except TypeError as exc:
+        raise OidcConfigError(
+            f'{name} must be a path-like object '
+            '(str, bytes, or os.PathLike)') from exc
+    if not path:
+        raise OidcConfigError(f'{name} is required')
+    # Expand and absolutise. Without this the value was handed to the native
+    # side verbatim and resolved against the process CWD: FileTokenStore(
+    # '~/qdb-tokens') wrote a long-lived plaintext refresh token into a
+    # directory literally named '~' under the working directory -- often a
+    # repo checkout -- and a relative path silently followed the process
+    # around, so a chdir re-ran the whole device flow and left a second copy
+    # of the credential somewhere else. Resolve once, at construction, so the
+    # location is fixed and inspectable.
+    expanded = os.path.expanduser(os.fsdecode(path))
+    # `expanduser` returns the path UNCHANGED when it cannot resolve the
+    # user -- `$HOME` unset and no `pwd` entry for the uid, which is the
+    # normal state in a container run under an arbitrary uid. `abspath`
+    # would then resolve the leading `~` against the working directory.
+    # Refuse instead, exactly as `at_default_location()` already does for the
+    # same condition.
+    if expanded.startswith('~'):
+        raise OidcConfigError(
+            f'could not resolve the home directory in {os.fsdecode(path)!r} '
+            f'for {purpose}; pass an absolute path')
+    return _absolute_unresolved(expanded)
+
+
 def _default_token_store_directory() -> str:
     """Resolve the shared native/Python default token-store directory.
 
@@ -142,40 +183,8 @@ class FileTokenStore:
     """
 
     def __init__(self, directory: Any):
-        # Reject a non-path type (0, False, an arbitrary object) as "must be
-        # path-like" before the emptiness check, so only a genuinely missing or
-        # empty value (None, '', b'') reports "required" -- and neither escapes
-        # the package's typed-error contract with a bare TypeError.
-        try:
-            path = os.fspath(directory) if directory is not None else None
-        except TypeError as exc:
-            raise OidcConfigError(
-                'the token store directory must be a path-like object '
-                '(str, bytes, or os.PathLike)') from exc
-        if not path:
-            raise OidcConfigError('the token store directory is required')
-        # Expand and absolutise, exactly as at_default_location() already does.
-        # Without this the value was handed to the native side verbatim and
-        # resolved against the process CWD: FileTokenStore('~/qdb-tokens') wrote
-        # a long-lived plaintext refresh token into a directory literally named
-        # '~' under the working directory -- often a repo checkout -- and a
-        # relative path silently followed the process around, so a chdir re-ran
-        # the whole device flow and left a second copy of the credential
-        # somewhere else. Resolve once, at construction, so the location is
-        # fixed and inspectable via `.directory`.
-        expanded = os.path.expanduser(os.fsdecode(path))
-        # `expanduser` returns the path UNCHANGED when it cannot resolve the
-        # user -- `$HOME` unset and no `pwd` entry for the uid, which is the
-        # normal state in a container run under an arbitrary uid. `abspath`
-        # would then resolve the leading `~` against the working directory and
-        # quietly write a long-lived plaintext refresh token into a directory
-        # literally named `~`. Refuse instead, exactly as
-        # `at_default_location()` already does for the same condition.
-        if expanded.startswith('~'):
-            raise OidcConfigError(
-                f'could not resolve the home directory in {os.fsdecode(path)!r} '
-                'for the OIDC token store; pass an absolute path')
-        self._directory = _absolute_unresolved(expanded)
+        self._directory = _expand_path_argument(
+            directory, 'the token store directory', 'the OIDC token store')
 
     @classmethod
     def at(cls, directory: Any) -> 'FileTokenStore':

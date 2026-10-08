@@ -1068,6 +1068,19 @@ cdef class _OidcForegroundCall:
 cdef object _OIDC_FOREGROUND = threading.local()
 
 
+cdef bint _oidc_callback_on_this_thread() except -1:
+    """Whether this thread is running Python code inside an OIDC callback.
+
+    That is a persistence-warning diagnostic of any provider, or -- while a
+    ``sign_in()`` / ``token()`` / ``clear()`` runs on this thread with the GIL
+    released -- one of its renderer events: the only Python code that thread
+    can run meanwhile is a callback native makes from inside the call.
+    """
+    if getattr(_OIDC_DIAGNOSTIC_LOCAL, 'ids', None):
+        return True
+    return getattr(_OIDC_FOREGROUND, 'call', None) is not None
+
+
 cdef _OidcForegroundCall _oidc_foreground_enter(object provider):
     cdef _OidcForegroundCall call = _OidcForegroundCall.__new__(
         _OidcForegroundCall)
@@ -1813,8 +1826,10 @@ cdef class OidcDeviceAuth:
         * ``insecure`` — permits plaintext HTTP for the **QuestDB discovery
           request only**. The identity provider is always held to HTTPS (or
           loopback); this flag never relaxes that.
-        * ``ca_bundle`` — path to a PEM bundle used when contacting QuestDB
-          and the IdP, instead of the default roots: the Mozilla root bundle
+        * ``ca_bundle`` — path (``str``, ``bytes`` or any ``os.PathLike``;
+          ``~`` is expanded and the path made absolute, as for
+          :class:`~questdb.auth.FileTokenStore`) to a PEM bundle used when
+          contacting QuestDB and the IdP, instead of the default roots: the Mozilla root bundle
           compiled into the client together with the operating system's trust
           store. An OS trust store that reports a load error (for example
           ``SSL_CERT_DIR`` naming a missing directory) fails construction;
@@ -1851,7 +1866,15 @@ cdef class OidcDeviceAuth:
           interval, and any ``Retry-After``, take precedence.
         * ``timeout`` — the per-HTTP-request timeout in seconds (default 30,
           maximum 120). This is **not** a deadline for the sign-in as a whole,
-          which is bounded by the device code's own lifetime.
+          which is bounded by the device code's own lifetime. It also bounds
+          how long an attached transport waits for a credential: a flush or
+          connect that needs a fresh token resolves it before its first
+          request, and that can take one refresh (up to ``timeout``) or wait
+          behind a refresh already running on another thread for up to six
+          times ``timeout``. The sender's ``request_timeout``,
+          ``retry_timeout`` and reconnect budget do not cap that wait.
+          Call :meth:`sign_in` before starting the sender to avoid the first,
+          longest acquisition.
         * ``token_store`` — a :class:`~questdb.auth.FileTokenStore` enabling
           plaintext on-disk persistence. Credentials stay in memory when this is
           ``None``.
@@ -2086,6 +2109,12 @@ cdef class OidcDeviceAuth:
                 raise _oidc_err_to_py(err)
             raise OidcConfigError('timeout is too small')
 
+        if ca_bundle is not None:
+            # Accept the same path forms as FileTokenStore: str, bytes or any
+            # os.PathLike, with `~` expanded and the result made absolute.
+            from questdb.auth._store import _expand_path_argument
+            ca_bundle = _expand_path_argument(
+                ca_bundle, 'ca_bundle', 'the OIDC CA bundle')
         encoded = _oidc_optional_utf8(ca_bundle, 'ca_bundle')
         if encoded is not None and not questdb_oidc_builder_ca_bundle(
                 builder,
@@ -2359,6 +2388,10 @@ cdef class OidcDeviceAuth:
         :meth:`sign_in`, and once a refresh token has expired. This method never
         displays a prompt, so that condition can only be cleared by calling
         :meth:`sign_in` on a thread that may interact with the user.
+
+        A cached token returns at once. Otherwise this call refreshes the
+        token (up to the provider's ``timeout``), or waits for a refresh
+        already running on another thread for up to six times ``timeout``.
         """
         cdef questdb_error* err = NULL
         cdef questdb_oidc_token* token = NULL

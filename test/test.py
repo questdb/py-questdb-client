@@ -411,6 +411,28 @@ class TestQwpWebSocketApi(unittest.TestCase):
                         'finalizer reclaim blocked behind the cursor lock')
         self.assertEqual(outcomes, [-1])
 
+    def test_cursor_finalizer_reclaim_refuses_lock_held_by_this_thread(self):
+        # The cyclic GC can collect a reader lease on the very thread that is
+        # decoding its cursor's batch under the (re-entrant) cursor lock. A
+        # reclaim that re-acquired the lock freed the cursor -- and the batch
+        # buffers the decoder was still reading.
+        handle = qi._debug_new_cursor_handle()
+        outcomes = []
+
+        class Entered:
+            def set(self):
+                pass
+
+        class ReclaimWhileHolding:
+            def wait(self):
+                outcomes.append(qi._debug_try_reclaim_cursor_handle(handle))
+
+        qi._debug_hold_cursor_handle_lock(
+            handle, Entered(), ReclaimWhileHolding())
+        self.assertEqual(outcomes, [-1])
+        # Once the holder is gone, the same reclaim proceeds.
+        self.assertEqual(qi._debug_try_reclaim_cursor_handle(handle), 0)
+
     @unittest.skipUnless(
         hasattr(sys, 'getrefcount'), 'requires refcounting finalizers')
     @unittest.skipIf(pd is None, 'pandas not installed')

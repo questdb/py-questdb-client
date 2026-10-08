@@ -498,6 +498,11 @@ section for more details.
    use its ``acquisition_busy`` flag to tell a transient wait for another
    thread (retry) from a missing credential (sign in). See :ref:`oidc_auth`.
 
+   A flush or connect that needs a fresh token resolves it before its first
+   request, and that can take up to the provider's ``timeout`` -- or six times
+   it while another thread's refresh is running -- regardless of
+   ``request_timeout`` and ``retry_timeout``. See :ref:`auth-token-wait`.
+
 .. _sender_transaction:
 
 HTTP Transactions
