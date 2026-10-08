@@ -1972,6 +1972,17 @@ class Sender:
 
         See :func:`Buffer.row` for supported column types, protocol
         restrictions, server requirements, and ``NULL``-sentinel behavior.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) if called while
+        another ``row()`` on this sender is still in progress, or a
+        ``dataframe()`` over ``tcp``, ``http`` or ``udp``: from a column
+        value whose conversion runs Python code, or from a logging handler
+        that writes the ``questdb`` logger's records through this sender.
+        Such a ``dataframe()`` writes the frame into this sender's buffer,
+        and a row written while it runs could not be flushed until it
+        returned. Over ``ws`` and ``wss`` the frame goes out on a connection
+        of its own, so a row written from inside it is accepted and flushed
+        as usual.
         """
 
     def dataframe(

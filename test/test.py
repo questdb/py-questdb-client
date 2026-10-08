@@ -45,7 +45,8 @@ from forged_arrow import (
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
 
-from mock_server import (Server, HttpServer, SETTINGS_WITHOUT_PROTOCOL_VERSION,
+from mock_server import (Server, HttpServer, UdpServer,
+                         SETTINGS_WITHOUT_PROTOCOL_VERSION,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1, SETTINGS_WITH_PROTOCOL_VERSION_V2,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3,SETTINGS_WITH_PROTOCOL_VERSION_V4)
 from qwp_ws_ack_server import QwpAckServer, TLS_CA
@@ -5682,22 +5683,18 @@ print('OK')
                 txn.commit()
 
     @unittest.skipIf(pd is None, 'pandas not installed')
-    def test_a_row_written_inside_a_frame_defers_its_auto_flush(self):
-        """A `row()` written from inside a `dataframe()` leaves the
-        buffer's depth above zero when it returns, so an auto-flush
-        there would cut the frame's own work in half. It is left to the
-        call still running.
-
-        Attempting it instead reaches `flush()`'s in-row guard, which
-        refuses -- correctly, but with a message naming `flush()` and a
-        column value's conversion, to a caller who wrote a row. The row
-        lands either way; this is about what the caller is told.
+    def test_a_row_written_inside_a_frame_is_refused(self):
+        """Over the row-serializing protocols a frame is written into the
+        sender's own buffer and holds it from the moment it starts, so a
+        `row()` written from inside it has an auto-flush that cannot run
+        until the frame returns. The row is refused before anything is
+        written, and the frame goes on unaffected.
         """
-        with Server() as server:
+        refusals = []
+        with UdpServer() as server:
             with qi.Sender.from_conf(
-                    f'tcp::addr=localhost:{server.port};'
-                    'auto_flush_rows=1;') as sender:
-                server.accept()
+                    f'udp::addr=127.0.0.1:{server.port};'
+                    'auto_flush_rows=1;auto_flush_interval=off;') as sender:
 
                 class HostileFrame(pd.DataFrame):
                     fired = False
@@ -5708,9 +5705,13 @@ print('OK')
                             HostileFrame.fired = True
                             # `_dataframe` has already counted into the
                             # buffer's depth by the time it reads this.
-                            sender.row(
-                                'nested', columns={'v': 1},
-                                at=qi.TimestampNanos(1))
+                            before = len(sender)
+                            try:
+                                sender.row(
+                                    'nested', columns={'v': 1},
+                                    at=qi.TimestampNanos(1))
+                            except qi.QuestDBError as e:
+                                refusals.append((e, len(sender) - before))
                         return {}
 
                     @attrs.setter
@@ -5720,14 +5721,63 @@ print('OK')
                 frame = HostileFrame({
                     'v': [2, 3],
                     'ts': pd.to_datetime([0, 1], unit='s')})
-                # No error, and in particular not one about `flush()`.
                 sender.dataframe(frame, table_name='framed', at='ts')
-                sender.flush()
 
-            received = server.recv()
-        text = b'\n'.join(received).decode('utf-8')
-        self.assertIn('nested', text)
-        self.assertIn('framed', text)
+            received = b''.join(server.recv())
+        self.assertEqual(len(refusals), 1)
+        exc, written = refusals[0]
+        self.assertEqual(exc.code, qi.QuestDBErrorCode.InvalidApiCall)
+        self.assertIn("row() can't be called", str(exc))
+        self.assertEqual(written, 0)
+        self.assertIn(b'framed', received)
+        self.assertNotIn(b'nested', received)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_logging_handler_writing_through_the_framing_sender_is_refused(
+            self):
+        """A frame written a row at a time reports each round-trip claim
+        it cannot apply through the `questdb` logger, from inside the
+        frame. A handler that ships those records through the same sender
+        has its `row()` refused, and the frame goes on unaffected.
+        """
+        refusals = []
+        logger = logging.getLogger('questdb')
+        old_level = logger.level
+        with UdpServer() as server:
+            with qi.Sender.from_conf(
+                    f'udp::addr=127.0.0.1:{server.port};'
+                    'auto_flush_rows=1;auto_flush_interval=off;') as sender:
+
+                class ShipToSender(logging.Handler):
+                    def emit(self, record):
+                        try:
+                            sender.row(
+                                'logs',
+                                columns={'msg': record.getMessage()},
+                                at=qi.ServerTimestamp)
+                        except qi.QuestDBError as e:
+                            refusals.append(e)
+
+                handler = ShipToSender(level=logging.WARNING)
+                logger.setLevel(logging.WARNING)
+                logger.addHandler(handler)
+                try:
+                    df = pd.DataFrame({'a': [1, 2]})
+                    df.attrs['questdb'] = {
+                        'version': 1, 'columns': {'a': {'kind': 'ipv4'}}}
+                    sender.dataframe(
+                        df, table_name='framed', at=qi.ServerTimestamp)
+                finally:
+                    logger.removeHandler(handler)
+                    logger.setLevel(old_level)
+
+            received = b''.join(server.recv())
+        self.assertTrue(refusals)
+        for exc in refusals:
+            self.assertEqual(exc.code, qi.QuestDBErrorCode.InvalidApiCall)
+            self.assertIn('logging handler', str(exc))
+        self.assertIn(b'framed', received)
+        self.assertNotIn(b'logs', received)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_a_close_racing_a_refused_close_cannot_report_success(self):

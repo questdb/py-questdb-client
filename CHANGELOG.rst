@@ -203,6 +203,19 @@ Breaking changes
   its pool, are refused for the same reason. Clearing a buffer that holds
   finished rows, or one whose last ``row()`` failed, is unaffected.
 
+- **``Sender.row()`` raises while ``Sender.dataframe()`` on the same sender
+  is still running, over ``tcp``, ``http`` and ``udp``.** On those
+  protocols the frame is written into the sender's own buffer, which it
+  holds from the moment it starts, and it can run your Python before its
+  first row — a logging handler on the ``questdb`` logger, for example. A
+  row written from there could not be flushed until the frame returned, so
+  ``row()`` raises :class:`QuestDBError <questdb.QuestDBError>` with
+  ``code`` set to ``QuestDBErrorCode.InvalidApiCall`` before writing
+  anything. A logging handler that ships records through the sender it is
+  logging about needs a ``Sender`` of its own. Over ``ws`` and ``wss`` the
+  frame goes out on a connection of its own, and a row written from inside
+  it is accepted and flushed as usual.
+
 - If a ``ws::`` or ``wss::`` configuration contains ``max_in_flight`` or
   ``in_flight_window``, remove it. These options are no longer supported and now
   raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to

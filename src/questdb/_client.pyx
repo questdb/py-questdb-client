@@ -1535,7 +1535,8 @@ cdef class Buffer:
         cdef line_sender_buffer_view view = line_sender_buffer_peek(self._impl)
         return PyBytes_FromStringAndSize(<const char *> view.buf, <Py_ssize_t> view.len)
 
-    cdef inline void_int _check_not_in_row(self, str method) except -1:
+    cdef inline void_int _check_not_in_row(
+            self, str method, str hint=None) except -1:
         """
         Refuse a call that arrives while a row is part-way through
         being written into this buffer.
@@ -1546,6 +1547,9 @@ cdef class Buffer:
         stands between it and the buffer. The native buffer refuses a
         half-written row anyway; what it cannot do is stop the caller's
         own error handling from acting on the refusal.
+
+        `hint` is a further sentence for the message, for a refused call
+        with a remedy of its own.
         """
         if self._row_depth != 0:
             raise QuestDBError(
@@ -1554,7 +1558,8 @@ cdef class Buffer:
                 "written into this buffer. `row()` or `dataframe()` is "
                 "part-way through and something it called has come "
                 "back here, most likely a column value whose "
-                "conversion runs Python code.")
+                "conversion runs Python code." +
+                ("" if hint is None else " " + hint))
 
     cdef inline void_int _set_marker(self) except -1:
         cdef line_sender_error* err = NULL
@@ -2056,13 +2061,11 @@ cdef class Buffer:
             raise
         finally:
             self._leave_row()
-        # A row written from inside another row or frame on this buffer
-        # leaves the depth above zero, and flushing there would cut the
-        # outer call's work in half, so the auto-flush is left to the
-        # call that is still running. Attempting it instead reaches the
-        # flush guard, which refuses -- correctly, but naming `flush()`
-        # and a column conversion to a caller who wrote a row.
-        if wrote_fields and allow_auto_flush and self._row_depth == 0:
+        # Only a `Sender`'s own buffer has an auto-flush to trigger, and
+        # `Sender.row` refuses a row there while another call is part-way
+        # through the buffer, so this flush never cuts into an outer
+        # call's work.
+        if wrote_fields and allow_auto_flush:
             self._may_trigger_row_complete()
 
     def row(
@@ -11151,6 +11154,17 @@ cdef class Sender:
         See :func:`Buffer.row <questdb.ingress.Buffer.row>` for supported
         column types, protocol restrictions, server requirements, and
         ``NULL``-sentinel behavior.
+
+        Raises :class:`QuestDBError <questdb.QuestDBError>`
+        (``InvalidApiCall``) if called while another ``row()`` on this
+        sender is still in progress, or a ``dataframe()`` over ``tcp``,
+        ``http`` or ``udp``: from a column value whose conversion runs
+        Python code, or from a logging handler that writes the ``questdb``
+        logger's records through this sender. Such a ``dataframe()``
+        writes the frame into this sender's buffer, and a row written while
+        it runs could not be flushed until it returned. Over ``ws`` and
+        ``wss`` the frame goes out on a connection of its own, so a row
+        written from inside it is accepted and flushed as usual.
         """
         if self._in_txn:
             raise QuestDBError(
@@ -11166,7 +11180,16 @@ cdef class Sender:
                 QuestDBErrorCode.InvalidApiCall,
                 "row() can\'t be called: Sender is closed."
             )
-
+        # A row-serializing `dataframe()` holds this buffer from the
+        # moment it starts and runs caller Python before its first row:
+        # the `questdb` logger, an object column's sniff. A row written
+        # there has an auto-flush that cannot run until that call
+        # returns, so the row is refused before anything is written.
+        self._buffer._check_not_in_row(
+            'row',
+            "A logging handler that writes the `questdb` logger's records "
+            "through this same sender arrives here too; give it a Sender "
+            "of its own.")
         self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
         return self
 

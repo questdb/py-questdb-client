@@ -3520,8 +3520,8 @@
   "outer_outcome": "completed"
  },
  "Sender.dataframe/http | Sender.row": {
-  "result": "clean",
-  "reason": "",
+  "result": "refused",
+  "reason": "row() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ha",
   "outer_outcome": "completed"
  },
  "Sender.dataframe/http | Sender.transaction": {
@@ -3965,8 +3965,8 @@
   "outer_outcome": "completed"
  },
  "Sender.dataframe/ilp | Sender.row": {
-  "result": "clean",
-  "reason": "",
+  "result": "refused",
+  "reason": "row() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ha",
   "outer_outcome": "completed"
  },
  "Sender.dataframe/ilp | Sender.transaction": {
@@ -5301,7 +5301,7 @@
  },
  "Sender.row/ilp | Sender.row": {
   "result": "refused",
-  "reason": "Can't set the marker whilst constructing a line. A marker may only be set on an empty buffer or after `at` or `at_now` is called.",
+  "reason": "row() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ha",
   "outer_outcome": "completed"
  },
  "Sender.row/ilp | Sender.transaction": {
@@ -5746,7 +5746,7 @@
  },
  "Sender.row/qwp | Sender.row": {
   "result": "refused",
-  "reason": "Can't set the marker whilst constructing a line. A marker may only be set on an empty buffer or after `at` or `at_now` is called.",
+  "reason": "row() can't be called while a row is being written into this buffer. `row()` or `dataframe()` is part-way through and something it called ha",
   "outer_outcome": "completed"
  },
  "Sender.row/qwp | Sender.transaction": {
