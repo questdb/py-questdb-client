@@ -4045,6 +4045,11 @@ cdef pyobj_built_t* _dataframe_columnar_build_str_pyobj(
 
     cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
     cdef PyObject* cell
+    # Owns the cell for as long as `cell` points at it. Code the cell
+    # runs while it is read, such as a `__class__` lookup inside
+    # `isinstance` or a property, can replace it in the frame's array
+    # and so drop the array's reference to it.
+    cdef object cell_ref
     cdef size_t i
     cdef Py_ssize_t utf8_len
     cdef const char* utf8_buf
@@ -4066,7 +4071,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_str_pyobj(
             raise MemoryError()
 
         for i in range(row_count):
-            cell = access[i]
+            cell_ref = <object>access[i]
+            cell = <PyObject*>cell_ref
             if PyUnicode_CheckExact(cell):
                 utf8_buf = PyUnicode_AsUTF8AndSize(cell, &utf8_len)
                 if bytes_used + <size_t>utf8_len > <size_t>2_147_483_647:
@@ -4139,6 +4145,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
 
     cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
     cdef PyObject* cell
+    # Owns the cell; see `_dataframe_columnar_build_str_pyobj`.
+    cdef object cell_ref
     cdef uint8_t* values = NULL
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
@@ -4194,7 +4202,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_int_pyobj(
             if b.validity == NULL:
                 raise MemoryError()
         for i in range(row_count):
-            cell = access[i]
+            cell_ref = <object>access[i]
+            cell = <PyObject*>cell_ref
             # PyBool_Check goes BEFORE PyLong_CheckExact because Python
             # bools are subclasses of int and PyLong_CheckExact returns
             # false for them; treat them as int (matches row-path).
@@ -4283,6 +4292,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_long256_pyobj(
 
     cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
     cdef PyObject* cell
+    # Owns the cell; see `_dataframe_columnar_build_str_pyobj`.
+    cdef object cell_ref
     cdef uint8_t* buf = NULL
     cdef size_t buf_bytes = row_count * 32 if row_count > 0 else 32
     cdef size_t validity_bytes = (row_count + 7) // 8
@@ -4304,7 +4315,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_long256_pyobj(
             if b.validity == NULL:
                 raise MemoryError()
         for i in range(row_count):
-            cell = access[i]
+            cell_ref = <object>access[i]
+            cell = <PyObject*>cell_ref
             if PyLong_CheckExact(cell):
                 py_cell = <object>cell
                 if py_cell < 0 or py_cell >= _LONG256_LIMIT:
@@ -4350,6 +4362,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_float_pyobj(
 
     cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
     cdef PyObject* cell
+    # Owns the cell; see `_dataframe_columnar_build_str_pyobj`.
+    cdef object cell_ref
     cdef double* values = NULL
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
@@ -4366,7 +4380,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_float_pyobj(
             if b.validity == NULL:
                 raise MemoryError()
         for i in range(row_count):
-            cell = access[i]
+            cell_ref = <object>access[i]
+            cell = <PyObject*>cell_ref
             if PyFloat_CheckExact(cell):
                 value = PyFloat_AS_DOUBLE(cell)
                 if isnan(value):
@@ -4417,6 +4432,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_bool_pyobj(
 
     cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
     cdef PyObject* cell
+    # Owns the cell; see `_dataframe_columnar_build_str_pyobj`.
+    cdef object cell_ref
     cdef uint8_t* bits = NULL
     cdef size_t bytes = (row_count + 7) // 8
     cdef size_t i
@@ -4429,7 +4446,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_bool_pyobj(
             raise MemoryError()
         b.data = <void*>bits
         for i in range(row_count):
-            cell = access[i]
+            cell_ref = <object>access[i]
+            cell = <PyObject*>cell_ref
             if PyBool_Check(cell):
                 if cell == Py_True:
                     bits[i >> 3] |= <uint8_t>(1 << (i & 7))
@@ -4461,6 +4479,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
 
     cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
     cdef PyObject* cell
+    # Owns the cell; see `_dataframe_columnar_build_str_pyobj`.
+    cdef object cell_ref
     cdef uint8_t* buf = NULL
     cdef size_t buf_bytes = row_count * 16 if row_count > 0 else 16
     cdef size_t validity_bytes = (row_count + 7) // 8
@@ -4479,7 +4499,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
             if b.validity == NULL:
                 raise MemoryError()
         for i in range(row_count):
-            cell = access[i]
+            cell_ref = <object>access[i]
+            cell = <PyObject*>cell_ref
             if isinstance(<object>cell, uuid_cls):
                 # `qwp_numpy_s16` reads canonical RFC 4122 big-endian
                 # rows and byte-swaps them into QWP wire order itself.
@@ -4520,6 +4541,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_ipv4_pyobj(
 
     cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
     cdef PyObject* cell
+    # Owns the cell; see `_dataframe_columnar_build_str_pyobj`.
+    cdef object cell_ref
     cdef uint32_t* values = NULL
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
@@ -4534,7 +4557,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_ipv4_pyobj(
             if b.validity == NULL:
                 raise MemoryError()
         for i in range(row_count):
-            cell = access[i]
+            cell_ref = <object>access[i]
+            cell = <PyObject*>cell_ref
             if _is_ipv4_address(<object>cell):
                 values[i] = <uint32_t>int(<object>cell)
                 if b.validity != NULL:
@@ -4583,6 +4607,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
 
     cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
     cdef PyObject* cell
+    # Owns the cell; see `_dataframe_columnar_build_str_pyobj`.
+    cdef object cell_ref
     cdef int64_t* values = NULL
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
@@ -4605,7 +4631,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
             if b.validity == NULL:
                 raise MemoryError()
         for i in range(row_count):
-            cell = access[i]
+            cell_ref = <object>access[i]
+            cell = <PyObject*>cell_ref
             if _dataframe_is_null_pyobj(cell):
                 b.has_nulls = True
             elif isinstance(<object>cell, datetime_cls):
@@ -4663,6 +4690,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_bytes_pyobj(
 
     cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
     cdef PyObject* cell
+    # Owns the cell; see `_dataframe_columnar_build_str_pyobj`.
+    cdef object cell_ref
     cdef Py_ssize_t blob_len
     cdef const char* blob_buf
     cdef object py_cell
@@ -4687,7 +4716,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_bytes_pyobj(
             raise MemoryError()
 
         for i in range(row_count):
-            cell = access[i]
+            cell_ref = <object>access[i]
+            cell = <PyObject*>cell_ref
             release_view = False
             try:
                 if PyBytes_Check(<object>cell):
@@ -4787,6 +4817,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_fsb_pyobj(
 
     cdef PyObject** access = <PyObject**>col.setup.chunks.chunks[0].buffers[1]
     cdef PyObject* cell
+    # Owns the cell; see `_dataframe_columnar_build_str_pyobj`.
+    cdef object cell_ref
     cdef uint8_t* buf = NULL
     cdef size_t buf_bytes = row_count * width if row_count > 0 else width
     cdef size_t validity_bytes = (row_count + 7) // 8
@@ -4807,7 +4839,8 @@ cdef pyobj_built_t* _dataframe_columnar_build_fsb_pyobj(
             if b.validity == NULL:
                 raise MemoryError()
         for i in range(row_count):
-            cell = access[i]
+            cell_ref = <object>access[i]
+            cell = <PyObject*>cell_ref
             release_view = False
             try:
                 if PyBytes_Check(<object>cell):

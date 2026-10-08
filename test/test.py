@@ -111,6 +111,7 @@ from test_client_capsule_path import (
 )
 from test_client_dataframe_failures import (
     TestClientDataframeArgValidation,
+    TestClientDataframeCellLifetime,
     TestClientDataframeDirectFailures,
     TestClientDataframeFaultFuzz,
 )

@@ -315,6 +315,16 @@ Fixed
   affected. Rows written this way in 5.0 hold ``false`` or ``0`` where
   the frame held ``True``; re-ingest them from the source if they matter.
 
+- **An object cell that replaces itself in the frame no longer crashes the
+  interpreter.** ``QuestDB.dataframe()``, ``PooledSender.dataframe()`` and
+  the WebSocket ``Sender.dataframe()`` read an object-dtype column through
+  the frame's own array. In 5.0, code that a cell ran while it was being
+  read, such as a ``__class__`` property consulted by ``isinstance()``,
+  could replace that cell in the array, freeing it while the client still
+  used it. UUID and ``datetime`` object columns were affected, and so was
+  the check that picks an object column's type. The client now holds its own
+  reference to each cell while it reads it.
+
 - **A column name containing a NUL character (``'\0'``) no longer aborts the
   process or lands under a shortened name.** ``QuestDB.dataframe()``,
   ``PooledSender.dataframe()`` and the WebSocket ``Sender.dataframe()`` pass

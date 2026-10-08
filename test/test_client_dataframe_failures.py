@@ -13,7 +13,10 @@ import sys
 
 sys.dont_write_bytecode = True
 
+import os
+import pathlib
 import socket
+import subprocess
 import time
 import unittest
 
@@ -489,6 +492,45 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         self.assertFalse(raised.exception.in_doubt)
         self.assertIn('all endpoints unreachable', str(raised.exception))
         self.assertLess(elapsed, 5.0)
+
+
+@unittest.skipIf(pd is None, 'pandas not installed')
+class TestClientDataframeCellLifetime(unittest.TestCase):
+    """A cell's own code can replace that cell in the frame while
+    ``QuestDB.dataframe()`` is reading it. Each case in ``hostile_cells.py``
+    runs in its own interpreter with ``PYTHONMALLOC=debug``, so a read of
+    the freed cell takes the child down every time instead of passing by
+    chance."""
+
+    def test_a_cell_that_replaces_itself_does_not_crash(self):
+        import hostile_cells
+        script = pathlib.Path(__file__).with_name('hostile_cells.py')
+        self.assertTrue(hostile_cells.CASES)
+        for name in hostile_cells.CASES:
+            with self.subTest(case=name), QwpAckServer() as server:
+                env = os.environ.copy()
+                env['PYTHONMALLOC'] = 'debug'
+                env['QUESTDB_HOSTILE_CELL_CASE'] = name
+                env['QUESTDB_HOSTILE_CELL_PORT'] = str(server.port)
+                try:
+                    child = subprocess.run(
+                        [sys.executable, str(script)],
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=30)
+                except subprocess.TimeoutExpired as exc:
+                    self.fail(
+                        f'{name}: child timed out after {exc.timeout} '
+                        'seconds')
+                if (child.returncode != 0
+                        or hostile_cells.MARKER not in child.stdout):
+                    self.fail(
+                        f'{name}: child failed\n'
+                        f'returncode: {child.returncode}\n'
+                        f'stdout:\n{child.stdout}\n'
+                        f'stderr:\n{child.stderr}')
 
 
 @unittest.skipIf(pd is None, 'pandas not installed')

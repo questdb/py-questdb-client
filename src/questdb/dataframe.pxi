@@ -2210,17 +2210,18 @@ cdef str _row_wrapper_arrow_sentence(object col_name, str kind):
 
 
 cdef object _dataframe_row_wrapper_df_message(
-        object col_name, PyObject* obj):
+        object col_name, object obj):
     """A working DataFrame route for a scalar wrapper learned from row()."""
     cdef str col = f'df[{col_name!r}]'
-    if isinstance(<object>obj, Char):
+    cdef object precision
+    if isinstance(obj, Char):
         return (
             '`questdb.Char` values work only with `row()`, not in a '
             'DataFrame. To store this column as CHAR, convert it with '
             f'`{col} = {col}.map(lambda v: ord(v.value)).astype(\'uint16\')`, '
             + _row_wrapper_arrow_sentence(col_name, "'char'") + ' '
             + _row_wrapper_calls_sentence('CHAR'))
-    if isinstance(<object>obj, DateMillis):
+    if isinstance(obj, DateMillis):
         return (
             '`questdb.DateMillis` values work only with `row()`, not in a '
             'DataFrame. To store this column as DATE, convert it with '
@@ -2229,7 +2230,7 @@ cdef object _dataframe_row_wrapper_df_message(
             'alone selects DATE, and `date32()` and `date64()` columns work '
             'too; `schema_overrides` has no DATE option. '
             + _row_wrapper_calls_sentence('DATE'))
-    if isinstance(<object>obj, Long256):
+    if isinstance(obj, Long256):
         return (
             '`questdb.Long256` values work only with `row()`, not in a '
             'DataFrame. To store this column as LONG256, convert it with '
@@ -2237,15 +2238,16 @@ cdef object _dataframe_row_wrapper_df_message(
             '.astype(pd.ArrowDtype(pa.binary(32)))`, '
             + _row_wrapper_arrow_sentence(col_name, "'long256'") + ' '
             + _row_wrapper_calls_sentence('LONG256'))
-    if isinstance(<object>obj, Geohash):
+    if isinstance(obj, Geohash):
+        precision = obj.precision
         return (
             '`questdb.Geohash` values work only with `row()`, not in a '
             'DataFrame. To store this column as GEOHASH, convert it with '
             f'`{col} = {col}.map(lambda v: v.bits)`, '
             + _row_wrapper_arrow_sentence(
-                col_name, f"('geohash', {(<object>obj).precision})")
+                col_name, f"('geohash', {precision})")
             + ' Every value in the column must have a precision of '
-            f'{(<object>obj).precision} bits. '
+            f'{precision} bits. '
             + _row_wrapper_calls_sentence('GEOHASH'))
     return None
 
@@ -2262,6 +2264,11 @@ cdef void_int _dataframe_series_sniff_pyobj(
     cdef size_t n_elements = len(pandas_col.series)
     cdef PyObject** obj_arr
     cdef PyObject* obj
+    # Owns the cell for as long as `obj` points at it. Code the cell
+    # runs while it is read, such as a `__class__` lookup inside
+    # `isinstance` or a property, can replace it in the frame's array
+    # and so drop the array's reference to it.
+    cdef object obj_ref
 
     # To access elements which are themselves arrays.
     cdef PyArrayObject* arr
@@ -2273,7 +2280,8 @@ cdef void_int _dataframe_series_sniff_pyobj(
     _dataframe_series_as_pybuf(pandas_col, col)
     obj_arr = <PyObject**>(col.setup.pybuf.buf)
     for el_index in range(n_elements):
-        obj = obj_arr[el_index]
+        obj_ref = <object>obj_arr[el_index]
+        obj = <PyObject*>obj_ref
         if not _dataframe_is_null_pyobj(obj):
             if PyBool_Check(obj):
                 col.setup.source = col_source_t.col_source_bool_pyobj
@@ -2320,7 +2328,7 @@ cdef void_int _dataframe_series_sniff_pyobj(
                     _ipv4_interface_df_message(pandas_col.name))
             else:
                 wrapper_message = _dataframe_row_wrapper_df_message(
-                    pandas_col.name, obj)
+                    pandas_col.name, obj_ref)
                 if wrapper_message is not None:
                     raise QuestDBError(
                         QuestDBErrorCode.BadDataFrame,
