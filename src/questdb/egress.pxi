@@ -2591,14 +2591,14 @@ class QueryResult:
     form whose per-batch SYMBOL dictionary is compacted to the values each
     batch uses, which a generic consumer reconciles. So when the target is a
     polars / pandas frame, the dedicated methods avoid the re-reconciliation
-    that ``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
+    that ``polars.DataFrame(result)`` / ``to_arrow().to_pandas()`` pay on
     SYMBOL-heavy results.
 
     Example::
 
         with db.query('SELECT * FROM trades WHERE ts > $1',
                       [datetime.datetime(2026, 7, 1)]) as result:
-            df = polars.from_arrow(result)              # no pyarrow
+            df = polars.DataFrame(result)               # no pyarrow
             # df = result.to_pandas()                   # no pyarrow
             # table = pa.table(result)                  # pyarrow required
     """
@@ -2629,7 +2629,7 @@ class QueryResult:
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
-        (e.g. ``polars.from_arrow``) reconciles them.
+        (e.g. ``polars.DataFrame(result)``) reconciles them.
 
         The returned stream may be handed to a consumer worker thread.
         Stream callbacks are serialised by the same cursor lock, but the
@@ -2652,7 +2652,7 @@ class QueryResult:
         Materialise-whole: a mid-query failover replays the result
         transparently — the partial accumulation we hold is discarded
         from batch-0. The pyarrow-free streaming path
-        (``__arrow_c_stream__`` consumed by ``polars.from_arrow(result)``
+        (``__arrow_c_stream__`` consumed by ``polars.DataFrame(result)``
         / ``pa.table(result)``) instead surfaces ``FailoverWouldDuplicate``
         on a post-delivery failover.
         """
@@ -2739,7 +2739,7 @@ class QueryResult:
         transparently. This accumulates batches in-library (via pyarrow)
         so the partial result can be discarded on failover; for the
         pyarrow-free streaming path consume ``__arrow_c_stream__``
-        directly (``polars.from_arrow(result)``), which surfaces
+        directly (``polars.DataFrame(result)``), which surfaces
         ``FailoverWouldDuplicate`` on a post-delivery failover.
         """
         try:

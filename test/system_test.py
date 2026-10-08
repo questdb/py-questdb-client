@@ -2462,7 +2462,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
-    def test_polars_from_arrow_consumes_capsule(self):
+    def test_polars_dataframe_consumes_capsule(self):
         """``QuestDB.query`` exposes ``__arrow_c_stream__`` directly off
         the Rust cursor, so polars can consume it without pyarrow being
         the import-time mediator. Pins that contract: the polars frame
@@ -2487,7 +2487,10 @@ class TestEgressWithDatabase(unittest.TestCase):
                 with client.query(
                         f'SELECT lg, vc FROM {table_name} ORDER BY lg DESC'
                         ) as result:
-                    df = pl.from_arrow(result)
+                    # The DataFrame constructor, not `pl.from_arrow`: on
+                    # polars >= 2.0 that returns a Series of structs for a
+                    # bare Arrow C stream.
+                    df = pl.DataFrame(result)
             self.assertEqual(df.shape, (2, 2))
             self.assertEqual(df['lg'].to_list(), [42, 7])
             self.assertEqual(df['vc'].to_list(), ['hello', 'world'])
@@ -2539,6 +2542,49 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertIsInstance(stitched.schema['sym'], pl.Categorical)
             self.assertEqual(stitched['v'].to_list(), list(range(n)))
             self.assertEqual(stitched['sym'].cast(pl.Utf8).to_list(), exp)
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_to_polars_multi_batch_symbol_long_varchar(self):
+        """``to_polars`` over a multi-batch result keeps every value. The
+        SYMBOL column goes through the ``Categories`` registry and the
+        VARCHAR column through the ``string_view`` cast, each across
+        several wire batches."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        rows = 300
+        table_name = 't_egress_polars_batches_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, sym SYMBOL, lg LONG, vc VARCHAR) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f'INSERT INTO {table_name} SELECT '
+                "dateadd('s', (x - 1)::int, "
+                "'2024-01-01T00:00:00.000000Z'::timestamp), "
+                "concat('sym_', x % 7), x, concat('v_', x) "
+                f'FROM long_sequence({rows})')
+            self.qdb_plain.retry_check_table(table_name, min_rows=rows)
+            sql = f'SELECT sym, lg, vc FROM {table_name} ORDER BY ts'
+            conf = self._conf() + 'max_batch_rows=64;'
+            with qi.QuestDB.from_conf(conf) as client:
+                batches = list(client.query(sql).iter_arrow())
+                df = client.query(sql).to_polars()
+            self.assertGreater(len(batches), 1)
+            self.assertEqual(df.shape, (rows, 3))
+            self.assertIsInstance(df.schema['sym'], pl.Categorical)
+            self.assertEqual(df['lg'].to_list(), list(range(1, rows + 1)))
+            self.assertEqual(
+                df['sym'].cast(pl.Utf8).to_list(),
+                [f'sym_{x % 7}' for x in range(1, rows + 1)])
+            self.assertEqual(
+                df['vc'].to_list(), [f'v_{x}' for x in range(1, rows + 1)])
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -6911,7 +6957,7 @@ class TestEgressFailover(unittest.TestCase):
             df = client.query(f'SELECT v FROM {table} ORDER BY ts').to_polars()
         self.assertEqual(df['v'].to_list(), list(range(n)))
 
-    def test_polars_from_arrow_dead_then_live_endpoint(self):
+    def test_polars_dataframe_dead_then_live_endpoint(self):
         """The pyarrow-free Polars capsule path also borrows through the
         same multi-endpoint reader pool before Polars starts consuming
         the Arrow stream."""
@@ -6929,7 +6975,7 @@ class TestEgressFailover(unittest.TestCase):
                            target='primary',
                            failover_max_duration_ms='60000')) as client:
             with client.query(f'SELECT v FROM {table} ORDER BY ts') as result:
-                df = pl.from_arrow(result)
+                df = pl.DataFrame(result)
         self.assertEqual(df['v'].to_list(), list(range(n)))
 
     def test_iter_arrow_surfaces_failover_would_duplicate(self):

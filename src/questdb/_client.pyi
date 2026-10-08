@@ -1658,7 +1658,7 @@ class QueryResult:
     :meth:`to_arrow` / :meth:`iter_arrow` / :meth:`__arrow_c_stream__` give a
     generic compact-dictionary Arrow form a consumer reconciles. When the
     target is a polars / pandas frame, the dedicated methods avoid the
-    re-reconciliation that ``polars.from_arrow(result)`` /
+    re-reconciliation that ``polars.DataFrame(result)`` /
     ``to_arrow().to_pandas()`` pay on SYMBOL-heavy results.
     """
 
@@ -1666,7 +1666,7 @@ class QueryResult:
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
-        (e.g. ``polars.from_arrow``) reconciles them."""
+        (e.g. ``polars.DataFrame(result)``) reconciles them."""
 
     def to_arrow(self) -> Any:
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow."""

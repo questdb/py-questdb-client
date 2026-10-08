@@ -1274,8 +1274,11 @@ streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
 ``iter_arrow`` (and ``to_pandas`` / ``iter_pandas`` with ``dtype_backend`` or
 ``types_mapper``) require pyarrow; the default ``to_pandas`` / ``iter_pandas``
 are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
-(``__arrow_c_stream__``), so ``polars.from_arrow(result)`` or
+(``__arrow_c_stream__``), so ``polars.DataFrame(result)`` or
 ``duckdb.from_arrow(result)`` consume it directly without pyarrow installed.
+On polars 2.0 and later, ``polars.from_arrow(result)`` returns a ``Series`` of
+structs for such a stream rather than a ``DataFrame``; use the
+``polars.DataFrame`` constructor.
 Each result is consumed once. Fully drain it, use it as a context manager
 (``with db.query(...) as result:``), or call :func:`QueryResult.close <questdb.QueryResult.close>`. A
 partially-consumed result cannot return its connection to the pool — closing
@@ -1295,7 +1298,7 @@ concurrent consumption, cancellation, and close are unsupported.
 per-batch ``SYMBOL`` dictionary is compacted to the values each batch uses,
 which a generic consumer reconciles. So when the target is a polars / pandas
 frame, the dedicated methods avoid the re-reconciliation that
-``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
+``polars.DataFrame(result)`` / ``to_arrow().to_pandas()`` pay on
 ``SYMBOL``-heavy results.
 
 For several queries in a row, call :meth:`QuestDB.reader <questdb.QuestDB.reader>` to take a
