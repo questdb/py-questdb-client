@@ -12,3 +12,4 @@ pyarrow>=10.0.1
 fastparquet>=2023.10.1
 sqlalchemy>=2
 psycopg[binary]>=3
+pyyaml>=6

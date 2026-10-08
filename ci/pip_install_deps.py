@@ -137,6 +137,11 @@ def main(args):
     # unit and is skipped rather than left with a driver that cannot import.
     try_pip_install('sqlalchemy>=2')
     try_pip_install('psycopg[binary]')
+    # `TestManifest` (test/test.py) parses examples.manifest.yaml, then
+    # compiles every Python example and checks each header's `questdb[...]`
+    # extras against pyproject.toml. Without PyYAML both tests skip, and
+    # nothing else in this list pulls it in.
+    try_pip_install('pyyaml')
 
     on_linux_is_glibc = (
             (not platform.system() == 'Linux') or
@@ -150,6 +155,7 @@ def main(args):
         import pandas
         import numpy
         import pyarrow
+        import yaml
 
         # Temporarily don't require fastparquet on 3.14
         # Compat will still be tested on older releases.
