@@ -1596,16 +1596,33 @@ class NativeOidcTest(unittest.TestCase):
                 '~', os.path.relpath(target, home))
             make_auth(ca_bundle=relative).close()
             make_auth(ca_bundle=pathlib.Path(relative)).close()
-        # The expanded path is what native opens and reports.
+        # The expanded path is what native opens and reports. Native quotes
+        # it with Rust's `Debug` formatting, which escapes each Windows `\`
+        # separator as `\\`.
         with self.assertRaises(OidcError) as caught:
             make_auth(ca_bundle='~/questdb-oidc-review-missing/ca.pem')
-        self.assertIn(home, str(caught.exception))
+        self.assertIn(home.replace('\\', '\\\\'), str(caught.exception))
 
     def test_ca_bundle_rejects_unresolvable_home_and_non_paths(self):
-        with self.assertRaisesRegex(
-                OidcConfigError, 'could not resolve the home directory') \
-                as caught:
-            make_auth(ca_bundle='~questdb-no-such-user-0x51/ca.pem')
+        if os.name == 'nt':
+            # Windows `expanduser` never fails for an unknown `~user`: it
+            # guesses a sibling of the current profile directory. It leaves
+            # the path unexpanded only when no home variable is set.
+            unresolvable = '~/ca.pem'
+            env = {
+                key: value for key, value in os.environ.items()
+                if key.upper() not in (
+                    'USERPROFILE', 'HOMEPATH', 'HOMEDRIVE', 'HOME')}
+        else:
+            # POSIX `expanduser` leaves `~user` unexpanded when there is no
+            # `pwd` entry for that user.
+            unresolvable = '~questdb-no-such-user-0x51/ca.pem'
+            env = os.environ.copy()
+        with mock.patch.dict(os.environ, env, clear=True), \
+                self.assertRaisesRegex(
+                    OidcConfigError,
+                    'could not resolve the home directory') as caught:
+            make_auth(ca_bundle=unresolvable)
         self.assertIs(
             caught.exception.code, questdb.QuestDBErrorCode.ConfigError)
         for bad in (0, False, object()):
