@@ -56,7 +56,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
 from typing import (
-    Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union)
+    Any, Callable, Dict, Iterable, Iterator, List, Literal, Optional, Tuple,
+    Union)
 
 import numpy as np
 import pandas as pd
@@ -237,6 +238,12 @@ class UnsupportedDataFrameShapeError(QuestDBError):
     """
     A DataFrame shape is not supported by the optimized columnar client path.
     """
+
+    def __init__(
+        self,
+        msg: str,
+        column_failures: Optional[Iterable[Dict[str, Any]]] = None,
+    ) -> None: ...
 
     column_failures: tuple
 
