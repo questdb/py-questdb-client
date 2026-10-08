@@ -4816,6 +4816,112 @@ class TestBufferNativeBorrow(unittest.TestCase):
         buf, _ = self._while_flushing(True, probe)
         self.assertEqual(len(buf), 0)
 
+    def _while_publishing(self, method_name, probe):
+        # Slow ACKs and a tiny store-and-forward budget make the publish block
+        # inside native, with the GIL released, waiting for capacity, while
+        # `probe` runs on this thread against the same buffer.
+        big = 'x' * 1500
+
+        def fill(buf, tag):
+            buf.row('t', columns={'v': tag, 's': big},
+                    at=qi.TimestampNanos(1_700_000_000_000_000_000))
+
+        outcome = {}
+        with QwpAckServer(ack_delay_s=2.0) as slow, \
+                QwpAckServer() as healthy:
+            sender = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{slow.port};lazy_connect=true;'
+                'sf_max_segment_bytes=4096;sf_max_total_bytes=8192;'
+                'sf_append_deadline_millis=30000;'
+                'close_flush_timeout_millis=0;', auto_flush=False)
+            other = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{healthy.port};lazy_connect=true;'
+                'close_flush_timeout_millis=0;', auto_flush=False)
+            sender.establish()
+            other.establish()
+            try:
+                prime = sender.new_buffer()
+                for _ in range(4):
+                    fill(prime, 1)
+                    sender.flush_and_get_fsn(prime)
+                empty_len = len(sender.new_buffer())
+                buf = sender.new_buffer()
+                fill(buf, 7)
+                expected = (len(buf), bytes(buf))
+
+                def publish():
+                    try:
+                        outcome['fsn'] = getattr(sender, method_name)(buf)
+                    except Exception as e:  # noqa: BLE001
+                        outcome['error'] = e
+
+                publisher = threading.Thread(target=publish)
+                publisher.start()
+                try:
+                    # Both kinds of borrow reject a modification, and a
+                    # capacity-only `reserve` is harmless before the publish
+                    # starts, so its first rejection marks the borrow.
+                    deadline = time.monotonic() + 10
+                    while True:
+                        self.assertLess(time.monotonic(), deadline)
+                        try:
+                            buf.reserve(1)
+                        except qi.QuestDBError as e:
+                            self.assertEqual(
+                                e.code, qi.QuestDBErrorCode.InvalidApiCall)
+                            break
+                        time.sleep(0.005)
+                    probe(buf, expected, other)
+                    self.assertTrue(
+                        publisher.is_alive(),
+                        'the publish left native before the probe finished')
+                finally:
+                    publisher.join(30)
+            finally:
+                sender.close(False)
+                other.close(False)
+        self.assertNotIn('error', outcome)
+        return buf, expected, empty_len
+
+    def test_publishing_flush_and_get_fsn_rejects_reads_and_writes(self):
+        # `flush_and_get_fsn(buf)` clears the buffer when it completes, so
+        # it borrows it exclusively: reading or fanning it out to another
+        # sender while it runs would race the native clear and abort.
+        def probe(buf, _expected, other):
+            self._assert_rejected(lambda: len(buf))
+            self._assert_rejected(lambda: bytes(buf))
+            self._assert_rejected(lambda: bool(buf))
+            self._assert_rejected(buf.capacity)
+            self._assert_rejected(
+                lambda: other.flush_and_keep_and_get_fsn(buf))
+            self._assert_rejected(lambda: other.flush(buf, clear=False))
+            self._assert_rejected(buf.clear)
+            self._assert_rejected(lambda: buf.row(
+                't', columns={'v': 2}, at=qi.TimestampNanos(2)))
+
+        buf, _, empty_len = self._while_publishing('flush_and_get_fsn', probe)
+        self.assertEqual(len(buf), empty_len)
+
+    def test_kept_flush_and_get_fsn_allows_reads_and_parallel_kept_flushes(
+            self):
+        # `flush_and_keep_and_get_fsn(buf)` only reads the buffer, so other
+        # threads may read it and fan it out with kept flushes, but not
+        # modify it.
+        def probe(buf, expected, other):
+            self.assertEqual((len(buf), bytes(buf)), expected)
+            self.assertTrue(buf)
+            self.assertGreater(buf.capacity(), 0)
+            other.flush_and_keep_and_get_fsn(buf)
+            other.flush(buf, clear=False)
+            self._assert_rejected(buf.clear)
+            self._assert_rejected(lambda: buf.row(
+                't', columns={'v': 2}, at=qi.TimestampNanos(2)))
+
+        buf, expected, _ = self._while_publishing(
+            'flush_and_keep_and_get_fsn', probe)
+        self.assertEqual((len(buf), bytes(buf)), expected)
+        buf.clear()
+
 
 class TestReinitRejected(unittest.TestCase):
     """Calling `__init__` a second time on an already-initialized native
