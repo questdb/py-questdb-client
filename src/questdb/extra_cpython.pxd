@@ -42,12 +42,6 @@ cdef extern from "Python.h":
     Py_UCS2* PyUnicode_2BYTE_DATA(PyObject* o)
     Py_UCS4* PyUnicode_4BYTE_DATA(PyObject* o)
 
-    Py_ssize_t PyBytes_GET_SIZE(object o)
-
-    bint PyBytes_CheckExact(PyObject* o)
-
-    char* PyBytes_AsString(object o)
-
     bint PyUnicode_CheckExact(PyObject* o)
 
     const char* PyUnicode_AsUTF8AndSize(PyObject* o, Py_ssize_t* size) except NULL

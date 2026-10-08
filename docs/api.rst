@@ -116,6 +116,26 @@ questdb
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: questdb.Char
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.DateMillis
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.Long256
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.Geohash
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. autoclass:: questdb.TlsCa
    :members:
    :undoc-members:
