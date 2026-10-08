@@ -2321,6 +2321,9 @@ cdef class OidcDeviceAuth:
         discarded, attached senders, pools and readers remain usable, and a
         later ``sign_in()`` on this provider can succeed. If no device flow is
         running, this is an idempotent no-op that does not affect the next one.
+        It is also a no-op once the identity provider has issued tokens for the
+        running flow: that sign-in is committed and completes normally, and the
+        renderer receives its ``on_success`` or ``on_failure`` call.
 
         Safe from any thread, including a renderer callback. Use :meth:`close`
         instead only when the provider and every attached transport should be

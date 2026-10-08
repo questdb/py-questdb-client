@@ -757,8 +757,12 @@ class Renderer:
     and visibly escapes non-ASCII prompt codes and URLs before dispatch. That is
     presentation sanitisation, not authority or sink encoding: custom notebook
     renderers must still HTML-escape text, and only ``browser_target`` may be
-    opened, linkified or encoded as a QR code. Identity and failure text may
-    retain ordinary Unicode and HTML metacharacters.
+    opened, linkified or encoded as a QR code. A renderer that does so must
+    show ``browser_target`` itself as the destination, not the display
+    ``verification_uri``: display URLs are length-capped before invisible
+    characters are removed, so a padded one can show a different host from
+    the one the browser opens. Identity and failure text may retain ordinary
+    Unicode and HTML metacharacters.
     :func:`~questdb.auth.sanitize_display_text` is available for raw values from
     other sources or optional defense-in-depth.
 
@@ -809,7 +813,8 @@ class Renderer:
         URL the native side has vetted for opening / linkifying / QR-encoding;
         the built-in renderers prefer it, and a custom renderer should use it
         (rather than the display-only ``verification_uri``) as the actionable
-        target.
+        target, and show it as the place the user is sent: a shortened display
+        URL can show a different host.
         """
 
     def on_waiting(self, seconds_left: float) -> None:

@@ -485,7 +485,11 @@ Security notes
   identity/failure text may retain ordinary Unicode and HTML metacharacters.
   Custom renderers must apply their output sink's encoding (for example HTML
   escaping), and use only ``browser_target`` for links, browser opening or QR
-  codes. :func:`~questdb.auth.sanitize_display_text` remains available for raw
+  codes. A renderer that does so must also show ``browser_target`` as the place
+  the user is sent: display URLs are length-capped before invisible characters
+  are removed, so a padded ``verification_uri`` can display a different host
+  from the one the browser opens.
+  :func:`~questdb.auth.sanitize_display_text` remains available for raw
   values from other sources or defense-in-depth; it does not HTML-escape.
 * Token-endpoint diagnostics are scanned before they reach renderers,
   exceptions, C views, or logs. If an IdP reflects the submitted device code or
@@ -507,7 +511,10 @@ Security notes
   open, every attached ``Sender``, :func:`questdb.connect` pool and reader stays
   usable, and a later ``sign_in()`` on the same provider can retry. A custom UI
   can provide the same non-destructive behaviour through
-  :meth:`~questdb.auth.OidcDeviceAuth.cancel_sign_in`. Use
+  :meth:`~questdb.auth.OidcDeviceAuth.cancel_sign_in`. Once the identity
+  provider has issued tokens, the attempt is committed: a cancel that arrives
+  later is a no-op, ``sign_in()`` completes, and the renderer receives its
+  ``on_success`` or ``on_failure`` call. Use
   :meth:`~questdb.auth.OidcDeviceAuth.close` only for permanent shutdown.
 
 Optional dependencies

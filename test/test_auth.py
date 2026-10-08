@@ -2889,6 +2889,36 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             self.assertEqual(renderer.failures, ['Sign-in cancelled.'])
             self.assertEqual(len(renderer.successes), 1)
 
+    def test_cancel_after_tokens_are_issued_still_reports_success(self):
+        # The device grant returns an already-expired JWT plus a refresh
+        # token, so sign_in() makes a rescue refresh after the IdP has issued
+        # tokens. A cancel landing there used to be accepted natively and then
+        # ignored: sign_in() succeeded but the renderer got neither
+        # on_success nor on_failure, leaving a prompt on "waiting".
+        holder = []
+        hook_outcome = []
+
+        def cancel_during_refresh():
+            try:
+                holder[0].cancel_sign_in()
+                hook_outcome.append('returned')
+            except BaseException as exc:  # noqa: BLE001
+                hook_outcome.append(exc)
+
+        renderer = RecordingRenderer()
+        with OidcTestServer(initial_access_token=EXPIRED_ACCESS_TOKEN,
+                            refresh_request_hook=cancel_during_refresh,
+                            device_expires_in=20) as server:
+            auth = make_discovered_auth(server, renderer=renderer)
+            holder.append(auth)
+            auth.sign_in()
+            self.assertEqual(hook_outcome, ['returned'])
+            self.assertEqual(auth.token(), 'AT-refreshed')
+            self.assertEqual(len(renderer.prompts), 1)
+            self.assertEqual(len(renderer.successes), 1)
+            self.assertEqual(renderer.failures, [])
+            auth.close()
+
     def test_renderer_can_close_the_provider_from_its_callback(self):
         # Permanent close remains callback-safe for renderers that explicitly
         # want to disable this provider and all attached transports. Native
@@ -7105,6 +7135,11 @@ class OidcReaderLifetimeTest(unittest.TestCase):
             self.assertTrue(_settle_until(lambda: auth_ref() is None))
 
 
+_CLOSE_INSIDE_HANDLER = (
+    "cannot run inside its OIDC provider's persistence-warning callback")
+_CLOSE_GAVE_UP = 'gave up waiting for a persistence-warning callback'
+
+
 @unittest.skipUnless(os.name == 'posix',
                      'durable file token store requires POSIX')
 class OidcDiagnosticReentryTest(unittest.TestCase):
@@ -7132,6 +7167,7 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
         credential = [None]
         sabotaged = threading.Event()
         observed = []
+        close_messages = []
 
         def fail_save():
             if sabotaged.is_set():
@@ -7157,6 +7193,8 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                         action()
                     except questdb.QuestDBError as exc:
                         observed.append((name, exc.code))
+                        if name == 'db.close':
+                            close_messages.append(str(exc))
                     else:
                         observed.append((name, None))
 
@@ -7231,6 +7269,11 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                 self.assertEqual(observed, [
                     (name, questdb.QuestDBErrorCode.InvalidApiCall)
                     for name in expected])
+                # The handler's own close fails fast; the 2 s wait for
+                # handlers on other threads must not be what rejects it.
+                self.assertEqual(len(close_messages), 1 if leased else 0)
+                for message in close_messages:
+                    self.assertIn(_CLOSE_INSIDE_HANDLER, message)
                 self.assertEqual(qdb.authorizations,
                                  ['Bearer AT-initial', 'Bearer AT-refreshed'])
                 self.assertEqual(qdb.errors, [])
@@ -7299,6 +7342,8 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
 
     def _exercise_pool_close(self):
         observed = []
+        messages = []
+        elapsed = []
         with tempfile.TemporaryDirectory() as parent, OidcTestServer() as idp:
             directory = os.path.join(parent, 'tokens')
             os.mkdir(directory)
@@ -7317,12 +7362,15 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                 def emit(self, record):
                     if 'token store load failed' not in record.getMessage():
                         return
+                    started = time.monotonic()
                     try:
                         db.close()
                     except questdb.QuestDBError as exc:
                         observed.append(exc.code)
+                        messages.append(str(exc))
                     else:
                         observed.append(None)
+                    elapsed.append(time.monotonic() - started)
 
             logger = logging.getLogger('questdb')
             old_level = logger.level
@@ -7336,6 +7384,8 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                                     questdb.QuestDBErrorCode.InvalidApiCall)
                 self.assertEqual(observed,
                                  [questdb.QuestDBErrorCode.InvalidApiCall])
+                self.assertIn(_CLOSE_INSIDE_HANDLER, messages[0])
+                self.assertLess(elapsed[0], 1.0)
                 self.assertIsNotNone(_client._debug_egress_pool_stats(db))
             finally:
                 logger.removeHandler(handler)
@@ -7439,6 +7489,7 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
         credential = [None]
         sabotaged = threading.Event()
         observed = []
+        messages = []
         caller_thread = threading.get_ident()
 
         def fail_refresh_save():
@@ -7454,6 +7505,7 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                 db.close()
             except questdb.QuestDBError as exc:
                 observed.append((exc.code, threading.get_ident()))
+                messages.append(str(exc))
             else:
                 observed.append((None, threading.get_ident()))
 
@@ -7506,6 +7558,12 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                     self.assertEqual(observed[0][0],
                                      questdb.QuestDBErrorCode.InvalidApiCall)
                     self.assertNotEqual(observed[0][1], caller_thread)
+                    # Called from the handler itself, close fails fast; a
+                    # close delegated to another thread is released by the
+                    # bounded wait instead.
+                    self.assertIn(
+                        _CLOSE_GAVE_UP if delegated else _CLOSE_INSIDE_HANDLER,
+                        messages[0])
                     self.assertEqual(qdb.snapshot()['binary_frames'], 1)
                 finally:
                     logger.removeHandler(handler)
