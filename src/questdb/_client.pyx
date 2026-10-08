@@ -6722,21 +6722,31 @@ cdef class QuestDB:
         """Move a borrowed sender's use when it is handed to another thread."""
         cdef size_t count
         cdef dict uses
+        cdef object new_count
+        cdef object old_count
         if old_owner is new_owner:
             return 0
-        with self._state_cond:
-            # Publish both changes together: a failed dict insertion must not
-            # leave close() seeing an unmatched lease under either thread.
-            uses = self._uses_by_thread.copy()
+        # Runs on a PooledSender's per-row path whenever its lease changes
+        # thread, so update in place rather than copying the whole map. Only
+        # the first mutation can fail (inserting `new_owner` may resize the
+        # dict, and the counts are allocated beforehand); replacing or deleting
+        # the existing `old_owner` entry cannot, so close() never sees the
+        # lease counted twice or not at all.
+        self._state_cond.acquire()
+        try:
+            uses = self._uses_by_thread
             count = uses.get(old_owner, 0)
             if count == 0:
                 raise RuntimeError('QuestDB use counter underflow.')
-            uses[new_owner] = uses.get(new_owner, 0) + 1
+            new_count = uses.get(new_owner, 0) + 1
+            old_count = count - 1
+            uses[new_owner] = new_count
             if count == 1:
                 del uses[old_owner]
             else:
-                uses[old_owner] = count - 1
-            self._uses_by_thread = uses
+                uses[old_owner] = old_count
+        finally:
+            self._state_cond.release()
         return 0
 
     cdef void _end_db_use(self, object owner=None) except *:
