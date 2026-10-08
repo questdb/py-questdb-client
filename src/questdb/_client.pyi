@@ -1916,6 +1916,9 @@ class Sender:
     def await_acked_fsn(self, fsn: int, timeout_millis: int = 0) -> bool:
         """
         Wait until the QWP/WebSocket completion watermark reaches ``fsn``.
+
+        Returns ``False`` if the no-progress timeout elapses first;
+        ``timeout_millis=0`` waits indefinitely.
         """
 
     def drive_once(self) -> bool:

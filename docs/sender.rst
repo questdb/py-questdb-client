@@ -479,10 +479,15 @@ section for more details.
    they only queue frames locally, and the background reconnect that needs
    the token keeps retrying instead. It reports each failed attempt as a
    ``ConnectionEventKind.CredentialUnavailable`` event (register a
-   ``connection_listener`` to see it). An ACK wait on a pooled sender
-   (``wait()`` or ``flush(wait=True)``) eventually fails with an ordinary
-   timeout ``QuestDBError``, and ``Sender.await_acked_fsn()`` returns
-   ``False``. The queued rows are sent once :meth:`OidcDeviceAuth.sign_in
+   ``connection_listener`` to see it). An ACK wait does not fail because of
+   the missing token: with a non-zero ``timeout_millis``, a pooled sender's
+   ``wait()`` raises an ordinary timeout ``QuestDBError`` and
+   ``await_acked_fsn()`` returns ``False`` once it expires, and
+   ``flush(wait=True)`` is bounded by the pool's request timeout. With the
+   default ``timeout_millis=0``, ``wait()`` and ``await_acked_fsn()`` wait
+   until the rows are acknowledged, which needs a successful sign-in on
+   another thread; pass a timeout when the credential may be missing. The
+   queued rows are sent once :meth:`OidcDeviceAuth.sign_in
    <questdb.auth.OidcDeviceAuth.sign_in>` succeeds.
 
    Its ``code`` reports the failing call's native error category, not a

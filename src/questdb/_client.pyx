@@ -9195,6 +9195,10 @@ cdef class Sender:
         Returns ``True`` once every frame published so far (which includes
         ``fsn``) has been acknowledged, or ``False`` if the no-progress
         timeout elapsed before the acknowledgement watermark reached ``fsn``.
+
+        ``timeout_millis`` is a no-progress timeout; ``0`` waits indefinitely,
+        including while an attached OIDC provider has no usable token and the
+        background reconnect keeps retrying.
         """
         cdef line_sender_error* err = NULL
         cdef PyThreadState* gs = NULL
