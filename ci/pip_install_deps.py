@@ -155,7 +155,6 @@ def main(args):
         import pandas
         import numpy
         import pyarrow
-        import yaml
 
         # Temporarily don't require fastparquet on 3.14
         # Compat will still be tested on older releases.
