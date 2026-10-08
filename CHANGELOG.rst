@@ -181,6 +181,17 @@ while the sender is inside a native call such as ``flush()``. Write listener
 events to a different sender or queue them for the owning thread, and read the
 counters when the sender is not flushing.
 
+Likewise, a :class:`Buffer <questdb.ingress.Buffer>` that a native call is modifying --
+the sender's internal buffer during ``flush()``, an explicit buffer during
+``flush(buffer)`` (``clear=True``) or ``flush_and_get_fsn(buffer)``, or any
+buffer during ``dataframe()`` -- now raises that error from ``len()``,
+``bytes()``, truthiness (``if buffer:`` / ``if sender:``), ``capacity()``,
+``reserve()``, ``clear()`` and ``row()``, from any thread, instead of reading or
+modifying memory the native call is using. A ``flush(buffer, clear=False)`` or
+``flush_and_keep_and_get_fsn(buffer)`` only reads the buffer, so other threads
+may keep reading it and flushing it with ``clear=False`` to other senders;
+only modifying it raises.
+
 ``SenderTransaction.commit()`` after its sender was closed
 **********************************************************
 

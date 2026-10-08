@@ -1274,8 +1274,11 @@ cdef class Buffer:
     cdef size_t _init_buf_size
     cdef size_t _max_name_len
     cdef bint _qwp
-    # A native flush borrows this buffer even when it is caller-owned.
-    cdef bint _in_flight
+    # Native calls borrowing this buffer, even when it is caller-owned:
+    # 0 = none, > 0 = that many read-only (const) borrows, such as a
+    # ``flush(buffer, clear=False)``; -1 = one borrow that may modify it.
+    # Only updated while holding the GIL.
+    cdef int _native_borrows
     cdef object _row_complete_sender
 
     def __cinit__(self):
@@ -1284,7 +1287,7 @@ cdef class Buffer:
         self._init_buf_size = 0
         self._max_name_len = 0
         self._qwp = False
-        self._in_flight = False
+        self._native_borrows = 0
         self._row_complete_sender = None
 
     def __init__(
@@ -1335,14 +1338,41 @@ cdef class Buffer:
         line_sender_buffer_free(self._impl)
 
     cdef inline void_int _check_impl(self) except -1:
-        if self._in_flight:
+        """Check the buffer can be modified."""
+        if self._native_borrows != 0:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
-                'Buffer cannot be accessed while a native flush is using it.')
+                'Buffer cannot be modified while a native call is using it.')
         if self._impl == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'Buffer is not initialized.')
+
+    cdef inline void_int _check_readable(self) except -1:
+        """Check the buffer can be read: read-only native borrows allowed."""
+        if self._native_borrows < 0:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'Buffer cannot be accessed while a native call is '
+                'modifying it.')
+        if self._impl == NULL:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'Buffer is not initialized.')
+
+    cdef inline void _begin_native_borrow(self, bint exclusive) noexcept:
+        # Callers have already passed `_check_impl` (exclusive) or
+        # `_check_readable` (shared), so the transition is always valid.
+        if exclusive:
+            self._native_borrows = -1
+        else:
+            self._native_borrows += 1
+
+    cdef inline void _end_native_borrow(self, bint exclusive) noexcept:
+        if exclusive:
+            self._native_borrows = 0
+        else:
+            self._native_borrows -= 1
 
     @property
     def init_buf_size(self) -> int:
@@ -1371,7 +1401,7 @@ cdef class Buffer:
 
     def capacity(self) -> int:
         """The current buffer capacity."""
-        self._check_impl()
+        self._check_readable()
         return line_sender_buffer_capacity(self._impl)
 
     def clear(self):
@@ -1394,7 +1424,7 @@ cdef class Buffer:
 
         Equivalent (but cheaper) to ``len(bytes(buffer))``.
         """
-        self._check_impl()
+        self._check_readable()
         return line_sender_buffer_size(self._impl)
 
     def __bytes__(self) -> bytes:
@@ -1402,7 +1432,7 @@ cdef class Buffer:
         return self._to_bytes()
 
     cdef inline object _to_bytes(self):
-        self._check_impl()
+        self._check_readable()
         cdef line_sender_buffer_view view = line_sender_buffer_peek(self._impl)
         return PyBytes_FromStringAndSize(<const char *> view.buf, <Py_ssize_t> view.len)
 
@@ -2059,7 +2089,7 @@ cdef class Buffer:
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
         self._check_impl()
-        self._in_flight = True
+        self._begin_native_borrow(True)
         try:
             _dataframe(
                 auto_flush_blank(),
@@ -2071,7 +2101,7 @@ cdef class Buffer:
                 symbols,
                 at)
         finally:
-            self._in_flight = False
+            self._end_native_borrow(True)
         return self
 
 
@@ -8853,7 +8883,7 @@ cdef class Sender:
                 "dataframe() can\'t be called: Sender is closed."
             )
         self._native_in_flight = True
-        self._buffer._in_flight = True
+        self._buffer._begin_native_borrow(True)
         try:
             _dataframe(
                 af,
@@ -8865,7 +8895,7 @@ cdef class Sender:
                 symbols,
                 at)
         finally:
-            self._buffer._in_flight = False
+            self._buffer._end_native_borrow(True)
             self._native_in_flight = False
         return self
 
@@ -8912,6 +8942,10 @@ cdef class Sender:
         cdef Buffer active_buf
         cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
         cdef bint ok = False
+        # Only a clearing flush modifies the buffer; a kept flush borrows it
+        # read-only (`const line_sender_buffer*`), so concurrent reads and
+        # other kept flushes of the same buffer stay allowed.
+        cdef bint exclusive = clear
 
         self._check_not_in_own_callback('flush')
 
@@ -8928,7 +8962,10 @@ cdef class Sender:
                 QuestDBErrorCode.InvalidApiCall,
                 'flush() can\'t be called: Sender is closed.')
         if buffer is not None:
-            buffer._check_impl()
+            if exclusive:
+                buffer._check_impl()
+            else:
+                buffer._check_readable()
             self._check_buffer_protocol(buffer)
             c_buf = buffer._impl
         else:
@@ -8942,7 +8979,7 @@ cdef class Sender:
         # and a borrowed pointer to c_buf. A logging/signal handler must not
         # free the sender or mutate its buffer before the call returns.
         self._native_in_flight = True
-        active_buf._in_flight = True
+        active_buf._begin_native_borrow(exclusive)
         _ensure_doesnt_have_gil(&gs)
         if transactional:
             ok = line_sender_flush_and_keep_with_flags(
@@ -8957,7 +8994,7 @@ cdef class Sender:
         else:
             ok = line_sender_flush_and_keep(sender, c_buf, &err)
         _ensure_has_gil(&gs)
-        active_buf._in_flight = False
+        active_buf._end_native_borrow(exclusive)
         self._native_in_flight = False
         if ok and c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
@@ -9057,20 +9094,15 @@ cdef class Sender:
             self._check_buffer_protocol(buffer)
             c_buf = buffer._impl
         else:
+            buffer = self._buffer
             c_buf = self._buffer._impl
 
         self._native_in_flight = True
-        if buffer is not None:
-            buffer._in_flight = True
-        else:
-            self._buffer._in_flight = True
+        buffer._begin_native_borrow(True)
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_flush_and_get_fsn(sender, c_buf, &fsn, &err)
         _ensure_has_gil(&gs)
-        if buffer is not None:
-            buffer._in_flight = False
-        else:
-            self._buffer._in_flight = False
+        buffer._end_native_borrow(True)
         self._native_in_flight = False
         if not ok:
             if c_buf == self._buffer._impl:
@@ -9100,25 +9132,22 @@ cdef class Sender:
                 'Cannot flush explicitly inside a transaction')
         self._check_qwp_ws('flush_and_keep_and_get_fsn')
         if buffer is not None:
-            buffer._check_impl()
+            # Native borrows the buffer read-only (`const`), as
+            # `flush(buffer, clear=False)` does.
+            buffer._check_readable()
             self._check_buffer_protocol(buffer)
             c_buf = buffer._impl
         else:
+            buffer = self._buffer
             c_buf = self._buffer._impl
 
         self._native_in_flight = True
-        if buffer is not None:
-            buffer._in_flight = True
-        else:
-            self._buffer._in_flight = True
+        buffer._begin_native_borrow(False)
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_flush_and_keep_and_get_fsn(
             sender, c_buf, &fsn, &err)
         _ensure_has_gil(&gs)
-        if buffer is not None:
-            buffer._in_flight = False
-        else:
-            self._buffer._in_flight = False
+        buffer._end_native_borrow(False)
         self._native_in_flight = False
         if not ok:
             if c_buf == self._buffer._impl:

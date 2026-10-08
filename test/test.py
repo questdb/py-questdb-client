@@ -4738,6 +4738,85 @@ class TestBufferConstruction(unittest.TestCase):
         self.assertGreater(buf.capacity(), 0)
 
 
+class TestBufferNativeBorrow(unittest.TestCase):
+    """A buffer a native flush is using, observed from another thread."""
+
+    def _while_flushing(self, clear, probe):
+        # Holds server 1's reply so the flush stays inside native, with the
+        # GIL released, while `probe` runs on this thread.
+        release = threading.Event()
+        outcome = {}
+        with HttpServer() as server:
+            server.responses.append((release, 204, None, None))
+            buf = qi.Buffer(protocol_version=2)
+            buf.row('t', columns={'x': 1}, at=qi.TimestampNanos(1))
+            expected = bytes(buf)
+            conf = (f'http::addr=127.0.0.1:{server.port};'
+                    'protocol_version=2;auto_flush=off;')
+            with qi.Sender.from_conf(conf) as sender:
+                def flush():
+                    try:
+                        sender.flush(buf, clear=clear)
+                    except Exception as e:  # noqa: BLE001
+                        outcome['flush'] = e
+                flusher = threading.Thread(target=flush)
+                flusher.start()
+                try:
+                    deadline = time.monotonic() + 10
+                    while not server.requests:
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                    self.assertTrue(flusher.is_alive())
+                    probe(buf, expected)
+                finally:
+                    release.set()
+                    flusher.join(10)
+        self.assertNotIn('flush', outcome)
+        return buf, expected
+
+    def _assert_rejected(self, action):
+        with self.assertRaises(qi.QuestDBError) as cm:
+            action()
+        self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+
+    def test_kept_flush_allows_reads_and_parallel_kept_flushes(self):
+        # `flush(buf, clear=False)` borrows the buffer read-only, so the
+        # documented multi-database fan-out -- one sender per thread, one
+        # shared buffer -- and plain reads keep working while it runs.
+        def probe(buf, expected):
+            self.assertEqual(len(buf), len(expected))
+            self.assertEqual(bytes(buf), expected)
+            self.assertTrue(buf)
+            self.assertGreater(buf.capacity(), 0)
+            with HttpServer() as other:
+                conf = (f'http::addr=127.0.0.1:{other.port};'
+                        'protocol_version=2;auto_flush=off;')
+                with qi.Sender.from_conf(conf) as sender:
+                    sender.flush(buf, clear=False)
+                self.assertEqual(other.requests, [expected])
+            # Modifying it would race the native read.
+            self._assert_rejected(buf.clear)
+            self._assert_rejected(lambda: buf.reserve(1))
+            self._assert_rejected(lambda: buf.row(
+                't', columns={'x': 2}, at=qi.TimestampNanos(2)))
+
+        buf, expected = self._while_flushing(False, probe)
+        self.assertEqual(bytes(buf), expected)
+        buf.clear()  # Usable again once the flush has returned.
+
+    def test_clearing_flush_rejects_reads_and_writes(self):
+        # A clearing flush modifies the buffer when it completes.
+        def probe(buf, _expected):
+            self._assert_rejected(lambda: len(buf))
+            self._assert_rejected(lambda: bytes(buf))
+            self._assert_rejected(lambda: bool(buf))
+            self._assert_rejected(buf.capacity)
+            self._assert_rejected(buf.clear)
+
+        buf, _ = self._while_flushing(True, probe)
+        self.assertEqual(len(buf), 0)
+
+
 class TestReinitRejected(unittest.TestCase):
     """Calling `__init__` a second time on an already-initialized native
     object must raise instead of leaking or corrupting the impl state."""

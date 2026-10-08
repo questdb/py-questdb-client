@@ -149,8 +149,13 @@ needs none — it is additive, and an existing listener keeps working.
   even while the sender is idle. 5.0 accepted ``row()`` there. The read-only
   ``max_name_len``, ``protocol_version``, ``connection_events_dropped`` and
   ``connection_events_delivered`` also raise, from any thread, while the sender
-  is inside a native call such as ``flush()``. Hand listener events to another
-  sender or to the owning thread instead::
+  is inside a native call such as ``flush()``. So do ``len()``, ``bytes()``,
+  truthiness, ``capacity()``, ``reserve()``, ``clear()`` and ``row()`` on a
+  :class:`~questdb.ingress.Buffer` that a native call is modifying (the internal buffer
+  during ``flush()``, an explicit one during ``flush(buffer)`` or
+  ``dataframe()``); a ``flush(buffer, clear=False)`` only reads the buffer, so
+  concurrent reads and other ``clear=False`` flushes of it still work. Hand
+  listener events to another sender or to the owning thread instead::
 
       events = queue.SimpleQueue()
       sender = Sender.from_conf(conf, connection_listener=events.put)
