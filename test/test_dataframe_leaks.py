@@ -187,6 +187,10 @@ class TestOidcNativeLeak(unittest.TestCase):
             # token response strings that the cache-hit loop above never
             # touches. Re-authorize the same provider so RSS measures those
             # native free sites rather than only Python weakref bookkeeping.
+            # Only the token response carries PAYLOAD, so this loop needs the
+            # same measure=120 (twenty cycles per window) as the others: with
+            # ten per window, one leaked copy per cycle (2.5 MiB) stays under
+            # the 3 MiB allowance and the leak passes.
             auth.clear()
 
             def sign_in_cycle():
@@ -194,7 +198,7 @@ class TestOidcNativeLeak(unittest.TestCase):
                 self.assertEqual(len(auth.token()), len(self.PAYLOAD))
                 auth.clear()
 
-            _assert_no_leak(self, sign_in_cycle, warmup=4, measure=60)
+            _assert_no_leak(self, sign_in_cycle, warmup=4, measure=120)
 
 
 class TestLeakHarness(unittest.TestCase):
