@@ -7179,10 +7179,12 @@ _CLOSE_INSIDE_HANDLER = (
 _CLOSE_GAVE_UP = 'gave up waiting for a persistence-warning callback'
 
 
-@unittest.skipUnless(os.name == 'posix',
-                     'durable file token store requires POSIX')
-class OidcDiagnosticReentryTest(unittest.TestCase):
-    """Isolate native callback regressions: a broken guard can crash or hang."""
+class _IsolatedReentry:
+    """Run a test's exercise in a child interpreter.
+
+    Native callback regressions crash or hang the process: the child's
+    timeout turns that into one failed test instead of a dead suite.
+    """
 
     def _run_isolated(self, name, exercise, timeout):
         if os.environ.get('_QUESTDB_OIDC_REENTRY_CHILD') == name:
@@ -7196,11 +7198,17 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
             + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
         proc = subprocess.run(
             [sys.executable, '-m', 'unittest',
-             f'test_auth.OidcDiagnosticReentryTest.test_{name}'],
+             f'test_auth.{type(self).__name__}.test_{name}'],
             env=env, capture_output=True, text=True, timeout=timeout)
         self.assertEqual(proc.returncode, 0,
                          f'child failed ({proc.returncode}): '
                          f'{proc.stdout}{proc.stderr}')
+
+
+@unittest.skipUnless(os.name == 'posix',
+                     'durable file token store requires POSIX')
+class OidcDiagnosticReentryTest(_IsolatedReentry, unittest.TestCase):
+    """Isolate native callback regressions: a broken guard can crash or hang."""
 
     def _exercise_cursor_reentry(self, leased, consumer='arrow'):
         credential = [None]
@@ -7698,6 +7706,198 @@ class OidcDiagnosticReentryTest(unittest.TestCase):
                     logger.setLevel(old_level)
                     sender.close()
                     db.close()
+
+
+def _pool_claimed(db):
+    """Whether a ``close()`` has claimed the pool: closing it, or closed."""
+    return _client._debug_egress_pool_stats(db) is None
+
+
+class _ArmedRenderer(Renderer):
+    """Runs ``action`` from the first prompt after it is set."""
+
+    action = None
+
+    def on_prompt(self, response):
+        action, self.action = self.action, None
+        if action is not None:
+            action()
+
+
+class OidcRendererReentryTest(_IsolatedReentry, unittest.TestCase):
+    """A renderer callback that closes a pool another thread is leasing.
+
+    The lease's ACK waits for a reconnect that needs a new sign-in, and the
+    device flow cannot progress while one of its renderer callbacks runs. A
+    close from that callback that waited for the lease, or for a close on
+    another thread that waits for it, never returned.
+    """
+
+    @contextlib.contextmanager
+    def _lease_waiting_for_sign_in(self):
+        # Thread B holds a lease in an indefinite ACK wait. The server drops
+        # every connection without the never-issued `AT-refreshed`, and once
+        # the provider is cleared a reconnect has no token at all: only a new
+        # sign-in could supply one.
+        waiting = threading.Event()
+        renderer = _ArmedRenderer()
+        with OidcTestServer(
+                refresh_token_response=(
+                    400, {'error': 'invalid_grant'}, None),
+                device_expires_in=30) as idp:
+            auth = make_discovered_auth(idp, renderer=renderer)
+            auth.sign_in()
+            # Later device flows stay pending until cancelled.
+            idp.device_token_response = (
+                400, {'error': 'authorization_pending'}, None)
+            with QwpAckServer(
+                    close_after_upgrade_unless_authorization=(
+                        'Bearer AT-refreshed')) as qdb:
+                db = questdb.connect(
+                    f'ws::addr=127.0.0.1:{qdb.port};'
+                    'lazy_connect=true;sender_pool_min=0;query_pool_min=0;'
+                    'reconnect_initial_backoff_millis=25;'
+                    'reconnect_max_backoff_millis=25;'
+                    'close_flush_timeout_millis=0;',
+                    oidc_auth=auth)
+
+                def hold_lease():
+                    lease = db.sender()
+                    try:
+                        lease.row('events', columns={'value': 42},
+                                  at=questdb.ServerTimestamp)
+                        lease.flush(wait=False)
+                        waiting.set()
+                        lease.wait()
+                    except OidcError:
+                        pass  # The provider was closed under the wait.
+                    finally:
+                        lease.close(flush=False)
+
+                holder = threading.Thread(target=hold_lease, daemon=True)
+                holder.start()
+                try:
+                    self.assertTrue(waiting.wait(10))
+                    auth.clear()
+                    yield auth, db, holder, renderer
+                finally:
+                    # Closing the provider fails B's wait, which returns the
+                    # lease and lets the pool close.
+                    auth.close()
+                    holder.join(10)
+                    if not holder.is_alive():
+                        db.close()
+
+    @staticmethod
+    def _close_and_cancel(auth, db, observed):
+        """The renderer action: close the pool, then end the sign-in."""
+        started = time.monotonic()
+        try:
+            db.close()
+        except questdb.QuestDBError as exc:
+            observed.append((exc.code, str(exc), time.monotonic() - started))
+        else:
+            observed.append((None, '', time.monotonic() - started))
+        auth.cancel_sign_in()
+
+    def test_pool_close_from_renderer_callback(self):
+        self._run_isolated('pool_close_from_renderer_callback',
+                           self._exercise_pool_close_from_renderer, 60)
+
+    def _exercise_pool_close_from_renderer(self):
+        observed = []
+        with self._lease_waiting_for_sign_in() as (auth, db, holder, renderer):
+            renderer.action = lambda: self._close_and_cancel(
+                auth, db, observed)
+            with self.assertRaises(OidcCancelledError):
+                auth.sign_in()
+            self.assertEqual(len(observed), 1, observed)
+            code, message, elapsed = observed[0]
+            self.assertEqual(code, questdb.QuestDBErrorCode.InvalidApiCall)
+            self.assertIn(
+                'outstanding lease(s) inside an OIDC callback', message)
+            # It waited for the lease a bounded time, then gave up and put
+            # the pool back for it.
+            self.assertGreaterEqual(elapsed, 1.0)
+            self.assertLess(elapsed, 10.0)
+            self.assertTrue(holder.is_alive())
+            self.assertFalse(_pool_claimed(db))
+
+    def test_pool_close_from_renderer_during_a_concurrent_close(self):
+        self._run_isolated(
+            'pool_close_from_renderer_during_a_concurrent_close',
+            self._exercise_renderer_close_during_concurrent_close, 60)
+
+    def _exercise_renderer_close_during_concurrent_close(self):
+        # Thread C is already closing the pool and waits for B's lease, so a
+        # renderer close waiting for C waits for that lease too.
+        observed = []
+        closed = []
+        with self._lease_waiting_for_sign_in() as (auth, db, holder, renderer):
+            closer = threading.Thread(
+                target=lambda: closed.append(db.close()), daemon=True)
+            closer.start()
+            deadline = time.monotonic() + 10
+            while not _pool_claimed(db):
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.01)
+            renderer.action = lambda: self._close_and_cancel(
+                auth, db, observed)
+            with self.assertRaises(OidcCancelledError):
+                auth.sign_in()
+            self.assertEqual(len(observed), 1, observed)
+            code, message, elapsed = observed[0]
+            self.assertEqual(code, questdb.QuestDBErrorCode.InvalidApiCall)
+            self.assertIn(
+                'concurrent close() on another thread inside an OIDC '
+                'callback', message)
+            self.assertLess(elapsed, 10.0)
+            self.assertTrue(closer.is_alive())
+            # C still closes the pool once the lease is returned.
+            auth.close()
+            closer.join(10)
+            self.assertEqual(closed, [None])
+            self.assertTrue(_pool_claimed(db))
+
+    def test_close_waiting_for_a_renderer_close_takes_over(self):
+        self._run_isolated(
+            'close_waiting_for_a_renderer_close_takes_over',
+            self._exercise_close_takes_over_from_renderer, 60)
+
+    def _exercise_close_takes_over_from_renderer(self):
+        # Thread C's close waits for the renderer's, which has claimed the
+        # pool. When the renderer's close gives up, C must close the pool
+        # itself rather than return with it still open.
+        observed = []
+        closed = []
+        with self._lease_waiting_for_sign_in() as (auth, db, holder, renderer):
+            def close_on_c():
+                deadline = time.monotonic() + 10
+                while (not _pool_claimed(db)
+                        and time.monotonic() < deadline):
+                    time.sleep(0.01)
+                closed.append(db.close())
+
+            closer = threading.Thread(target=close_on_c, daemon=True)
+
+            def close_from_prompt():
+                closer.start()
+                self._close_and_cancel(auth, db, observed)
+
+            renderer.action = close_from_prompt
+            with self.assertRaises(OidcCancelledError):
+                auth.sign_in()
+            self.assertEqual(len(observed), 1, observed)
+            self.assertEqual(
+                observed[0][0], questdb.QuestDBErrorCode.InvalidApiCall)
+            # C took the close over and now waits for the lease itself.
+            closer.join(1.0)
+            self.assertTrue(closer.is_alive())
+            self.assertTrue(_pool_claimed(db))
+            auth.close()
+            closer.join(10)
+            self.assertEqual(closed, [None])
+            self.assertTrue(_pool_claimed(db))
 
 
 class OidcSenderReentryTest(unittest.TestCase):

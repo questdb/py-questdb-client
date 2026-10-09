@@ -1171,26 +1171,38 @@ cdef class SenderTransaction:
 
         The table name is taken from the transaction.
         """
+        # Referenced for the whole call: the serializer writes into the
+        # buffer through raw pointers.
+        cdef Buffer buffer = self._sender._buffer
         if at is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidTimestamp,
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
-        if self._sender._buffer is None:
+        if buffer is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 "dataframe() can\'t be called: Sender is closed."
             )
         self._sender._check_not_in_own_callback('transaction.dataframe')
-        _dataframe(
-            auto_flush_blank(),
-            self._sender._buffer._impl,
-            self._sender._buffer._b,
-            df,
-            self._table_name,
-            None, # table_name_col,
-            symbols,
-            at)
+        # Borrow the buffer as `Sender.dataframe()` does, so that reading it
+        # or closing the sender from another thread raises instead of racing
+        # the serializer or freeing the buffer under it.
+        self._sender._native_in_flight = True
+        buffer._begin_native_borrow(True)
+        try:
+            _dataframe(
+                auto_flush_blank(),
+                buffer._impl,
+                buffer._b,
+                df,
+                self._table_name,
+                None, # table_name_col,
+                symbols,
+                at)
+        finally:
+            buffer._end_native_borrow(True)
+            self._sender._native_in_flight = False
         return self
 
     def commit(self):
@@ -7563,11 +7575,20 @@ cdef class QuestDB:
         worker delivering the warning or its sender leases. A close on any
         other thread waits for such a handler to return; it gives up with the
         same error after two seconds, which is how a close the handler
-        delegated to another thread and waits for is released.
+        delegated to another thread and waits for is released. Called from
+        any other OIDC callback -- a renderer callback, or a
+        persistence-warning handler of another provider -- it waits at most
+        two seconds for leases other threads hold, or for a concurrent
+        ``close()`` on another thread, and then raises the same error: such
+        a lease may be blocked on a token the provider cannot supply until
+        the callback returns.
         """
         cdef questdb_db* db = NULL
         cdef PyThreadState* gs = NULL
         cdef bint closed = False
+        cdef bint in_oidc_callback
+        cdef double deadline
+        cdef double remaining
         oidc_auth = self._oidc_auth
         if _oidc_diagnostic_on_this_thread(oidc_auth):
             raise QuestDBError(
@@ -7575,44 +7596,84 @@ cdef class QuestDB:
                 'QuestDB.close() cannot run inside its OIDC provider\'s '
                 'persistence-warning callback. Return from the callback '
                 'before closing the pool.')
-        # Wait outside `_state_cond`: the callback's thread may need it to
-        # release a pool use before the callback can return.
-        if not _oidc_wait_diagnostics_drained(
-                oidc_auth, _OIDC_CLOSE_DIAGNOSTIC_WAIT_SECS):
-            raise QuestDBError(
-                QuestDBErrorCode.InvalidApiCall,
-                'QuestDB.close() gave up waiting for a persistence-warning '
-                'callback of its OIDC provider to return on another thread. '
-                'If that callback is waiting for this close, return from it '
-                'first; otherwise retry the close.')
-        with self._state_cond:
-            if self._uses_by_thread.get(_db_thread_token(), 0):
+        # Any other OIDC callback on this thread -- a renderer event, or
+        # another provider's persistence warning -- may be what a lease on
+        # another thread is waiting for: its ACK can need a token the provider
+        # cannot supply until the callback returns. Bound every wait below
+        # then, as `PooledSender._lock_enter()` bounds a wait for the lease.
+        in_oidc_callback = _oidc_callback_on_this_thread()
+        while True:
+            # Wait outside `_state_cond`: the callback's thread may need it to
+            # release a pool use before the callback can return.
+            if not _oidc_wait_diagnostics_drained(
+                    oidc_auth, _OIDC_CLOSE_DIAGNOSTIC_WAIT_SECS):
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
-                    'QuestDB.close() cannot wait for a pool operation or '
-                    'lease held by the calling thread. Finish the operation '
-                    'or close the lease first.')
-            db = self._db
-            if db == NULL:
+                    'QuestDB.close() gave up waiting for a '
+                    'persistence-warning callback of its OIDC provider to '
+                    'return on another thread. If that callback is waiting '
+                    'for this close, return from it first; otherwise retry '
+                    'the close.')
+            with self._state_cond:
+                if self._uses_by_thread.get(_db_thread_token(), 0):
+                    raise QuestDBError(
+                        QuestDBErrorCode.InvalidApiCall,
+                        'QuestDB.close() cannot wait for a pool operation or '
+                        'lease held by the calling thread. Finish the '
+                        'operation or close the lease first.')
+                db = self._db
+                if db != NULL:
+                    self._db = NULL
+                    self._closing = True
+                    break
                 # A caller dispatching for this handle must not wait here:
                 # the in-flight closer joins this very thread.
-                if not _on_dispatch_thread_for(
+                if _on_dispatch_thread_for(
                         self._error_handler, self._connection_listener):
-                    while self._closing:
-                        if (not self._state_cond.wait(timeout=5.0)
-                                and self._closing):
-                            warnings.warn(
-                                'QuestDB.close() is still waiting for a '
-                                'concurrent close() on another thread to '
-                                'finish.',
-                                UserWarning)
-                return
-            self._db = NULL
-            self._closing = True
+                    return
+                deadline = time.monotonic() + _OIDC_CLOSE_DIAGNOSTIC_WAIT_SECS
+                while self._closing:
+                    if in_oidc_callback:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise QuestDBError(
+                                QuestDBErrorCode.InvalidApiCall,
+                                'QuestDB.close() cannot wait for a concurrent '
+                                'close() on another thread inside an OIDC '
+                                'callback: that close may be waiting for a '
+                                'lease that needs this callback to return. '
+                                'Return from the callback before closing the '
+                                'pool.')
+                        self._state_cond.wait(remaining)
+                    elif (not self._state_cond.wait(timeout=5.0)
+                            and self._closing):
+                        warnings.warn(
+                            'QuestDB.close() is still waiting for a '
+                            'concurrent close() on another thread to '
+                            'finish.',
+                            UserWarning)
+                if self._db == NULL:
+                    return
+                # The concurrent close gave up -- inside an OIDC callback, or
+                # interrupted -- and put the pool back. Retry the close rather
+                # than return with the pool still open.
         try:
             with self._state_cond:
+                deadline = time.monotonic() + _OIDC_CLOSE_DIAGNOSTIC_WAIT_SECS
                 while self._active_uses != 0:
-                    if (not self._state_cond.wait(timeout=5.0)
+                    if in_oidc_callback:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise QuestDBError(
+                                QuestDBErrorCode.InvalidApiCall,
+                                'QuestDB.close() cannot wait for '
+                                f'{self._active_uses} outstanding lease(s) '
+                                'inside an OIDC callback: other threads hold '
+                                'them and may be waiting for this callback to '
+                                'return. Return from the callback before '
+                                'closing the pool.')
+                        self._state_cond.wait(remaining)
+                    elif (not self._state_cond.wait(timeout=5.0)
                             and self._active_uses != 0):
                         warnings.warn(
                             'QuestDB.close() is waiting for '

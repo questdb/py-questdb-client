@@ -152,8 +152,9 @@ needs none — it is additive, and an existing listener keeps working.
   is inside a native call such as ``flush()``. So do ``len()``, ``bytes()``,
   truthiness, ``capacity()``, ``reserve()``, ``clear()`` and ``row()`` on a
   :class:`~questdb.ingress.Buffer` that a native call is modifying (the internal buffer
-  during ``flush()``, an explicit one during ``flush(buffer)`` or
-  ``dataframe()``); a ``flush(buffer, clear=False)`` only reads the buffer, so
+  during ``flush()``, an explicit one during ``flush(buffer)``, or any one
+  during ``dataframe()``, ``SenderTransaction.dataframe()`` included); a
+  ``flush(buffer, clear=False)`` only reads the buffer, so
   concurrent reads and other ``clear=False`` flushes of it still work. Hand
   listener events to another sender or to the owning thread instead::
 

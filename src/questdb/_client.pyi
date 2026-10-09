@@ -1452,6 +1452,12 @@ class QuestDB:
         A close on any other thread waits for that callback to return, and
         gives up with the same error after two seconds; that is how a close
         the callback delegated to another thread, and waits for, is released.
+        Called from any other OIDC callback -- a renderer callback, or a
+        persistence-warning handler of another provider -- it waits at most
+        two seconds for leases other threads hold, or for a concurrent
+        ``close()`` on another thread, and then raises the same error: such a
+        lease may be blocked on a token the provider cannot supply until the
+        callback returns.
         """
 
     def __exit__(self, exc_type, _exc_val, _exc_tb): ...

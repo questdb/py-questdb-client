@@ -76,6 +76,7 @@ from test_auth import (
     OidcPoolDataframeFailoverTest,
     OidcReaderLifetimeTest,
     OidcReaderMidStreamErrorTest,
+    OidcRendererReentryTest,
     OidcReviewFixTest,
     OidcSenderReentryTest,
     ProviderCycleSafetyTest,
@@ -4943,6 +4944,64 @@ class TestBufferNativeBorrow(unittest.TestCase):
             'flush_and_keep_and_get_fsn', probe)
         self.assertEqual((len(buf), bytes(buf)), expected)
         buf.clear()
+
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_transaction_dataframe_rejects_reads_and_close(self):
+        # `txn.dataframe()` serializes into the sender's internal buffer, as
+        # `Sender.dataframe()` does. Reading that buffer from another thread
+        # raced the serializer, and closing the sender freed the buffer under
+        # it. A tz-aware cell runs its tzinfo during serialization: park the
+        # serializing thread there while this one probes the sender.
+        parked = threading.Event()
+        resume = threading.Event()
+        serializer = []
+
+        class ParkingTz(datetime.tzinfo):
+            def utcoffset(self, dt):
+                if (threading.current_thread() is serializer[0]
+                        and not parked.is_set()):
+                    parked.set()
+                    resume.wait(10)
+                return datetime.timedelta(0)
+
+            def dst(self, dt):
+                return datetime.timedelta(0)
+
+            def tzname(self, dt):
+                return 'UTC'
+
+        df = pd.DataFrame({'when': pd.Series(
+            [datetime.datetime(2024, 1, 1, tzinfo=ParkingTz())],
+            dtype=object)})
+        outcome = {}
+        with HttpServer() as server:
+            conf = (f'http::addr=127.0.0.1:{server.port};'
+                    'protocol_version=2;auto_flush=off;')
+            with qi.Sender.from_conf(conf) as sender:
+                def run():
+                    try:
+                        with sender.transaction('t') as txn:
+                            txn.dataframe(df, at=qi.ServerTimestamp)
+                    except Exception as e:  # noqa: BLE001
+                        outcome['txn'] = e
+
+                serializer.append(threading.Thread(target=run))
+                serializer[0].start()
+                try:
+                    self.assertTrue(parked.wait(10))
+                    self._assert_rejected(lambda: len(sender))
+                    self._assert_rejected(lambda: bytes(sender))
+                    self._assert_rejected(lambda: bool(sender))
+                    # Not the transaction's own refusal to flush: that one
+                    # still closed the sender.
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError, 'in a native operation'):
+                        sender.close()
+                finally:
+                    resume.set()
+                    serializer[0].join(10)
+                self.assertNotIn('txn', outcome)
+            self.assertEqual(len(server.requests), 1)
 
 
 class TestReinitRejected(unittest.TestCase):

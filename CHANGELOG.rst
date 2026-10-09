@@ -184,7 +184,8 @@ counters when the sender is not flushing.
 Likewise, a :class:`Buffer <questdb.ingress.Buffer>` that a native call is modifying --
 the sender's internal buffer during ``flush()``, an explicit buffer during
 ``flush(buffer)`` (``clear=True``) or ``flush_and_get_fsn(buffer)``, or any
-buffer during ``dataframe()`` -- now raises that error from ``len()``,
+buffer during ``dataframe()`` (``SenderTransaction.dataframe()`` included) --
+now raises that error from ``len()``,
 ``bytes()``, truthiness (``if buffer:`` / ``if sender:``), ``capacity()``,
 ``reserve()``, ``clear()`` and ``row()``, from any thread, instead of reading or
 modifying memory the native call is using. A ``flush(buffer, clear=False)`` or
@@ -329,7 +330,9 @@ Highlights:
 * A persistence-warning handler or renderer callback that uses a
   :class:`~questdb.PooledSender` lease another thread is blocked in (for
   example ``wait()``) gives up after two seconds with
-  ``QuestDBError(InvalidApiCall)`` instead of deadlocking both threads.
+  ``QuestDBError(InvalidApiCall)`` instead of deadlocking both threads. So
+  does a renderer callback that closes the :class:`~questdb.QuestDB` pool while
+  another thread still holds a lease.
 * Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
   :func:`~questdb.auth.psycopg_connect`) that wire the token into PG-wire as the
   ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
@@ -466,6 +469,10 @@ Other changes
   directly. Previously, setting any of them made every flush fail with a
   misleading ``Connection refused`` without contacting anything, because the
   proxy was read but never dialled. HTTP proxies remain unsupported.
+- A :meth:`QuestDB.close <questdb.QuestDB.close>` that waits for a ``close()``
+  already running on another thread now closes the pool itself if that other
+  close gives up -- interrupted by ``Ctrl-C``, or bounded inside an OIDC
+  callback -- instead of returning with the pool still open.
 
 5.0.0 (2026-07-27)
 ------------------

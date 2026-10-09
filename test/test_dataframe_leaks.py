@@ -106,8 +106,11 @@ class TestOidcNativeLeak(unittest.TestCase):
 
     Covered: the builder free (both constructors), the auth free, the token
     free on success, and the ``questdb_error`` free in ``_oidc_err_to_py`` --
-    driven with a native error whose message carries the large payload, so a
-    dropped free is visible to the RSS harness. Not covered: the interrupt and
+    driven with a CA bundle the native build cannot open, whose error message
+    carries the large payload, so a dropped free is visible to the RSS
+    harness. That loop asserts the error is native: a path that Python
+    validation rejects first never reaches the free, and leaves the test green
+    whether or not the free happens. Not covered: the interrupt and
     callback-cancel error frees, which need a signal or a renderer callback
     landing mid-call on every iteration.
     """
@@ -143,19 +146,26 @@ class TestOidcNativeLeak(unittest.TestCase):
 
         def native_error():
             try:
-                # Rejected by the native builder (an unexpanded leading `~`),
-                # whose error message quotes the whole path -- so each
-                # iteration allocates a large `questdb_error` that only
-                # `_oidc_err_to_py` frees. Every other loop here succeeds, or
-                # fails in Python before any native error exists.
+                # The native build cannot open this CA bundle, and its error
+                # message quotes the whole path -- so each iteration allocates
+                # a large `questdb_error` that only `_oidc_err_to_py` frees.
+                # Every other loop here succeeds, or fails in Python before
+                # any native error exists. So would a path Python rejects
+                # first, such as a leading `~` it cannot expand: hence the
+                # check for the native message.
                 OidcDeviceAuth(
                     'questdb',
                     'https://idp.example/device',
                     'https://idp.example/token',
-                    ca_bundle='~' + self.PAYLOAD,
+                    ca_bundle='/nonexistent-qdb-ca/' + self.PAYLOAD,
                     interactive=False, open_browser=False)
             except OidcError as exc:
-                assert len(str(exc)) > len(self.PAYLOAD), str(exc)[:200]
+                message = str(exc)
+                self.assertTrue(
+                    'Could not open the CA bundle' in message, message[:200])
+                self.assertGreater(len(message), len(self.PAYLOAD))
+            else:
+                self.fail('the CA bundle path was accepted')
 
         for name, work in (
                 ('direct builder/auth success', direct_success),

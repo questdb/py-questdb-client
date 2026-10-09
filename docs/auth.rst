@@ -318,8 +318,13 @@ lease whose acknowledgement depends on the warning callback returning. A
 ``db.close()`` on any other thread waits for the handler to return, and gives
 up with the same error after two seconds. That bound is what releases a close
 the handler delegated to another thread and joins; it also means an unrelated
-close fails, and can simply be retried, if a handler runs for longer. Close the
-pool after the handler returns instead. The binding imports
+close fails, and can simply be retried, if a handler runs for longer. A
+renderer callback, or a persistence-warning handler of a different provider,
+may close the pool, but that ``db.close()`` waits at most two seconds for
+leases other threads hold -- or for a ``db.close()`` already running on another
+thread -- and then raises the same error, because such a lease may be blocked
+on a token the provider cannot supply until the callback returns. In both
+cases, close the pool after the callback returns instead. The binding imports
 ``logging`` before registering its own shutdown hook, so the hook detaches OIDC
 callbacks while logging handlers are still live;
 ``logging.shutdown()`` runs afterwards. Diagnostics produced after the detach
