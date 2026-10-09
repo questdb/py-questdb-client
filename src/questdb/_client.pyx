@@ -204,6 +204,7 @@ class QuestDBErrorCode(Enum):
     BatchTooLarge = line_sender_error_batch_too_large
     StoreResendRequired = line_sender_error_store_resend_required
     SymbolDictFull = line_sender_error_symbol_dict_full
+    QueryTimeout = line_sender_error_query_timeout
     # Python-only sentinel with no backing FFI code: raised by the Cython
     # DataFrame-shape validation path. Sits in a reserved high band, disjoint
     # from the contiguous FFI code space, so an appended FFI variant can never
@@ -388,6 +389,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return QuestDBErrorCode.StoreResendRequired
     elif code == line_sender_error_symbol_dict_full:
         return QuestDBErrorCode.SymbolDictFull
+    elif code == line_sender_error_query_timeout:
+        return QuestDBErrorCode.QueryTimeout
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -6468,7 +6471,7 @@ cdef class QuestDB:
             if db_use:
                 self._end_db_use()
 
-    def execute(self, str sql, object binds=None):
+    def execute(self, str sql, object binds=None, *, object timeout=None):
         """
         Run a statement and discard whatever it returns.
 
@@ -6480,14 +6483,21 @@ cdef class QuestDB:
         ``SELECT``) is discarded; use :meth:`query` when you want the
         result. The connection's SYMBOL dictionary is left untouched.
 
-        ``binds`` behaves exactly as on :meth:`query`. Returns
-        ``None``: the protocol carries no rows-affected count.
+        ``binds`` and ``timeout`` behave exactly as on :meth:`query`.
+
+        Returns the statement's ``EXEC_DONE`` report as an
+        ``(op_type, rows_affected)`` tuple, or ``None`` for a statement
+        that streamed a result set instead (a ``SELECT``). See
+        :attr:`QueryResult.exec_done` for the caveats on
+        ``rows_affected``.
         """
         self._begin_db_use('execute')
         try:
-            result = self.query(sql, binds, reset_symbol_dict=False)
+            result = self.query(
+                sql, binds, reset_symbol_dict=False, timeout=timeout)
             try:
                 result._drain()
+                return result.exec_done
             finally:
                 result.close()
         finally:
@@ -6498,7 +6508,8 @@ cdef class QuestDB:
             str sql,
             object binds=None,
             *,
-            bint reset_symbol_dict=True):
+            bint reset_symbol_dict=True,
+            object timeout=None):
         """
         Execute a SQL query and return a :class:`QueryResult`.
 
@@ -6578,11 +6589,13 @@ cdef class QuestDB:
             raise TypeError(
                 '"binds" must be a list or tuple of positional bind '
                 f'parameters (or None), not {_fqn(type(binds))}')
+        cdef uint64_t timeout_ms = _query_timeout_to_millis(timeout)
         db = self._begin_db_use('query')
         try:
             reader_handle = _borrow_reader_from_pool(db)
             cursor_handle = _execute_query(
-                reader_handle, sql, binds, reset_symbol_dict)
+                reader_handle, sql, binds, reset_symbol_dict, True,
+                timeout_ms)
         finally:
             self._end_db_use()
         return QueryResult(cursor_handle)
@@ -8966,7 +8979,8 @@ cdef class PooledReader:
             str sql,
             object binds=None,
             *,
-            bint reset_symbol_dict=True) -> QueryResult:
+            bint reset_symbol_dict=True,
+            object timeout=None) -> QueryResult:
         """
         Execute a SQL query on the lease's connection and return a
         :class:`QueryResult`.
@@ -8980,10 +8994,14 @@ cdef class PooledReader:
         """
         cdef _CursorHandle cursor_handle
         cdef _CursorHandle last
+        cdef uint64_t timeout_ms
         if binds is not None and not isinstance(binds, (list, tuple)):
             raise TypeError(
                 '"binds" must be a list or tuple of positional bind '
                 f'parameters (or None), not {_fqn(type(binds))}')
+        # Validated before the lease is touched, so a bad argument is a
+        # plain TypeError / ValueError and never disturbs the connection.
+        timeout_ms = _query_timeout_to_millis(timeout)
         with self._lock:
             self._check_open('query')
             last = self._last_cursor
@@ -9003,26 +9021,30 @@ cdef class PooledReader:
                         'this lease and obtain a new one with '
                         'QuestDB.reader().')
             cursor_handle = _execute_query(
-                self._reader, sql, binds, reset_symbol_dict, False)
+                self._reader, sql, binds, reset_symbol_dict, False,
+                timeout_ms)
             self._last_cursor = cursor_handle
         return QueryResult(cursor_handle)
 
-    def execute(self, str sql, object binds=None):
+    def execute(self, str sql, object binds=None, *, object timeout=None):
         """
         Run a statement on the lease's connection and discard whatever
         it returns.
 
-        Mirrors :meth:`QuestDB.execute`. The result is drained to its
-        clean end, so the lease stays usable for the next call, and the
-        connection's SYMBOL dictionary is left untouched — an
+        Mirrors :meth:`QuestDB.execute`, including the
+        ``(op_type, rows_affected)`` return value. The result is drained
+        to its clean end, so the lease stays usable for the next call,
+        and the connection's SYMBOL dictionary is left untouched — an
         interleaved statement does not invalidate a warm dictionary
         built with ``reset_symbol_dict=False``.
         """
         with self._lock:
             self._check_open('execute')
-        result = self.query(sql, binds, reset_symbol_dict=False)
+        result = self.query(
+            sql, binds, reset_symbol_dict=False, timeout=timeout)
         try:
             result._drain()
+            return result.exec_done
         finally:
             result.close()
 

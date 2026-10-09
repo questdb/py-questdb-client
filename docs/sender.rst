@@ -1125,11 +1125,88 @@ SQL, drains the result and returns the pooled connection in one call
 Statement output (a ``COPY`` status row, admin-function rows, a stray
 ``SELECT``) is discarded — use ``query()`` when you want it.
 
+``execute()`` returns the statement's ``(op_type, rows_affected)``, or
+``None`` for a statement that streamed a result set instead. The same report
+is on :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` once a
+result has been drained. ``rows_affected`` is meaningful for ``INSERT`` and
+``UPDATE``; statements executed at parse time currently report an unsigned
+``-1``, so treat a value at or above ``2 ** 63`` as unknown::
+
+    op_type, rows = db.execute('INSERT INTO trades VALUES (now(), \'AAPL\', 1.5)')
+
 Positional bind parameters fill the ``$1``..``$N`` placeholders — always
 prefer them over interpolating values into the SQL text. Supported bind
 types: ``None`` (SQL NULL), ``bool``, ``int``, ``float``, ``str``,
 ``datetime.datetime``, :class:`TimestampMicros <questdb.TimestampMicros>`,
 :class:`TimestampNanos <questdb.TimestampNanos>`, and ``uuid.UUID``.
+
+Rows of Python objects
+----------------------
+
+For a row-shaped consumer — a PEP 249 cursor, dbt, plain scripting —
+:func:`QueryResult.iter_rows <questdb.QueryResult.iter_rows>` yields one
+tuple per row and
+:func:`QueryResult.columns <questdb.QueryResult.columns>` gives
+``(name, type_name)`` pairs, with neither pyarrow nor pandas involved::
+
+    with db.query('SELECT ts, symbol, price FROM trades LIMIT 3') as result:
+        for name, type_name in result.columns():
+            print(name, type_name)       # ts TIMESTAMP / symbol SYMBOL / ...
+        for ts, symbol, price in result.iter_rows():
+            print(ts, symbol, price)
+
+``type_name`` is the QuestDB DDL spelling (``VARCHAR``, ``TIMESTAMP_NS``,
+``IPv4``, ``GEOHASH(8c)``, ``DECIMAL(38,2)``, ``DOUBLE[]``), so it can be
+compared against ``tables()`` / ``information_schema.questdb_columns()``
+without normalising. Asking for the columns does not consume the rows, so a
+DB-API-style caller can read its ``description`` first; ``SELECT ... LIMIT 0``
+reads a schema without fetching anything. Both are empty for a statement that
+ships no result set — see ``exec_done`` for that outcome.
+
+Rows stream one batch at a time and map SQL NULL to ``None``. Timestamps are
+timezone-aware UTC (``TIMESTAMP_NS`` truncated to microseconds, since
+``datetime`` has no nanosecond field), ``DECIMAL`` keeps its scale,
+``GEOHASH`` comes back as the text form the server itself prints, ``IPv4`` as
+``ipaddress.IPv4Address``, and arrays as ``numpy.ndarray``. ``BOOLEAN``,
+``BYTE`` and ``SHORT`` have no NULL representation in QuestDB, so an inserted
+``null`` reads back as ``False`` / ``0``.
+
+This path costs an allocation per cell, so it suits small result sets —
+metadata lookups, test rows, schema probes. Large analytical results belong
+on the columnar methods below.
+
+Per-query timeouts
+------------------
+
+Every query otherwise runs under the server-wide ``query.timeout`` (60 s by
+default), which is short for a long transform. ``query_timeout_ms`` in the
+connection string sets a default for every query on a handle, and
+``timeout=`` overrides it per query (milliseconds, or a
+``datetime.timedelta``)::
+
+    with questdb.connect('ws::addr=localhost:9000;query_timeout_ms=600000;') as db:
+        db.execute('INSERT INTO ohlc SELECT ... FROM trades SAMPLE BY 1m')
+        db.execute('REFRESH MATERIALIZED VIEW ohlc_1m FULL', timeout=3_600_000)
+
+The server applies no ceiling, so a value above ``query.timeout`` is
+honoured. ``0`` or ``None`` means no per-query timeout.
+
+This needs a server advertising ``CAP_QUERY_TIMEOUT``. Against an older one
+the query fails fast with ``QuestDBErrorCode.QueryTimeout`` instead of
+silently running under the server default — raise the server's
+``query.timeout`` instead, or clear the per-query timeout. On expiry the
+error carries that same code and the pooled connection stays open and
+authenticated, so the next query runs on it without reconnecting.
+
+.. warning::
+
+   Do not retry a write after a timeout. A statement that completes past its
+   timeout is reported as done rather than as a timeout, precisely so a retry
+   cannot apply it twice, and a DDL / ``INSERT`` / ``UPDATE`` that timed out
+   waiting for the table writer may still be applied afterwards.
+
+Columnar results
+----------------
 
 A :class:`QueryResult <questdb.QueryResult>` can be materialised with ``to_arrow`` / ``to_pandas`` or
 streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /

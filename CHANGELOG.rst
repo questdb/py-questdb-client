@@ -7,6 +7,70 @@ Changelog
 5.0.1 (unreleased)
 ------------------
 
+- :class:`QueryResult <questdb.QueryResult>` can now be read as rows of
+  Python objects, without pyarrow or pandas. :meth:`iter_rows
+  <questdb.QueryResult.iter_rows>` streams one batch at a time and yields a
+  tuple per row, with ``None`` for SQL NULL; :meth:`columns
+  <questdb.QueryResult.columns>` gives ``(name, type_name)`` pairs using the
+  QuestDB DDL spelling (``VARCHAR``, ``TIMESTAMP_NS``, ``IPv4``,
+  ``GEOHASH(8c)``, ``DECIMAL(38,2)``, ``DOUBLE[]``), so they can be compared
+  against ``tables()`` / ``information_schema.questdb_columns()`` without
+  normalising. Asking for the columns does not consume the rows, so a
+  DB-API-style caller can read its ``description`` first. Intended for
+  row-shaped consumers and small result sets — metadata lookups, test rows,
+  ``limit 0`` schema probes; large analytical results still belong on
+  ``to_pandas()`` / ``to_arrow()``, which stay columnar.
+
+  Timestamps come back timezone-aware in UTC, matching what ``to_arrow()``
+  labels them. ``TIMESTAMP_NS`` is truncated to microseconds, because
+  ``datetime`` has no nanosecond field. A ``CHAR`` whose code point is 0 is
+  ``None``, matching how the server's own text protocol renders it. A
+  ``DECIMAL`` keeps its scale. ``BOOLEAN``, ``BYTE`` and ``SHORT`` have no
+  NULL representation in QuestDB, so an inserted ``null`` reads back as
+  ``False`` / ``0``.
+
+  Note for ``UUID`` columns: this path returns the canonical RFC-4122 value,
+  agreeing with ``to_arrow()`` and with the server's own text output.
+  ``to_pandas()`` still returns the byte-reversed value — a pre-existing
+  defect, scheduled to be corrected by the 5.1 UUID byte-order change, which
+  also affects UUID *bind* parameters in the same way.
+
+- :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` reports a
+  non-SELECT statement's terminal ``EXEC_DONE`` as
+  ``(op_type, rows_affected)`` once the result has been drained, and
+  :meth:`QuestDB.execute <questdb.QuestDB.execute>` /
+  :meth:`PooledReader.execute <questdb.PooledReader.execute>` return the same
+  tuple instead of ``None``. It is ``None`` for a statement that streamed a
+  result set. The protocol does carry the count — the previous
+  documentation saying otherwise was wrong. ``rows_affected`` is meaningful
+  for ``INSERT`` and ``UPDATE``; statements executed at parse time currently
+  report an unsigned ``-1``, so treat a value at or above ``2 ** 63`` as
+  unknown.
+
+- Queries can be given their own timeout instead of running under the
+  server-wide ``query.timeout``. ``query_timeout_ms`` in the connection
+  string sets a default for every query on that handle (``0``, the default,
+  means none), and ``timeout=`` on ``query()`` / ``execute()`` of both
+  :class:`QuestDB <questdb.QuestDB>` and
+  :class:`PooledReader <questdb.PooledReader>` overrides it per query. An
+  ``int`` is milliseconds; a ``datetime.timedelta`` works too, with a
+  positive value below one millisecond rounded *up* to 1 ms. The server
+  applies no ceiling, so a value above ``query.timeout`` is honoured — which
+  is the point for a long transform.
+
+  Requires a server advertising ``CAP_QUERY_TIMEOUT``
+  (questdb/questdb#7768). Against an older one the query fails fast with the
+  new :class:`QuestDBErrorCode.QueryTimeout
+  <questdb.QuestDBErrorCode>` rather than silently running under the server
+  default; raise the server's ``query.timeout`` instead, or clear the
+  per-query timeout. On expiry the error carries that same code and the
+  pooled connection stays open and authenticated, so the next query runs on
+  it without reconnecting. **Do not retry a write after a timeout:** a
+  statement that completes past its timeout is reported as ``EXEC_DONE``
+  rather than a timeout, precisely so a retry cannot apply it twice, and a
+  DDL / ``INSERT`` / ``UPDATE`` that timed out waiting for the table writer
+  may still be applied afterwards.
+
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a

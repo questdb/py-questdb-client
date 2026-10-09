@@ -53,7 +53,8 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from typing import (Any, Callable, Dict, Iterator, List, Optional, Tuple,
+                    Union)
 
 import numpy as np
 import pandas as pd
@@ -100,6 +101,7 @@ class QuestDBErrorCode(Enum):
     BatchTooLarge = ...
     StoreResendRequired = ...
     SymbolDictFull = ...
+    QueryTimeout = ...
     BadDataFrame = ...
 
 
@@ -1097,6 +1099,7 @@ class PooledReader:
         binds: Optional[Union[list, tuple]] = None,
         *,
         reset_symbol_dict: bool = True,
+        timeout: Optional[Union[int, timedelta]] = None,
     ) -> QueryResult:
         """
         Execute a SQL query on the lease's connection and return a
@@ -1112,10 +1115,13 @@ class PooledReader:
         self,
         sql: str,
         binds: Optional[Union[list, tuple]] = None,
-    ) -> None:
+        *,
+        timeout: Optional[Union[int, timedelta]] = None,
+    ) -> Optional[Tuple[int, int]]:
         """
         Run a statement on the lease's connection and discard whatever
-        it returns. Mirrors :meth:`QuestDB.execute`; the lease stays
+        it returns. Mirrors :meth:`QuestDB.execute`, including the
+        ``(op_type, rows_affected)`` return value; the lease stays
         usable for the next call.
         """
 
@@ -1263,6 +1269,7 @@ class QuestDB:
         binds: Optional[Union[list, tuple]] = None,
         *,
         reset_symbol_dict: bool = True,
+        timeout: Optional[Union[int, timedelta]] = None,
     ) -> QueryResult:
         """
         Execute a SQL query and return a :class:`QueryResult`.
@@ -1274,13 +1281,30 @@ class QuestDB:
         ``to_pandas()``. Set ``False`` to keep the dictionary warm across
         repeated identical queries. No-op against servers that predate the
         capability.
+
+        ``timeout`` runs this query under its own budget instead of the
+        server-wide ``query.timeout``, overriding the connect string's
+        ``query_timeout_ms``. An ``int`` is milliseconds; a
+        ``datetime.timedelta`` works too, with a positive value below one
+        millisecond rounded *up* to 1 ms. ``None`` (the default) and ``0``
+        mean no per-query timeout.
+
+        Requires a server advertising ``CAP_QUERY_TIMEOUT``: against an older
+        one the query fails with ``QuestDBErrorCode.QueryTimeout`` rather
+        than silently running under the server default. On expiry the error
+        carries that same code and the connection stays usable — but do not
+        retry a write on it, because a statement that outlives its timeout is
+        reported as done instead, and a DDL / INSERT / UPDATE that timed out
+        waiting for the table writer may still be applied.
         """
 
     def execute(
         self,
         sql: str,
         binds: Optional[Union[list, tuple]] = None,
-    ) -> None:
+        *,
+        timeout: Optional[Union[int, timedelta]] = None,
+    ) -> Optional[Tuple[int, int]]:
         """
         Run a statement and discard whatever it returns.
 
@@ -1288,8 +1312,13 @@ class QuestDB:
         clean end and returns the pooled connection. Statement output
         (a ``COPY`` status row, admin-function rows, a stray
         ``SELECT``) is discarded; use :meth:`query` when you want the
-        result. Returns ``None``: the protocol carries no
-        rows-affected count.
+        result. ``timeout`` behaves as on :meth:`query`.
+
+        Returns the statement's ``EXEC_DONE`` report as an
+        ``(op_type, rows_affected)`` tuple, or ``None`` for a statement
+        that streamed a result set instead. See
+        :attr:`QueryResult.exec_done` for the caveats on
+        ``rows_affected``.
         """
 
     def reader(self) -> PooledReader:

@@ -76,7 +76,8 @@ cdef extern from "questdb/ingress/line_sender.h":
         # Client-side QWP/WebSocket sender error codes (35..37).
         line_sender_error_batch_too_large,
         line_sender_error_store_resend_required,
-        line_sender_error_symbol_dict_full
+        line_sender_error_symbol_dict_full,
+        line_sender_error_query_timeout
 
     ctypedef line_sender_error_code questdb_error_code
 
@@ -1309,6 +1310,11 @@ cdef extern from "questdb/egress/qwp_reader.h":
         questdb_error** err_out
         ) noexcept nogil
 
+    void qwp_reader_query_set_timeout_ms(
+        qwp_reader_query* query,
+        uint64_t timeout_ms
+        ) noexcept nogil
+
     void qwp_reader_query_set_reset_symbol_dict(
         qwp_reader_query* query,
         cbool reset
@@ -1425,6 +1431,21 @@ cdef extern from "questdb/egress/qwp_reader.h":
 
     bint qwp_reader_cursor_connection_reusable(
         const qwp_reader_cursor* cursor
+        ) noexcept nogil
+
+    cdef enum qwp_reader_terminal_kind:
+        qwp_reader_terminal_kind_none = 0
+        qwp_reader_terminal_kind_end = 1
+        qwp_reader_terminal_kind_exec_done = 2
+
+    qwp_reader_terminal_kind qwp_reader_cursor_terminal_kind(
+        const qwp_reader_cursor* cursor
+        ) noexcept nogil
+
+    bint qwp_reader_cursor_terminal_exec_done(
+        const qwp_reader_cursor* cursor,
+        uint8_t* out_op_type,
+        uint64_t* out_rows_affected
         ) noexcept nogil
 
     qwp_reader_arrow_batch_result qwp_reader_cursor_next_arrow_batch(
