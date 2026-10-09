@@ -4,6 +4,7 @@ import shlex
 import textwrap
 import platform
 import argparse
+import importlib.metadata
 
 arg_parser = argparse.ArgumentParser(
     prog='pip_install_deps.py',
@@ -85,6 +86,19 @@ def should_use_pandas3(py_version=None):
     return is_64bits and py_version >= (3, 11)
 
 
+def pyarrow_requirement():
+    # pyarrow 26 refuses to import against NumPy 1.x ("pyarrow requires NumPy
+    # 2.0 or newer") but declares no numpy dependency, so pip happily pairs it
+    # with the numpy<2 the pandas 2 path installs, and the `import pyarrow`
+    # check below then fails the whole step. Keep a NumPy 1.x environment on
+    # the last pyarrow series that supports it.
+    try:
+        numpy_major = int(importlib.metadata.version('numpy').split('.')[0])
+    except importlib.metadata.PackageNotFoundError:
+        return 'pyarrow'
+    return 'pyarrow' if numpy_major >= 2 else 'pyarrow<26'
+
+
 def install_default_pandas_and_numpy():
     # Pandas 3 requires Python 3.11+ and ships only 64-bit wheels, so keep
     # 3.10 and all 32-bit wheel tests on the pandas 2 / numpy 1.x-compatible
@@ -106,7 +120,7 @@ def main(args):
         install_default_pandas_and_numpy()
 
     try_pip_install('fastparquet>=2023.10.1')
-    try_pip_install('pyarrow')
+    try_pip_install(pyarrow_requirement())
     try_pip_install('polars')
     try_pip_install('psutil')
     # Optional OIDC extra. Without it `_qr_ascii` / `_qr_data_uri` return None,
