@@ -417,7 +417,10 @@ which is what says whether the sender will carry on:
 * ``SocketError`` — retryable, and the ordinary case. The sender keeps
   reconnecting so queued rows survive while the identity provider recovers or
   a human signs in, and nothing is raised to the caller. Only a foreground
-  call such as :meth:`questdb.QuestDB.dataframe` fails fast.
+  call such as :meth:`questdb.QuestDB.dataframe` fails fast, and an ACK wait
+  (:meth:`PooledSender.wait <questdb.PooledSender.wait>`) whose timeout expires
+  meanwhile raises :class:`~questdb.auth.OidcInteractionRequired` -- ``code``
+  ``FailoverRetry``, rows still queued -- when the provider needs a new sign-in.
 * ``AuthError`` / ``ConfigError`` — the provider cannot recover in this
   process, so the reconnect is **terminal** and the sender stops. Reached by a
   permanently closed provider (``close()`` is one-way; cancelling one

@@ -4433,6 +4433,34 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         self.assertTrue(all(ref() is None for ref in refs))
         self.assertEqual(remaining, set())
 
+    def test_lease_wait_timeout_names_a_credential_that_blocks_reconnect(self):
+        # The background reconnect keeps retrying a provider that needs a new
+        # sign-in, so nothing fails early. But a wait that runs out of time
+        # meanwhile used to blame the server ("the connection is alive but the
+        # server is not advancing the watermark") with no OIDC detail. It
+        # now names the credential, as OidcInteractionRequired, while keeping
+        # the retryable FailoverRetry code and the queued rows.
+        auth = make_auth()  # never signed in
+        with questdb.connect(
+                'ws::addr=127.0.0.1:19009;lazy_connect=true;'
+                'close_flush_timeout_millis=0;',
+                oidc_auth=auth) as db:
+            with db.sender() as sender:
+                sender.row(
+                    'oidc_lapse', columns={'value': 1},
+                    at=questdb.ServerTimestamp)
+                fsn = sender.flush_and_get_fsn()
+                self.assertFalse(sender.await_acked_fsn(fsn, 300))
+                with self.assertRaises(OidcInteractionRequired) as ctx:
+                    sender.wait(timeout_millis=300)
+                sender.close(flush=False)
+        err = ctx.exception
+        self.assertIs(err.code, questdb.QuestDBErrorCode.FailoverRetry)
+        self.assertFalse(err.acquisition_busy)
+        self.assertIn('reconnecting keeps failing', str(err))
+        self.assertIn('sign_in()', str(err))
+        self.assertNotIn('the connection is alive', str(err))
+
     def test_token_provider_failure_is_narrated_to_the_listener(self):
         # Regression: the Bearer header is resolved ABOVE the endpoint loop, so
         # its failure returned before auth_failed() (inside the loop) and
@@ -6848,6 +6876,8 @@ class _RolePolicyServer(QwpAckServer):
         self._policy = policy
         self._t0 = None
         self._upgrades = 0
+        # The ``Authorization`` of every upgrade the policy answered.
+        self.authorizations = []
 
     def _handle_connection(self, conn, close_after):
         import qwp_ws_ack_server
@@ -6862,7 +6892,11 @@ class _RolePolicyServer(QwpAckServer):
             return super()._handle_connection(conn, close_after)
         try:
             conn.settimeout(5)
-            qwp_ws_ack_server._read_until(conn, b'\r\n\r\n')
+            request = qwp_ws_ack_server._read_until(conn, b'\r\n\r\n')
+            with self._lock:
+                self.authorizations.append(
+                    qwp_ws_ack_server._optional_header(
+                        request, 'Authorization'))
             if action == '503':
                 conn.sendall(b'HTTP/1.1 503 Service Unavailable\r\n'
                              b'Content-Length: 0\r\nConnection: close\r\n\r\n')
@@ -6961,7 +6995,14 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
                 policy, servers, wait_for_event_on_error=auth_failed_ready,
                 connection_listener=on_event, connection_event_inbox_capacity=256)
         self.assertEqual(cm.exception.code, questdb.QuestDBErrorCode.AuthError)
-        self.assertEqual(servers[0]._upgrades, 2)
+        # The 503, then the 401 -- which makes the provider drop the rejected
+        # token and refresh it -- and one replay of the same endpoint with the
+        # refreshed token, which this server rejects too. That second 401 is
+        # terminal: no slice re-dials it.
+        self.assertEqual(servers[0]._upgrades, 3)
+        self.assertEqual(
+            servers[0].authorizations[-2:],
+            ['Bearer AT-initial', 'Bearer AT-refreshed'])
         auth_failed = [
             e for e in events
             if e.kind is questdb.ConnectionEventKind.AuthFailed]
@@ -7002,7 +7043,11 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
                 connection_event_inbox_capacity=256)
         self.assertEqual(cm.exception.code, questdb.QuestDBErrorCode.AuthError)
         with lock:
-            self.assertEqual(actions.count('401'), 1, actions)
+            # The post-deadline pick's 401 is replayed once, at once, with the
+            # token the provider refreshed in response; the second 401 ends the
+            # call. No later slice re-dials the rejection.
+            self.assertEqual(actions.count('401'), 2, actions)
+            self.assertEqual(actions[-2:], ['401', '401'], actions)
 
     def test_role_election_longer_than_a_retry_slice_is_ridden_out(self):
         # The first attempt fails with a retryable 503; the reconnect then sees

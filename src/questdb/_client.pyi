@@ -1139,7 +1139,14 @@ class PooledSender:
         """Wait for everything published through this lease to receive an
         OK ack; returns immediately if the lease published nothing. Only a
         terminal connection failure raises; server rejections go to the
-        pool's ``error_handler``."""
+        pool's ``error_handler``.
+
+        ``timeout_millis`` is a no-progress timeout (``0`` waits
+        indefinitely); when it expires this raises ``QuestDBError`` with
+        ``code`` set to ``QuestDBErrorCode.FailoverRetry`` and the rows stay
+        queued. While the lease cannot reconnect because an attached OIDC
+        provider needs a new sign-in, that error is
+        :class:`~questdb.auth.OidcInteractionRequired`."""
 
     def flush_and_get_fsn(self) -> Optional[int]:
         """Publish and clear buffered rows, returning the published

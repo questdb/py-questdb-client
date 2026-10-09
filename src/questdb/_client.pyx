@@ -9828,6 +9828,10 @@ cdef class PooledSender:
         ``error_handler`` (default: the ``questdb`` logger) instead.
 
         ``timeout_millis`` is a no-progress timeout; ``0`` waits indefinitely.
+        When it expires this raises ``QuestDBError`` with ``code`` set to
+        ``QuestDBErrorCode.FailoverRetry`` and the rows stay queued. While the
+        lease cannot reconnect because an attached OIDC provider needs a new
+        sign-in, that error is :class:`~questdb.auth.OidcInteractionRequired`.
         """
         if not isinstance(timeout_millis, int) or isinstance(timeout_millis, bool):
             raise TypeError('"timeout_millis" must be a non-negative int.')

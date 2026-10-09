@@ -120,7 +120,11 @@ replace it before retrying, rather than blindly repeating the same request.
 
 HTTP senders fetch a token on each flush; QWP/WebSocket senders and readers
 fetch one on connect/reconnect (and may retry after a handshake 401), **not**
-on every flush of an already-connected sender. A token pull can raise an
+on every flush of an already-connected sender. A flush or handshake answered
+with HTTP 401 asks the provider once more and is retried if the token changed.
+When the server rejected a token that had not yet expired -- it was revoked,
+or the server rotated its signing key -- the provider refreshes it for that
+retry instead of presenting it again, at most once every 30 seconds. A token pull can raise an
 ``OidcError`` (e.g. :class:`~questdb.auth.OidcInteractionRequired` when
 sign-in has lapsed) alongside ordinary data / server / transport
 ``QuestDBError`` from ``flush()`` (HTTP), ``dataframe()``, ``row()``,

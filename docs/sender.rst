@@ -479,10 +479,12 @@ section for more details.
    they only queue frames locally, and the background reconnect that needs
    the token keeps retrying instead. It reports each failed attempt as a
    ``ConnectionEventKind.CredentialUnavailable`` event (register a
-   ``connection_listener`` to see it). An ACK wait does not fail because of
-   the missing token: with a non-zero ``timeout_millis``, a pooled sender's
-   ``wait()`` raises an ordinary timeout ``QuestDBError`` and
-   ``await_acked_fsn()`` returns ``False`` once it expires, and
+   ``connection_listener`` to see it). An ACK wait does not fail early
+   because of the missing token: with a non-zero ``timeout_millis``, a pooled
+   sender's ``wait()`` raises once it expires -- with
+   :class:`~questdb.auth.OidcInteractionRequired`, whose ``code`` is
+   ``QuestDBErrorCode.FailoverRetry`` and whose message names the failing
+   reconnect -- and ``await_acked_fsn()`` returns ``False``;
    ``flush(wait=True)`` is bounded by the pool's request timeout. With the
    default ``timeout_millis=0``, ``wait()`` and ``await_acked_fsn()`` wait
    until the rows are acknowledged, which needs a successful sign-in on
