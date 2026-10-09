@@ -551,26 +551,19 @@ class TestRowEgressLive(unittest.TestCase):
 
 
 @live
-class TestUuidBindDefect(unittest.TestCase):
-    """A pre-existing UUID byte-order defect on the BIND side.
+class TestUuidByteOrder(unittest.TestCase):
+    """Every route a UUID takes has to agree on canonical RFC-4122 order.
 
-    `QueryRequestBuilder::bind_uuid` in c-questdb-client reverses the
-    caller's canonical RFC-4122 bytes, on the premise that the QWP wire
-    wants a little-endian `(lo, hi)` pair. The live server contradicts that
-    in both directions: a UUID read back from a table arrives in canonical
-    order (which `to_arrow` and `iter_rows` both show, and which matches the
-    server's own text output), and a bound UUID arrives at the server
-    byte-reversed.
-
-    It has stayed hidden because the numpy egress path reverses on the way
-    back as well, so a bind-then-`to_pandas` round trip cancels out. The
-    `arrow` path and this row path do not, so they expose it.
-
-    This is the breaking "UUID byte order" change scheduled for the 5.1
-    driver release. The test is marked as an expected failure so the defect
-    is tracked rather than silently encoded as correct behaviour; it starts
-    passing unexpectedly once `bind_uuid` stops reversing.
+    The native client took standard byte order in c-questdb-client #186 and
+    byte-swaps to QWP wire order itself. Three Python-side paths kept
+    pre-swapping on top of that, which reversed the 16 bytes: the bind, the
+    numpy reader behind `to_pandas`, and a dataframe UUID column. Each test
+    here checks against the server's own text form, the one arbiter that
+    cannot itself be byte-reversed.
     """
+
+    U = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
+    TBL = TABLE + '_uuid'
 
     @classmethod
     def setUpClass(cls):
@@ -578,29 +571,73 @@ class TestUuidBindDefect(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        cls.db.close()
+        try:
+            cls.db.execute(f'drop table if exists {cls.TBL}')
+        finally:
+            cls.db.close()
 
-    @unittest.expectedFailure
     def test_bound_uuid_reaches_the_server_unchanged(self):
-        u = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
-        seen, = list(self.db.query(
-            'select cast($1 as varchar) as s', [u]).iter_rows())[0],
-        self.assertEqual(seen, str(u))
+        rows = list(self.db.query(
+            'select cast($1 as varchar) as s', [self.U]).iter_rows())
+        self.assertEqual(rows[0][0], str(self.U))
 
-    @unittest.expectedFailure
     def test_bound_uuid_round_trips(self):
-        u = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
-        got, = list(self.db.query('select $1 as u', [u]).iter_rows())[0]
-        self.assertEqual(got, u)
+        rows = list(self.db.query('select $1 as u', [self.U]).iter_rows())
+        self.assertEqual(rows[0][0], self.U)
+
+    def test_a_bound_uuid_matches_the_same_value_in_sql(self):
+        # The predicate an incremental merge or a seed lookup is built on.
+        rows = list(self.db.query(
+            f"select $1 = cast('{self.U}' as uuid) as eq",
+            [self.U]).iter_rows())
+        self.assertIs(rows[0][0], True)
 
     def test_egress_uuid_matches_the_server_text_form(self):
-        # The direction this branch fixes: not an expected failure.
         rows = list(self.db.query(
-            "select cast('123e4567-e89b-12d3-a456-426614174000' as uuid) "
-            'as u, '
-            "cast(cast('123e4567-e89b-12d3-a456-426614174000' as uuid) "
-            'as varchar) as s').iter_rows())
+            f"select cast('{self.U}' as uuid) as u, "
+            f"cast(cast('{self.U}' as uuid) as varchar) as s").iter_rows())
         self.assertEqual(str(rows[0][0]), rows[0][1])
+
+    def test_to_pandas_agrees_with_the_row_path(self):
+        try:
+            import pandas  # noqa: F401
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest('needs pandas and pyarrow')
+        sql = f"select cast('{self.U}' as uuid) as u"
+        df = self.db.query(sql).to_pandas()
+        self.assertEqual(df['u'][0], self.U)
+        self.assertEqual(
+            df['u'][0], list(self.db.query(sql).iter_rows())[0][0])
+
+    def test_dataframe_uuid_column_round_trips(self):
+        try:
+            import pandas as pd
+        except ImportError:
+            self.skipTest('needs pandas')
+        self.db.execute(f'drop table if exists {self.TBL}')
+        self.db.execute(
+            f'create table {self.TBL} (u uuid, ts timestamp) '
+            'timestamp(ts) partition by day wal')
+        self.db.dataframe(
+            pd.DataFrame({'u': [self.U, None]}),
+            table_name=self.TBL, at=qdb.ServerTimestamp)
+        self.db.query(f"select wait_wal_table('{self.TBL}')")._drain()
+        got = dict(self.db.query(
+            f'select u, cast(u as varchar) as s from {self.TBL}').iter_rows())
+        self.assertEqual(got.get(self.U), str(self.U))
+        self.assertIn(None, got)
+
+    def test_a_uuid_whose_bytes_are_the_wrong_width_is_refused(self):
+        # `UUID.bytes` is an overridable property and the bind reads a flat
+        # 16 bytes from the pointer, so the width is checked first.
+        class Narrow(uuid.UUID):
+            @property
+            def bytes(self):
+                return b'\x00' * 15
+
+        with self.assertRaises(ValueError):
+            self.db.query('select $1 as u', [Narrow(int=0)])
 
 
 if __name__ == '__main__':

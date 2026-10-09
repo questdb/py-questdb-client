@@ -29,11 +29,26 @@ Changelog
   NULL representation in QuestDB, so an inserted ``null`` reads back as
   ``False`` / ``0``.
 
-  Note for ``UUID`` columns: this path returns the canonical RFC-4122 value,
-  agreeing with ``to_arrow()`` and with the server's own text output.
-  ``to_pandas()`` still returns the byte-reversed value — a pre-existing
-  defect, scheduled to be corrected by the 5.1 UUID byte-order change, which
-  also affects UUID *bind* parameters in the same way.
+  ``UUID`` columns come back as the canonical RFC-4122 value, agreeing with
+  ``to_arrow()``, with ``to_pandas()`` and with the server's own text output.
+
+- **Fixed, and a behaviour change for ``UUID``:** every ``UUID`` crossing
+  this driver is now the canonical RFC-4122 value. The native client took
+  its standard byte order in `#186
+  <https://github.com/questdb/c-questdb-client/pull/186>`_ and byte-swaps to
+  QWP wire order itself; this release stops pre-swapping on top of it, in
+  three places that otherwise reversed the 16 bytes:
+
+  - a ``uuid.UUID`` bind parameter, which reached the server as a different
+    UUID, so ``$1`` never matched the value that was bound;
+  - ``to_pandas()``, which returned the reversed value where ``to_arrow()``
+    returned the right one;
+  - a dataframe ``UUID`` column on the QWP column sender, which stored the
+    reversed value.
+
+  A ``UUID`` stored by an earlier release is reversed in the table and keeps
+  reading back reversed. ``uuid.UUID(bytes=old.bytes[::-1])`` recovers the
+  intended value.
 
 - :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` reports a
   non-SELECT statement's terminal ``EXEC_DONE`` as

@@ -3365,8 +3365,9 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
     cdef size_t buf_bytes = row_count * 16 if row_count > 0 else 16
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
-    cdef object le_bytes
+    cdef object be_bytes
     cdef object uuid_cls = _uuid.UUID
+    cdef object int_to_bytes = int.to_bytes
 
     try:
         buf = <uint8_t*>calloc(buf_bytes, sizeof(uint8_t))
@@ -3380,12 +3381,14 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
         for i in range(row_count):
             cell = access[i]
             if isinstance(<object>cell, uuid_cls):
-                # `.int.to_bytes(16, 'little')` produces exactly the
-                # QuestDB UUID wire layout: bytes 0..8 = lo half LE,
-                # bytes 8..16 = hi half LE. One C-implemented call +
-                # one 16-byte memcpy per row.
-                le_bytes = (<object>cell).int.to_bytes(16, 'little')
-                memcpy(buf + i * 16, PyBytes_AsString(le_bytes), 16)
+                # `qwp_numpy_s16` reads canonical RFC 4122 big-endian
+                # rows and byte-swaps them into QWP wire order itself.
+                # `int.to_bytes` is called unbound so that a replaced
+                # `UUID.int` cannot narrow the result: it is always the
+                # 16 bytes `UUID.bytes` would give, in one C-implemented
+                # call plus one 16-byte memcpy per row.
+                be_bytes = int_to_bytes((<object>cell).int, 16, 'big')
+                memcpy(buf + i * 16, PyBytes_AsString(be_bytes), 16)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
             elif _dataframe_is_null_pyobj(cell):
