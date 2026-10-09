@@ -3384,28 +3384,380 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
         self.assertIn(old_layout, payload)
         self.assertNotIn(self.UUID_VALUE.bytes, payload)
 
+    @staticmethod
+    def _custom_extension_type(width):
+        """An extension type over `fixed_size_binary(width)` that says
+        nothing about UUID or LONG256, so it labels nothing."""
+        class Tag(pyarrow.ExtensionType):
+            def __init__(self):
+                super().__init__(pyarrow.binary(width), f'acme.tag{width}')
+
+            def __arrow_ext_serialize__(self):
+                return b''
+
+            @classmethod
+            def __arrow_ext_deserialize__(cls, storage_type, serialized):
+                return cls()
+
+        return Tag()
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
-    def test_capsule_path_takes_unlabelled_fixed_size_binary_as_binary(self):
-        """The Arrow columnar path makes the opposite choice, and means
-        it: `schema_overrides` is there to say otherwise, so an
-        unlabelled column of either width is opaque bytes rather than an
-        error. This asymmetry with the NumPy planner is deliberate and
-        is what `QuestDB.dataframe`'s docstring describes."""
+    def test_a_pandas_frame_refuses_unlabelled_fixed_size_binary(self):
+        """A pandas frame refuses an unlabelled 16- or 32-byte column
+        whichever planner writes it, with the same message: an
+        `ArrowDtype` holds no field metadata, so the column may be a UUID
+        or LONG256 column whose label was dropped on the way in. Adding a
+        NumPy column, which moves the frame to the other planner, does
+        not change the answer. Every label the capsule path reads lets
+        the column through, and so does variable-length binary."""
         stamps = pd.to_datetime(['2025-01-01', '2025-01-02'])
-        for width in (16, 32):
+        for width, kind, tag in ((16, 'uuid', 0x0C), (32, 'long256', 0x0D)):
             with self.subTest(width=width):
-                arrow_frame = pd.DataFrame({
-                    'v': pd.Series(
-                        [bytes(range(width))] * 2,
-                        dtype=pd.ArrowDtype(pyarrow.binary(width))),
-                    'ts': pd.array(stamps, dtype=pd.ArrowDtype(
-                        pyarrow.timestamp('us'))),
-                })
+                def frame(dtype, numpy_column=False):
+                    raw = [bytes(range(width))] * 2
+                    arrow_type = getattr(dtype, 'pyarrow_dtype', None)
+                    if isinstance(arrow_type,
+                                  pyarrow.lib.BaseExtensionType):
+                        raw = pd.array(
+                            pyarrow.ExtensionArray.from_storage(
+                                arrow_type,
+                                pyarrow.array(
+                                    raw, arrow_type.storage_type)),
+                            dtype=dtype)
+                    columns = {
+                        'v': pd.Series(raw, dtype=dtype),
+                        'ts': pd.array(stamps, dtype=pd.ArrowDtype(
+                            pyarrow.timestamp('us'))),
+                    }
+                    if numpy_column:
+                        columns['n'] = np.array([1, 2], dtype='int64')
+                    return pd.DataFrame(columns)
+
+                fixed = pd.ArrowDtype(pyarrow.binary(width))
+                # An extension type other than `pa.uuid()` is judged by
+                # its storage: it says nothing about UUID or LONG256.
+                custom = pd.ArrowDtype(self._custom_extension_type(width))
+                messages = []
+                for dtype in (fixed, custom):
+                    for numpy_column in (False, True):
+                        with QwpAckServer(record_payloads=True) as server:
+                            conf = (
+                                f'ws::addr=127.0.0.1:{server.port};'
+                                'lazy_connect=true;pool_reap=manual;')
+                            with qi.QuestDB.from_conf(conf) as client:
+                                with self.assertRaises(
+                                        qi.QuestDBError) as caught:
+                                    client.dataframe(
+                                        frame(dtype, numpy_column),
+                                        table_name='blobs', at='ts')
+                            self.assertEqual(
+                                server.snapshot()['binary_payloads'], [])
+                        self.assertEqual(
+                            caught.exception.code,
+                            qi.QuestDBErrorCode.BadDataFrame)
+                        messages.append(str(caught.exception))
+                self.assertEqual(len(set(messages)), 1)
+                self.assertIn(f'its values are {width} bytes', messages[0])
+                self.assertIn("schema_overrides={'v': 'binary'}", messages[0])
+
+                # Plain bytes, said outright: written as they are.
                 self.assertEqual(
                     self._dataframe_column_types(
-                        arrow_frame, table_name='blobs', at='ts')['v'],
+                        frame(fixed), table_name='blobs', at='ts',
+                        schema_overrides={'v': 'binary'})['v'],
                     0x17)
+
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        frame(fixed), table_name='blobs', at='ts',
+                        schema_overrides={'v': kind})['v'],
+                    tag)
+                claimed = frame(fixed)
+                claimed.attrs['questdb'] = {
+                    'version': 1, 'columns': {'v': {'kind': kind}}}
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        claimed, table_name='blobs', at='ts')['v'],
+                    tag)
+                if width == 16 and hasattr(pyarrow, 'uuid'):
+                    self.assertEqual(
+                        self._dataframe_column_types(
+                            frame(pd.ArrowDtype(pyarrow.uuid())),
+                            table_name='blobs', at='ts')['v'],
+                        tag)
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        frame(pd.ArrowDtype(pyarrow.binary())),
+                        table_name='blobs', at='ts')['v'],
+                    0x17)
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_native_arrow_writes_unlabelled_fixed_size_binary_with_a_warning(
+            self):
+        """Native Arrow input keeps its field metadata, so an unlabelled
+        16- or 32-byte column there is taken at its word and written as
+        BINARY. It is not silent: one `questdb` WARNING names the column
+        and the remedies. A labelled column, or variable-length binary,
+        logs nothing."""
+        stamps = pyarrow.array(
+            [1_700_000_000_000_000, 1_700_000_001_000_000],
+            pyarrow.timestamp('us'))
+        for width, kind, tag in ((16, 'uuid', 0x0C), (32, 'long256', 0x0D)):
+            with self.subTest(width=width):
+                values = [bytes(range(width))] * 2
+
+                def table(arrow_type, metadata=None):
+                    if isinstance(arrow_type,
+                                  pyarrow.lib.BaseExtensionType):
+                        column = pyarrow.ExtensionArray.from_storage(
+                            arrow_type,
+                            pyarrow.array(values, arrow_type.storage_type))
+                    else:
+                        column = pyarrow.array(values, arrow_type)
+                    return pyarrow.table(
+                        [column, stamps],
+                        schema=pyarrow.schema([
+                            pyarrow.field('v', arrow_type,
+                                          metadata=metadata),
+                            pyarrow.field('ts', pyarrow.timestamp('us'))]))
+
+                bare = table(pyarrow.binary(width))
+                # Only the labels the native ingest honours count: a
+                # misspelt `questdb.column_type`, or an extension type
+                # other than `pa.uuid()`, is written as BINARY and so
+                # gets the warning.
+                unlabelled = [
+                    ('pa.Table', bare),
+                    ('pa.RecordBatch', bare.to_batches()[0]),
+                    ('misspelt field metadata',
+                     table(pyarrow.binary(width),
+                           {'questdb.column_type': kind.upper()})),
+                    ('other extension type',
+                     table(self._custom_extension_type(width))),
+                    ('repeated key, label first',
+                     table(pyarrow.binary(width), pyarrow.KeyValueMetadata(
+                         [('questdb.column_type', kind),
+                          ('questdb.column_type', 'other')])))]
+                for label, source in unlabelled:
+                    with self.subTest(label=label):
+                        with self.assertLogs('questdb', 'WARNING') as logs:
+                            types = self._dataframe_column_types(
+                                source, table_name='blobs', at='ts')
+                        self.assertEqual(types['v'], 0x17)
+                        self.assertEqual(len(logs.records), 1)
+                        message = logs.records[0].getMessage()
+                        self.assertIn(
+                            f"column 'v' is fixed_size_binary({width})",
+                            message)
+                        self.assertIn(
+                            f"schema_overrides={{'v': '{kind}'}}", message)
+                        self.assertIn(
+                            "schema_overrides={'v': 'binary'}", message)
+                        self.assertIn(
+                            '{"questdb.column_type": "binary"}', message)
+
+                labelled = [
+                    ('schema_overrides', bare, {'v': kind}),
+                    ('field metadata',
+                     table(pyarrow.binary(width),
+                           {'questdb.column_type': kind}),
+                     None),
+                    # The label after other keys: the metadata walk has
+                    # to skip whole pairs to reach it.
+                    ('field metadata after other keys',
+                     table(pyarrow.binary(width),
+                           {'a': 'x', 'longer.key': 'longer value',
+                            'questdb.column_type': kind}),
+                     None),
+                    # A repeated key: the native importer keeps the last
+                    # one, and so does the check.
+                    ('repeated key, label last',
+                     table(pyarrow.binary(width), pyarrow.KeyValueMetadata(
+                         [('questdb.column_type', 'other'),
+                          ('questdb.column_type', kind)])),
+                     None)]
+                if width == 16 and hasattr(pyarrow, 'uuid'):
+                    labelled.append(
+                        ('pa.uuid()', table(pyarrow.uuid()), None))
+                for label, source, overrides in labelled:
+                    with self.subTest(label=label):
+                        with self.assertNoLogs('questdb', 'WARNING'):
+                            types = self._dataframe_column_types(
+                                source, table_name='blobs', at='ts',
+                                schema_overrides=overrides)
+                        self.assertEqual(types['v'], tag)
+
+                # Plain bytes, said outright or as variable-length
+                # binary: BINARY, and nothing to warn about.
+                plain = [
+                    ('binary field metadata',
+                     table(pyarrow.binary(width),
+                           {'questdb.column_type': 'binary'}),
+                     None),
+                    ("schema_overrides 'binary'", bare, {'v': 'binary'}),
+                    ('variable-length binary', table(pyarrow.binary()),
+                     None)]
+                for label, source, overrides in plain:
+                    with self.subTest(label=label):
+                        with self.assertNoLogs('questdb', 'WARNING'):
+                            types = self._dataframe_column_types(
+                                source, table_name='blobs', at='ts',
+                                schema_overrides=overrides)
+                        self.assertEqual(types['v'], 0x17)
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_the_unlabelled_column_warning_comes_after_the_write(self):
+        """A logging handler is caller Python. The warning is logged once
+        the write has gone through and its connection is closed, so a
+        handler never runs inside a write that is still in progress: by
+        the time it sees the record, the rows are at the server."""
+        rows_at_warning = []
+        logger = logging.getLogger('questdb')
+        source = pyarrow.table({
+            'v': pyarrow.array([bytes(16)] * 2, pyarrow.binary(16)),
+            'ts': pyarrow.array([1, 2], pyarrow.timestamp('us'))})
+        with QwpAckServer(record_payloads=True) as server:
+
+            class Watch(logging.Handler):
+                def emit(self, record):
+                    rows_at_warning.append(sum(
+                        1 for payload
+                        in server.snapshot()['binary_payloads']
+                        if int.from_bytes(payload[6:8], 'little') > 0))
+
+            handler = Watch(level=logging.WARNING)
+            old_level = logger.level
+            logger.setLevel(logging.WARNING)
+            logger.addHandler(handler)
+            try:
+                conf = (
+                    f'ws::addr=127.0.0.1:{server.port};'
+                    'lazy_connect=true;pool_reap=manual;')
+                with qi.QuestDB.from_conf(conf) as client:
+                    client.dataframe(source, table_name='blobs', at='ts')
+            finally:
+                logger.removeHandler(handler)
+                logger.setLevel(old_level)
+        self.assertEqual(len(rows_at_warning), 1)
+        self.assertGreater(rows_at_warning[0], 0)
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_failed_write_still_reports_the_unlabelled_columns_it_sent(
+            self):
+        """A batch that went out before a write failed may have created
+        the table with the column as BINARY, so the failure reports it
+        too, once the connection is closed. The write's own error is what
+        the caller gets, even from under a logging handler that raises."""
+        schema = pyarrow.schema([
+            pyarrow.field('v', pyarrow.binary(16)),
+            pyarrow.field('ts', pyarrow.timestamp('us'))])
+        batch = pyarrow.record_batch(
+            [pyarrow.array([bytes(16)] * 2, pyarrow.binary(16)),
+             pyarrow.array([1, 2], pyarrow.timestamp('us'))],
+            schema=schema)
+
+        def batches():
+            yield batch
+            raise RuntimeError('producer broke')
+
+        logger = logging.getLogger('questdb')
+        for handler_raises in (False, True):
+            with self.subTest(handler_raises=handler_raises):
+                seen = []
+
+                class Record(logging.Handler):
+                    def emit(self, record):
+                        seen.append(record.getMessage())
+                        if handler_raises:
+                            raise ValueError('handler broke')
+
+                handler = Record(level=logging.WARNING)
+                old_level = logger.level
+                logger.setLevel(logging.WARNING)
+                logger.addHandler(handler)
+                try:
+                    with QwpAckServer(record_payloads=True) as server:
+                        conf = (
+                            f'ws::addr=127.0.0.1:{server.port};'
+                            'lazy_connect=true;pool_reap=manual;')
+                        with qi.QuestDB.from_conf(conf) as client:
+                            with self.assertRaisesRegex(
+                                    qi.QuestDBError, 'producer broke'):
+                                client.dataframe(
+                                    pyarrow.RecordBatchReader.from_batches(
+                                        schema, batches()),
+                                    table_name='blobs', at='ts')
+                finally:
+                    logger.removeHandler(handler)
+                    logger.setLevel(old_level)
+                self.assertEqual(len(seen), 1)
+                self.assertIn(
+                    "column 'v' is fixed_size_binary(16)", seen[0])
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_misapplied_binary_override_is_refused(self):
+        """`'binary'` never reaches the native ingest, so the client makes
+        the checks the native side makes for every other override: the
+        column must exist and be binary. It also cannot stand against a
+        UUID or LONG256 label the column already carries, which the
+        native side would honour instead. Each refusal comes before any
+        row is sent."""
+        stamps = pyarrow.array([1, 2], pyarrow.timestamp('us'))
+        ints = pyarrow.array([1, 2], pyarrow.int64())
+
+        def table(v_type, metadata=None):
+            if isinstance(v_type, pyarrow.lib.BaseExtensionType):
+                v = pyarrow.ExtensionArray.from_storage(
+                    v_type, pyarrow.array(
+                        [bytes(16)] * 2, v_type.storage_type))
+            else:
+                v = pyarrow.array([bytes(16)] * 2, v_type)
+            return pyarrow.table(
+                [v, ints, stamps],
+                schema=pyarrow.schema([
+                    pyarrow.field('v', v.type, metadata=metadata),
+                    pyarrow.field('n', pyarrow.int64()),
+                    pyarrow.field('ts', pyarrow.timestamp('us'))]))
+
+        cases = [
+            ('not binary', table(pyarrow.binary(16)), 'n',
+             "override 'binary' is not applicable to column 'n' of Arrow "
+             "type Int64"),
+            # A dictionary column's format is its index type; it is named
+            # by the dictionary instead.
+            ('dictionary', pyarrow.table({
+                'd': pyarrow.array(['a', 'b']).dictionary_encode(),
+                'ts': stamps}), 'd',
+             "override 'binary' is not applicable to column 'd' of Arrow "
+             "type Dictionary"),
+            ('unknown column', table(pyarrow.binary(16)), 'nope',
+             "override targets unknown column 'nope'"),
+            ('uuid field metadata',
+             table(pyarrow.binary(16), {'questdb.column_type': 'uuid'}),
+             'v', "conflicts with the column's own UUID label")]
+        if hasattr(pyarrow, 'uuid'):
+            cases.append(
+                ('pa.uuid()', table(pyarrow.uuid()), 'v',
+                 "conflicts with the column's own UUID label"))
+        for label, source, column, expected in cases:
+            with self.subTest(label=label):
+                with QwpAckServer(record_payloads=True) as server:
+                    conf = (
+                        f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;pool_reap=manual;')
+                    with qi.QuestDB.from_conf(conf) as client:
+                        with self.assertRaises(qi.QuestDBError) as caught:
+                            client.dataframe(
+                                source, table_name='blobs', at='ts',
+                                schema_overrides={column: 'binary'})
+                    self.assertFalse(any(
+                        int.from_bytes(payload[6:8], 'little') > 0
+                        for payload
+                        in server.snapshot()['binary_payloads']))
+                self.assertEqual(
+                    caught.exception.code, qi.QuestDBErrorCode.ArrowIngest)
+                self.assertIn(expected, str(caught.exception))
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
@@ -4518,8 +4870,9 @@ print('OK')
         # The write side of the pandas round trip. An Arrow-backed frame
         # takes the capsule path, where the field metadata is already
         # gone, so `df.attrs['questdb']` is the only thing left claiming
-        # the column types. Without it these five land as BINARY and
-        # plain integers on a table the server auto-creates.
+        # the column types. Without it the UUID and LONG256 columns are
+        # refused, and the other three land as plain integers on a table
+        # the server auto-creates.
         frame = self._roundtrip_frame()
         types = self._dataframe_column_types(
             frame, table_name='attrs_round_trip', at='ts')
@@ -4533,10 +4886,15 @@ print('OK')
         # the claim is buying.
         bare = frame.copy()
         bare.attrs = {}
+        for refused, rest in (('u', bare), ('l', bare.drop(columns='u'))):
+            with self.subTest(refused=refused):
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, f"Bad column '{refused}'"):
+                    self._dataframe_column_types(
+                        rest, table_name='attrs_round_trip', at='ts')
         types = self._dataframe_column_types(
-            bare, table_name='attrs_round_trip', at='ts')
-        self.assertEqual(types['u'], 0x17)
-        self.assertEqual(types['l'], 0x17)
+            bare.drop(columns=['u', 'l']),
+            table_name='attrs_round_trip', at='ts')
         self.assertEqual(types['ip'], 0x05)
         self.assertEqual(types['ch'], 0x04)
         self.assertEqual(types['gh'], 0x05)
@@ -10069,6 +10427,11 @@ finish()
             narrow, table_name='attrs_stale', at='ts')
         self.assertEqual(types['gh'], 0x04)
 
+        # The claims below are about `ip` alone. A pandas frame refuses
+        # its 16- and 32-byte columns once nothing labels them, so the
+        # frames those claims replace go without `u` and `l`.
+        frame = frame.drop(columns=['u', 'l'])
+
         # A stray argument on a kind that takes none is ignored; only
         # GEOHASH reads `precision_bits`.
         for junk in (10 ** 30, 'x', None, -1):
@@ -10222,8 +10585,11 @@ finish()
         self.assertEqual(json.loads(json.dumps(claim)), dict(claim))
 
         # Replacing it is how a frame's claim is changed, and a plain
-        # hand-written dict is read just the same.
-        edited = frame.copy()
+        # hand-written dict is read just the same. The new claim names
+        # `ip` alone, and a pandas frame refuses its 16- and 32-byte
+        # columns once nothing labels them, so this frame goes without
+        # `u` and `l`.
+        edited = frame.drop(columns=['u', 'l'])
         edited.attrs = dict(frame.attrs)
         edited.attrs['questdb'] = {
             'version': 1, 'columns': {'ip': {'kind': 'char'}}}

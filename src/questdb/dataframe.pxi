@@ -1967,6 +1967,400 @@ cdef void_int _refuse_fsb8_columns(const ArrowSchema* schema) except -1:
     return _refuse_fsb8_column(schema)
 
 
+# Sixteen and thirty-two bytes are the two fixed-size binary widths that
+# mean something else in QuestDB: UUID and LONG256. Width alone decides
+# neither. A column says which through the `arrow.uuid` extension type
+# (16 bytes), `questdb.column_type` field metadata of `uuid` or `long256`,
+# `schema_overrides`, or a `df.attrs['questdb']` claim; with none of those
+# it is unlabelled. These are exactly the labels the native Arrow ingest
+# honours, so anything else -- another extension type, a misspelt
+# `questdb.column_type` such as `UUID` -- is unlabelled here too, rather
+# than taken as a label the native side then quietly writes as BINARY.
+#
+# What happens to an unlabelled one depends on where it came from, not on
+# which planner writes it. Any pandas frame refuses it: an `ArrowDtype`
+# holds a type and no field, so field metadata does not survive the trip
+# into pandas, and an unlabelled column there may be a UUID column whose
+# label was dropped on the way. Native Arrow input -- a `pa.Table`, a
+# `RecordBatch`, a reader, any `__arrow_c_stream__` producer -- keeps its
+# field metadata, so an unlabelled column there is taken at its word and
+# written as BINARY, with a `questdb` WARNING naming the remedies. Hash
+# columns read straight from Parquet or a database are common in that
+# shape, and refusing them would break pipelines that mean exactly that.
+cdef const char* _ARROW_FMT_FSB16 = "w:16"
+cdef const char* _ARROW_FMT_FSB32 = "w:32"
+cdef const char* _ARROW_C_MD_COLUMN_TYPE = "questdb.column_type"
+cdef const char* _ARROW_C_MD_EXTENSION_NAME = "ARROW:extension:name"
+cdef const char* _ARROW_C_MD_UUID = "uuid"
+cdef const char* _ARROW_C_MD_LONG256 = "long256"
+cdef const char* _ARROW_C_EXT_UUID = "arrow.uuid"
+cdef const char* _ARROW_C_MD_BINARY = "binary"
+cdef const char* _ARROW_FMT_BINARY = "z"
+cdef const char* _ARROW_FMT_LARGE_BINARY = "Z"
+cdef const char* _ARROW_FMT_BINARY_VIEW = "vz"
+
+
+cdef str _unlabelled_fsb32_message(object name):
+    return (
+        f'Bad column {name!r}: its values are 32 bytes each (Arrow type '
+        f'fixed_size_binary(32)). They could be LONG256 numbers or plain '
+        f'binary data, and the column does not say which. To store '
+        f'LONG256, do one of the following: pass '
+        f'`schema_overrides={{{name!r}: \'long256\'}}` to dataframe(), '
+        f'which works only when every column of the DataFrame is '
+        f'Arrow-backed, e.g. after '
+        f'`df = df.convert_dtypes(dtype_backend="pyarrow")`; or pass '
+        f'dataframe() a `pa.Table` or `pa.RecordBatch` instead of a '
+        f'DataFrame, with `{{"questdb.column_type": "long256"}}` in this '
+        f'column\'s field metadata (a pandas DataFrame cannot hold field '
+        f'metadata). Each value is read as an unsigned integer, least '
+        f'significant byte first, which is what '
+        f'`value.to_bytes(32, \'little\')` produces. To store plain binary '
+        f'data, pass `schema_overrides={{{name!r}: \'binary\'}}`, which '
+        f'also needs every column Arrow-backed; or make it variable-length '
+        f'binary, `pd.ArrowDtype(pa.binary())`, or a column of Python '
+        f'`bytes` objects.')
+
+
+cdef str _unlabelled_fsb16_message(object name):
+    return (
+        f'Bad column {name!r}: its values are 16 bytes each (Arrow type '
+        f'fixed_size_binary(16)). They could be UUIDs or plain binary '
+        f'data, and the column does not say which. To store UUIDs, do one '
+        f'of the following: make it a column of `uuid.UUID` objects; give '
+        f'it the Arrow UUID type, `pd.ArrowDtype(pa.uuid())`'
+        + ('' if hasattr(_PYARROW, 'uuid')
+           else f', which needs pyarrow 18 or newer (installed: '
+                f'{_PYARROW.__version__})')
+        + f'; or pass `schema_overrides={{{name!r}: \'uuid\'}}` to '
+        f'dataframe(), which works only when every column of the '
+        f'DataFrame is Arrow-backed, e.g. after '
+        f'`df = df.convert_dtypes(dtype_backend="pyarrow")`. Raw UUID '
+        f'bytes must be in the standard order (RFC 4122), which is what '
+        f'`uuid.UUID.bytes` returns and `uuid.UUID(bytes=...)` expects. '
+        f'If you produce them as `value.int.to_bytes(16, \'little\')`, the '
+        f'order version 5.0 of this client expected, reverse each value '
+        f'with `b[::-1]` first, or every UUID will be stored reversed. To '
+        f'store plain binary data, pass '
+        f'`schema_overrides={{{name!r}: \'binary\'}}`, which also needs '
+        f'every column Arrow-backed; or make it variable-length binary, '
+        f'`pd.ArrowDtype(pa.binary())`, or a column of Python `bytes` '
+        f'objects.')
+
+
+cdef bint _arrow_metadata_holds(
+        const char* metadata, const char* key, const char* value) noexcept:
+    """Whether an Arrow C-schema metadata blob maps `key` to exactly
+    `value`.
+
+    The blob is an int32 pair count followed, per pair, by an int32 key
+    length, the key bytes, an int32 value length and the value bytes, in
+    native byte order with no alignment promised, so each length is
+    copied out rather than read in place. The blob comes from the
+    producer as the native importer will read it; a negative count or
+    length ends the walk without a match and leaves the importer to
+    judge the schema."""
+    cdef int32_t n_pairs
+    cdef int32_t key_len_here
+    cdef int32_t value_len_here
+    cdef int32_t i
+    cdef size_t key_len = strlen(key)
+    cdef size_t value_len = strlen(value)
+    cdef const char* key_here
+    cdef const char* p = metadata
+    cdef bint holds = False
+    if metadata == NULL:
+        return False
+    memcpy(&n_pairs, p, sizeof(int32_t))
+    p += sizeof(int32_t)
+    if n_pairs < 0:
+        return False
+    for i in range(n_pairs):
+        memcpy(&key_len_here, p, sizeof(int32_t))
+        p += sizeof(int32_t)
+        if key_len_here < 0:
+            return False
+        key_here = p
+        p += key_len_here
+        memcpy(&value_len_here, p, sizeof(int32_t))
+        p += sizeof(int32_t)
+        if value_len_here < 0:
+            return False
+        # A producer may repeat a key. The native importer collects the
+        # pairs into a map, so the last one wins there, and it wins here.
+        if (<size_t>key_len_here == key_len
+                and memcmp(key_here, key, key_len) == 0):
+            holds = (<size_t>value_len_here == value_len
+                     and memcmp(p, value, value_len) == 0)
+        p += value_len_here
+    return holds
+
+
+cdef bint _arrow_overrides_name(
+        const qwp_arrow_override* overrides,
+        size_t overrides_len,
+        const char* name,
+        size_t name_len) noexcept:
+    cdef size_t i
+    for i in range(overrides_len):
+        if (overrides[i].column_len == name_len
+                and memcmp(overrides[i].column, name, name_len) == 0):
+            return True
+    return False
+
+
+cdef void_int _log_unlabelled_fsb_columns(object unlabelled) except -1:
+    """Log a `questdb` WARNING for each `(name, width)` the schema walk
+    collected.
+
+    Called once the write has gone through and its connection is
+    closed: a logging handler is caller Python, and running it after the
+    native state is gone keeps it from re-entering a write that is still
+    in progress. A diagnostic about a write that went ahead, so it stays
+    out of `warnings.warn`, which `-W error` would turn into an error."""
+    cdef object name
+    cdef int width
+    if not unlabelled:
+        return 0
+    for name, width in unlabelled:
+        if width == 16:
+            logging.getLogger('questdb').warning(
+                'questdb: column %r is fixed_size_binary(16) and nothing '
+                'labels it as UUID, so it was written as BINARY. If it '
+                'holds UUIDs, give it the type pa.uuid(), put '
+                '{"questdb.column_type": "uuid"} in its field metadata, or '
+                'pass schema_overrides={%r: \'uuid\'}; the bytes must be in '
+                'RFC 4122 order, which uuid.UUID.bytes gives. If it holds '
+                'plain binary data, say so to write it without this '
+                'warning: {"questdb.column_type": "binary"} in its field '
+                'metadata, or schema_overrides={%r: \'binary\'}.',
+                name, name, name)
+        else:
+            logging.getLogger('questdb').warning(
+                'questdb: column %r is fixed_size_binary(32) and nothing '
+                'labels it as LONG256, so it was written as BINARY. If it '
+                'holds LONG256 numbers, put '
+                '{"questdb.column_type": "long256"} in its field metadata '
+                'or pass schema_overrides={%r: \'long256\'}; each value is '
+                'read as an unsigned integer, least significant byte first. '
+                'If it holds plain binary data, say so to write it without '
+                'this warning: {"questdb.column_type": "binary"} in its '
+                'field metadata, or schema_overrides={%r: \'binary\'}.',
+                name, name, name)
+    return 0
+
+
+# Arrow C format strings by the name the native ingest's errors give the
+# type (arrow-rs `DataType` debug names), so a refusal made here reads the
+# way the native side's own refusal of the same mistake reads.
+cdef dict _ARROW_FORMAT_TYPE_NAMES = {
+    'n': 'Null', 'b': 'Boolean',
+    'c': 'Int8', 'C': 'UInt8', 's': 'Int16', 'S': 'UInt16',
+    'i': 'Int32', 'I': 'UInt32', 'l': 'Int64', 'L': 'UInt64',
+    'e': 'Float16', 'f': 'Float32', 'g': 'Float64',
+    'u': 'Utf8', 'U': 'LargeUtf8', 'vu': 'Utf8View',
+    'tdD': 'Date32', 'tdm': 'Date64',
+    '+l': 'List', '+L': 'LargeList', '+vl': 'ListView', '+s': 'Struct',
+    '+m': 'Map',
+}
+
+cdef tuple _ARROW_FORMAT_PREFIX_TYPE_NAMES = (
+    ('ts', 'Timestamp'), ('tt', 'Time'), ('tD', 'Duration'),
+    ('ti', 'Interval'), ('d:', 'Decimal'), ('+w:', 'FixedSizeList'),
+)
+
+
+cdef str _arrow_type_name(const ArrowSchema* col):
+    """A readable name for a column's Arrow type: the arrow-rs name for
+    the common types, the format string itself otherwise. A dictionary
+    column's format is its index type, so it is named by the dictionary
+    instead."""
+    cdef str fmt
+    cdef str prefix
+    cdef str type_name
+    if col.dictionary != NULL:
+        return 'Dictionary'
+    fmt = (<bytes>col.format).decode('utf-8', 'replace')
+    type_name = _ARROW_FORMAT_TYPE_NAMES.get(fmt)
+    if type_name is not None:
+        return type_name
+    for prefix, type_name in _ARROW_FORMAT_PREFIX_TYPE_NAMES:
+        if fmt.startswith(prefix):
+            return type_name
+    return f'with format {fmt!r}'
+
+
+cdef bint _arrow_format_is_binary(const char* fmt) noexcept:
+    """Whether an Arrow format string is one of the binary types:
+    fixed-size (`w:N`), variable-length (`z`), large (`Z`) or a view
+    (`vz`). Comparing the terminator too makes each match exact."""
+    return (strncmp(fmt, "w:", 2) == 0
+            or strncmp(fmt, _ARROW_FMT_BINARY, 2) == 0
+            or strncmp(fmt, _ARROW_FMT_LARGE_BINARY, 2) == 0
+            or strncmp(fmt, _ARROW_FMT_BINARY_VIEW, 3) == 0)
+
+
+cdef void_int _check_fsb_column(
+        const ArrowSchema* col,
+        const qwp_arrow_override* overrides,
+        size_t overrides_len,
+        object binary_names,
+        object seen_binary_names,
+        object unlabelled) except -1:
+    cdef int width = 0
+    cdef bint labelled_as_wide_type = False
+    cdef bytes name_bytes = b''
+    cdef str name
+    if col.format == NULL:
+        return 0
+    # Five bytes include the terminator, so `"w:16"` matches exactly.
+    if strncmp(col.format, _ARROW_FMT_FSB16, 5) == 0:
+        width = 16
+        labelled_as_wide_type = (
+            _arrow_metadata_holds(
+                col.metadata, _ARROW_C_MD_COLUMN_TYPE, _ARROW_C_MD_UUID)
+            or _arrow_metadata_holds(
+                col.metadata, _ARROW_C_MD_EXTENSION_NAME,
+                _ARROW_C_EXT_UUID))
+    elif strncmp(col.format, _ARROW_FMT_FSB32, 5) == 0:
+        width = 32
+        labelled_as_wide_type = _arrow_metadata_holds(
+            col.metadata, _ARROW_C_MD_COLUMN_TYPE, _ARROW_C_MD_LONG256)
+    if binary_names:
+        if col.name != NULL:
+            name_bytes = <bytes>col.name
+        if name_bytes in binary_names:
+            seen_binary_names.add(name_bytes)
+            name = name_bytes.decode('utf-8', 'replace')
+            if (col.dictionary != NULL
+                    or not _arrow_format_is_binary(col.format)):
+                raise QuestDBError(
+                    QuestDBErrorCode.ArrowIngest,
+                    f"override 'binary' is not applicable to column "
+                    f"{name!r} of Arrow type {_arrow_type_name(col)}: it "
+                    f"applies to binary columns only.")
+            if labelled_as_wide_type:
+                # The native ingest honours the column's own label over
+                # an override it never receives, so the two cannot both
+                # stand.
+                raise QuestDBError(
+                    QuestDBErrorCode.ArrowIngest,
+                    f"override 'binary' on column {name!r} conflicts with "
+                    f"the column's own "
+                    f"{'UUID' if width == 16 else 'LONG256'} label (its "
+                    f"Arrow type or field metadata). Drop one of the two.")
+            return 0
+    if width == 0 or labelled_as_wide_type:
+        return 0
+    if _arrow_metadata_holds(
+            col.metadata, _ARROW_C_MD_COLUMN_TYPE, _ARROW_C_MD_BINARY):
+        return 0
+    if col.name != NULL and _arrow_overrides_name(
+            overrides, overrides_len, col.name, strlen(col.name)):
+        return 0
+    if unlabelled is not None:
+        unlabelled.append((
+            (<bytes>col.name).decode('utf-8', 'replace')
+            if col.name != NULL else '',
+            width))
+    return 0
+
+
+cdef void_int _check_fsb_columns(
+        const ArrowSchema* schema,
+        const qwp_arrow_override* overrides,
+        size_t overrides_len,
+        object binary_names,
+        object unlabelled) except -1:
+    """Check every top-level column of an Arrow stream schema against
+    the fixed-size binary labelling rules.
+
+    Refuses a `'binary'` schema override that names no column, names a
+    column that is not binary, or names one that already carries a UUID
+    or LONG256 label; that override never reaches the native ingest, so
+    the checks it would make fall to this walk. Appends `(name, width)`
+    to `unlabelled`, when given, for each 16- or 32-byte column nothing
+    labels, for `_log_unlabelled_fsb_columns` to report once the write is
+    done. A pandas frame never has one by then: the capsule path refuses
+    it first (`_refuse_unlabelled_fsb_pandas_columns`). The walk bounds
+    the child count the way `_refuse_fsb8_columns` does."""
+    cdef int64_t i
+    cdef set seen_binary_names = set()
+    cdef object missing
+    if (schema.format != NULL
+            and strncmp(schema.format, _ARROW_FMT_STRUCT, 3) == 0):
+        if (schema.children == NULL
+                or schema.n_children < 0
+                or schema.n_children > _ARROW_MAX_TOP_LEVEL_COLUMNS):
+            return 0
+        for i in range(schema.n_children):
+            if schema.children[i] != NULL:
+                _check_fsb_column(
+                    schema.children[i], overrides, overrides_len,
+                    binary_names, seen_binary_names, unlabelled)
+    else:
+        _check_fsb_column(
+            schema, overrides, overrides_len,
+            binary_names, seen_binary_names, unlabelled)
+    if binary_names:
+        missing = sorted(set(binary_names) - seen_binary_names)
+        if missing:
+            raise QuestDBError(
+                QuestDBErrorCode.ArrowIngest,
+                f"override targets unknown column "
+                f"{missing[0].decode('utf-8', 'replace')!r}")
+    return 0
+
+
+cdef void_int _refuse_unlabelled_fsb_pandas_columns(
+        object df, object dtypes, object overrides) except -1:
+    """Refuse a pandas frame's unlabelled 16- or 32-byte column on the
+    Arrow capsule path, before any connection is opened.
+
+    `dtypes` is the frame's `df.dtypes`, read once by the caller and
+    shared with the other per-column passes. `overrides` is the merged
+    list of `(name_bytes, kind, arg)` the capsule path holds:
+    `schema_overrides` (`'binary'` included), `symbols` and the frame's
+    `df.attrs['questdb']` claims. A column named there is labelled, and
+    so is a 16-byte one whose `ArrowDtype` is `pa.uuid()`; any other
+    extension type is judged by its storage. A pandas frame cannot carry
+    field metadata."""
+    cdef object name
+    cdef object dtype
+    cdef object arrowtype
+    cdef object ext_name
+    cdef object entry
+    cdef set labelled = set()
+    if dtypes is None or not _is_pandas_dataframe_object(df):
+        return 0
+    if not _dataframe_try_import_pyarrow():
+        # No pyarrow means no `ArrowDtype` column to check.
+        return 0
+    if overrides is not None:
+        for entry in overrides:
+            labelled.add(entry[0])
+    for name, dtype in dtypes.items():
+        arrowtype = getattr(dtype, 'pyarrow_dtype', None)
+        if arrowtype is None:
+            continue
+        ext_name = None
+        if isinstance(arrowtype, _PYARROW.lib.BaseExtensionType):
+            ext_name = arrowtype.extension_name
+            arrowtype = arrowtype.storage_type
+        if (arrowtype.id != _PYARROW.lib.Type_FIXED_SIZE_BINARY
+                or arrowtype.byte_width not in (16, 32)
+                or (arrowtype.byte_width == 16
+                    and ext_name == _ARROW_EXT_UUID)
+                or str(name).encode('utf-8') in labelled):
+            continue
+        raise QuestDBError(
+            QuestDBErrorCode.BadDataFrame,
+            _unlabelled_fsb16_message(name)
+            if arrowtype.byte_width == 16
+            else _unlabelled_fsb32_message(name))
+    return 0
+
+
 cdef const char* _ARROW_FMT_INT8 = "c"
 cdef const char* _ARROW_FMT_INT16 = "s"
 cdef const char* _ARROW_FMT_INT32 = "i"
@@ -2044,19 +2438,11 @@ cdef void_int _dataframe_series_resolve_arrow(
         ext_name = arrowtype.extension_name
         arrowtype = arrowtype.storage_type
 
-    # Sixteen and thirty-two bytes are the two fixed-size binary widths
-    # that mean something else in QuestDB: UUID and LONG256. On the
-    # column-QWP planner an unlabelled column of either width is refused
-    # rather than sent as BINARY, because this planner cannot tell "I
-    # want opaque bytes" from "I meant UUID and the claim did not
-    # survive pandas", and guessing wrong auto-creates a table with the
-    # wrong column type and says nothing.
-    #
-    # The Arrow capsule path makes the opposite choice deliberately: it
-    # accepts an unlabelled column of either width as BINARY, because
-    # `schema_overrides` gives the caller a way to say otherwise there
-    # and this planner has none. That asymmetry is the whole of it, and
-    # `QuestDB.dataframe`'s docstring states it for users.
+    # An unlabelled 16- or 32-byte column is refused: this planner only
+    # ever sees pandas frames, and a pandas frame may have dropped the
+    # label on the way in. `_ARROW_FMT_FSB16` explains the rule, which
+    # the Arrow capsule path applies to pandas frames too
+    # (`_refuse_unlabelled_fsb_pandas_columns`), with the same messages.
     #
     # The check does not consult the pyarrow version. `pa.uuid()` exists
     # from pyarrow 18 on, so the message notes that version when it is
@@ -2072,49 +2458,15 @@ cdef void_int _dataframe_series_resolve_arrow(
             and arrowtype.byte_width == 32):
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
-            f'Bad column {pandas_col.name!r}: its values are 32 bytes '
-            f'each (Arrow type fixed_size_binary(32)). They could be '
-            f'LONG256 numbers or plain binary data, and the column does '
-            f'not say which. To store LONG256, do one of the following: '
-            f'pass `schema_overrides={{{pandas_col.name!r}: '
-            f'\'long256\'}}` to dataframe(), which works only when every '
-            f'column of the DataFrame is Arrow-backed, e.g. after '
-            f'`df = df.convert_dtypes(dtype_backend="pyarrow")`; or pass '
-            f'dataframe() a `pa.Table` or `pa.RecordBatch` instead of a '
-            f'DataFrame, with `{{"questdb.column_type": "long256"}}` in '
-            f'this column\'s field metadata (a pandas DataFrame cannot '
-            f'hold field metadata). Each value is read as an unsigned '
-            f'integer, least significant byte first, which is what '
-            f'`value.to_bytes(32, \'little\')` produces. To store plain '
-            f'binary data, make it a column of Python `bytes` objects.')
+            _unlabelled_fsb32_message(pandas_col.name))
 
     if (qwp_planner
             and arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
             and arrowtype.byte_width == 16
-            and ext_name is None):
+            and ext_name != _ARROW_EXT_UUID):
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
-            f'Bad column {pandas_col.name!r}: its values are 16 bytes '
-            f'each (Arrow type fixed_size_binary(16)). They could be '
-            f'UUIDs or plain binary data, and the column does not say '
-            f'which. To store UUIDs, do one of the following: make it a '
-            f'column of `uuid.UUID` objects; give it the Arrow UUID '
-            f'type, `pd.ArrowDtype(pa.uuid())`'
-            + ('' if hasattr(_PYARROW, 'uuid')
-               else f', which needs pyarrow 18 or newer (installed: '
-                    f'{_PYARROW.__version__})')
-            + f'; or pass `schema_overrides={{{pandas_col.name!r}: '
-            f'\'uuid\'}}` to dataframe(), which works only when every '
-            f'column of the DataFrame is Arrow-backed, e.g. after '
-            f'`df = df.convert_dtypes(dtype_backend="pyarrow")`. Raw '
-            f'UUID bytes must be in the standard order (RFC 4122), which '
-            f'is what `uuid.UUID.bytes` returns and `uuid.UUID(bytes=...)` '
-            f'expects. If you produce them as '
-            f'`value.int.to_bytes(16, \'little\')`, the order version 5.0 '
-            f'of this client expected, reverse each value with `b[::-1]` '
-            f'first, or every UUID will be stored reversed. To store '
-            f'plain binary data, make it a column of Python `bytes` '
-            f'objects.')
+            _unlabelled_fsb16_message(pandas_col.name))
 
     # Eight bytes is the shape of a polars `Object` column's handles (see
     # `_ARROW_FMT_FSB8`), refused whatever its label. The two widths above

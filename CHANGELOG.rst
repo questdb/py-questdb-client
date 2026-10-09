@@ -21,11 +21,11 @@ Breaking changes
   write them back; see *UUIDs in Arrow-shaped results saved from 5.0* below.
 
 - **A 16- or 32-byte Arrow column is no longer assumed to be a UUID or a
-  LONG256.** Width alone no longer decides the type. On the Arrow columnar
-  path such a column is opaque bytes and lands as BINARY; the NumPy planner
-  refuses both widths outright, as *The two DataFrame planners* below
-  explains. To get the old behaviour back, say what the column is: build it
-  with ``pa.uuid()``, attach ``questdb.column_type`` field metadata, or pass
+  LONG256.** Width alone no longer decides the type. Native Arrow input
+  writes such a column as BINARY with a warning, and a pandas frame refuses
+  it, as *Unlabelled 16- and 32-byte columns* below explains. To get the
+  old behaviour back, say what the column is: build it with ``pa.uuid()``,
+  attach ``questdb.column_type`` field metadata, or pass
   ``schema_overrides={'col': 'uuid'}`` (or ``'long256'``).
 
   ``pa.uuid()`` needs pyarrow 18 or newer, and the column must carry the
@@ -35,8 +35,9 @@ Breaking changes
 
 - **If you write UUIDs as raw bytes, change the byte order too.** Two of the
   changes above affect such a column, and only one of them produces an
-  error. On the Arrow columnar path your 16-byte column now lands as BINARY,
-  and the usual fix for that is ``schema_overrides={'col': 'uuid'}``. It
+  error. Your unlabelled 16-byte column is now written as BINARY or
+  refused, and the usual fix for that is
+  ``schema_overrides={'col': 'uuid'}``. It
   gets the UUID column back and leaves the byte order still wrong. Any 16 bytes are a valid UUID, so
   nothing fails at any point — the values are simply stored reversed.
 
@@ -49,13 +50,23 @@ Breaking changes
   ``123e4567-e89b-12d3-a456-426614174000`` as
   ``00401714-6642-56a4-d312-9be867453e12``.
 
-- **The two DataFrame planners now treat an unlabelled 16- or 32-byte column
-  differently.** A fully Arrow-backed frame takes the Arrow path,
-  where the column lands as BINARY, because ``schema_overrides`` is available
-  to say otherwise. A frame with any non-Arrow column takes the NumPy
-  planner, which has no such argument; rather than guess, it refuses both
-  widths. To send them as BINARY there, pass an object-dtype column of
-  ``bytes``.
+- **Unlabelled 16- and 32-byte columns.** A label is ``pa.uuid()``,
+  ``questdb.column_type`` field metadata of ``uuid`` or ``long256``,
+  ``schema_overrides``, or a ``df.attrs['questdb']`` claim; another
+  extension type or ``questdb.column_type`` value is not one. What happens
+  to an unlabelled column depends on where it comes from. Native Arrow input — a ``pa.Table``,
+  ``pa.RecordBatch``, ``pa.RecordBatchReader`` or any other
+  ``__arrow_c_stream__`` producer — keeps its field metadata, so an
+  unlabelled column there is written as BINARY, and once the write is done
+  the ``questdb`` logger records a WARNING naming the column and the
+  remedies. A pandas frame,
+  fully Arrow-backed or not, refuses it with ``BadDataFrame``: a pandas
+  ``ArrowDtype`` holds no field metadata, so the column may be a UUID or
+  LONG256 column that lost its label on the way into pandas. To write
+  either width as BINARY without the warning or the refusal, label it as
+  plain bytes: ``schema_overrides={'col': 'binary'}``, or
+  ``{"questdb.column_type": "binary"}`` field metadata on native Arrow
+  input. Either sends the column as it is, without a copy.
 
 - **UUIDs in Arrow-shaped results saved from 5.0 are stored reversed when
   written back.** In 5.0, ``to_arrow()``, ``iter_arrow()``,
@@ -260,6 +271,13 @@ New
   fixed-size and variable-length binary columns — which is how polars frames
   get there, since polars has no fixed-size binary dtype. Every non-null
   value must be exactly 16 or 32 bytes.
+
+- **``schema_overrides`` accepts ``'binary'``.** It says a 16- or 32-byte
+  binary column holds plain bytes, so the column is written as BINARY
+  without the refusal or warning an unlabelled one gets, and without a copy.
+  It applies to binary columns only, and is refused on a column whose
+  ``pa.uuid()`` type or ``uuid`` / ``long256`` field metadata already says
+  otherwise.
 
 - **A ``('geohash', bits)`` override accepts an unsigned integer column.**
   Until now it had to be signed (``int8`` to ``int64``), and an unsigned

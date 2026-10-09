@@ -45,8 +45,9 @@ def example(
             # Arrow type where the type is specific enough to say
             # so, and through `schema_overrides` where it is not.
             # Only `pa.uuid()` names a type outright here: a
-            # fixed-size binary of 16 or 32 bytes is a BINARY
-            # column of that width and nothing more, and uint32 and
+            # fixed-size binary of 16 or 32 bytes does not say
+            # whether it holds a UUID, a LONG256 or plain bytes, and
+            # a DataFrame refuses one that nothing labels; uint32 and
             # uint16 are plain integers. Each of those is named
             # below.
             'device_id': pd.Series(

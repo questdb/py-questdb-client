@@ -1980,9 +1980,9 @@
   "error": null
  },
  "long256 | arrow/fsb | binary | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 0,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | binary | numpy": {
   "wire_type": null,
@@ -1990,9 +1990,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | char | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | char | numpy": {
   "wire_type": null,
@@ -2000,9 +2000,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | geohash(20b) | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | geohash(20b) | numpy": {
   "wire_type": null,
@@ -2010,9 +2010,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | geohash(60b) | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | geohash(60b) | numpy": {
   "wire_type": null,
@@ -2020,9 +2020,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | ipv4 | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | ipv4 | numpy": {
   "wire_type": null,
@@ -2040,9 +2040,9 @@
   "error": null
  },
  "long256 | arrow/fsb | none | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 0,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | none | numpy": {
   "wire_type": null,
@@ -2050,9 +2050,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | not_a_kind | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | not_a_kind | numpy": {
   "wire_type": null,
@@ -2060,9 +2060,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | uuid | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/fsb | uuid | numpy": {
   "wire_type": null,
@@ -2160,9 +2160,9 @@
   "error": null
  },
  "long256 | arrow/native | binary | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 0,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | binary | numpy": {
   "wire_type": null,
@@ -2170,9 +2170,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | char | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | char | numpy": {
   "wire_type": null,
@@ -2180,9 +2180,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | geohash(20b) | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | geohash(20b) | numpy": {
   "wire_type": null,
@@ -2190,9 +2190,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | geohash(60b) | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | geohash(60b) | numpy": {
   "wire_type": null,
@@ -2200,9 +2200,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | ipv4 | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | ipv4 | numpy": {
   "wire_type": null,
@@ -2220,9 +2220,9 @@
   "error": null
  },
  "long256 | arrow/native | none | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 0,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | none | numpy": {
   "wire_type": null,
@@ -2230,9 +2230,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | not_a_kind | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | not_a_kind | numpy": {
   "wire_type": null,
@@ -2240,9 +2240,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | uuid | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 32 bytes each (Arrow type fixed_size_binary(32)). They could be LONG256 numbers or plain binary data, and the colum"
  },
  "long256 | arrow/native | uuid | numpy": {
   "wire_type": null,
@@ -2610,9 +2610,9 @@
   "error": null
  },
  "uuid | arrow/fsb | binary | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 0,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | binary | numpy": {
   "wire_type": null,
@@ -2620,9 +2620,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | char | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | char | numpy": {
   "wire_type": null,
@@ -2630,9 +2630,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | geohash(20b) | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | geohash(20b) | numpy": {
   "wire_type": null,
@@ -2640,9 +2640,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | geohash(60b) | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | geohash(60b) | numpy": {
   "wire_type": null,
@@ -2650,9 +2650,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | ipv4 | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | ipv4 | numpy": {
   "wire_type": null,
@@ -2660,9 +2660,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | long256 | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | long256 | numpy": {
   "wire_type": null,
@@ -2670,9 +2670,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | none | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 0,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | none | numpy": {
   "wire_type": null,
@@ -2680,9 +2680,9 @@
   "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | not_a_kind | arrow": {
-  "wire_type": "BINARY",
+  "wire_type": null,
   "notices": 1,
-  "error": null
+  "error": "QuestDBError: Bad column 'c': its values are 16 bytes each (Arrow type fixed_size_binary(16)). They could be UUIDs or plain binary data, and the column does not"
  },
  "uuid | arrow/fsb | not_a_kind | numpy": {
   "wire_type": null,

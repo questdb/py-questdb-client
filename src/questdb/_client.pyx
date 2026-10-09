@@ -6801,7 +6801,8 @@ def _bench_dataframe_flush_arrow_batch(
                 _capsule_consume_stream(
                     conn, arrow_source, c_table_name, c_ts_column_ptr,
                     False, 0, &c_schema, NULL, 0, &any_flushed,
-                    &deferred_since_sync, &may_have_committed_prefix)
+                    &deferred_since_sync, &may_have_committed_prefix,
+                    None, None)
             if any_flushed:
                 _dataframe_columnar_sync(conn)
             completed = iterations
@@ -7153,7 +7154,9 @@ cdef void_int _capsule_consume_stream(
         size_t c_overrides_len,
         bint* any_flushed,
         size_t* deferred_since_sync,
-        bint* may_have_committed_prefix) except -1:
+        bint* may_have_committed_prefix,
+        object binary_names,
+        object unlabelled) except -1:
     # `c_schema` is in/out and owned by the caller: zero-init on first
     # call (this function populates it via get_schema), reused as-is on
     # subsequent calls (Arrow C Data Interface guarantees slices of the
@@ -7188,6 +7191,13 @@ cdef void_int _capsule_consume_stream(
         # caught here however it was exported. The caller releases
         # `c_schema`.
         _refuse_fsb8_columns(c_schema)
+        # Once per call, since `c_schema` is fetched once and reused for
+        # every slice. It only collects the unlabelled columns: the
+        # caller reports them once the write is done
+        # (`_log_unlabelled_fsb_columns`).
+        _check_fsb_columns(
+            c_schema, c_overrides, c_overrides_len,
+            binary_names, unlabelled)
         # Field metadata goes on to the native client unchanged, by
         # design. A `questdb.column_type` claim the field's Arrow type
         # cannot carry -- 'short' on int32, 'ipv4' on int64 -- makes the
@@ -7241,20 +7251,32 @@ cdef void_int _capsule_consume_stream(
                 batch.release(&batch)
 
 
+# `schema_overrides` kind `'binary'`. The native Arrow ingest has no such
+# override: an unlabelled fixed-size binary column already lands as
+# BINARY. The kind is a label for this client alone -- it keeps a pandas
+# frame's 16- or 32-byte column from being refused, and a native one from
+# being warned about -- so the capsule path takes it out of the list
+# before building the native overrides array, and checks what the
+# native side would otherwise have checked (`_check_fsb_columns`).
+cdef int _SCHEMA_OVERRIDE_BINARY = -1
+
+
 cdef object _validate_schema_overrides(object schema_overrides):
     """Convert the public schema_overrides dict into a list of
     (name_bytes, kind_int, arg_int) tuples. Returns None if empty.
 
     Keeping `name_bytes` alive on the Python side lets the C overrides
-    array borrow the underlying char* without an extra copy.
+    array borrow the underlying char* without an extra copy. A
+    `'binary'` entry carries `_SCHEMA_OVERRIDE_BINARY`, which is not a
+    native kind.
     """
     if not schema_overrides:
         return None
     if not isinstance(schema_overrides, dict):
         raise TypeError(
             'schema_overrides must be a dict mapping column name to '
-            "one of: 'symbol', 'ipv4', 'char', 'uuid', 'long256', or "
-            "('geohash', bits).")
+            "one of: 'symbol', 'ipv4', 'char', 'uuid', 'long256', "
+            "'binary', or ('geohash', bits).")
     cdef list out = []
     cdef object name, override, kind, value, bits
     cdef int kind_int
@@ -7284,6 +7306,8 @@ cdef object _validate_schema_overrides(object schema_overrides):
             kind_int = <int>qwp_arrow_override_uuid
         elif kind == 'long256':
             kind_int = <int>qwp_arrow_override_long256
+        elif kind == 'binary':
+            kind_int = _SCHEMA_OVERRIDE_BINARY
         elif kind == 'geohash':
             # Held to the range as a Python object, so a number too
             # wide for the C field is refused rather than overflowing
@@ -7299,7 +7323,7 @@ cdef object _validate_schema_overrides(object schema_overrides):
             raise ValueError(
                 f'schema_overrides[{name!r}] kind {kind!r} not '
                 "in {'symbol', 'ipv4', 'char', 'uuid', 'long256', "
-                "'geohash'}.")
+                "'binary', 'geohash'}.")
         out.append((name.encode('utf-8'), kind_int, arg_int))
     return out
 
@@ -7820,7 +7844,7 @@ cdef bint _attrs_override_fits(
     return False
 
 
-cdef object _capsule_roundtrip_overrides(object frame):
+cdef object _capsule_roundtrip_overrides(object frame, object dtypes):
     """Arrow overrides rebuilt from the `df.attrs['questdb']` metadata
     that `QueryResult.to_pandas()` attaches.
 
@@ -7833,7 +7857,7 @@ cdef object _capsule_roundtrip_overrides(object frame):
     rather than rejected.
     """
     cdef list out = []
-    cdef object cols_meta, meta, ty, bits, dtypes, arrow_dtype, types
+    cdef object cols_meta, meta, ty, bits, arrow_dtype, types
     cdef object dtype
     cdef str kind
     cdef int kind_int
@@ -7846,8 +7870,10 @@ cdef object _capsule_roundtrip_overrides(object frame):
     _dataframe_may_import_deps()
     if not _dataframe_try_import_pyarrow():
         return out
-    # Read once for the whole frame, not once per column.
-    dtypes = frame.dtypes
+    # Read once for the whole frame, not once per column; the capsule
+    # path hands over the `df.dtypes` it already read.
+    if dtypes is None:
+        dtypes = frame.dtypes
     arrow_dtype = getattr(_PANDAS, 'ArrowDtype', None)
     if arrow_dtype is None:
         # No `ArrowDtype` in this pandas, so no column can be shown to
@@ -7924,17 +7950,15 @@ cdef object _pandas_masked_dtype():
     return _MASKED_DTYPE
 
 
-cdef bint _pandas_dataframe_requires_manual_planner(object df) except -1:
+cdef bint _pandas_dtypes_require_manual_planner(object dtypes) except -1:
     # A fully Arrow-backed frame takes the zero-copy capsule path; any
     # numpy / object / masked / categorical column routes the whole frame to
     # the manual planner (which ingests those directly and the Arrow-backed
-    # columns via the arrow-import path).
+    # columns via the arrow-import path). `dtypes` is the frame's
+    # `df.dtypes`.
     cdef object dtype
-    if not _is_pandas_dataframe_object(df):
-        return False
-    _dataframe_may_import_deps()
     try:
-        for dtype in df.dtypes:
+        for dtype in dtypes:
             if not _pandas_dtype_is_arrow(dtype):
                 return True
     except Exception:
@@ -8092,9 +8116,21 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef object roundtrip_overrides
     cdef int kind_int
     cdef int arg_int
+    cdef object pandas_dtypes = None
+    cdef set binary_names = set()
+    cdef list unlabelled = []
+    cdef object entry
 
-    if _pandas_dataframe_requires_manual_planner(df):
-        return False
+    if _is_pandas_dataframe_object(df):
+        # Read once and shared by every per-column pass below: each
+        # `df.dtypes` builds a fresh Series.
+        _dataframe_may_import_deps()
+        try:
+            pandas_dtypes = df.dtypes
+        except Exception:
+            return False
+        if _pandas_dtypes_require_manual_planner(pandas_dtypes):
+            return False
     if _pandas_dataframe_is_timestamp_only_at(df, at):
         return False
 
@@ -8155,9 +8191,22 @@ cdef bint _dataframe_client_try_capsule_path(
         return False
     merged_overrides = _merge_capsule_overrides(
         symbol_overrides, validated_overrides)
-    roundtrip_overrides = _capsule_roundtrip_overrides(sliceable)
+    roundtrip_overrides = _capsule_roundtrip_overrides(
+        sliceable, pandas_dtypes)
     merged_overrides = _merge_capsule_overrides(
         roundtrip_overrides, merged_overrides)
+    _refuse_unlabelled_fsb_pandas_columns(
+        df, pandas_dtypes, merged_overrides)
+    if merged_overrides:
+        # A `'binary'` override is a label for this client alone; the
+        # native ingest gets the rest.
+        for entry in merged_overrides:
+            if entry[1] == _SCHEMA_OVERRIDE_BINARY:
+                binary_names.add(entry[0])
+        if binary_names:
+            merged_overrides = [
+                entry for entry in merged_overrides
+                if entry[1] != _SCHEMA_OVERRIDE_BINARY] or None
 
     can_slice = (total_rows >= 0) and (
         hasattr(sliceable, 'slice')
@@ -8166,76 +8215,92 @@ cdef bint _dataframe_client_try_capsule_path(
     b = qdb_pystr_buf_new()
     memset(&c_schema, 0, sizeof(ArrowSchema))
     try:
-        str_to_table_name(b, <PyObject*>table_name, &c_table_name)
-        if at_is_column:
-            str_to_column_name(b, at, &c_ts_column)
-            c_ts_column_ptr = &c_ts_column
-
-        if merged_overrides is not None:
-            c_overrides_len = len(merged_overrides)
-            c_overrides = <qwp_arrow_override*>calloc(
-                c_overrides_len, sizeof(qwp_arrow_override))
-            if c_overrides == NULL:
-                raise MemoryError()
-            for i in range(c_overrides_len):
-                name_bytes, kind_int, arg_int = merged_overrides[i]
-                c_overrides[i].column = PyBytes_AsString(name_bytes)
-                c_overrides[i].column_len = PyBytes_GET_SIZE(name_bytes)
-                c_overrides[i].kind = <uint32_t>kind_int
-                c_overrides[i].arg = <uint32_t>arg_int
-
-        _ensure_doesnt_have_gil(&gs)
-        conn = _direct_conn_open(src, budget_ms, &err)
-        _ensure_has_gil(&gs)
-        if conn == NULL:
-            raise c_err_to_py(err)
-
         try:
-            if not can_slice:
-                # A one-shot stream (e.g. RecordBatchReader) cannot be
-                # re-exported for a whole-frame replay: a failed attempt
-                # must surface instead of retrying with the drained rest.
-                nonreplayable_consumed[0] = True
-                _capsule_consume_stream_with_hint(
-                    conn, sliceable, c_table_name, c_ts_column_ptr,
-                    at_scalar_set, at_scalar_nanos,
-                    &c_schema, c_overrides, c_overrides_len,
-                    &any_flushed, &deferred_since_sync,
-                    may_have_committed_prefix, max_rows_per_batch, False)
-            else:
-                offset = 0
-                while offset < total_rows:
-                    chunk_rows = max_rows_per_batch
-                    if chunk_rows > total_rows - offset:
-                        chunk_rows = total_rows - offset
-                    row_slice = _capsule_slice_rows(
-                        sliceable, offset, chunk_rows)
+            str_to_table_name(b, <PyObject*>table_name, &c_table_name)
+            if at_is_column:
+                str_to_column_name(b, at, &c_ts_column)
+                c_ts_column_ptr = &c_ts_column
+
+            if merged_overrides is not None:
+                c_overrides_len = len(merged_overrides)
+                c_overrides = <qwp_arrow_override*>calloc(
+                    c_overrides_len, sizeof(qwp_arrow_override))
+                if c_overrides == NULL:
+                    raise MemoryError()
+                for i in range(c_overrides_len):
+                    name_bytes, kind_int, arg_int = merged_overrides[i]
+                    c_overrides[i].column = PyBytes_AsString(name_bytes)
+                    c_overrides[i].column_len = PyBytes_GET_SIZE(name_bytes)
+                    c_overrides[i].kind = <uint32_t>kind_int
+                    c_overrides[i].arg = <uint32_t>arg_int
+
+            _ensure_doesnt_have_gil(&gs)
+            conn = _direct_conn_open(src, budget_ms, &err)
+            _ensure_has_gil(&gs)
+            if conn == NULL:
+                raise c_err_to_py(err)
+
+            try:
+                if not can_slice:
+                    # A one-shot stream (e.g. RecordBatchReader) cannot be
+                    # re-exported for a whole-frame replay: a failed attempt
+                    # must surface instead of retrying with the drained rest.
+                    nonreplayable_consumed[0] = True
                     _capsule_consume_stream_with_hint(
-                        conn, row_slice, c_table_name, c_ts_column_ptr,
+                        conn, sliceable, c_table_name, c_ts_column_ptr,
                         at_scalar_set, at_scalar_nanos,
                         &c_schema, c_overrides, c_overrides_len,
                         &any_flushed, &deferred_since_sync,
-                        may_have_committed_prefix, max_rows_per_batch, True)
-                    offset += chunk_rows
-            if any_flushed:
-                _dataframe_columnar_sync(conn)
-        except:
-            force_drop_conn = _dataframe_columnar_force_drop_after_error(
-                conn, any_flushed)
-            raise
-
-        return True
-    finally:
-        _ensure_has_gil(&gs)
-        if conn != NULL:
-            with nogil:
-                _direct_conn_close(src, conn, force_drop_conn)
-        if c_schema.release != NULL:
-            c_schema.release(&c_schema)
-        if c_overrides != NULL:
-            free(c_overrides)
-        if b != NULL:
-            qdb_pystr_buf_free(b)
+                        may_have_committed_prefix, max_rows_per_batch, False,
+                        binary_names, unlabelled)
+                else:
+                    offset = 0
+                    while offset < total_rows:
+                        chunk_rows = max_rows_per_batch
+                        if chunk_rows > total_rows - offset:
+                            chunk_rows = total_rows - offset
+                        row_slice = _capsule_slice_rows(
+                            sliceable, offset, chunk_rows)
+                        _capsule_consume_stream_with_hint(
+                            conn, row_slice, c_table_name, c_ts_column_ptr,
+                            at_scalar_set, at_scalar_nanos,
+                            &c_schema, c_overrides, c_overrides_len,
+                            &any_flushed, &deferred_since_sync,
+                            may_have_committed_prefix, max_rows_per_batch, True,
+                            binary_names, unlabelled)
+                        offset += chunk_rows
+                if any_flushed:
+                    _dataframe_columnar_sync(conn)
+            except:
+                force_drop_conn = _dataframe_columnar_force_drop_after_error(
+                    conn, any_flushed)
+                raise
+        finally:
+            _ensure_has_gil(&gs)
+            if conn != NULL:
+                with nogil:
+                    _direct_conn_close(src, conn, force_drop_conn)
+            if c_schema.release != NULL:
+                c_schema.release(&c_schema)
+            if c_overrides != NULL:
+                free(c_overrides)
+            if b != NULL:
+                qdb_pystr_buf_free(b)
+    except BaseException:
+        # A batch that went out may have created the table with these
+        # columns as BINARY, so a failed write still reports them, once
+        # its connection is closed. The write's own error is the one the
+        # caller needs, so a handler that raises is not let replace it.
+        if any_flushed:
+            try:
+                _log_unlabelled_fsb_columns(unlabelled)
+            except Exception:
+                pass
+        raise
+    # Only once the write has gone through and its connection is closed,
+    # so a logging handler cannot re-enter a write in progress.
+    _log_unlabelled_fsb_columns(unlabelled)
+    return True
 
 
 cdef void_int _dataframe_numpy_publish(
@@ -8520,14 +8585,17 @@ cdef void_int _capsule_consume_stream_with_hint(
         size_t* deferred_since_sync,
         bint* may_have_committed_prefix,
         size_t max_rows_per_batch,
-        bint can_slice) except -1:
+        bint can_slice,
+        object binary_names,
+        object unlabelled) except -1:
     cdef str hint
     try:
         _capsule_consume_stream(
             conn, stream_owner, c_table_name, c_ts_column_ptr,
             at_scalar_set, at_scalar_nanos, c_schema,
             c_overrides, c_overrides_len, any_flushed,
-            deferred_since_sync, may_have_committed_prefix)
+            deferred_since_sync, may_have_committed_prefix,
+            binary_names, unlabelled)
     except QuestDBError as exc:
         if _is_batch_too_large_error(exc):
             if exc.code == QuestDBErrorCode.BatchTooLarge:
@@ -9125,8 +9193,8 @@ cdef class QuestDB:
           Writing ``ARROW:extension:name`` as plain field metadata is not
           equivalent: pyarrow leaves such a key on the field, and a
           pandas ``ArrowDtype`` carries a type and no field, so a frame
-          built that way reaches the NumPy planner as a bare
-          ``pa.fixed_size_binary(16)`` and lands as BINARY. Frames
+          built that way holds a bare ``pa.fixed_size_binary(16)`` and
+          is refused as unlabelled — see **Binary** below. Frames
           imported over the C data interface or Arrow IPC do get the
           extension type rebuilt from that key, which is why the same
           metadata can route two ways. The other two routes —
@@ -9136,8 +9204,8 @@ cdef class QuestDB:
           16-byte ``bytes``, the shape
           ``to_pandas(dtype_backend='numpy_nullable')`` returns. On
           pyarrow < 18, where no column can carry the label at all, a
-          bare ``pa.fixed_size_binary(16)`` column is rejected on the
-          NumPy planner rather than quietly landing as BINARY.
+          pandas frame's bare ``pa.fixed_size_binary(16)`` column is
+          still refused rather than quietly landing as BINARY.
         - **LONG256**: 32-byte binary columns. Bytes are little-endian
           limbs, least-significant limb first, forwarded verbatim. Three
           routes claim the type, and they need different inputs.
@@ -9157,20 +9225,18 @@ cdef class QuestDB:
           bytes, so every non-null value must satisfy
           ``0 <= value < 2**256``; ``bytes`` cells go out verbatim and
           must be exactly 32 bytes. LONG256 has no Arrow extension type,
-          so a ``pa.fixed_size_binary(32)`` column reaching the NumPy
-          planner claims nothing by itself and is rejected rather than
-          sent as opaque bytes — see **Binary** below for why that
-          planner refuses where the Arrow columnar path accepts.
+          so a ``pa.fixed_size_binary(32)`` column in a pandas frame
+          claims nothing by itself and is refused rather than sent as
+          opaque bytes — see **Binary** below for why pandas frames
+          refuse where native Arrow input writes BINARY.
         - **Binary**: object-dtype columns of ``bytes``, ``bytearray``, or
           C-contiguous one-byte-item ``memoryview`` cells land as BINARY,
           the same value types :func:`Buffer.row <questdb.ingress.Buffer.row>`
           accepts. Arrow ``pa.binary()``, ``pa.large_binary()``, and
-          ``pa.fixed_size_binary(n)`` columns also land as BINARY: a
-          16- or 32-byte width on its own claims nothing, so an
-          unlabeled fixed-size column is opaque bytes rather than a
-          UUID or a LONG256.
+          ``pa.fixed_size_binary(n)`` columns also land as BINARY, with
+          the exception and the condition below.
 
-          The one exception is ``pa.fixed_size_binary(8)``, which both
+          The exception is ``pa.fixed_size_binary(8)``, which both
           planners refuse with ``ArrowUnsupportedColumnKind``, labelled
           or not. polars exports its ``Object`` dtype in exactly that
           shape, as handles to objects in its own process rather than
@@ -9179,19 +9245,37 @@ cdef class QuestDB:
           variable-length binary: ``pa.binary()``, ``pl.Binary``, or an
           object column of ``bytes``.
 
-          The two planners differ here, and deliberately. On the Arrow
-          columnar path an unlabeled 16- or 32-byte column lands as
-          BINARY, because ``schema_overrides`` is there to say otherwise
-          when that is not what you meant. The NumPy planner has no such
-          argument, so it cannot tell *I want opaque bytes* from *I meant
-          UUID and the claim did not survive pandas*; it refuses both
-          widths rather than auto-create a table with the wrong column
-          type and say nothing. The refusal does not depend on the
-          pyarrow version — which remedies the message can name does,
-          since ``pa.uuid()`` needs pyarrow 18, but which columns are
-          accepted does not. To send either width as BINARY on that
-          planner, pass the values as an object-dtype column of
-          ``bytes``. Requires QuestDB 10 or newer.
+          The condition is on widths 16 and 32. A width on its own
+          claims nothing: such a column is a UUID or a LONG256 only when
+          something labels it — ``pa.uuid()``, ``questdb.column_type``
+          field metadata of ``uuid`` or ``long256``, ``schema_overrides``,
+          or a ``df.attrs['questdb']`` claim. Any other extension type,
+          or any other ``questdb.column_type`` value, leaves the column
+          unlabelled — except ``binary``, which, like
+          ``schema_overrides={'col': 'binary'}``, labels it as plain bytes.
+          What happens to an unlabelled
+          one depends on where it comes from, not on which planner
+          writes it. Native Arrow input — a ``pa.Table``,
+          ``pa.RecordBatch``, ``pa.RecordBatchReader``, or any other
+          ``__arrow_c_stream__`` producer — keeps its field metadata, so
+          an unlabelled column there is written as BINARY, and once the
+          write is done the ``questdb`` logger records one WARNING per
+          such column naming the remedies. A pandas frame refuses it with ``BadDataFrame``,
+          fully Arrow-backed or not: an ``ArrowDtype`` carries a type and
+          no field, so the column may be a UUID or LONG256 column whose
+          label was dropped on the way into pandas, and guessing would
+          auto-create a table with the wrong column type. The refusal
+          does not depend on the pyarrow version — which remedies the
+          message can name does, since ``pa.uuid()`` needs pyarrow 18,
+          but which columns are accepted does not. To write either width
+          as BINARY without the warning or the refusal, label it as
+          plain bytes — ``schema_overrides={'col': 'binary'}``, or
+          ``{"questdb.column_type": "binary"}`` field metadata on native
+          Arrow input — which sends it as it is, with no copy. Making the
+          column variable-length binary (``pa.binary()``,
+          ``pd.ArrowDtype(pa.binary())``) or, in pandas, an object-dtype
+          column of ``bytes`` works too, at the cost of a copy. Requires
+          QuestDB 10 or newer.
         - **DATE**: Arrow ``pa.timestamp('ms')`` (tz-aware or naive),
           ``pa.date32()``, and ``pa.date64()`` columns land as DATE. The
           Arrow type is itself the claim, so there is no DATE cell type
@@ -9220,14 +9304,19 @@ cdef class QuestDB:
         ``QuestDBError`` from the ``flush()``.
 
         ``schema_overrides`` reclassifies columns by name, mapping each to
-        ``'symbol'``, ``'ipv4'``, ``'char'``, ``'uuid'``, ``'long256'``, or
-        ``('geohash', bits)`` (e.g.
+        ``'symbol'``, ``'ipv4'``, ``'char'``, ``'uuid'``, ``'long256'``,
+        ``'binary'``, or ``('geohash', bits)`` (e.g.
         ``{'venue': 'symbol', 'src_ip': 'ipv4'}``). Unknown column names are
         rejected. An override wins over any Arrow field metadata on its
-        column. ``'uuid'`` and ``'long256'`` apply to fixed-size and
+        column, except ``'binary'``, which is refused on a column whose
+        own type or field metadata labels it UUID or LONG256. ``'uuid'`` and ``'long256'`` apply to fixed-size and
         variable-length binary columns alike — the route polars frames take,
         since polars has no fixed-size binary dtype — and every non-null
-        value must be exactly 16 or 32 bytes respectively. It requires the
+        value must be exactly 16 or 32 bytes respectively. ``'binary'``
+        applies to binary columns and says a 16- or 32-byte column holds
+        plain bytes (see **Binary** above); it cannot override a
+        ``pa.uuid()`` type or a ``uuid`` / ``long256`` field label, and
+        is refused on such a column. It requires the
         Arrow columnar path (fully Arrow-backed input without
         ``table_name_col``); on input that falls back to the NumPy planner
         it raises :class:`UnsupportedDataFrameShapeError`.

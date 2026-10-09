@@ -344,9 +344,27 @@ where it is not:
      - ``pa.timestamp('ms')``, ``pa.date32()``, ``pa.date64()``
      - —
    * - ``BINARY``
-     - ``pa.binary()``, ``pa.large_binary()``,
-       ``pa.binary(n)`` on the Arrow columnar path
-     - —
+     - ``pa.binary()``, ``pa.large_binary()``, ``pa.binary(n)``
+     - ``'binary'`` on a 16- or 32-byte ``pa.binary(n)`` column
+
+``schema_overrides`` needs a fully Arrow-backed frame: every column an
+``ArrowDtype``, as ``df.convert_dtypes(dtype_backend='pyarrow')`` makes it.
+A frame with any NumPy, object or masked column refuses the argument.
+
+A 16- or 32-byte ``pa.binary(n)`` column needs a label to be a ``UUID`` or a
+``LONG256``: ``pa.uuid()``, ``questdb.column_type`` field metadata of
+``uuid`` or ``long256``, ``schema_overrides``, or a ``df.attrs['questdb']``
+claim, and ``schema_overrides={'col': 'binary'}`` or
+``questdb.column_type`` metadata of ``binary`` labels it as plain bytes.
+Another extension type or ``questdb.column_type`` value is not a label.
+Without one, what happens depends on where the column comes from. From a ``pa.Table``, a
+``pa.RecordBatch`` or another native Arrow source it is written as
+``BINARY``, and the ``questdb`` logger records a warning naming the column
+once the write is done.
+In a pandas frame, Arrow-backed or not, it is refused, because a pandas
+``ArrowDtype`` holds no field metadata and the label may have been lost on
+the way in. Variable-length binary, ``pa.binary()``, is ``BINARY`` either
+way and needs no label.
 
 .. literalinclude:: ../examples/qwp_column_types_dataframe.py
    :language: python

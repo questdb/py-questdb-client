@@ -6387,20 +6387,27 @@ class TestColumnIngressQwpRowTypes(unittest.TestCase):
 
 
     def test_unclaimed_fsb16_lands_as_binary(self):
-        """A bare ``pa.fixed_size_binary(16)`` column carries no UUID
-        claim, so it is opaque bytes: writing it into a UUID column is
-        a type mismatch the server rejects."""
+        """A bare ``pa.fixed_size_binary(16)`` column in a ``pa.Table``
+        carries no UUID claim, so it is opaque bytes: writing it into a
+        UUID column is a type mismatch the server rejects. A pandas
+        frame refuses the same column before sending anything, which
+        the unit tests pin."""
         import pyarrow as pa
         import uuid as uuid_mod
         table = self._table()
         self._create_table(table, 'v UUID')
-        values = pa.array(
-            [uuid_mod.uuid4().bytes for _ in range(3)],
-            type=pa.binary(16))
-        df = self._make_df_with_ts('v', values, 3)
+        n = 3
+        source = pa.table({
+            'ts': pa.array(
+                [1700000000_000000 + i * 1_000_000 for i in range(n)],
+                type=pa.timestamp('us', tz='UTC')),
+            'v': pa.array(
+                [uuid_mod.uuid4().bytes for _ in range(n)],
+                type=pa.binary(16)),
+        })
         with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaises(qi.QuestDBError):
-                client.dataframe(df, table_name=table, at='ts')
+                client.dataframe(source, table_name=table, at='ts')
 
     def test_fsb_other_size_lands_as_binary(self):
         """``FixedSizeBinary(k)`` carries no QuestDB type claim at any
