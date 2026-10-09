@@ -60,12 +60,13 @@ __all__ = [
 
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
 from libc.stdint cimport uint8_t, uint64_t, int64_t, int32_t, uint32_t, \
-    uintptr_t, INT64_MAX, INT64_MIN
+    uintptr_t, INT64_MAX, INT64_MIN, UINT64_MAX
 from libc.stdlib cimport malloc, calloc, realloc, free, qsort
 from libc.string cimport strncmp, memset, memcpy, strlen
 from libc.math cimport isnan, floor
 from cpython.datetime cimport datetime as cp_datetime
 from cpython.datetime cimport timedelta as cp_timedelta
+from cpython.datetime cimport import_datetime, timedelta_new
 from cpython.datetime cimport (
     PyDateTime_GET_YEAR, PyDateTime_GET_MONTH, PyDateTime_GET_DAY,
     PyDateTime_DATE_GET_HOUR, PyDateTime_DATE_GET_MINUTE,
@@ -119,6 +120,7 @@ from numpy cimport NPY_DOUBLE, PyArrayObject
 from .extra_numpy cimport *
 
 cnp.import_array()
+import_datetime()
 
 cdef bint _dataframe_columnar_count_io_stats = False
 cdef uint64_t _dataframe_columnar_flush_calls = 0
@@ -5029,7 +5031,8 @@ cdef object _validate_schema_overrides(object schema_overrides):
     if not isinstance(schema_overrides, dict):
         raise TypeError(
             'schema_overrides must be a dict mapping column name to '
-            "one of: 'symbol', 'ipv4', 'char', or ('geohash', bits).")
+            "one of: 'symbol', 'ipv4', 'char', 'uuid', 'long256', or "
+            "('geohash', bits).")
     cdef list out = []
     cdef object name, override, kind, value
     cdef int kind_int
@@ -5055,6 +5058,10 @@ cdef object _validate_schema_overrides(object schema_overrides):
             kind_int = <int>qwp_arrow_override_ipv4
         elif kind == 'char':
             kind_int = <int>qwp_arrow_override_char
+        elif kind == 'uuid':
+            kind_int = <int>qwp_arrow_override_uuid
+        elif kind == 'long256':
+            kind_int = <int>qwp_arrow_override_long256
         elif kind == 'geohash':
             if not isinstance(value, int) or value < 1 or value > 60:
                 raise ValueError(
@@ -5065,7 +5072,8 @@ cdef object _validate_schema_overrides(object schema_overrides):
         else:
             raise ValueError(
                 f'schema_overrides[{name!r}] kind {kind!r} not '
-                "in {'symbol', 'ipv4', 'char', 'geohash'}.")
+                "in {'symbol', 'ipv4', 'char', 'uuid', 'long256', "
+                "'geohash'}.")
         out.append((name.encode('utf-8'), kind_int, arg_int))
     return out
 
@@ -5383,6 +5391,38 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
     return out
 
 
+cdef list _pandas_fixed_size_binary_overrides(object df):
+    """UUID / LONG256 claims for a pandas frame's ``FixedSizeBinary(16)``
+    / ``(32)`` columns.
+
+    Pandas drops Arrow field metadata, and the native importer only maps a
+    FixedSizeBinary column to UUID / LONG256 on an explicit claim, so these
+    keep the per-column planner's classification on the capsule path.
+    """
+    cdef list out = []
+    cdef object name, dtype, pa_type
+    cdef int kind
+    if not _is_pandas_dataframe_object(df):
+        return out
+    for name, dtype in df.dtypes.items():
+        pa_type = getattr(dtype, 'pyarrow_dtype', None)
+        if pa_type is None:
+            continue
+        if _PYARROW is None:
+            _dataframe_require_pyarrow()
+        pa_type = getattr(pa_type, 'storage_type', pa_type)
+        if pa_type.id != _PYARROW.lib.Type_FIXED_SIZE_BINARY:
+            continue
+        if pa_type.byte_width == 16:
+            kind = <int>qwp_arrow_override_uuid
+        elif pa_type.byte_width == 32:
+            kind = <int>qwp_arrow_override_long256
+        else:
+            continue
+        out.append((str(name).encode('utf-8'), kind, 0))
+    return out
+
+
 cdef object _merge_capsule_overrides(
         object symbol_overrides, object validated_overrides):
     """Merge symbol overrides into validated schema_overrides.
@@ -5636,6 +5676,9 @@ cdef bint _dataframe_client_try_capsule_path(
     symbol_overrides = _resolve_symbols_to_overrides(sliceable, symbols)
     if symbol_overrides is None:
         return False
+    symbol_overrides = (
+        list(symbol_overrides)
+        + _pandas_fixed_size_binary_overrides(sliceable))
     merged_overrides = _merge_capsule_overrides(
         symbol_overrides, validated_overrides)
 
@@ -6413,14 +6456,17 @@ cdef class QuestDB:
           ``numpy.ndarray`` cells (any rank; requires pyarrow). Both land as
           QuestDB ``ARRAY(DOUBLE)``. Null rows are allowed; null *elements*
           inside an array are not.
-        - **UUID**: ``pa.fixed_size_binary(16)`` and the ``arrow.uuid``
-          extension type. Bytes are forwarded verbatim as **QuestDB's
-          UUID wire layout** ("bytes 0..8 lo half LE, bytes 8..16 hi
-          half LE"), matching the convention shared across the
-          c-questdb-client family (Rust direct, Polars). Round-trip is
-          byte-identity at this layout; users who want
-          ``uuid.UUID.bytes`` (RFC 4122 big-endian) round-trip must
-          convert at their boundary.
+        - **UUID**: the ``arrow.uuid`` extension type, a pandas
+          ``pa.fixed_size_binary(16)`` column, or any ``fixed_size_binary(16)``
+          column named in ``schema_overrides`` as ``'uuid'``, holding
+          canonical RFC 4122 bytes — exactly ``uuid.UUID.bytes``, and what
+          :meth:`QueryResult.to_arrow` returns, so a UUID column round-trips
+          unchanged. Object-dtype columns of ``uuid.UUID`` work too. In an
+          Arrow table or polars frame passed directly, an unlabelled
+          ``fixed_size_binary`` column lands as ``BINARY``.
+        - **LONG256**: a pandas ``pa.fixed_size_binary(32)`` column, or one
+          named as ``'long256'`` in ``schema_overrides``, holding four 64-bit
+          little-endian limbs, least significant first.
 
         Server-side coercion handles cross-type writes (e.g. ``pa.string()``
         UUIDs landing in a UUID column are parsed server-side; narrow ints
@@ -6428,8 +6474,13 @@ cdef class QuestDB:
         ``QuestDBError`` from the ``flush()``.
 
         ``schema_overrides`` reclassifies columns by name, mapping each to
-        ``'symbol'``, ``'ipv4'``, ``'char'``, or ``'geohash'`` (e.g.
-        ``{'venue': 'symbol', 'src_ip': 'ipv4'}``). Unknown column names are
+        ``'symbol'``, ``'ipv4'``, ``'char'``, ``'uuid'``, ``'long256'``, or
+        ``('geohash', bits)`` (e.g.
+        ``{'venue': 'symbol', 'src_ip': 'ipv4'}``). ``'uuid'`` and
+        ``'long256'`` matter for Arrow tables and polars frames passed
+        directly: there a ``fixed_size_binary`` column without an
+        ``arrow.uuid`` / ``questdb.column_type`` label lands as BINARY.
+        Unknown column names are
         rejected. It requires the Arrow columnar path (fully Arrow-backed
         input without ``table_name_col``); on input that falls back to the
         NumPy planner it raises :class:`UnsupportedDataFrameShapeError`.
@@ -6562,10 +6613,25 @@ cdef class QuestDB:
             the dictionary warm across repeated identical queries. No-op
             against servers that predate the capability.
 
+        :param timeout: Run this query under its own budget instead of the
+            server-wide ``query.timeout``, overriding the connect string's
+            ``query_timeout_ms``. An ``int`` is milliseconds; a
+            ``datetime.timedelta`` works too, with a positive value below
+            one millisecond rounded *up* to 1 ms. ``None`` (the default)
+            keeps the connect string's ``query_timeout_ms``; ``0`` clears
+            it. Requires a server advertising ``CAP_QUERY_TIMEOUT``: against
+            an older one a non-zero timeout fails the query with
+            ``QuestDBErrorCode.QueryTimeout`` rather than silently running
+            under the server default. On expiry the error carries that same
+            code and the connection stays usable — but do not retry a write
+            on it: a statement that outlives its timeout is reported as done
+            instead, and a DDL / INSERT / UPDATE that timed out waiting for
+            the table writer may still be applied.
+
         :return: A :class:`QueryResult`. Materialise it via
-            ``to_pandas()``, ``to_arrow()``, ``iter_arrow()``,
-            ``iter_pandas()``, or the ``__arrow_c_stream__`` PyCapsule
-            protocol.
+            ``iter_rows()``, ``to_pandas()``, ``to_arrow()``,
+            ``iter_arrow()``, ``iter_pandas()``, or the
+            ``__arrow_c_stream__`` PyCapsule protocol.
 
         Sentinel-value collisions in the result frame round-trip QuestDB's
         contract: ``INT64_MIN`` in a LONG column, NaN in DOUBLE / FLOAT,
@@ -6592,7 +6658,7 @@ cdef class QuestDB:
             raise TypeError(
                 '"binds" must be a list or tuple of positional bind '
                 f'parameters (or None), not {_fqn(type(binds))}')
-        cdef uint64_t timeout_ms = _query_timeout_to_millis(timeout)
+        cdef int64_t timeout_ms = _query_timeout_to_millis(timeout)
         db = self._begin_db_use('query')
         try:
             reader_handle = _borrow_reader_from_pool(db)
@@ -8988,16 +9054,16 @@ cdef class PooledReader:
         Execute a SQL query on the lease's connection and return a
         :class:`QueryResult`.
 
-        ``sql``, ``binds`` and ``reset_symbol_dict`` behave exactly as
-        on :meth:`QuestDB.query`, except the query runs on the reader
-        this lease holds instead of a per-call pool borrow. The
+        ``sql``, ``binds``, ``reset_symbol_dict`` and ``timeout`` behave
+        exactly as on :meth:`QuestDB.query`, except the query runs on the
+        reader this lease holds instead of a per-call pool borrow. The
         previous query's result must be fully drained (or closed)
         first; ``reset_symbol_dict=False`` reuses the connection's
         SYMBOL dictionary built up by the lease's earlier queries.
         """
         cdef _CursorHandle cursor_handle
         cdef _CursorHandle last
-        cdef uint64_t timeout_ms
+        cdef int64_t timeout_ms
         if binds is not None and not isinstance(binds, (list, tuple)):
             raise TypeError(
                 '"binds" must be a list or tuple of positional bind '

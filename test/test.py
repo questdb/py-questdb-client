@@ -33,7 +33,13 @@ from qwp_ws_ack_server import QwpAckServer, TLS_CA
 
 import questdb._client as qi
 
+from test_client_row_egress import TestTimeoutArgument
+
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
+    from test_client_row_egress import (
+        TestRowEgressLive,
+        TestQueryTimeoutLive,
+        TestUuidByteOrder)
     from system_test import (
         TestWithDatabase,
         TestEgressWithDatabase,
@@ -312,6 +318,10 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertIs(
             qi._debug_error_code_to_py(37),
             qi.QuestDBErrorCode.SymbolDictFull)
+        self.assertEqual(qi.QuestDBErrorCode.QueryTimeout.value, 38)
+        self.assertIs(
+            qi._debug_error_code_to_py(38),
+            qi.QuestDBErrorCode.QueryTimeout)
 
     def test_default_max_chunk_rows_matches_core_literal(self):
         # Pinned to the Rust core's DEFAULT_MAX_CHUNK_ROWS. Both sides hardcode

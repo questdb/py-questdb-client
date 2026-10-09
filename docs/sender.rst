@@ -1128,9 +1128,10 @@ Statement output (a ``COPY`` status row, admin-function rows, a stray
 ``execute()`` returns the statement's ``(op_type, rows_affected)``, or
 ``None`` for a statement that streamed a result set instead. The same report
 is on :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` once a
-result has been drained. ``rows_affected`` is meaningful for ``INSERT`` and
-``UPDATE``; statements executed at parse time currently report an unsigned
-``-1``, so treat a value at or above ``2 ** 63`` as unknown::
+result has been drained, and stays there after the result is closed.
+``rows_affected`` is meaningful for ``INSERT`` and ``UPDATE``, and ``None``
+when the server reports no count, as statements executed at parse time
+currently do::
 
     op_type, rows = db.execute('INSERT INTO trades VALUES (now(), \'AAPL\', 1.5)')
 
@@ -1156,18 +1157,23 @@ tuple per row and
             print(ts, symbol, price)
 
 ``type_name`` is the QuestDB DDL spelling (``VARCHAR``, ``TIMESTAMP_NS``,
-``IPv4``, ``GEOHASH(8c)``, ``DECIMAL(38,2)``, ``DOUBLE[]``), so it can be
+``IPv4``, ``GEOHASH(8c)``, ``DECIMAL(18,2)``, ``DOUBLE[]``), so it can be
 compared against ``tables()`` / ``information_schema.questdb_columns()``
-without normalising. Asking for the columns does not consume the rows, so a
-DB-API-style caller can read its ``description`` first; ``SELECT ... LIMIT 0``
-reads a schema without fetching anything. Both are empty for a statement that
-ships no result set — see ``exec_done`` for that outcome.
+without normalising. A ``DECIMAL`` is reported at its storage width's
+precision (18, 38 or 76), since the wire carries only the scale. Asking for
+the columns does not consume the rows, so a DB-API-style caller can read its
+``description`` first, but it does rule out ``to_pandas()`` and the other
+columnar methods on that result. ``SELECT ... LIMIT 0`` reads a schema
+without fetching anything, and the connection goes back to the pool. Both are
+empty for a statement that ships no result set — see ``exec_done`` for that
+outcome.
 
 Rows stream one batch at a time and map SQL NULL to ``None``. Timestamps are
-timezone-aware UTC (``TIMESTAMP_NS`` truncated to microseconds, since
+timezone-aware UTC (``TIMESTAMP_NS`` rounded down to microseconds, since
 ``datetime`` has no nanosecond field), ``DECIMAL`` keeps its scale,
 ``GEOHASH`` comes back as the text form the server itself prints, ``IPv4`` as
-``ipaddress.IPv4Address``, and arrays as ``numpy.ndarray``. ``BOOLEAN``,
+``ipaddress.IPv4Address``, and ``DOUBLE[]`` as ``numpy.ndarray`` (``LONG[]``
+is not supported on this path). ``BOOLEAN``,
 ``BYTE`` and ``SHORT`` have no NULL representation in QuestDB, so an inserted
 ``null`` reads back as ``False`` / ``0``.
 
@@ -1189,12 +1195,13 @@ connection string sets a default for every query on a handle, and
         db.execute('REFRESH MATERIALIZED VIEW ohlc_1m FULL', timeout=3_600_000)
 
 The server applies no ceiling, so a value above ``query.timeout`` is
-honoured. ``0`` or ``None`` means no per-query timeout.
+honoured. ``timeout=None`` (the default) keeps the connection string's
+``query_timeout_ms``; ``timeout=0`` clears it for that query.
 
 This needs a server advertising ``CAP_QUERY_TIMEOUT``. Against an older one
 the query fails fast with ``QuestDBErrorCode.QueryTimeout`` instead of
 silently running under the server default — raise the server's
-``query.timeout`` instead, or clear the per-query timeout. On expiry the
+``query.timeout`` instead, or pass ``timeout=0`` to clear it. On expiry the
 error carries that same code and the pooled connection stays open and
 authenticated, so the next query runs on it without reconnecting.
 
@@ -1213,7 +1220,7 @@ streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
 ``iter_arrow`` (and ``to_pandas`` / ``iter_pandas`` with ``dtype_backend`` or
 ``types_mapper``) require pyarrow; the default ``to_pandas`` / ``iter_pandas``
 are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
-(``__arrow_c_stream__``), so ``polars.from_arrow(result)`` or
+(``__arrow_c_stream__``), so ``polars.DataFrame(result)`` or
 ``duckdb.from_arrow(result)`` consume it directly without pyarrow installed.
 Each result is consumed once. Fully drain it, use it as a context manager
 (``with db.query(...) as result:``), or call :func:`QueryResult.close <questdb.QueryResult.close>`. A
@@ -1234,7 +1241,7 @@ concurrent consumption, cancellation, and close are unsupported.
 per-batch ``SYMBOL`` dictionary is compacted to the values each batch uses,
 which a generic consumer reconciles. So when the target is a polars / pandas
 frame, the dedicated methods avoid the re-reconciliation that
-``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
+``polars.DataFrame(result)`` / ``to_arrow().to_pandas()`` pay on
 ``SYMBOL``-heavy results.
 
 For several queries in a row, call :meth:`QuestDB.reader <questdb.QuestDB.reader>` to take a

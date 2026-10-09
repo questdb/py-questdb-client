@@ -1367,6 +1367,17 @@ cdef void_int _dataframe_category_series_as_arrow(
             'Expected a category of strings, ' +
             f'got a category of {pandas_col.series.dtype.categories.dtype}.')
 
+cdef void_int _dataframe_claim_arrow_column_type(
+        object storage_type, bytes column_type, col_t* col) except -1:
+    # Unclaimed, a FixedSizeBinary column lands as BINARY.
+    if col.setup.arrow_schema.release != NULL:
+        col.setup.arrow_schema.release(&col.setup.arrow_schema)
+    _PYARROW.field(
+        '', storage_type,
+        metadata={b'questdb.column_type': column_type})._export_to_c(
+            <uintptr_t>&col.setup.arrow_schema)
+
+
 cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrowtype, col_t *col) except -1:
     cdef bint is_decimal_col = False
     _dataframe_require_pyarrow()
@@ -1423,9 +1434,11 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
     elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
             and arrowtype.byte_width == 16):
         col.setup.source = col_source_t.col_source_fsb16_arrow
+        _dataframe_claim_arrow_column_type(arrowtype, b'uuid', col)
     elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
             and arrowtype.byte_width == 32):
         col.setup.source = col_source_t.col_source_fsb32_arrow
+        _dataframe_claim_arrow_column_type(arrowtype, b'long256', col)
     elif arrowtype.id == _PYARROW.lib.Type_UINT32:
         col.setup.source = col_source_t.col_source_u32_arrow
     else:

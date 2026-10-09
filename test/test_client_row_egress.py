@@ -7,7 +7,9 @@ Split in two:
 - `TestTimeoutArgument` needs no server. The timeout argument is validated
   before a connection is borrowed, precisely so a programming error costs no
   round trip, and that is what these pin.
-- Everything else is gated on `QDB_HTTP_ADDR` and drives a real QuestDB.
+- Everything else drives a real QuestDB: the one at `QDB_HTTP_ADDR`, or
+  under `TEST_QUESTDB_INTEGRATION=1` (the `test.py` integration run) the
+  system-test fixture's server.
   The wire encoding of `timeout_ms` and the capability gating are covered
   exhaustively in the Rust and C++ suites of c-questdb-client; what needs a
   live server is the half those cannot reach: the Python value mapping for
@@ -22,6 +24,7 @@ Run the live half with:
 import sys
 
 sys.dont_write_bytecode = True
+import atexit
 import datetime
 import decimal
 import ipaddress
@@ -35,10 +38,37 @@ import questdb as qdb
 
 
 ADDR = os.environ.get('QDB_HTTP_ADDR')
-live = unittest.skipUnless(
-    ADDR, 'set QDB_HTTP_ADDR=host:port for a running QuestDB')
-
 TABLE = 'py_row_egress_test'
+
+_fixture = None
+
+
+def _live_addr():
+    global _fixture
+    if ADDR:
+        return ADDR
+    if os.environ.get('TEST_QUESTDB_INTEGRATION') != '1':
+        raise unittest.SkipTest(
+            'set QDB_HTTP_ADDR=host:port for a running QuestDB')
+    if _fixture is None:
+        import system_test
+        system_test.may_install_questdb()
+        _fixture = system_test.QuestDbFixture(
+            system_test.QUESTDB_PLAIN_INSTALL_PATH, http=True)
+        _fixture.start()
+        atexit.register(_fixture.stop)
+    return f'{_fixture.host}:{_fixture.http_server_port}'
+
+
+class _LiveCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.addr = _live_addr()
+        cls.db = qdb.connect(f'ws::addr={cls.addr};')
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.db.close()
 
 
 class TestTimeoutArgument(unittest.TestCase):
@@ -81,6 +111,38 @@ class TestTimeoutArgument(unittest.TestCase):
             with self.assertRaises(ValueError):
                 db.execute('select 1', timeout=-1)
 
+    def test_conversion(self):
+        conv = qdb._client._debug_query_timeout_to_millis
+        td = datetime.timedelta
+        cases = [
+            (None, -1),
+            (0, 0),
+            (250, 250),
+            (td(0), 0),
+            (td(microseconds=1), 1),
+            (td(microseconds=999), 1),
+            (td(milliseconds=1001), 1001),
+            (td(milliseconds=1001, microseconds=999), 1001),
+            (td(days=1, milliseconds=3), 86_400_003),
+            (2 ** 63 - 1, 2 ** 63 - 1),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(conv(value), expected)
+
+    def test_conversion_is_exact_for_every_millisecond(self):
+        conv = qdb._client._debug_query_timeout_to_millis
+        for ms in range(1, 100_000):
+            self.assertEqual(
+                conv(datetime.timedelta(milliseconds=ms)), ms)
+
+    def test_timeout_beyond_int64_rejected(self):
+        with self._db() as db:
+            for bad in (2 ** 63, 2 ** 64, 2 ** 70):
+                with self.subTest(bad=bad):
+                    with self.assertRaises(ValueError):
+                        db.query('select 1', timeout=bad)
+
     def test_unknown_connect_string_key_still_rejected(self):
         # The new key must not have widened the parser.
         with self.assertRaises(qdb.QuestDBError):
@@ -95,13 +157,12 @@ class TestTimeoutArgument(unittest.TestCase):
             self.assertIsNotNone(db)
 
 
-@live
-class TestRowEgressLive(unittest.TestCase):
+class TestRowEgressLive(_LiveCase):
     """Value mapping and type names against a real server."""
 
     @classmethod
     def setUpClass(cls):
-        cls.db = qdb.connect(f'ws::addr={ADDR};')
+        super().setUpClass()
         cls.db.execute(f'drop table if exists {TABLE}')
         cls.db.execute(
             f'create table {TABLE} ('
@@ -128,7 +189,7 @@ class TestRowEgressLive(unittest.TestCase):
         try:
             cls.db.execute(f'drop table if exists {TABLE}')
         finally:
-            cls.db.close()
+            super().tearDownClass()
 
     def _one(self, sql, binds=None):
         with self.db.query(sql, binds) as result:
@@ -238,13 +299,92 @@ class TestRowEgressLive(unittest.TestCase):
         dec, = self._one(f'select dec from {TABLE} where n = 7')
         self.assertEqual(str(dec), '12.34')
 
-    def test_timestamp_ns_truncates_to_microseconds(self):
-        # `datetime` has no nanosecond field. Truncation is documented;
-        # this pins it so it cannot silently become rounding.
-        value, = self._one(
-            "select cast(1500 as timestamp_ns) as t")
-        self.assertEqual(value, datetime.datetime(
-            1970, 1, 1, 0, 0, 0, 1, tzinfo=datetime.timezone.utc))
+    def test_timestamp_ns_rounds_down_to_microseconds(self):
+        # `datetime` has no nanosecond field. The value is rounded towards
+        # the past on both sides of the epoch, never to nearest.
+        utc = datetime.timezone.utc
+        value, = self._one("select cast(1500 as timestamp_ns) as t")
+        self.assertEqual(
+            value, datetime.datetime(1970, 1, 1, 0, 0, 0, 1, tzinfo=utc))
+        value, = self._one("select cast(-1500 as timestamp_ns) as t")
+        self.assertEqual(
+            value,
+            datetime.datetime(1969, 12, 31, 23, 59, 59, 999998, tzinfo=utc))
+
+    def test_pre_epoch_temporals(self):
+        utc = datetime.timezone.utc
+        ts, d = self._one(
+            "select cast(-1 as timestamp) as ts, cast(-1 as date) as d")
+        self.assertEqual(
+            ts,
+            datetime.datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=utc))
+        self.assertEqual(
+            d,
+            datetime.datetime(1969, 12, 31, 23, 59, 59, 999000, tzinfo=utc))
+
+    def test_datetime_bounds_decode(self):
+        utc = datetime.timezone.utc
+        lo, hi = self._one(
+            'select cast(-62135596800000000 as timestamp) as lo, '
+            'cast(253402300799999999 as timestamp) as hi')
+        self.assertEqual(lo, datetime.datetime(1, 1, 1, tzinfo=utc))
+        self.assertEqual(
+            hi, datetime.datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=utc))
+        lo, hi = self._one(
+            'select cast(-62135596800000 as date) as lo, '
+            'cast(253402300799999 as date) as hi')
+        self.assertEqual(lo, datetime.datetime(1, 1, 1, tzinfo=utc))
+        self.assertEqual(
+            hi, datetime.datetime(9999, 12, 31, 23, 59, 59, 999000, tzinfo=utc))
+
+    def test_temporal_outside_datetime_range_is_a_clear_error(self):
+        # Year 10000 is a valid QuestDB timestamp but not a `datetime`; the
+        # int64 extremes exercise the overflow guards on the way to it.
+        for sql in (
+                'select cast(253402300800000000 as timestamp) as t',
+                'select cast(-62135596800000001 as timestamp) as t',
+                'select cast(253402300800000 as date) as t',
+                'select cast(-62135596800001 as date) as t',
+                'select cast(9223372036854775807 as timestamp) as t',
+                'select cast(-9223372036854775807 as timestamp) as t',
+                'select cast(9223372036854775807 as date) as t',
+                'select cast(-9223372036854775807 as date) as t'):
+            with self.subTest(sql=sql):
+                with self.assertRaises(qdb.QuestDBError) as ctx:
+                    self._one(sql)
+                self.assertEqual(
+                    ctx.exception.code, qdb.QuestDBErrorCode.InvalidTimestamp)
+                self.assertIn("'t'", str(ctx.exception))
+        self.assertEqual(self._one('select 1 as a'), (1,))
+
+    def test_edge_values(self):
+        cases = [
+            ('select cast(-12.34 as decimal(10,2)) as v',
+             decimal.Decimal('-12.34')),
+            ('select cast(7 as decimal(10,0)) as v', decimal.Decimal('7')),
+            ("select cast('123456789012345678901234567.8' "
+             "as decimal(30,1)) as v",
+             decimal.Decimal('123456789012345678901234567.8')),
+            ("select cast('-1234567890123456789012345678901234567890"
+             "12345678901234.5' as decimal(60,1)) as v",
+             decimal.Decimal('-1234567890123456789012345678901234567890'
+                             '12345678901234.5')),
+            ("select cast('0x0102030405060708090a0b0c0d0e0f101112131415"
+             "161718191a1b1c1d1e1f20' as long256) as v",
+             0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20),
+            ("select cast('1.2.3.4' as ipv4) as v",
+             ipaddress.IPv4Address('1.2.3.4')),
+            ('select cast(-5 as byte) as v', -5),
+            ('select #sp052w92bcde as v', 'sp052w92bcde'),
+            ('select ##1 as v', '1'),
+            ("select 'héllo, 🌍' as v", 'héllo, 🌍'),
+            ("select cast('é' as char) as v", 'é'),
+        ]
+        for sql, expected in cases:
+            with self.subTest(sql=sql):
+                value, = self._one(sql)
+                self.assertEqual(value, expected)
+                self.assertIs(type(value), type(expected))
 
     def test_geohash_bit_width_renders_as_bits(self):
         value, = self._one('select ##1011 as g')
@@ -257,6 +397,9 @@ class TestRowEgressLive(unittest.TestCase):
     def test_binary_is_bytes(self):
         value, = self._one("select cast(null as binary) as b")
         self.assertIsNone(value)
+        value, = self._one("select rnd_bin(4, 4, 0) as b")
+        self.assertIsInstance(value, bytes)
+        self.assertEqual(len(value), 4)
 
     def test_array_is_ndarray(self):
         import numpy as np
@@ -343,6 +486,59 @@ class TestRowEgressLive(unittest.TestCase):
         self.assertEqual(list(self.db.query('select 1 as a').iter_rows()),
                          [(1,)])
 
+    def test_iterator_is_invalid_after_close(self):
+        result = self.db.query('select x from long_sequence(3)')
+        rows = result.iter_rows()
+        result.close()
+        with self.assertRaises(qdb.QuestDBError):
+            next(rows)
+
+    def test_iterator_is_invalid_after_close_mid_stream(self):
+        # Rows decoded ahead of the consumer must not keep flowing after
+        # `close()`, whichever batch they sit in.
+        result = self.db.query('select x from long_sequence(100000)')
+        rows = result.iter_rows()
+        for _ in range(50000):
+            next(rows)
+        result.close()
+        with self.assertRaises(qdb.QuestDBError):
+            next(rows)
+
+    def test_columns_do_not_fail_on_undecodable_data(self):
+        # A schema probe must not depend on the values; the decode error
+        # belongs to iteration.
+        sql = ('select case when x = 3 '
+               'then cast(253402300800000000 as timestamp) '
+               'else cast(x as timestamp) end as t from long_sequence(5)')
+        with self.db.query(sql) as result:
+            self.assertEqual(result.columns(), [('t', 'TIMESTAMP')])
+            with self.assertRaises(qdb.QuestDBError) as ctx:
+                list(result.iter_rows())
+        self.assertEqual(
+            ctx.exception.code, qdb.QuestDBErrorCode.InvalidTimestamp)
+
+    def test_schema_probe_keeps_the_lease_usable(self):
+        # `columns()` on a `LIMIT 0` probe must read the result to its end,
+        # or closing it tears the lease's connection down.
+        with self.db.reader() as r:
+            for _ in range(3):
+                with r.query(f'select * from {TABLE} limit 0') as result:
+                    self.assertEqual(len(result.columns()), 18)
+            self.assertEqual(
+                list(r.query('select 1 as a').iter_rows()), [(1,)])
+
+    def test_dropped_row_result_does_not_wedge_the_lease(self):
+        # Dropping an un-iterated row result must free its cursor, so the
+        # lease reports a torn-down connection rather than a result that
+        # is "still open" forever.
+        import gc
+        with self.db.reader() as r:
+            r.query('select x from long_sequence(100000)').columns()
+            gc.collect()
+            with self.assertRaises(qdb.QuestDBError) as ctx:
+                r.query('select 1 as a')
+            self.assertIn('terminal', str(ctx.exception))
+
     def test_close_is_idempotent_after_a_non_select(self):
         # A non-SELECT reaches its terminal inside `columns()`, which frees
         # the cursor; `close()` must still be a no-op rather than a crash.
@@ -383,7 +579,7 @@ class TestRowEgressLive(unittest.TestCase):
             '    return real(name, *a, **k)\n'
             'builtins.__import__ = guard\n'
             'import questdb\n'
-            f'db = questdb.connect("ws::addr={ADDR};")\n'
+            f'db = questdb.connect("ws::addr={self.addr};")\n'
             'with db.query("select 1 as a") as r:\n'
             '    assert r.columns() == [("a", "INT")]\n'
             '    assert list(r.iter_rows()) == [(1,)]\n'
@@ -422,6 +618,56 @@ class TestRowEgressLive(unittest.TestCase):
         finally:
             self.db.execute('drop table if exists py_exec_done_test')
 
+    def test_exec_done_survives_close(self):
+        self.db.execute('drop table if exists py_exec_done_close')
+        self.db.execute('create table py_exec_done_close (a int)')
+        try:
+            with self.db.query(
+                    'insert into py_exec_done_close values (1),(2)') as result:
+                list(result.iter_rows())
+            self.assertEqual(result.exec_done[1], 2)
+            result.close()
+            self.assertEqual(result.exec_done[1], 2)
+        finally:
+            self.db.execute('drop table if exists py_exec_done_close')
+
+    def test_exec_done_through_every_drain_path(self):
+        try:
+            import pandas  # noqa: F401
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest('needs pandas and pyarrow')
+        self.db.execute('drop table if exists py_exec_done_paths')
+        self.db.execute('create table py_exec_done_paths (a int)')
+        try:
+            drains = {
+                'to_pandas': lambda r: r.to_pandas(),
+                'to_arrow': lambda r: r.to_arrow(),
+                'iter_arrow': lambda r: list(r.iter_arrow()),
+                'iter_pandas': lambda r: list(r.iter_pandas()),
+                'cancel': lambda r: r.cancel(),
+            }
+            for name, drain in drains.items():
+                with self.subTest(path=name):
+                    with self.db.query(
+                            'insert into py_exec_done_paths values (1)'
+                            ) as result:
+                        drain(result)
+                    self.assertEqual(result.exec_done[1], 1)
+        finally:
+            self.db.execute('drop table if exists py_exec_done_paths')
+
+    def test_rows_affected_is_none_when_the_server_reports_none(self):
+        self.db.execute('drop table if exists py_exec_done_truncate')
+        self.db.execute('create table py_exec_done_truncate (a int)')
+        try:
+            op_type, rows = self.db.execute(
+                'truncate table py_exec_done_truncate')
+            self.assertIsInstance(op_type, int)
+            self.assertIsNone(rows)
+        finally:
+            self.db.execute('drop table if exists py_exec_done_truncate')
+
     def test_execute_on_a_select_returns_none(self):
         self.assertIsNone(self.db.execute('select 1'))
 
@@ -443,16 +689,18 @@ class TestRowEgressLive(unittest.TestCase):
             finally:
                 r.execute('drop table if exists py_lease_exec_test')
 
-    # --- per-query timeout ----------------------------------------------
+class TestQueryTimeoutLive(_LiveCase):
+    """`timeout=` against a server advertising ``CAP_QUERY_TIMEOUT``."""
 
-    def test_server_advertises_the_timeout_capability(self):
-        # Everything below depends on it; fail here with a clear message
-        # rather than as a confusing timeout error.
-        caps = self.db.server_info().capabilities
-        self.assertTrue(
-            caps & 0x08,
-            'server does not advertise CAP_QUERY_TIMEOUT (capabilities '
-            f'0x{caps:08X}); it predates questdb/questdb#7768')
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        caps = cls.db.server_info().capabilities
+        if not caps & 0x08:
+            cls.db.close()
+            raise unittest.SkipTest(
+                'server does not advertise CAP_QUERY_TIMEOUT (capabilities '
+                f'0x{caps:08X}); it predates questdb/questdb#7768')
 
     def test_timeout_expiry_raises_query_timeout(self):
         with self.assertRaises(qdb.QuestDBError) as ctx:
@@ -484,15 +732,16 @@ class TestRowEgressLive(unittest.TestCase):
         with self.db.query('select 1 as a', timeout=30_000) as r:
             self.assertEqual(list(r.iter_rows()), [(1,)])
         with self.db.query(
-                f'select count() from {TABLE}', timeout=30_000) as r:
-            self.assertEqual(len(list(r.iter_rows())), 1)
+                'select count() from long_sequence(1000)',
+                timeout=30_000) as r:
+            self.assertEqual(list(r.iter_rows()), [(1000,)])
 
     def test_no_timeout_leaves_the_query_alone(self):
         with self.db.query('select 1 as a') as r:
             self.assertEqual(list(r.iter_rows()), [(1,)])
 
     def test_connect_string_timeout_applies_to_every_query(self):
-        with qdb.connect(f'ws::addr={ADDR};query_timeout_ms=200;') as db:
+        with qdb.connect(f'ws::addr={self.addr};query_timeout_ms=200;') as db:
             for _ in range(2):
                 with self.assertRaises(qdb.QuestDBError) as ctx:
                     with db.query('select * from sleep(60000)') as r:
@@ -510,7 +759,7 @@ class TestRowEgressLive(unittest.TestCase):
         # the per-query value replaced the default rather than being
         # ignored or combined with it.
         import time
-        with qdb.connect(f'ws::addr={ADDR};query_timeout_ms=300;') as db:
+        with qdb.connect(f'ws::addr={self.addr};query_timeout_ms=300;') as db:
             started = time.monotonic()
             with self.assertRaises(qdb.QuestDBError) as ctx:
                 with db.query(
@@ -525,21 +774,57 @@ class TestRowEgressLive(unittest.TestCase):
                 f'the per-query 3 s (cut off after {elapsed:.2f}s)')
             self.assertLess(elapsed, 20.0)
 
-    def test_per_query_timeout_zero_is_accepted(self):
-        # `0` clears the default, leaving the query under the server-wide
-        # `query.timeout`. That it puts no field on the wire is pinned
-        # byte-exactly in the C++ mock suite; here it just has to not be
-        # rejected, and a short query must still run.
-        with qdb.connect(f'ws::addr={ADDR};query_timeout_ms=300;') as db:
-            with db.query('select 1 as a', timeout=0) as r:
-                self.assertEqual(list(r.iter_rows()), [(1,)])
-            with db.query('select 1 as a', timeout=None) as r:
-                self.assertEqual(list(r.iter_rows()), [(1,)])
+    def test_per_query_timeout_zero_clears_the_connect_string(self):
+        # A query of a few hundred milliseconds against a 20 ms default:
+        # `timeout=None` keeps the default and is cut off, `timeout=0` lifts
+        # it and the query completes.
+        sql = ('select count() from long_sequence(100000000) '
+               'where x % 7 = 0')
+        with qdb.connect(f'ws::addr={self.addr};query_timeout_ms=20;') as db:
+            with self.assertRaises(qdb.QuestDBError) as ctx:
+                with db.query(sql, timeout=None) as r:
+                    list(r.iter_rows())
+            self.assertEqual(
+                ctx.exception.code, qdb.QuestDBErrorCode.QueryTimeout)
+            with db.query(sql, timeout=0) as r:
+                self.assertEqual(list(r.iter_rows()), [(14285714,)])
+            self.assertIsNone(db.execute(sql, timeout=0))
+
+    def test_lease_survives_a_timeout(self):
+        # The server answers a timed-out query with a terminal frame on a
+        # healthy connection, so the lease must stay usable: a dbt thread
+        # keeps its lease across a model that ran over its budget.
+        with self.db.reader() as r:
+            for _ in range(2):
+                with self.assertRaises(qdb.QuestDBError) as ctx:
+                    r.execute('select * from sleep(60000)', timeout=200)
+                self.assertEqual(
+                    ctx.exception.code, qdb.QuestDBErrorCode.QueryTimeout)
+                self.assertEqual(
+                    list(r.query('select 1 as a').iter_rows()), [(1,)])
+
+    def test_timeout_returns_the_reader_to_the_pool(self):
+        stats = qdb._client._debug_egress_pool_stats
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            list(db.query('select 1 as a').iter_rows())
+            self.assertEqual(stats(db), (0, 1))
+            with self.assertRaises(qdb.QuestDBError):
+                db.execute('select * from sleep(60000)', timeout=200)
+            self.assertEqual(stats(db), (0, 1))
 
     def test_timeout_on_execute(self):
         with self.assertRaises(qdb.QuestDBError) as ctx:
             self.db.execute('select * from sleep(60000)', timeout=200)
         self.assertEqual(ctx.exception.code, qdb.QuestDBErrorCode.QueryTimeout)
+
+    def test_pooled_reader_rejects_a_bad_timeout_and_stays_usable(self):
+        with self.db.reader() as r:
+            with self.assertRaises(ValueError):
+                r.query('select 1', timeout=-1)
+            with self.assertRaises(TypeError):
+                r.execute('select 1', timeout='1s')
+            self.assertEqual(
+                list(r.query('select 1 as a').iter_rows()), [(1,)])
 
     def test_timeout_on_a_pooled_reader(self):
         with self.db.reader() as r:
@@ -550,8 +835,7 @@ class TestRowEgressLive(unittest.TestCase):
                 ctx.exception.code, qdb.QuestDBErrorCode.QueryTimeout)
 
 
-@live
-class TestUuidByteOrder(unittest.TestCase):
+class TestUuidByteOrder(_LiveCase):
     """Every route a UUID takes has to agree on canonical RFC-4122 order.
 
     The native client took standard byte order in c-questdb-client #186 and
@@ -563,18 +847,20 @@ class TestUuidByteOrder(unittest.TestCase):
     """
 
     U = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
-    TBL = TABLE + '_uuid'
+    def _new_table(self):
+        table = f'{TABLE}_uuid_{uuid.uuid4().hex[:8]}'
+        self.addCleanup(self.db.execute, f'drop table if exists {table}')
+        return table
 
-    @classmethod
-    def setUpClass(cls):
-        cls.db = qdb.connect(f'ws::addr={ADDR};')
+    def _fresh_table(self, columns):
+        table = self._new_table()
+        self.db.execute(
+            f'create table {table} ({columns}, ts timestamp) '
+            'timestamp(ts) partition by day wal')
+        return table
 
-    @classmethod
-    def tearDownClass(cls):
-        try:
-            cls.db.execute(f'drop table if exists {cls.TBL}')
-        finally:
-            cls.db.close()
+    def _wait(self, table):
+        self.db.query(f"select wait_wal_table('{table}')")._drain()
 
     def test_bound_uuid_reaches_the_server_unchanged(self):
         rows = list(self.db.query(
@@ -615,18 +901,114 @@ class TestUuidByteOrder(unittest.TestCase):
             import pandas as pd
         except ImportError:
             self.skipTest('needs pandas')
-        self.db.execute(f'drop table if exists {self.TBL}')
-        self.db.execute(
-            f'create table {self.TBL} (u uuid, ts timestamp) '
-            'timestamp(ts) partition by day wal')
+        table = self._fresh_table('u uuid')
         self.db.dataframe(
             pd.DataFrame({'u': [self.U, None]}),
-            table_name=self.TBL, at=qdb.ServerTimestamp)
-        self.db.query(f"select wait_wal_table('{self.TBL}')")._drain()
+            table_name=table, at=qdb.ServerTimestamp)
+        self._wait(table)
         got = dict(self.db.query(
-            f'select u, cast(u as varchar) as s from {self.TBL}').iter_rows())
+            f'select u, cast(u as varchar) as s from {table}').iter_rows())
         self.assertEqual(got.get(self.U), str(self.U))
         self.assertIn(None, got)
+
+    def test_arrow_fixed_size_binary_uuid_column(self):
+        # `pa.binary(16)` holds `UUID.bytes` and lands as that UUID.
+        try:
+            import pandas as pd
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('needs pandas and pyarrow')
+        table = self._fresh_table('u uuid')
+        col = pd.Series(
+            pa.array([self.U.bytes, None], type=pa.binary(16)),
+            dtype=pd.ArrowDtype(pa.binary(16)))
+        self.db.dataframe(
+            pd.DataFrame({'u': col}),
+            table_name=table, at=qdb.ServerTimestamp)
+        self._wait(table)
+        got = dict(self.db.query(
+            f'select u, cast(u as varchar) as s from {table}').iter_rows())
+        self.assertEqual(got.get(self.U), str(self.U))
+        self.assertIn(None, got)
+        table = self.db.query(f'select u from {table}').to_arrow()
+        storage = table.column('u').combine_chunks()
+        if isinstance(storage.type, pa.BaseExtensionType):
+            storage = storage.storage
+        self.assertIn(self.U.bytes, storage.to_pylist())
+
+    def test_arrow_fixed_size_binary_long256_column(self):
+        try:
+            import pandas as pd
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('needs pandas and pyarrow')
+        table = self._fresh_table('v long256')
+        raw = bytes(range(1, 33))
+        col = pd.Series(
+            pa.array([raw], type=pa.binary(32)),
+            dtype=pd.ArrowDtype(pa.binary(32)))
+        self.db.dataframe(
+            pd.DataFrame({'v': col}),
+            table_name=table, at=qdb.ServerTimestamp)
+        self._wait(table)
+        value, = list(self.db.query(f'select v from {table}').iter_rows())
+        self.assertEqual(value[0], int.from_bytes(raw, 'little'))
+
+    def test_dataframe_planner_path_claims_fixed_size_binary(self):
+        # A numpy column alongside the Arrow one routes the frame through
+        # the per-column planner rather than the capsule path.
+        try:
+            import pandas as pd
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('needs pandas and pyarrow')
+        table = self._fresh_table('u uuid, v long256, n long')
+        raw = bytes(range(32, 64))
+        self.db.dataframe(
+            pd.DataFrame({
+                'u': pd.Series(
+                    pa.array([self.U.bytes], type=pa.binary(16)),
+                    dtype=pd.ArrowDtype(pa.binary(16))),
+                'v': pd.Series(
+                    pa.array([raw], type=pa.binary(32)),
+                    dtype=pd.ArrowDtype(pa.binary(32))),
+                'n': [1]}),
+            table_name=table, at=qdb.ServerTimestamp)
+        self._wait(table)
+        rows = list(self.db.query(
+            f'select cast(u as varchar), v, n from {table}').iter_rows())
+        self.assertEqual(
+            rows, [(str(self.U), int.from_bytes(raw, 'little'), 1)])
+
+    def test_arrow_table_without_a_claim_lands_as_binary(self):
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('needs pyarrow')
+        table = self._new_table()
+        frame = pa.table({'u': pa.array([self.U.bytes], type=pa.binary(16))})
+        self.db.dataframe(frame, table_name=table, at=qdb.ServerTimestamp)
+        self._wait(table)
+        with self.db.query(f'select u from {table}') as result:
+            self.assertEqual(result.columns(), [('u', 'BINARY')])
+            self.assertEqual(list(result.iter_rows()), [(self.U.bytes,)])
+
+    def test_arrow_table_needs_a_uuid_claim(self):
+        # Passed straight through, an unlabelled `binary(16)` is opaque
+        # bytes; `schema_overrides` claims it as UUID.
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('needs pyarrow')
+        table = self._fresh_table('u uuid')
+        frame = pa.table({'u': pa.array([self.U.bytes], type=pa.binary(16))})
+        self.db.dataframe(
+            frame, table_name=table, at=qdb.ServerTimestamp,
+            schema_overrides={'u': 'uuid'})
+        self._wait(table)
+        rows = list(self.db.query(
+            f'select cast(u as varchar) from {table}').iter_rows())
+        self.assertEqual(rows, [(str(self.U),)])
 
     def test_a_uuid_whose_bytes_are_the_wrong_width_is_refused(self):
         # `UUID.bytes` is an overridable property and the bind reads a flat

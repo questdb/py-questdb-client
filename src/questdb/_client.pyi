@@ -1117,7 +1117,7 @@ class PooledReader:
         binds: Optional[Union[list, tuple]] = None,
         *,
         timeout: Optional[Union[int, timedelta]] = None,
-    ) -> Optional[Tuple[int, int]]:
+    ) -> Optional[Tuple[int, Optional[int]]]:
         """
         Run a statement on the lease's connection and discard whatever
         it returns. Mirrors :meth:`QuestDB.execute`, including the
@@ -1286,8 +1286,9 @@ class QuestDB:
         server-wide ``query.timeout``, overriding the connect string's
         ``query_timeout_ms``. An ``int`` is milliseconds; a
         ``datetime.timedelta`` works too, with a positive value below one
-        millisecond rounded *up* to 1 ms. ``None`` (the default) and ``0``
-        mean no per-query timeout.
+        millisecond rounded *up* to 1 ms. ``None`` (the default) keeps the
+        connect string's ``query_timeout_ms``; ``0`` clears it, so the query
+        runs under the server-wide ``query.timeout``.
 
         Requires a server advertising ``CAP_QUERY_TIMEOUT``: against an older
         one the query fails with ``QuestDBErrorCode.QueryTimeout`` rather
@@ -1304,7 +1305,7 @@ class QuestDB:
         binds: Optional[Union[list, tuple]] = None,
         *,
         timeout: Optional[Union[int, timedelta]] = None,
-    ) -> Optional[Tuple[int, int]]:
+    ) -> Optional[Tuple[int, Optional[int]]]:
         """
         Run a statement and discard whatever it returns.
 
@@ -1386,7 +1387,7 @@ class QueryResult:
     :meth:`to_arrow` / :meth:`iter_arrow` / :meth:`__arrow_c_stream__` give a
     generic compact-dictionary Arrow form a consumer reconciles. When the
     target is a polars / pandas frame, the dedicated methods avoid the
-    re-reconciliation that ``polars.from_arrow(result)`` /
+    re-reconciliation that ``polars.DataFrame(result)`` /
     ``to_arrow().to_pandas()`` pay on SYMBOL-heavy results.
     """
 
@@ -1394,7 +1395,7 @@ class QueryResult:
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
-        (e.g. ``polars.from_arrow``) reconciles them."""
+        (e.g. ``polars.DataFrame(result)``) reconciles them."""
 
     def to_arrow(self) -> Any:
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow."""
@@ -1431,6 +1432,26 @@ class QueryResult:
         """Iterate result batches as ``pandas.DataFrame``. With no arguments
         the batches are materialised via numpy (pyarrow-free); passing
         ``dtype_backend`` or ``types_mapper`` selects the pyarrow path."""
+
+    def columns(self) -> List[Tuple[str, str]]:
+        """Column names and QuestDB DDL type names, as
+        ``[(name, type_name), ...]``. Does not consume the rows —
+        :meth:`iter_rows` continues from the same stream — but rules out the
+        other materialisation methods. Empty for a non-SELECT. A ``DECIMAL``
+        is reported at its storage width's precision (18, 38 or 76), because
+        the wire carries only the scale."""
+
+    def iter_rows(self) -> Iterator[Tuple[Any, ...]]:
+        """Iterate the result as tuples of Python objects, one batch at a
+        time, with ``None`` for SQL NULL. Needs neither pyarrow nor pandas.
+        Every call returns the same iterator."""
+
+    @property
+    def exec_done(self) -> Optional[Tuple[int, Optional[int]]]:
+        """A non-SELECT's terminal ``EXEC_DONE`` as
+        ``(op_type, rows_affected)`` once the result has been drained, else
+        ``None``. ``rows_affected`` is ``None`` when the server reports no
+        count. Still available after :meth:`close`."""
 
     def cancel(self) -> None:
         """Cancel the query and drain to terminal. The result remains

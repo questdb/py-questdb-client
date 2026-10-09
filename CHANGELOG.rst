@@ -13,16 +13,17 @@ Changelog
   tuple per row, with ``None`` for SQL NULL; :meth:`columns
   <questdb.QueryResult.columns>` gives ``(name, type_name)`` pairs using the
   QuestDB DDL spelling (``VARCHAR``, ``TIMESTAMP_NS``, ``IPv4``,
-  ``GEOHASH(8c)``, ``DECIMAL(38,2)``, ``DOUBLE[]``), so they can be compared
+  ``GEOHASH(8c)``, ``DECIMAL(18,2)``, ``DOUBLE[]``), so they can be compared
   against ``tables()`` / ``information_schema.questdb_columns()`` without
   normalising. Asking for the columns does not consume the rows, so a
-  DB-API-style caller can read its ``description`` first. Intended for
+  DB-API-style caller can read its ``description`` first; a ``LIMIT 0``
+  schema probe returns its connection to the pool. Intended for
   row-shaped consumers and small result sets — metadata lookups, test rows,
   ``limit 0`` schema probes; large analytical results still belong on
   ``to_pandas()`` / ``to_arrow()``, which stay columnar.
 
   Timestamps come back timezone-aware in UTC, matching what ``to_arrow()``
-  labels them. ``TIMESTAMP_NS`` is truncated to microseconds, because
+  labels them. ``TIMESTAMP_NS`` is rounded down to microseconds, because
   ``datetime`` has no nanosecond field. A ``CHAR`` whose code point is 0 is
   ``None``, matching how the server's own text protocol renders it. A
   ``DECIMAL`` keeps its scale. ``BOOLEAN``, ``BYTE`` and ``SHORT`` have no
@@ -32,23 +33,26 @@ Changelog
   ``UUID`` columns come back as the canonical RFC-4122 value, agreeing with
   ``to_arrow()``, with ``to_pandas()`` and with the server's own text output.
 
-- **Fixed, and a behaviour change for ``UUID``:** every ``UUID`` crossing
-  this driver is now the canonical RFC-4122 value. The native client took
-  its standard byte order in `#186
-  <https://github.com/questdb/c-questdb-client/pull/186>`_ and byte-swaps to
-  QWP wire order itself; this release stops pre-swapping on top of it, in
-  three places that otherwise reversed the 16 bytes:
+- **Behaviour change for ``UUID`` on the Arrow paths:** UUID bytes in Arrow
+  data are now the canonical RFC-4122 order, ``uuid.UUID.bytes``, in both
+  directions, following the native client's `#186
+  <https://github.com/questdb/c-questdb-client/pull/186>`_.
 
-  - a ``uuid.UUID`` bind parameter, which reached the server as a different
-    UUID, so ``$1`` never matched the value that was bound;
-  - ``to_pandas()``, which returned the reversed value where ``to_arrow()``
-    returned the right one;
-  - a dataframe ``UUID`` column on the QWP column sender, which stored the
-    reversed value.
+  - ``to_arrow()``, ``iter_arrow()``, ``to_polars()``, ``iter_polars()`` and
+    the Arrow PyCapsule stream previously returned UUIDs in QWP wire order
+    (two little-endian 64-bit halves, low half first) while labelling them
+    ``arrow.uuid``; they now return the canonical bytes.
+  - :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` reads a
+    ``pa.fixed_size_binary(16)`` / ``arrow.uuid`` column as canonical bytes
+    too. Code that converted ``uuid.UUID`` values to the wire layout before
+    ingesting must now pass ``uuid.UUID.bytes`` unchanged.
+  - An Arrow table or polars frame passed straight to ``dataframe()`` that
+    carries a ``fixed_size_binary(16)`` / ``(32)`` column with no
+    ``arrow.uuid`` or ``questdb.column_type`` label now lands as ``BINARY``;
+    ``schema_overrides`` accepts ``'uuid'`` and ``'long256'`` to say otherwise.
 
-  A ``UUID`` stored by an earlier release is reversed in the table and keeps
-  reading back reversed. ``uuid.UUID(bytes=old.bytes[::-1])`` recovers the
-  intended value.
+  Values already stored are unaffected: binds, ``to_pandas()`` and object
+  ``uuid.UUID`` dataframe columns always carried the right UUID and still do.
 
 - :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` reports a
   non-SELECT statement's terminal ``EXEC_DONE`` as
@@ -58,16 +62,16 @@ Changelog
   tuple instead of ``None``. It is ``None`` for a statement that streamed a
   result set. The protocol does carry the count — the previous
   documentation saying otherwise was wrong. ``rows_affected`` is meaningful
-  for ``INSERT`` and ``UPDATE``; statements executed at parse time currently
-  report an unsigned ``-1``, so treat a value at or above ``2 ** 63`` as
-  unknown.
+  for ``INSERT`` and ``UPDATE``, and ``None`` when the server reports no
+  count, as statements executed at parse time currently do.
 
 - Queries can be given their own timeout instead of running under the
   server-wide ``query.timeout``. ``query_timeout_ms`` in the connection
   string sets a default for every query on that handle (``0``, the default,
   means none), and ``timeout=`` on ``query()`` / ``execute()`` of both
   :class:`QuestDB <questdb.QuestDB>` and
-  :class:`PooledReader <questdb.PooledReader>` overrides it per query. An
+  :class:`PooledReader <questdb.PooledReader>` overrides it per query, with
+  ``timeout=0`` clearing it. An
   ``int`` is milliseconds; a ``datetime.timedelta`` works too, with a
   positive value below one millisecond rounded *up* to 1 ms. The server
   applies no ceiling, so a value above ``query.timeout`` is honoured — which
@@ -77,8 +81,8 @@ Changelog
   (questdb/questdb#7768). Against an older one the query fails fast with the
   new :class:`QuestDBErrorCode.QueryTimeout
   <questdb.QuestDBErrorCode>` rather than silently running under the server
-  default; raise the server's ``query.timeout`` instead, or clear the
-  per-query timeout. On expiry the error carries that same code and the
+  default; raise the server's ``query.timeout`` instead, or pass
+  ``timeout=0``. On expiry the error carries that same code and the
   pooled connection stays open and authenticated, so the next query runs on
   it without reconnecting. **Do not retry a write after a timeout:** a
   statement that completes past its timeout is reported as ``EXEC_DONE``
