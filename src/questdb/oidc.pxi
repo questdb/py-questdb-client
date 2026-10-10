@@ -1775,9 +1775,9 @@ cdef class OidcDeviceAuth:
     def __init__(
             self,
             client_id,
+            *,
             device_authorization_endpoint,
             token_endpoint,
-            *,
             scope='openid',
             groups_in_token=False,
             audience=None,
@@ -1794,8 +1794,9 @@ cdef class OidcDeviceAuth:
         """Configure a provider from explicit IdP endpoints.
 
         ``client_id``, ``device_authorization_endpoint`` and ``token_endpoint``
-        are required. Use :meth:`from_questdb` to discover them from a QuestDB
-        server instead.
+        are required. The two endpoints are keyword-only so their order cannot
+        be accidentally reversed. Use :meth:`from_questdb` to discover them
+        from a QuestDB server instead.
 
         ``groups_in_token`` selects the token kind: ``False`` (the default)
         returns the access token; ``True`` selects the ID token.

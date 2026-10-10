@@ -124,8 +124,8 @@ class TestOidcNativeLeak(unittest.TestCase):
         def direct_success():
             auth = OidcDeviceAuth(
                 self.PAYLOAD,
-                'https://idp.example/device',
-                'https://idp.example/token',
+                device_authorization_endpoint='https://idp.example/device',
+                token_endpoint='https://idp.example/token',
                 interactive=False, open_browser=False)
             auth.close()
 
@@ -137,8 +137,8 @@ class TestOidcNativeLeak(unittest.TestCase):
                 # distinguish if the exceptional-path free is removed.
                 OidcDeviceAuth(
                     self.PAYLOAD,
-                    'https://idp.example/device',
-                    'https://idp.example/token',
+                    device_authorization_endpoint='https://idp.example/device',
+                    token_endpoint='https://idp.example/token',
                     timeout=0,
                     interactive=False, open_browser=False)
             except OidcConfigError:
@@ -155,8 +155,8 @@ class TestOidcNativeLeak(unittest.TestCase):
                 # check for the native message.
                 OidcDeviceAuth(
                     'questdb',
-                    'https://idp.example/device',
-                    'https://idp.example/token',
+                    device_authorization_endpoint='https://idp.example/device',
+                    token_endpoint='https://idp.example/token',
                     ca_bundle='/nonexistent-qdb-ca/' + self.PAYLOAD,
                     interactive=False, open_browser=False)
             except OidcError as exc:

@@ -124,7 +124,26 @@ on every flush of an already-connected sender. A flush or handshake answered
 with HTTP 401 asks the provider once more and is retried if the token changed.
 When the server rejected a token that had not yet expired -- it was revoked,
 or the server rotated its signing key -- the provider refreshes it for that
-retry instead of presenting it again, at most once every 30 seconds. A token pull can raise an
+retry instead of presenting it again, at most once every 30 seconds, **when a
+refresh token exists**. Without one, a 401 may reflect a transient server-side
+userinfo failure, and there is no silent replacement to obtain; the provider
+keeps the still-valid token until its expiry.
+
+A retryable refresh response (HTTP 408, 429 or 5xx, or the OAuth
+``temporarily_unavailable`` error, including when accompanied by
+``Retry-After``) retains the refresh token in
+memory and in the configured store. The call raises
+:class:`~questdb.auth.OidcNetworkError`, and later calls retry under exponential
+backoff; a ``Retry-After`` delta can extend that delay up to the 60-second
+backoff ceiling. A status-less transport failure after request dispatch is different:
+the identity provider may have rotated the parent and lost the response, so the
+client discards it and raises :class:`~questdb.auth.OidcInteractionRequired`
+with an explicit discard message. Call ``sign_in()``; a blind refresh-token
+retry could trigger reuse detection. A non-transient refresh rejection also
+discards the rejected parent and raises the same non-retryable error with the
+identity provider's status and details.
+
+A token pull can raise an
 ``OidcError`` (e.g. :class:`~questdb.auth.OidcInteractionRequired` when
 sign-in has lapsed) alongside ordinary data / server / transport
 ``QuestDBError`` from ``flush()`` (HTTP), ``dataframe()``, ``row()``,
@@ -207,6 +226,9 @@ Explicit keyword arguments override discovered values. Or skip discovery:
         groups_in_token=True,
         audience="questdb")
 
+The endpoint arguments are keyword-only; this prevents the device and token
+endpoints from being silently swapped.
+
 The two credential endpoints must share one origin (scheme, host and port),
 however they were obtained: the device code and refresh token are posted to
 both. When you pass both endpoints explicitly *and* an ``issuer``, both
@@ -231,12 +253,14 @@ Token waits and sender timeouts
 ===============================
 
 A flush, connect or reconnect that needs a fresh credential resolves it before
-its first request. A valid cached token is used at once. Otherwise the call
-refreshes the token itself -- one identity-provider request, bounded by the
-provider's ``timeout`` (default 30 seconds) -- or, when another thread is
-already refreshing the same provider, waits for that refresh for up to six
-times ``timeout`` (three minutes at the default, twelve at the 120-second
-maximum). ``auth.token()`` behaves the same way.
+its first request. A cached token is used at once until its actual expiry; the
+30-second clock-skew margin is not allowed to stall an otherwise valid
+credential. Otherwise the call refreshes the token itself -- one
+identity-provider request, bounded by the provider's ``timeout`` (default 30
+seconds) -- or, when another thread is already refreshing the same provider,
+waits for that refresh for up to six times ``timeout`` (three minutes at the
+default, twelve at the 120-second maximum). ``auth.token()`` behaves the same
+way.
 
 That wait is bounded by the OIDC ``timeout`` alone. The sender's
 ``request_timeout``, ``retry_timeout``, ``connect_timeout`` and reconnect
@@ -519,6 +543,10 @@ Security notes
 * Attach the provider to ``https::`` / ``wss::`` transports. Over plaintext
   ``http::`` / ``ws::`` to a non-loopback host the Bearer token travels in
   cleartext; nothing rejects or warns about that configuration.
+* Identity-provider and QuestDB discovery requests do not use
+  ``HTTPS_PROXY``, ``ALL_PROXY`` or their lowercase variants. There is no OIDC
+  proxy setting in this release; the IdP and discovery endpoint must be
+  directly reachable from the client host.
 * Renderer callbacks receive bounded, native display-normalized but still
   untrusted IdP text. Prompt fields are single-line and visibly ASCII-escaped;
   identity/failure text may retain ordinary Unicode and HTML metacharacters.

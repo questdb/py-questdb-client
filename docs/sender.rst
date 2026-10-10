@@ -484,8 +484,10 @@ section for more details.
    sender's ``wait()`` raises once it expires -- with
    :class:`~questdb.auth.OidcInteractionRequired`, whose ``code`` is
    ``QuestDBErrorCode.FailoverRetry`` and whose message names the failing
-   reconnect -- and ``await_acked_fsn()`` returns ``False``;
-   ``flush(wait=True)`` is bounded by the pool's request timeout. With the
+   reconnect -- and ``await_acked_fsn()`` returns ``False``. Use an explicit
+   ``wait(..., timeout_millis=...)`` when a bound is required:
+   ``flush(wait=True)`` can wait indefinitely when its current buffer is empty
+   but rows published by an earlier call remain unacknowledged. With the
    default ``timeout_millis=0``, ``wait()`` and ``await_acked_fsn()`` wait
    until the rows are acknowledged, which needs a successful sign-in on
    another thread; pass a timeout when the credential may be missing. The

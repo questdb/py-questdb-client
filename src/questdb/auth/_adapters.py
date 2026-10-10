@@ -79,7 +79,7 @@ _AUTO_SSLMODE = 'auto'
 #   * service          -- a pg_service.conf entry that can supply host/hostaddr;
 #   * dsn / conninfo   -- a whole connection string, i.e. all of the above.
 _DESTINATION_PARAMS = frozenset({
-    'host', 'hostaddr', 'port', 'service', 'dsn', 'conninfo'})
+    'host', 'hostaddr', 'port', 'service', 'dsn', 'conninfo', 'unix_sock'})
 
 # Driver parameters naming the login identity or database, which the adapters
 # set themselves (`_sso`, the token, `database=`). Not a security boundary --
@@ -89,6 +89,14 @@ _DESTINATION_PARAMS = frozenset({
 # values, silently log in as someone other than `_sso` or drop the caller's
 # password. Rejected up front as one typed error.
 _IDENTITY_PARAMS = frozenset({'user', 'password', 'dbname', 'database'})
+
+# Driver keyword names eventually become libpq conninfo keys (or an equivalent
+# driver's option map). libpq trims whitespace around keys and accepts conninfo
+# syntax embedded in strings, so checking only exact Python spellings lets keys
+# such as ``"hostaddr "`` or ``"x=1 host"`` bypass a destination guard. Keep
+# the passthrough surface to ordinary identifiers; every legitimate option used
+# by the supported drivers has this shape.
+_PLAIN_PARAMETER_RE = re.compile(r'\A[A-Za-z_][A-Za-z0-9_]*\Z')
 
 
 def _safe_urlparse(url: str) -> urllib.parse.ParseResult:
@@ -265,7 +273,25 @@ def _destination_overrides(
         return []
     return sorted(
         str(key) for key in keys
-        if isinstance(key, str) and key.lower() in names)
+        if isinstance(key, str) and key.strip().lower() in names)
+
+
+def _reject_non_plain_parameter_keys(params: Any, passthrough: str) -> None:
+    if not params:
+        return
+    try:
+        keys = list(params)
+    except TypeError:
+        return
+    invalid = [
+        key for key in keys
+        if not isinstance(key, str) or _PLAIN_PARAMETER_RE.fullmatch(key) is None
+    ]
+    if invalid:
+        rendered = ', '.join(repr(key) for key in invalid)
+        raise OidcConfigError(
+            f'{passthrough} keys must be plain identifiers; refusing '
+            f'{rendered} before acquiring a bearer token.')
 
 
 def _reject_destination_overrides(params: Any, passthrough: str) -> None:
@@ -275,6 +301,10 @@ def _reject_destination_overrides(params: Any, passthrough: str) -> None:
     Raised BEFORE any token is acquired, so a redirected connection never even
     reaches the point where the credential would be attached.
     """
+    # Normalize with strip/lower for the security comparison first, then reject
+    # every non-identifier spelling as a class. This both catches known aliases
+    # such as ``" port"`` as destination overrides and closes unknown conninfo
+    # injection spellings such as ``"x=1 host"``.
     identity = _destination_overrides(params, _IDENTITY_PARAMS)
     if identity:
         raise OidcConfigError(
@@ -283,15 +313,15 @@ def _reject_destination_overrides(params: Any, passthrough: str) -> None:
             'as `_sso` with the current token as the password; pass the '
             'database name as `database=`.')
     offending = _destination_overrides(params)
-    if not offending:
-        return
-    raise OidcConfigError(
-        f'{passthrough} must not set the connection destination '
-        f'({", ".join(offending)}). The token these adapters inject is a '
-        'bearer credential, so the destination is validated up front from '
-        '`url` / `host=` / `pg_port=` and a passthrough value applied after '
-        'that check could send the token to an unvetted peer. Pass '
-        '`host=` and `pg_port=` to the adapter instead.')
+    if offending:
+        raise OidcConfigError(
+            f'{passthrough} must not set the connection destination '
+            f'({", ".join(offending)}). The token these adapters inject is a '
+            'bearer credential, so the destination is validated up front from '
+            '`url` / `host=` / `pg_port=` and a passthrough value applied after '
+            'that check could send the token to an unvetted peer. Pass '
+            '`host=` and `pg_port=` to the adapter instead.')
+    _reject_non_plain_parameter_keys(params, passthrough)
 
 
 def _require_expected_destination(
@@ -307,6 +337,7 @@ def _require_expected_destination(
     libpq treats it as unset -- and is what the adapter sets to mask
     ``PGHOSTADDR``.
     """
+    _reject_non_plain_parameter_keys(cparams, 'final driver arguments')
     # SQLAlchemy passes both positional and keyword arguments to the driver.
     # A do_connect listener can put a whole conninfo string in cargs,
     # removing host/port from cparams so libpq dials an unvetted peer. The
@@ -330,6 +361,24 @@ def _require_expected_destination(
             f'refusing to send the OIDC token: the connection arguments set '
             f'{key}={value!r}, which does not match the destination this '
             f'adapter validated ({host}:{port}).')
+
+
+def _pin_expected_destination(
+        params: dict, host: str, port: int, include_hostaddr: bool) -> None:
+    """Put the adapter-owned destination at the end of the driver's map.
+
+    The validation above is the primary boundary. Re-inserting these keys last
+    is defense in depth for libpq's last-duplicate-wins parser and also masks
+    destination environment variables at the final call boundary.
+    """
+    for key in list(params):
+        if isinstance(key, str) and key.strip().lower() in {
+                'host', 'hostaddr', 'port'}:
+            del params[key]
+    params['host'] = host
+    if include_hostaddr:
+        params['hostaddr'] = ''
+    params['port'] = port
 
 
 def _is_numeric_loopback_host(host: str) -> bool:
@@ -442,7 +491,7 @@ def sqlalchemy_engine(
         empty ``hostaddr`` to keep the dial on the validated host.
     :param engine_kwargs: Forwarded to ``create_engine``. ``connect_args`` must
         not carry a connection *destination* (``host``, ``hostaddr``, ``port``,
-        ``service``, ``dsn``, ``conninfo``): SQLAlchemy merges ``connect_args``
+        ``service``, ``dsn``, ``conninfo``, ``unix_sock``): SQLAlchemy merges ``connect_args``
         over the arguments built from the validated URL, so such a value would
         re-point the connection — and the bearer token travelling as its
         password — at a peer this adapter never vetted. Use ``host=`` and
@@ -514,18 +563,17 @@ def sqlalchemy_engine(
         _require_expected_destination(
             cargs, cparams, resolved_host, pg_port,
             allow_empty_hostaddr=uses_libpq)
-        if uses_libpq:
-            # Always mask PGHOSTADDR, including when a listener removed the
-            # empty hostaddr value from a prior connect. The keyword dict is
-            # private to this invocation even on SQLAlchemy versions that
-            # reuse the original cparams between pool threads.
-            cparams['hostaddr'] = ''
         # An sslmode in connect_args (or set by a listener) takes precedence.
         if sslmode is not None:
             cparams.setdefault('sslmode', sslmode)
         # Non-interactive: silently refresh an existing token, but never start
         # a device flow from a pool thread. Fetch it only after validation.
         cparams['password'] = auth.token()
+        # Reinsert the adapter's destination after every listener-controlled
+        # value and after the credential. Libpq trims conninfo keys and the last
+        # duplicate wins, so final ordering is part of the defense in depth.
+        _pin_expected_destination(
+            cparams, resolved_host, pg_port, include_hostaddr=uses_libpq)
         return original_connect(*cargs, **cparams)
 
     engine.dialect.connect = _connect_with_token
@@ -571,7 +619,8 @@ def psycopg_connect(
         ``hostaddr`` to keep the dial on the validated host.
     :param connect_kwargs: Forwarded to the driver's ``connect()``. As with
         :func:`sqlalchemy_engine`, a connection *destination* (``host``,
-        ``hostaddr``, ``port``, ``service``, ``dsn``, ``conninfo``) is rejected:
+        ``hostaddr``, ``port``, ``service``, ``dsn``, ``conninfo``,
+        ``unix_sock``) is rejected:
         the token is a bearer credential and only the validated peer may
         receive it. Use ``host=`` and ``pg_port=`` instead. The login
         (``user``, ``password``, ``dbname``, ``database``) is rejected too:
@@ -596,14 +645,15 @@ def psycopg_connect(
     _reject_destination_overrides(connect_kwargs, 'connect_kwargs')
     mod = _pg_module()
     token = auth.token()
+    params = dict(connect_kwargs)
     if sslmode is not None:
         # setdefault, so an explicit sslmode in connect_kwargs wins.
-        connect_kwargs.setdefault('sslmode', sslmode)
-    return mod.connect(
-        host=resolved_host,
-        hostaddr='',  # Override PGHOSTADDR, but let libpq resolve host itself.
-        port=pg_port,
-        dbname=database,
-        user='_sso',
-        password=token,
-        **connect_kwargs)
+        params.setdefault('sslmode', sslmode)
+    params['dbname'] = database
+    params['user'] = '_sso'
+    params['password'] = token
+    # Override PGHOSTADDR, but let libpq resolve host itself. Insert the vetted
+    # destination last so no earlier driver option can win duplicate parsing.
+    _pin_expected_destination(
+        params, resolved_host, pg_port, include_hostaddr=True)
+    return mod.connect(**params)

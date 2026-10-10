@@ -84,9 +84,9 @@ class OidcDeviceAuth:
     def __init__(
         self,
         client_id: str,
+        *,
         device_authorization_endpoint: str,
         token_endpoint: str,
-        *,
         scope: str = "openid",
         groups_in_token: bool = False,
         audience: Optional[str] = None,

@@ -4,7 +4,7 @@
 Changelog
 =========
 
-5.1.0 (unreleased)
+6.0.0 (unreleased)
 ------------------
 
 Breaking changes
@@ -246,6 +246,19 @@ Highlights:
   operation. :meth:`~questdb.auth.OidcDeviceAuth.token` and every transport
   path remain non-interactive, silently refreshing when possible and otherwise
   raising :class:`~questdb.auth.OidcInteractionRequired`.
+* Silent refresh retains both the in-memory and persisted refresh token after
+  retryable identity-provider responses (HTTP 408, 429 and 5xx, or OAuth
+  ``temporarily_unavailable``), and later retries use exponential backoff. A
+  status-less failure after request dispatch
+  remains genuinely ambiguous: the possibly rotated parent is discarded and
+  the call raises ``OidcInteractionRequired`` with that reason. A QuestDB 401
+  only forces refresh when a refresh token exists; otherwise the still-valid
+  access/ID token remains usable until expiry. Cached tokens also remain on the
+  non-blocking fast path until their actual expiry instead of making every
+  shared transport wait through a refresh during the 30-second skew window.
+* Manual-progress QWP/WebSocket close observes
+  ``close_flush_timeout_millis`` while reconnect is waiting and returns the
+  latest reconnect/OIDC cause instead of spinning indefinitely.
 * Auth failures are typed :class:`~questdb.auth.OidcError` subclasses of
   :class:`~questdb.QuestDBError`. Their ``code`` reports the failing call's
   native error category, not a recovery instruction: a flush with no usable
@@ -266,6 +279,11 @@ Highlights:
   remain unchanged, including a non-rotating refresh token.
 * OIDC discovery, endpoint validation, token selection, caching, refresh, and
   concurrency control use the same native implementation as the C/C++ clients.
+  Discovery confirmation compares normalized origins plus the exact request
+  target, so QuestDB's explicit ``:443`` matches an Entra/Google discovery URL
+  that omits the default HTTPS port.
+  The explicit :class:`~questdb.auth.OidcDeviceAuth` constructor takes its two
+  endpoints as keyword-only arguments, preventing an accidental endpoint swap.
 * OIDC does not survive ``fork()`` without ``exec()``. A provider inherited by
   a forked child is refused there, and once the parent has constructed any
   :class:`~questdb.auth.OidcDeviceAuth` (used or not), constructing a new one
@@ -300,6 +318,9 @@ Highlights:
   ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` environment variable, shared with the
   native client. Custom Python token stores are not supported by the native
   provider.
+* PG adapters reject malformed driver-option keys and every destination alias,
+  including ``unix_sock``; the validated ``host``/``hostaddr``/``port`` values
+  are inserted last before the bearer password is handed to the driver.
 * :meth:`~questdb.auth.OidcDeviceAuth.sign_in` fails up front when the
   configured token store cannot hold a credential — a directory whose
   owner-only permissions cannot be enforced, as on WSL ``drvfs`` without
@@ -349,7 +370,8 @@ Highlights:
   ``localhost`` does **not** — it keeps ``verify-full``, because its resolved
   addresses are not pinned. Use a numeric literal for local development, or
   pass an explicit ``sslmode``. Both adapters own the connection destination:
-  a ``host``, ``hostaddr``, ``port``, ``service``, ``dsn`` or ``conninfo`` in
+  a ``host``, ``hostaddr``, ``port``, ``service``, ``dsn``, ``conninfo`` or
+  ``unix_sock`` in
   the driver passthrough (``connect_args`` / ``connect_kwargs``) raises
   ``OidcConfigError`` before any token is acquired, because the token is a
   bearer credential and SQLAlchemy merges ``connect_args`` over the arguments
@@ -401,7 +423,7 @@ New ``ConnectionEventKind.CredentialUnavailable``
 is a new event kind reporting a token provider that failed to supply a
 credential — an ``oidc_auth=`` provider with no cached or refreshable
 credential, either before any endpoint was dialled or when replacing a token a
-server rejected with HTTP 401. It has no counterpart before 5.1, because token
+server rejected with HTTP 401. It has no counterpart before 6.0, because token
 providers did not exist: a listener written against 5.0 cannot have seen it.
 
 ``AuthFailed`` keeps the meaning it has always had, now stated explicitly: it

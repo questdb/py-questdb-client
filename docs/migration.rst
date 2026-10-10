@@ -2,7 +2,7 @@
 Migration Guide
 ================
 
-5.0 to 5.1
+5.0 to 6.0
 ==========
 
 Ten changes need action: the two UUID / fixed-size-binary items below, the

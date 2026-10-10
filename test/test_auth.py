@@ -96,8 +96,8 @@ def make_auth(**kwargs):
     options.update(kwargs)
     return OidcDeviceAuth(
         'questdb',
-        'https://idp.example/device',
-        'https://idp.example/token',
+        device_authorization_endpoint='https://idp.example/device',
+        token_endpoint='https://idp.example/token',
         **options)
 
 
@@ -540,8 +540,9 @@ class NativeOidcTest(unittest.TestCase):
         for label, build in (
                 ('empty client_id',
                  lambda: questdb.auth.OidcDeviceAuth(
-                     '', 'https://idp.example/device',
-                     'https://idp.example/token')),
+                     '',
+                     device_authorization_endpoint='https://idp.example/device',
+                     token_endpoint='https://idp.example/token')),
                 ('bad renderer', lambda: make_auth(renderer=object())),
                 ('bad interval', lambda: make_auth(default_interval=0)),
                 ('empty store dir', lambda: FileTokenStore('')),
@@ -670,8 +671,8 @@ class NativeOidcTest(unittest.TestCase):
         with self.assertRaises(OidcConfigError):
             OidcDeviceAuth(
                 '\ud800',
-                'https://idp.example/device',
-                'https://idp.example/token',
+                device_authorization_endpoint='https://idp.example/device',
+                token_endpoint='https://idp.example/token',
                 interactive=False)
 
     def test_non_oidc_native_error_maps_to_base_oidc_error(self):
@@ -686,8 +687,8 @@ class NativeOidcTest(unittest.TestCase):
         with self.assertRaises(OidcError) as ctx:
             OidcDeviceAuth(
                 oversized,
-                'https://idp.example/device',
-                'https://idp.example/token',
+                device_authorization_endpoint='https://idp.example/device',
+                token_endpoint='https://idp.example/token',
                 interactive=False)
         err = ctx.exception
         self.assertIs(type(err), OidcError)  # base class, not a typed subclass
@@ -1421,8 +1422,9 @@ class NativeOidcTest(unittest.TestCase):
         renderer.on_failure = None
         with self.assertRaisesRegex(OidcConfigError, 'on_failure'):
             provider.__init__(
-                'questdb', 'https://idp.example/device',
-                'https://idp.example/token', interactive=False,
+                'questdb',
+                device_authorization_endpoint='https://idp.example/device',
+                token_endpoint='https://idp.example/token', interactive=False,
                 open_browser=False, renderer=renderer)
         self.assertFalse(_client._debug_oidc_renderer_attached(provider))
 
@@ -1433,8 +1435,9 @@ class NativeOidcTest(unittest.TestCase):
         renderer.provider = provider
         with self.assertRaises(OidcError):
             provider.__init__(
-                'questdb', 'https://idp.example/device',
-                'https://idp.example/token', interactive=False,
+                'questdb',
+                device_authorization_endpoint='https://idp.example/device',
+                token_endpoint='https://idp.example/token', interactive=False,
                 open_browser=False, renderer=renderer,
                 ca_bundle=self._UNREADABLE_CA_BUNDLE)
         self.assertFalse(_client._debug_oidc_renderer_attached(provider))
@@ -1566,9 +1569,11 @@ class NativeOidcTest(unittest.TestCase):
     def _construct_and_fail_in_build(self, target=None):
         """Drive a native build() failure, optionally re-``__init__``-ing
         ``target``. Asserts the failure really came from build()."""
-        args = ('questdb', 'https://idp.example/device',
-                'https://idp.example/token')
-        kwargs = dict(interactive=False, open_browser=False,
+        args = ('questdb',)
+        kwargs = dict(
+                      device_authorization_endpoint='https://idp.example/device',
+                      token_endpoint='https://idp.example/token',
+                      interactive=False, open_browser=False,
                       renderer=Renderer(),
                       ca_bundle=self._UNREADABLE_CA_BUNDLE)
         with self.assertRaises(OidcError) as caught:
@@ -1690,8 +1695,9 @@ class NativeOidcTest(unittest.TestCase):
             # The retry succeeds, so the object ends up live and built.
             before_retry = _provider_id_watermark()
             auth.__init__(
-                'questdb', 'https://idp.example/device',
-                'https://idp.example/token',
+                'questdb',
+                device_authorization_endpoint='https://idp.example/device',
+                token_endpoint='https://idp.example/token',
                 interactive=False, open_browser=False, renderer=Renderer())
             # Exactly the live retry is registered: every earlier iteration's
             # provider and this iteration's failed build are gone.
@@ -1835,8 +1841,8 @@ class ProviderCycleSafetyTest(unittest.TestCase):
             'directory = tempfile.mkdtemp()\n'
             'auth = OidcDeviceAuth(\n'
             '    "questdb",\n'
-            '    "https://idp.example/device",\n'
-            '    "https://idp.example/token",\n'
+            '    device_authorization_endpoint="https://idp.example/device",\n'
+            '    token_endpoint="https://idp.example/token",\n'
             '    interactive=False, open_browser=False,\n'
             '    token_store=FileTokenStore.at(directory))\n'
             'assert sz() == 1, sz()\n'
@@ -1852,8 +1858,9 @@ class ProviderCycleSafetyTest(unittest.TestCase):
             'from questdb.auth import FileTokenStore\n'
             'directory = tempfile.mkdtemp()\n'
             'auth = OidcDeviceAuth(\n'
-            '    "questdb", "https://idp.example/device",\n'
-            '    "https://idp.example/token", interactive=False,\n'
+            '    "questdb",\n'
+            '    device_authorization_endpoint="https://idp.example/device",\n'
+            '    token_endpoint="https://idp.example/token", interactive=False,\n'
             '    open_browser=False,\n'
             '    token_store=FileTokenStore.at(directory))\n'
             'sender = questdb.Sender(\n'
@@ -1892,8 +1899,9 @@ class ProviderCycleSafetyTest(unittest.TestCase):
             '    def on_failure(self, message): pass\n'
             'port = server.server_address[1]\n'
             'auth = OidcDeviceAuth(\n'
-            '    "questdb", f"http://127.0.0.1:{port}/device",\n'
-            '    f"http://127.0.0.1:{port}/token",\n'
+            '    "questdb",\n'
+            '    device_authorization_endpoint=f"http://127.0.0.1:{port}/device",\n'
+            '    token_endpoint=f"http://127.0.0.1:{port}/token",\n'
             '    renderer=R(), open_browser=False, timeout=5)\n'
             'def run():\n'
             '    try: auth.sign_in()\n'
@@ -1927,7 +1935,7 @@ class ProviderCycleSafetyTest(unittest.TestCase):
             '            closed.append(1)\n'
             '            print("closed")\n'
             'r = R()\n'
-            'a = OidcDeviceAuth("cid", "https://i/d", "https://i/t", renderer=r)\n'
+            'a = OidcDeviceAuth("cid", device_authorization_endpoint="https://i/d", token_endpoint="https://i/t", renderer=r)\n'
             'r.provider = a\n'
             'del a, r\n'
             'print("registry", settle(lambda: closed))\n')
@@ -1945,7 +1953,7 @@ class ProviderCycleSafetyTest(unittest.TestCase):
             '        self.close()\n'
             '        closed.append(1)\n'
             '        print("closed")\n'
-            'a = Sub("cid", "https://i/d", "https://i/t")\n'
+            'a = Sub("cid", device_authorization_endpoint="https://i/d", token_endpoint="https://i/t")\n'
             'a.self_ref = a\n'
             'del a\n'
             'print("registry", settle(lambda: closed))\n')
@@ -1966,7 +1974,7 @@ class ProviderCycleSafetyTest(unittest.TestCase):
         out = self._run(
             'import weakref\n'
             'import questdb._client as c\n'
-            'a = OidcDeviceAuth("cid", "https://i/d", "https://i/t")\n'
+            'a = OidcDeviceAuth("cid", device_authorization_endpoint="https://i/d", token_endpoint="https://i/t")\n'
             'client_id = a.config.client_id\n'
             '(ref,) = weakref.getweakrefs(a)\n'
             'for pid in range(1, 8):\n'
@@ -4019,7 +4027,7 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 }, {'Retry-After': '7'})) as server:
             auth = make_discovered_auth(server, renderer=renderer)
             auth.sign_in()
-            time.sleep(0.75)  # move past the half-lifetime refresh threshold
+            time.sleep(1.2)  # move past the token's actual expiry
             with self.assertRaises(OidcNetworkError) as ctx:
                 auth.token()
             token_requests = server.requests('/token', 'POST')
@@ -4093,7 +4101,7 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                     429, {'error': 'slow_down'}, {'Retry-After': '7'})) as server:
             auth = make_discovered_auth(server)
             auth.sign_in()
-            time.sleep(0.75)  # expire the cached token before its refresh
+            time.sleep(1.2)  # expire the cached token before its refresh
             with self.assertRaises(OidcNetworkError) as ctx:
                 auth.token()  # triggers the refresh, which hits the 429
         self.assertEqual(ctx.exception.status, 429)
@@ -4312,12 +4320,20 @@ class NativeTransportAttachmentTest(unittest.TestCase):
             with self.subTest(missing=expected):
                 with self.assertRaises(OidcConfigError) as ctx:
                     OidcDeviceAuth(
-                        client_id, device_endpoint, token_endpoint,
+                        client_id,
+                        device_authorization_endpoint=device_endpoint,
+                        token_endpoint=token_endpoint,
                         interactive=False, open_browser=False)
                 message = str(ctx.exception)
                 self.assertIn(expected, message)
                 self.assertIn('required', message)
                 self.assertNotIn('/settings', message)
+
+    def test_constructor_endpoints_are_keyword_only(self):
+        with self.assertRaises(TypeError):
+            OidcDeviceAuth(
+                'questdb', 'https://idp.example/device',
+                'https://idp.example/token')
 
     def test_sender_rejects_wrong_auth_type(self):
         with self.assertRaisesRegex(TypeError, 'OidcDeviceAuth'):
@@ -4700,8 +4716,10 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 device_expires_in=30) as server:
             cfg = make_discovered_auth(server).config
             auth = _PeerSignInBeforeProbe(
-                cfg.client_id, cfg.device_authorization_endpoint,
-                cfg.token_endpoint, scope=cfg.scope, audience=cfg.audience,
+                cfg.client_id,
+                device_authorization_endpoint=cfg.device_authorization_endpoint,
+                token_endpoint=cfg.token_endpoint,
+                scope=cfg.scope, audience=cfg.audience,
                 issuer=cfg.issuer, interactive=True, open_browser=False,
                 renderer=_Renderer())
             with QwpAckServer(
@@ -4750,8 +4768,8 @@ class NativeTransportAttachmentTest(unittest.TestCase):
             'ts': pd.to_datetime([1700000000], unit='s')})
         auth = ClosedDuringProbe(  # never signed in
             'questdb',
-            'https://idp.example/device',
-            'https://idp.example/token',
+            device_authorization_endpoint='https://idp.example/device',
+            token_endpoint='https://idp.example/token',
             interactive=False,
             open_browser=False)
         db = questdb.connect(
@@ -4791,8 +4809,9 @@ class NativeTransportAttachmentTest(unittest.TestCase):
             config = make_discovered_auth(oidc_server).config
             auth = SignInOnProbe(
                 config.client_id,
-                config.device_authorization_endpoint,
-                config.token_endpoint,
+                device_authorization_endpoint=(
+                    config.device_authorization_endpoint),
+                token_endpoint=config.token_endpoint,
                 scope=config.scope,
                 audience=config.audience,
                 issuer=config.issuer,
@@ -6118,6 +6137,9 @@ class AdapterTest(unittest.TestCase):
                 ('service', 'elsewhere'),
                 ('dsn', 'host=other.example'),
                 ('conninfo', 'host=other.example'),
+                ('unix_sock', '/tmp/attacker.sock'),
+                ('hostaddr ', '203.0.113.9'),
+                (' port', 5432),
                 ('HOST', 'other.example')):  # libpq keys are case-insensitive
             with self.subTest(key=key):
                 auth = mock.Mock()
@@ -6156,6 +6178,25 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(
             driver.connect.call_args.kwargs['sslrootcert'],
             '/etc/ssl/questdb-ca.pem')
+        self.assertEqual(
+            list(driver.connect.call_args.kwargs)[-3:],
+            ['host', 'hostaddr', 'port'],
+            'the adapter-owned destination must be the final conninfo values')
+
+    def test_adapters_reject_non_identifier_driver_keys_before_token(self):
+        # libpq trims key whitespace and parses conninfo-like spellings. Reject
+        # the whole malformed-key class, including one that does not normalize
+        # to a known destination key.
+        auth = mock.Mock()
+        driver = mock.Mock()
+        with mock.patch.object(_adapters, '_pg_module', return_value=driver):
+            with self.assertRaisesRegex(OidcConfigError, 'plain identifiers'):
+                _adapters.psycopg_connect(
+                    auth,
+                    'https://questdb.example.com:9000',
+                    **{'x=1 host': 'other.example'})
+        auth.token.assert_not_called()
+        driver.connect.assert_not_called()
 
     def test_adapters_reject_a_login_in_the_driver_passthrough(self):
         # The adapters always log in as `_sso` with the token. A passthrough
@@ -6235,10 +6276,15 @@ class AdapterTest(unittest.TestCase):
                 (['host=other.example port=5432'], {
                     'host': 'questdb.example.com', 'port': 8812}),
                 ([], {'host': 'questdb.example.com', 'port': 8812,
-                      'hostaddr': '127.0.0.1'})):
+                      'hostaddr': '127.0.0.1'}),
+                ([], {'host': 'questdb.example.com', 'port': 8812,
+                      'hostaddr ': '127.0.0.1'}),
+                ([], {'host': 'questdb.example.com', 'port': 8812,
+                      'x=1 host': 'other.example'})):
             with self.subTest(cargs=cargs, cparams=cparams):
                 with self.assertRaisesRegex(
-                        OidcConfigError, 'refusing to send the OIDC token'):
+                        OidcConfigError,
+                        'refusing to send the OIDC token|plain identifiers'):
                     connect(*cargs, **cparams)
                 auth.token.assert_not_called()
                 original_connect.assert_not_called()
@@ -6250,6 +6296,7 @@ class AdapterTest(unittest.TestCase):
         params = original_connect.call_args.kwargs
         self.assertEqual(params['password'], 'SECRET-BEARER')
         self.assertEqual(params['hostaddr'], '')
+        self.assertEqual(list(params)[-3:], ['host', 'hostaddr', 'port'])
         auth.token.assert_called_once_with()
 
     def test_sqlalchemy_rejects_unsafe_url_before_token_or_engine(self):
@@ -7201,9 +7248,9 @@ class OidcReaderLifetimeTest(unittest.TestCase):
                 'a live reader must keep its diagnostic callback target alive')
             logger.addHandler(capture)
             try:
-                # The replay opens a new reader connection, pulling a token
-                # past its half-lifetime threshold and failing the save.
-                time.sleep(max(0, 3.6 - (time.monotonic() - signed_at)))
+                # The replay opens a new reader connection after the cached
+                # token expires, triggering a refresh whose save fails.
+                time.sleep(max(0, 6.4 - (time.monotonic() - signed_at)))
                 qdb.release_first.set()
                 self.assertEqual(result.to_pandas()['v'].tolist(), [1, 2, 3])
                 self.assertTrue(sabotaged.is_set())
@@ -7317,12 +7364,12 @@ class OidcDiagnosticReentryTest(_IsolatedReentry, unittest.TestCase):
                     lease = db.reader()
                 if consumer == 'execute':
                     # execute() drains its cursor *inside* this call. Release
-                    # the first endpoint only after the token passes half-life
-                    # so reconnect emits the warning during _drain_cursor.
+                    # the first endpoint only after the token expires so
+                    # reconnect emits the warning during _drain_cursor.
                     self.assertTrue(leased)
                     logger.addHandler(handler)
                     timer = threading.Timer(
-                        max(0, 3.6 - (time.monotonic() - signed_at)),
+                        max(0, 6.4 - (time.monotonic() - signed_at)),
                         qdb.release_first.set)
                     timer.start()
                     self.assertIsNone(lease.execute('select v from t'))
@@ -7335,7 +7382,7 @@ class OidcDiagnosticReentryTest(_IsolatedReentry, unittest.TestCase):
                     # Force a token refresh while replaying after the first
                     # connection drops; the save failure emits synchronously
                     # inside the borrowed native cursor's next_batch call.
-                    time.sleep(max(0, 3.6 - (time.monotonic() - signed_at)))
+                    time.sleep(max(0, 6.4 - (time.monotonic() - signed_at)))
                     qdb.release_first.set()
                 if consumer == 'pandas':
                     values = result.to_pandas()['v'].tolist()
@@ -8739,7 +8786,8 @@ with OidcTestServer() as server:
         server.url, renderer=Renderer(), interactive=True,
         open_browser=False, timeout=30)
     idle = OidcDeviceAuth(
-        'questdb', server.url + '/device', server.url + '/token',
+        'questdb', device_authorization_endpoint=server.url + '/device',
+        token_endpoint=server.url + '/token',
         interactive=False, open_browser=False)
     idle_id = _client._debug_oidc_last_provider_id()
     worker_error = []
@@ -8775,7 +8823,9 @@ with OidcTestServer() as server:
             assert idle_id not in _client._debug_oidc_registry_snapshot()[1]
             try:
                 OidcDeviceAuth(
-                    'questdb', server.url + '/device', server.url + '/token',
+                    'questdb',
+                    device_authorization_endpoint=server.url + '/device',
+                    token_endpoint=server.url + '/token',
                     interactive=False, open_browser=False)
             except OidcConfigError as exc:
                 assert exc.code == QuestDBErrorCode.ConfigError
