@@ -539,6 +539,46 @@ cdef void _failover_reset_trampoline(
     (<int*>user_data)[0] += 1
 
 
+cdef int64_t _EPOCH_ORDINAL = 719163  # datetime.date(1970, 1, 1).toordinal()
+
+
+cdef void_int _bind_decimal(
+        qwp_reader_query* query, object value, Py_ssize_t idx) except -1:
+    """Bind a ``decimal.Decimal`` as the narrowest DECIMAL that holds it:
+    DECIMAL64 up to 18 digits, DECIMAL128 up to 38, DECIMAL256 up to 76,
+    with the fractional digits as the scale. Read off ``as_tuple()`` so the
+    decimal context's precision never rounds the value.
+    """
+    cdef bytes le_bytes
+    if not value.is_finite():
+        raise ValueError(
+            f'query bind ${idx}: DECIMAL has no NaN or infinity: {value!r}')
+    sign, digits, exponent = value.as_tuple()
+    mantissa = int(''.join(map(str, digits)) or '0')
+    scale = 0
+    if exponent > 0:
+        mantissa *= 10 ** exponent
+    else:
+        scale = -exponent
+    if sign:
+        mantissa = -mantissa
+    ndigits = len(str(abs(mantissa)))
+    if ndigits <= 18 and scale <= 18:
+        qwp_reader_query_bind_decimal64(query, mantissa, scale)
+    elif ndigits <= 38 and scale <= 38:
+        qwp_reader_query_bind_decimal128(
+            query, mantissa & 0xFFFFFFFFFFFFFFFF, mantissa >> 64, scale)
+    elif ndigits <= 76 and scale <= 76:
+        le_bytes = mantissa.to_bytes(32, 'little', signed=True)
+        qwp_reader_query_bind_decimal256(
+            query, <const uint8_t*>PyBytes_AsString(le_bytes), scale)
+    else:
+        raise ValueError(
+            f'query bind ${idx}: {value!r} needs more than the 76 digits of '
+            f'the widest QuestDB DECIMAL')
+    return 0
+
+
 cdef void_int _bind_query_params(qwp_reader_query* query, object binds) except -1:
     """Append positional binds matching the SQL's ``$1``..``$N`` placeholders.
 
@@ -595,12 +635,18 @@ cdef void_int _bind_query_params(qwp_reader_query* query, object binds) except -
                     f'{len(uuid_bytes)} bytes, expected 16.')
             qwp_reader_query_bind_uuid(
                 query, <const uint8_t*>PyBytes_AsString(uuid_bytes))
+        elif isinstance(value, datetime.date):
+            # datetime.datetime matched above; a plain date is a DATE.
+            qwp_reader_query_bind_date_millis(
+                query, (value.toordinal() - _EPOCH_ORDINAL) * 86_400_000)
+        elif isinstance(value, decimal.Decimal):
+            _bind_decimal(query, value, idx)
         else:
             raise TypeError(
                 f'query bind ${idx}: unsupported type '
                 f'{_fqn(type(value))}. Supported: None, bool, int, float, '
-                f'str, datetime.datetime, TimestampMicros, TimestampNanos, '
-                f'uuid.UUID.')
+                f'str, datetime.datetime, datetime.date, decimal.Decimal, '
+                f'TimestampMicros, TimestampNanos, uuid.UUID.')
     return 0
 
 

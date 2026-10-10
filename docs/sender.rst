@@ -1142,7 +1142,10 @@ Positional bind parameters fill the ``$1``..``$N`` placeholders — always
 prefer them over interpolating values into the SQL text. Supported bind
 types: ``None`` (SQL NULL), ``bool``, ``int``, ``float``, ``str``,
 ``datetime.datetime``, :class:`TimestampMicros <questdb.TimestampMicros>`,
-:class:`TimestampNanos <questdb.TimestampNanos>`, and ``uuid.UUID``.
+:class:`TimestampNanos <questdb.TimestampNanos>`, ``datetime.date`` (a
+``DATE``), ``decimal.Decimal`` (a ``DECIMAL`` of the narrowest width that
+holds it, with its fractional digits as the scale; ``NaN`` and infinities
+raise ``ValueError``) and ``uuid.UUID``.
 
 Rows of Python objects
 ----------------------

@@ -1350,6 +1350,30 @@ cdef extern from "questdb/egress/qwp_reader.h":
         int64_t v
         ) noexcept nogil
 
+    void qwp_reader_query_bind_date_millis(
+        qwp_reader_query* query,
+        int64_t v
+        ) noexcept nogil
+
+    void qwp_reader_query_bind_decimal64(
+        qwp_reader_query* query,
+        int64_t v,
+        int8_t scale
+        ) noexcept nogil
+
+    void qwp_reader_query_bind_decimal128(
+        qwp_reader_query* query,
+        uint64_t mantissa_lo,
+        int64_t mantissa_hi,
+        int8_t scale
+        ) noexcept nogil
+
+    void qwp_reader_query_bind_decimal256(
+        qwp_reader_query* query,
+        const uint8_t* value,
+        int8_t scale
+        ) noexcept nogil
+
     void qwp_reader_query_bind_varchar(
         qwp_reader_query* query,
         line_sender_utf8 v

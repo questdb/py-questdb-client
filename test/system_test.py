@@ -2469,13 +2469,18 @@ class TestEgressWithDatabase(unittest.TestCase):
             self._exec(
                 f'CREATE TABLE {table_name} '
                 '(ts TIMESTAMP, lg LONG, dbl DOUBLE, sym SYMBOL, '
-                'flag BOOLEAN, u UUID) '
+                'flag BOOLEAN, u UUID, d DATE, dec DECIMAL(18,2), '
+                'wide DECIMAL(38,10), huge DECIMAL(76,20)) '
                 'TIMESTAMP(ts) PARTITION BY DAY WAL')
             bound_uuid = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
+            wide = decimal.Decimal('123456789012345678.1234567890')
+            huge = decimal.Decimal(
+                '1234567890123456789012345678901234567890.12345678901234567890')
             self._exec(
                 f'INSERT INTO {table_name} VALUES '
                 f"('2024-01-01T00:00:01.000000Z', 7, 1.5, 'BTC-USD', "
-                f"true, '{bound_uuid}')")
+                f"true, '{bound_uuid}', '2024-01-01', '1.25', "
+                f"'{wide}', '{huge}')")
             self.qdb_plain.retry_check_table(table_name, min_rows=1)
 
             def count(sql, binds):
@@ -2511,6 +2516,20 @@ class TestEgressWithDatabase(unittest.TestCase):
                 (f'SELECT count() AS n FROM {table_name} '
                  'WHERE $1 IS NULL', [None], 1),
                 (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE d = $1', [datetime.date(2024, 1, 1)], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE d = $1', [datetime.date(2024, 1, 2)], 0),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE dec = $1', [decimal.Decimal('1.25')], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE dec = $1', [decimal.Decimal('1.3')], 0),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE wide = $1', [wide], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE huge = $1', [huge], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE huge = $1', [-huge], 0),
+                (f'SELECT count() AS n FROM {table_name} '
                  'WHERE ts > $1 AND sym = $2',
                  [datetime.datetime(
                      2020, 1, 1, tzinfo=datetime.timezone.utc),
@@ -2531,6 +2550,14 @@ class TestEgressWithDatabase(unittest.TestCase):
                     client.query(
                         f'SELECT count() AS n FROM {table_name} '
                         'WHERE lg = $1', [object()])
+                with self.assertRaisesRegex(ValueError, 'NaN'):
+                    client.query(
+                        f'SELECT count() AS n FROM {table_name} '
+                        'WHERE dec = $1', [decimal.Decimal('NaN')])
+                with self.assertRaisesRegex(ValueError, '76 digits'):
+                    client.query(
+                        f'SELECT count() AS n FROM {table_name} '
+                        'WHERE dec = $1', [decimal.Decimal('1E+77')])
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')

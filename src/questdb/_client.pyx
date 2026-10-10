@@ -108,6 +108,7 @@ from cpython.bytes cimport (PyBytes_FromStringAndSize,
 
 import collections
 import datetime
+import decimal
 import numbers
 import os
 import threading

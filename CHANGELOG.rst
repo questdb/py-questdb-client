@@ -131,6 +131,11 @@ New
   healthy as after a clean drain. A :class:`PooledReader
   <questdb.PooledReader>` lease likewise stays usable after such an error.
   A result abandoned mid-stream still drops its connection.
+- ``datetime.date`` and ``decimal.Decimal`` are bind parameter types. A date
+  is bound as ``DATE``; a decimal as the narrowest ``DECIMAL`` that holds it
+  — 64, 128 or 256 bits for up to 18, 38 or 76 digits — with its fractional
+  digits as the scale, so it reaches a ``DECIMAL`` column exactly instead of
+  through a ``DOUBLE``. ``NaN`` and infinities raise ``ValueError``.
 
 Fixed
 ~~~~~
