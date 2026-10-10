@@ -268,8 +268,9 @@ These keys shape :meth:`QuestDB.query <questdb.QuestDB.query>` /
   :class:`PooledReader <questdb.PooledReader>`, replacing the server-wide
   ``query.timeout``. ``timeout=`` on ``query()`` / ``execute()`` overrides it
   per query, and ``timeout=0`` clears it. Requires a server advertising
-  ``CAP_QUERY_TIMEOUT``: against an older one every query fails with
-  ``QuestDBErrorCode.QueryTimeout`` while a non-zero value is in effect.
+  ``CAP_QUERY_TIMEOUT``: against an older one every query is refused before
+  it is sent, with ``QuestDBErrorCode.UnsupportedServer``, while a non-zero
+  value is in effect; the connection is untouched by the refusal.
 
   Default: 0 (no client-supplied timeout).
 

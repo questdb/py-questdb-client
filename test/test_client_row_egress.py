@@ -24,9 +24,9 @@ Run the live half with:
 import sys
 
 sys.dont_write_bytecode = True
-import atexit
 import datetime
 import decimal
+import gc
 import ipaddress
 import os
 import unittest
@@ -40,35 +40,72 @@ import questdb as qdb
 ADDR = os.environ.get('QDB_HTTP_ADDR')
 TABLE = 'py_row_egress_test'
 
-_fixture = None
+# `SERVER_INFO` capability bits. A per-query timeout rides inside the
+# query-flags trailer, so the native client requires both.
+CAP_QUERY_FLAGS = 0x02
+CAP_QUERY_TIMEOUT = 0x08
 
 
-def _live_addr():
-    global _fixture
-    if ADDR:
-        return ADDR
-    if os.environ.get('TEST_QUESTDB_INTEGRATION') != '1':
-        raise unittest.SkipTest(
-            'set QDB_HTTP_ADDR=host:port for a running QuestDB')
-    if _fixture is None:
-        import system_test
-        system_test.may_install_questdb()
-        _fixture = system_test.QuestDbFixture(
-            system_test.QUESTDB_PLAIN_INSTALL_PATH, http=True)
-        _fixture.start()
-        atexit.register(_fixture.stop)
-    return f'{_fixture.host}:{_fixture.http_server_port}'
+def _pool_stats(db):
+    """``(in_use, idle)`` of a handle's reader pool."""
+    return qdb._client._debug_egress_pool_stats(db)
 
 
 class _LiveCase(unittest.TestCase):
+    """A class that drives a real QuestDB.
+
+    Under the ``test.py`` integration run the system-test fixture is
+    started in ``setUpClass`` and stopped in ``tearDownClass``, the way
+    every other integration class does it: the fixtures share one data
+    directory, so a server must be stopped before the next class starts
+    its own.
+    """
+
+    _fixture = None
+
     @classmethod
     def setUpClass(cls):
-        cls.addr = _live_addr()
-        cls.db = qdb.connect(f'ws::addr={cls.addr};')
+        if ADDR:
+            cls.addr = ADDR
+        elif os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
+            import system_test
+            system_test.may_install_questdb()
+            cls._fixture = system_test.QuestDbFixture(
+                system_test.QUESTDB_PLAIN_INSTALL_PATH, http=True)
+            cls._fixture.start()
+            cls.addr = f'{cls._fixture.host}:{cls._fixture.http_server_port}'
+        else:
+            raise unittest.SkipTest(
+                'set QDB_HTTP_ADDR=host:port for a running QuestDB')
+        try:
+            cls.db = qdb.connect(f'ws::addr={cls.addr};')
+        except BaseException:
+            cls._stop_fixture()
+            raise
 
     @classmethod
     def tearDownClass(cls):
-        cls.db.close()
+        try:
+            cls.db.close()
+        finally:
+            cls._stop_fixture()
+
+    @classmethod
+    def _stop_fixture(cls):
+        if cls._fixture is not None:
+            cls._fixture.stop()
+            cls._fixture = None
+
+    @classmethod
+    def _skip_class(cls, reason):
+        # `unittest` skips `tearDownClass` when `setUpClass` raises, so the
+        # server started above has to be stopped here.
+        cls.tearDownClass()
+        raise unittest.SkipTest(reason)
+
+    @classmethod
+    def _server_capabilities(cls):
+        return cls.db.server_info().capabilities
 
 
 class TestTimeoutArgument(unittest.TestCase):
@@ -143,10 +180,46 @@ class TestTimeoutArgument(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         db.query('select 1', timeout=bad)
 
+    def test_numpy_integers_accepted(self):
+        # "An int is milliseconds" covers every integer type, numpy's
+        # included: a count pulled out of a frame must not need `int()`.
+        import numpy as np
+        conv = qdb._client._debug_query_timeout_to_millis
+        self.assertEqual(conv(np.int64(250)), 250)
+        self.assertEqual(conv(np.uint8(5)), 5)
+        self.assertEqual(conv(np.int64(0)), 0)
+        with self.assertRaises(ValueError):
+            conv(np.int64(-1))
+        with self.assertRaises(TypeError):
+            conv(np.float64(1.0))
+
+    def test_pandas_timedelta_rounds_up_below_a_millisecond(self):
+        # A `pandas.Timedelta` is a `datetime.timedelta` with nanoseconds.
+        # Flooring it to microseconds first turned 500 ns into "no
+        # timeout", the opposite of what was asked for.
+        try:
+            import pandas as pd
+        except ImportError:
+            self.skipTest('needs pandas')
+        conv = qdb._client._debug_query_timeout_to_millis
+        self.assertEqual(conv(pd.Timedelta(500, 'ns')), 1)
+        self.assertEqual(conv(pd.Timedelta(999, 'us')), 1)
+        self.assertEqual(conv(pd.Timedelta(1500, 'us')), 1)
+        self.assertEqual(conv(pd.Timedelta(2, 'ms')), 2)
+        self.assertEqual(conv(pd.Timedelta(0)), 0)
+        with self.assertRaises(ValueError):
+            conv(pd.Timedelta(-1, 'ns'))
+
     def test_unknown_connect_string_key_still_rejected(self):
-        # The new key must not have widened the parser.
-        with self.assertRaises(qdb.QuestDBError):
-            qdb.connect('ws::addr=127.0.0.1:1;query_timeout=1000;')
+        # The new key must not have widened the parser. `lazy_connect`
+        # keeps the network out of it: without it a refused connection
+        # would raise too, and the assertion would prove nothing.
+        with self.assertRaises(qdb.QuestDBError) as ctx:
+            qdb.connect(
+                'ws::addr=127.0.0.1:1;query_timeout=1000;lazy_connect=on;')
+        self.assertEqual(
+            ctx.exception.code, qdb.QuestDBErrorCode.ConfigError)
+        self.assertIn('query_timeout', str(ctx.exception))
 
     def test_connect_string_key_accepted(self):
         # `query_timeout_ms` has to be accepted by BOTH roles: one connect
@@ -247,6 +320,15 @@ class TestRowEgressLive(_LiveCase):
             self.db.query(
                 "select ARRAY[1.0, 2.0] as a").columns(),
             [('a', 'DOUBLE[]')])
+
+    def test_array_type_name_carries_no_dimensionality(self):
+        # The wire schema has no dimension count, so a 2-D column is
+        # reported in the 1-D spelling; the server itself would say
+        # `DOUBLE[][]`. Pinned as a documented limit, not a target.
+        with self.db.query("select ARRAY[[1.0, 2.0], [3.0, 4.0]] as a") as r:
+            self.assertEqual(r.columns(), [('a', 'DOUBLE[]')])
+            value, = list(r.iter_rows())[0]
+            self.assertEqual(value.shape, (2, 2))
 
     # --- iter_rows() values ---------------------------------------------
 
@@ -461,30 +543,50 @@ class TestRowEgressLive(_LiveCase):
                 list(result.iter_rows())
 
     def test_iter_rows_streams_many_batches(self):
-        # Enough rows to cross batch boundaries, so the per-batch decode
-        # and the symbol-dictionary carry-over both get exercised.
+        # Enough rows to cross batch boundaries, with a symbol whose
+        # dictionary keeps growing past the first batch, so the per-batch
+        # decode and the incremental symbol-dictionary interning are both
+        # exercised. Every row is checked, not just the last.
         n = 20_000
         with self.db.query(
-                "select x, cast(x % 97 as symbol) as s "
+                "select x, cast(x as symbol) as s "
                 f"from long_sequence({n})") as result:
-            total = 0
-            last = None
+            expected = 1
             for x, s in result.iter_rows():
-                total += 1
-                last = (x, s)
-        self.assertEqual(total, n)
-        self.assertEqual(last, (n, str(n % 97)))
+                self.assertEqual((x, s), (expected, str(expected)))
+                expected += 1
+        self.assertEqual(expected, n + 1)
 
-    def test_abandoned_iterator_releases_the_connection(self):
-        # Walking away mid-stream must not wedge the pool: the next query
-        # has to work.
-        result = self.db.query(f'select x from long_sequence(100000)')
-        rows = result.iter_rows()
-        next(rows)
-        del rows
-        result.close()
-        self.assertEqual(list(self.db.query('select 1 as a').iter_rows()),
-                         [(1,)])
+    def test_symbol_dictionary_carries_over_on_a_lease(self):
+        # With `reset_symbol_dict=False` the second query's batches code
+        # their symbols against the connection dictionary the first query
+        # built, plus whatever is new; the row path has to intern exactly
+        # the new tail.
+        with self.db.reader() as r:
+            first = list(r.query(
+                "select cast(x as symbol) as s from long_sequence(50)",
+                reset_symbol_dict=False).iter_rows())
+            second = list(r.query(
+                "select cast(x + 25 as symbol) as s from long_sequence(50)",
+                reset_symbol_dict=False).iter_rows())
+        self.assertEqual([s for s, in first], [str(x) for x in range(1, 51)])
+        self.assertEqual([s for s, in second], [str(x) for x in range(26, 76)])
+
+    def test_abandoned_iterator_drops_the_connection(self):
+        # Walking away mid-stream must not wedge the pool. The cursor never
+        # reached its terminal, so the connection is dropped rather than
+        # recycled (a recycled one would hand the next borrower a torn
+        # down pipe), and the pool refills on demand.
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            result = db.query('select x from long_sequence(100000)')
+            rows = result.iter_rows()
+            next(rows)
+            del rows
+            result.close()
+            self.assertEqual(_pool_stats(db), (0, 0))
+            self.assertEqual(
+                list(db.query('select 1 as a').iter_rows()), [(1,)])
+            self.assertEqual(_pool_stats(db), (0, 1))
 
     def test_iterator_is_invalid_after_close(self):
         result = self.db.query('select x from long_sequence(3)')
@@ -527,6 +629,169 @@ class TestRowEgressLive(_LiveCase):
             self.assertEqual(
                 list(r.query('select 1 as a').iter_rows()), [(1,)])
 
+    def test_schema_probe_returns_the_connection_to_the_pool(self):
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            with db.query(f'select * from {TABLE} limit 0') as result:
+                self.assertEqual(len(result.columns()), 18)
+            self.assertEqual(_pool_stats(db), (0, 1))
+
+    def test_columns_then_close_on_unread_rows_drops_the_connection(self):
+        # The first batch is buffered but the terminal frame has not been
+        # read, so the cursor is mid-stream at close: the connection is
+        # dropped. Pinned so the documented remedy below stays honest.
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            with db.query('select 1 as a') as result:
+                self.assertEqual(result.columns(), [('a', 'INT')])
+            self.assertEqual(_pool_stats(db), (0, 0))
+
+    def test_columns_then_cancel_then_close_keeps_the_connection(self):
+        # The remedy: `cancel()` drains to a terminal on a live
+        # connection, so `close()` recycles it.
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            with db.query('select 1 as a') as result:
+                self.assertEqual(result.columns(), [('a', 'INT')])
+                result.cancel()
+            self.assertEqual(_pool_stats(db), (0, 1))
+        with self.db.reader() as r:
+            with r.query('select 1 as a') as result:
+                result.columns()
+                result.cancel()
+            self.assertEqual(
+                list(r.query('select 2 as a').iter_rows()), [(2,)])
+
+    def test_cancel_stops_the_rows(self):
+        # Rows decoded ahead of the consumer are not handed out after
+        # `cancel()`, whether they sit in the buffered first batch or a
+        # later one — the same contract as the Arrow iterators.
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            with db.query('select x from long_sequence(100000)') as result:
+                result.columns()
+                result.cancel()
+                self.assertEqual(list(result.iter_rows()), [])
+            self.assertEqual(_pool_stats(db), (0, 1))
+            with db.query('select x from long_sequence(100000)') as result:
+                rows = result.iter_rows()
+                self.assertEqual(next(rows), (1,))
+                result.cancel()
+                self.assertEqual(list(rows), [])
+            self.assertEqual(_pool_stats(db), (0, 1))
+
+    def test_columns_answer_after_close_but_iter_rows_raises(self):
+        result = self.db.query('select 1 as a')
+        self.assertEqual(result.columns(), [('a', 'INT')])
+        result.close()
+        self.assertEqual(result.columns(), [('a', 'INT')])
+        with self.assertRaises(qdb.QuestDBError) as ctx:
+            result.iter_rows()
+        self.assertIn('closed', str(ctx.exception))
+
+    def test_server_error_recycles_the_connection(self):
+        # A parse error ends at a terminal frame on a healthy connection,
+        # so the reader goes back to the pool instead of being dropped —
+        # on every path, not just the one that happened to be drained.
+        try:
+            import pyarrow  # noqa: F401
+            have_pyarrow = True
+        except ImportError:
+            have_pyarrow = False
+        bad = 'select no_such_column from long_sequence(1)'
+        paths = {
+            'iter_rows': lambda db: list(db.query(bad).iter_rows()),
+            'columns': lambda db: db.query(bad).columns(),
+            'execute': lambda db: db.execute(bad),
+            'to_pandas': lambda db: db.query(bad).to_pandas(),
+        }
+        if have_pyarrow:
+            paths['to_arrow'] = lambda db: db.query(bad).to_arrow()
+            paths['iter_arrow'] = lambda db: list(db.query(bad).iter_arrow())
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            list(db.query('select 1 as a').iter_rows())
+            self.assertEqual(_pool_stats(db), (0, 1))
+            for name, path in paths.items():
+                with self.subTest(path=name):
+                    with self.assertRaises(qdb.QuestDBError):
+                        path(db)
+                    self.assertEqual(_pool_stats(db), (0, 1))
+
+    def test_lease_survives_a_server_error(self):
+        with self.db.reader() as r:
+            for _ in range(2):
+                with self.assertRaises(qdb.QuestDBError):
+                    list(r.query(
+                        'select no_such_column from long_sequence(1)'
+                    ).iter_rows())
+                self.assertEqual(
+                    list(r.query('select 1 as a').iter_rows()), [(1,)])
+
+    def test_pooled_reader_rejects_a_bad_timeout_and_stays_usable(self):
+        # Argument validation runs before the lease is touched, so a bad
+        # value is a plain TypeError / ValueError and the lease is intact.
+        with self.db.reader() as r:
+            with self.assertRaises(ValueError):
+                r.query('select 1', timeout=-1)
+            with self.assertRaises(TypeError):
+                r.execute('select 1', timeout='1s')
+            self.assertEqual(
+                list(r.query('select 1 as a').iter_rows()), [(1,)])
+
+    def test_lease_finalised_mid_decode_is_safe(self):
+        # A `PooledReader` reachable only through a reference cycle can be
+        # collected by the cyclic GC while a batch of its own result is
+        # being decoded on the same thread: the decoders run Python code
+        # per cell. Its finaliser then frees the cursor through the
+        # re-entrant lock. That free must wait until the decoder has let
+        # go of the batch, not pull the buffers out from under it; the
+        # consumer then sees a clean "cursor is closed", never a crash.
+        import uuid as uuid_module
+        sql = 'select to_uuid(x, x) as u, x from long_sequence(100000)'
+        state = {'armed': False, 'collected': None}
+        real_uuid = uuid_module.UUID
+
+        class CollectingUUID(real_uuid):
+            # The decoder builds UUID cells through `uuid.UUID`; the first
+            # one built after arming runs a collection from inside the
+            # decode, which is exactly where the cyclic GC can land.
+            __slots__ = ()
+
+            def __init__(self, *args, **kwargs):
+                if state['armed'] and state['collected'] is None:
+                    state['collected'] = gc.collect()
+                super().__init__(*args, **kwargs)
+
+        with qdb.connect(f'ws::addr={self.addr};max_batch_rows=64;') as db:
+            def open_rows():
+                lease = db.reader()
+                try:
+                    raise ValueError('keeps the frame alive')
+                except ValueError as exc:
+                    # exc -> traceback -> this frame -> lease: once the
+                    # caller drops `exc`, the lease is reachable only
+                    # through that cycle.
+                    keep = exc
+                return lease.query(sql).iter_rows(), keep
+
+            gc.disable()
+            uuid_module.UUID = CollectingUUID
+            try:
+                rows, keep = open_rows()
+                # The first batch was decoded while the lease was alive;
+                # hand it out, then make the cycle garbage and arm the
+                # collection for the decode of the second batch.
+                for _ in range(64):
+                    next(rows)
+                keep = None
+                state['armed'] = True
+                with self.assertRaises(qdb.QuestDBError) as ctx:
+                    for _ in rows:
+                        pass
+                self.assertIn('closed', str(ctx.exception))
+                self.assertGreater(state['collected'], 0)
+            finally:
+                uuid_module.UUID = real_uuid
+                gc.enable()
+            self.assertEqual(
+                list(db.query('select 1 as a').iter_rows()), [(1,)])
+
     def test_dropped_row_result_does_not_wedge_the_lease(self):
         # Dropping an un-iterated row result must free its cursor, so the
         # lease reports a torn-down connection rather than a result that
@@ -548,22 +813,26 @@ class TestRowEgressLive(_LiveCase):
         result.close()
         result.close()
 
-    def test_cancel_then_close_mid_stream(self):
-        result = self.db.query('select x from long_sequence(100000)')
-        rows = result.iter_rows()
-        next(rows)
-        result.cancel()
-        result.close()
-        self.assertEqual(
-            list(self.db.query('select 1 as a').iter_rows()), [(1,)])
+    def test_cancel_then_close_mid_stream_recycles_the_connection(self):
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            result = db.query('select x from long_sequence(100000)')
+            rows = result.iter_rows()
+            next(rows)
+            result.cancel()
+            result.close()
+            self.assertEqual(_pool_stats(db), (0, 1))
+            self.assertEqual(
+                list(db.query('select 1 as a').iter_rows()), [(1,)])
 
-    def test_close_mid_stream_frees_the_connection(self):
-        result = self.db.query('select x from long_sequence(100000)')
-        rows = result.iter_rows()
-        next(rows)
-        result.close()
-        self.assertEqual(
-            list(self.db.query('select 1 as a').iter_rows()), [(1,)])
+    def test_close_mid_stream_drops_the_connection(self):
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            result = db.query('select x from long_sequence(100000)')
+            rows = result.iter_rows()
+            next(rows)
+            result.close()
+            self.assertEqual(_pool_stats(db), (0, 0))
+            self.assertEqual(
+                list(db.query('select 1 as a').iter_rows()), [(1,)])
 
     def test_no_pyarrow_needed(self):
         # The row path must not import pyarrow — that is the whole point of
@@ -596,9 +865,18 @@ class TestRowEgressLive(_LiveCase):
             self.assertIsNone(result.exec_done)
 
     def test_exec_done_before_drain_is_none(self):
-        with self.db.query('select 1 as a') as result:
-            self.assertIsNone(result.exec_done)
-            list(result.iter_rows())
+        # A non-SELECT, so the report exists to be read: it must still be
+        # None until the result has been drained to its terminal.
+        self.db.execute('drop table if exists py_exec_done_before')
+        self.db.execute('create table py_exec_done_before (a int)')
+        try:
+            with self.db.query(
+                    'insert into py_exec_done_before values (1)') as result:
+                self.assertIsNone(result.exec_done)
+                list(result.iter_rows())
+                self.assertEqual(result.exec_done.rows_affected, 1)
+        finally:
+            self.db.execute('drop table if exists py_exec_done_before')
 
     def test_execute_returns_insert_row_count(self):
         self.db.execute('drop table if exists py_exec_done_test')
@@ -608,13 +886,19 @@ class TestRowEgressLive(_LiveCase):
             done = self.db.execute(
                 'insert into py_exec_done_test values (1,1),(2,2),(3,3)')
             self.assertIsNotNone(done)
+            # A named tuple: unpacks, indexes, and reads by name.
+            self.assertIsInstance(done, qdb.ExecDone)
+            self.assertIsInstance(done, tuple)
             op_type, rows = done
             self.assertIsInstance(op_type, int)
             self.assertEqual(rows, 3)
+            self.assertEqual(done.rows_affected, 3)
+            self.assertEqual(done.op_type, op_type)
+            self.assertEqual(done[1], 3)
 
             done = self.db.execute(
                 'update py_exec_done_test set b = 9 where a > 1')
-            self.assertEqual(done[1], 2)
+            self.assertEqual(done.rows_affected, 2)
         finally:
             self.db.execute('drop table if exists py_exec_done_test')
 
@@ -689,16 +973,86 @@ class TestRowEgressLive(_LiveCase):
             finally:
                 r.execute('drop table if exists py_lease_exec_test')
 
+class TestQueryTimeoutWithoutCapability(_LiveCase):
+    """`timeout=` against a server that does *not* advertise the capability.
+
+    The native client refuses such a query before writing anything, with
+    ``UnsupportedServer`` rather than ``QueryTimeout``, so the connection
+    is untouched; the Python side must agree, or the documented remedy —
+    pass ``timeout=0`` — fails on the very lease that needs it. This is the
+    half of the timeout feature every released server can exercise.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        caps = cls._server_capabilities()
+        if (caps & (CAP_QUERY_FLAGS | CAP_QUERY_TIMEOUT)) == (
+                CAP_QUERY_FLAGS | CAP_QUERY_TIMEOUT):
+            cls._skip_class(
+                'server advertises CAP_QUERY_TIMEOUT (capabilities '
+                f'0x{caps:08X}); see TestQueryTimeoutLive')
+
+    def test_refused_before_anything_is_sent(self):
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            list(db.query('select 1 as a').iter_rows())
+            self.assertEqual(_pool_stats(db), (0, 1))
+            with self.assertRaises(qdb.QuestDBError) as ctx:
+                db.query('select 1 as a', timeout=1000)
+            # The server's shortcoming, not an expired budget: a caller that
+            # retries a timeout with a larger budget must not be sent round
+            # that loop against a server that ignores every budget.
+            self.assertEqual(
+                ctx.exception.code, qdb.QuestDBErrorCode.UnsupportedServer)
+            self.assertIn('CAP_QUERY_TIMEOUT', str(ctx.exception))
+            # Nothing reached the socket: the connection went back to the
+            # pool rather than being dropped and re-dialled.
+            self.assertEqual(_pool_stats(db), (0, 1))
+            with self.assertRaises(qdb.QuestDBError):
+                db.execute('select 1', timeout=1000)
+            self.assertEqual(_pool_stats(db), (0, 1))
+
+    def test_lease_survives_the_refusal(self):
+        # A lease that has already run a query, then one refused for its
+        # timeout: the documented `timeout=0` remedy must work on that
+        # same lease, and so must a plain query.
+        with self.db.reader() as r:
+            self.assertEqual(
+                list(r.query('select 1 as a').iter_rows()), [(1,)])
+            with self.assertRaises(qdb.QuestDBError) as ctx:
+                r.execute('select 1', timeout=1000)
+            self.assertEqual(
+                ctx.exception.code, qdb.QuestDBErrorCode.UnsupportedServer)
+            self.assertEqual(
+                list(r.query('select 1 as a', timeout=0).iter_rows()),
+                [(1,)])
+            self.assertEqual(
+                list(r.query('select 1 as a').iter_rows()), [(1,)])
+
+    def test_connect_string_default_is_refused_until_cleared(self):
+        with qdb.connect(
+                f'ws::addr={self.addr};query_timeout_ms=1000;') as db:
+            with self.assertRaises(qdb.QuestDBError) as ctx:
+                db.execute('select 1')
+            self.assertEqual(
+                ctx.exception.code, qdb.QuestDBErrorCode.UnsupportedServer)
+            self.assertEqual(_pool_stats(db), (0, 1))
+            self.assertEqual(
+                list(db.query('select 1 as a', timeout=0).iter_rows()),
+                [(1,)])
+            self.assertEqual(_pool_stats(db), (0, 1))
+
+
 class TestQueryTimeoutLive(_LiveCase):
     """`timeout=` against a server advertising ``CAP_QUERY_TIMEOUT``."""
 
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        caps = cls.db.server_info().capabilities
-        if not caps & 0x08:
-            cls.db.close()
-            raise unittest.SkipTest(
+        caps = cls._server_capabilities()
+        if (caps & (CAP_QUERY_FLAGS | CAP_QUERY_TIMEOUT)) != (
+                CAP_QUERY_FLAGS | CAP_QUERY_TIMEOUT):
+            cls._skip_class(
                 'server does not advertise CAP_QUERY_TIMEOUT (capabilities '
                 f'0x{caps:08X}); it predates questdb/questdb#7768')
 
@@ -816,15 +1170,6 @@ class TestQueryTimeoutLive(_LiveCase):
         with self.assertRaises(qdb.QuestDBError) as ctx:
             self.db.execute('select * from sleep(60000)', timeout=200)
         self.assertEqual(ctx.exception.code, qdb.QuestDBErrorCode.QueryTimeout)
-
-    def test_pooled_reader_rejects_a_bad_timeout_and_stays_usable(self):
-        with self.db.reader() as r:
-            with self.assertRaises(ValueError):
-                r.query('select 1', timeout=-1)
-            with self.assertRaises(TypeError):
-                r.execute('select 1', timeout='1s')
-            self.assertEqual(
-                list(r.query('select 1 as a').iter_rows()), [(1,)])
 
     def test_timeout_on_a_pooled_reader(self):
         with self.db.reader() as r:
@@ -1002,6 +1347,56 @@ class TestUuidByteOrder(_LiveCase):
             self.skipTest('needs pyarrow')
         table = self._fresh_table('u uuid')
         frame = pa.table({'u': pa.array([self.U.bytes], type=pa.binary(16))})
+        self.db.dataframe(
+            frame, table_name=table, at=qdb.ServerTimestamp,
+            schema_overrides={'u': 'uuid'})
+        self._wait(table)
+        rows = list(self.db.query(
+            f'select cast(u as varchar) from {table}').iter_rows())
+        self.assertEqual(rows, [(str(self.U),)])
+
+    def test_arrow_table_fsb32_without_a_claim_lands_as_binary(self):
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('needs pyarrow')
+        raw = bytes(range(1, 33))
+        table = self._new_table()
+        frame = pa.table({'v': pa.array([raw], type=pa.binary(32))})
+        self.db.dataframe(frame, table_name=table, at=qdb.ServerTimestamp)
+        self._wait(table)
+        with self.db.query(f'select v from {table}') as result:
+            self.assertEqual(result.columns(), [('v', 'BINARY')])
+            self.assertEqual(list(result.iter_rows()), [(raw,)])
+
+    def test_arrow_table_long256_claim(self):
+        # The `'long256'` override, the only way an Arrow table passed
+        # straight through lands a 32-byte column as LONG256.
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('needs pyarrow')
+        raw = bytes(range(1, 33))
+        table = self._fresh_table('v long256')
+        frame = pa.table({'v': pa.array([raw], type=pa.binary(32))})
+        self.db.dataframe(
+            frame, table_name=table, at=qdb.ServerTimestamp,
+            schema_overrides={'v': 'long256'})
+        self._wait(table)
+        rows = list(self.db.query(f'select v from {table}').iter_rows())
+        self.assertEqual(rows, [(int.from_bytes(raw, 'little'),)])
+
+    def test_polars_binary_column_claimed_as_uuid(self):
+        # polars has no fixed-width binary type: its `Binary` column
+        # exports as variable-width bytes, which the `'uuid'` override
+        # accepts as long as every value is exactly 16 bytes.
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('needs polars')
+        table = self._fresh_table('u uuid')
+        frame = pl.DataFrame({'u': [self.U.bytes]})
+        self.assertEqual(frame.schema['u'], pl.Binary)
         self.db.dataframe(
             frame, table_name=table, at=qdb.ServerTimestamp,
             schema_overrides={'u': 'uuid'})

@@ -4,8 +4,69 @@
 Changelog
 =========
 
-5.0.1 (unreleased)
+6.0.0 (unreleased)
 ------------------
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+- **UUID bytes on the Arrow paths are now RFC-4122 order** — the bytes of
+  ``uuid.UUID.bytes`` — in both directions, following the native client's
+  `#186 <https://github.com/questdb/c-questdb-client/pull/186>`_.
+
+  - ``to_arrow()``, ``iter_arrow()``, ``to_polars()``, ``iter_polars()``, the
+    Arrow PyCapsule stream, and ``to_pandas()`` / ``iter_pandas()`` with
+    ``dtype_backend=`` or ``types_mapper=`` previously returned UUIDs in QWP
+    wire order (two little-endian 64-bit halves, low half first) while
+    labelling them ``arrow.uuid``; they now return the canonical bytes.
+  - :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` reads a
+    ``pa.fixed_size_binary(16)`` / ``arrow.uuid`` column as canonical bytes
+    too. Code that converted ``uuid.UUID`` values to the wire layout before
+    ingesting must now pass ``uuid.UUID.bytes`` unchanged. Nothing raises if
+    it does not — any 16 bytes are a valid UUID — the values are simply
+    stored reversed.
+
+  What this means for stored data: binds, plain ``to_pandas()`` (the
+  default numpy path) and object-dtype ``uuid.UUID`` dataframe columns
+  always carried the right UUID and still do, so data written through them
+  needs no repair. Two kinds of data do. UUIDs written in 5.0.x from an
+  Arrow column holding canonical bytes — a ``pa.uuid()`` column, a Parquet
+  or DuckDB export — were stored byte-reversed. And an Arrow-shaped result
+  saved from 5.0.x (``to_arrow()`` output kept in Parquet, Feather, IPC or a
+  pickle) holds wire-order bytes under an ``arrow.uuid`` label, so it is
+  stored reversed when written back now. Reverse the 16 bytes of each such
+  value once, ``uuid.UUID(bytes=b[::-1])``, before writing it.
+
+- **An unlabelled 16- or 32-byte Arrow column no longer lands as UUID /
+  LONG256.** An Arrow table passed straight to ``dataframe()`` with a
+  ``fixed_size_binary(16)`` / ``(32)`` column that carries no ``arrow.uuid``
+  or ``questdb.column_type`` label now lands as ``BINARY``: a new table gets
+  a ``BINARY`` column where 5.0.x created a ``UUID`` one. Label the column
+  (``pa.uuid()``, or ``questdb.column_type`` field metadata) or pass
+  ``schema_overrides={'col': 'uuid'}`` / ``'long256'``, both new. The
+  overrides also accept a variable-width ``binary`` / ``large_binary`` /
+  ``binary_view`` column whose every value is exactly 16 / 32 bytes, which
+  is how a polars ``Binary`` column is claimed: polars has no fixed-width
+  binary type, so its columns always landed as ``BINARY``. Pandas frames
+  keep landing such columns as UUID / LONG256, because pandas drops Arrow
+  field metadata and the frame's ``ArrowDtype`` is taken as the claim.
+
+- :meth:`QuestDB.execute <questdb.QuestDB.execute>` and
+  :meth:`PooledReader.execute <questdb.PooledReader.execute>` return the
+  statement's ``EXEC_DONE`` report as an
+  :class:`ExecDone <questdb.ExecDone>` named tuple ``(op_type,
+  rows_affected)`` instead of ``None``; ``None`` is now returned only for a
+  statement that streamed a result set. The protocol does carry the count —
+  the previous documentation saying otherwise was wrong. ``rows_affected``
+  is meaningful for ``INSERT`` and ``UPDATE``, and ``None`` when the server
+  reports no count, as statements executed at parse time currently do;
+  ``op_type`` is the server's operation-type byte, carried through as an
+  opaque ``int``. The same report is on
+  :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` once a
+  result has been drained, and stays there after the result is closed.
+
+New
+~~~
 
 - :class:`QueryResult <questdb.QueryResult>` can now be read as rows of
   Python objects, without pyarrow or pandas. :meth:`iter_rows
@@ -15,12 +76,16 @@ Changelog
   QuestDB DDL spelling (``VARCHAR``, ``TIMESTAMP_NS``, ``IPv4``,
   ``GEOHASH(8c)``, ``DECIMAL(18,2)``, ``DOUBLE[]``), so they can be compared
   against ``tables()`` / ``information_schema.questdb_columns()`` without
-  normalising. Asking for the columns does not consume the rows, so a
-  DB-API-style caller can read its ``description`` first; a ``LIMIT 0``
-  schema probe returns its connection to the pool. Intended for
-  row-shaped consumers and small result sets — metadata lookups, test rows,
-  ``limit 0`` schema probes; large analytical results still belong on
-  ``to_pandas()`` / ``to_arrow()``, which stay columnar.
+  normalising. Two things the wire does not carry: a ``DECIMAL`` is reported
+  at its storage width's precision (18, 38 or 76), and an array column as
+  ``DOUBLE[]`` / ``LONG[]`` whatever its dimensionality. Asking for the
+  columns does not consume the rows, so a DB-API-style caller can read its
+  ``description`` first; a ``LIMIT 0`` schema probe returns its connection
+  to the pool, while a result with unread rows needs ``cancel()`` before
+  ``close()`` to do the same. Intended for row-shaped consumers and small
+  result sets — metadata lookups, test rows, ``limit 0`` schema probes;
+  large analytical results still belong on ``to_pandas()`` / ``to_arrow()``,
+  which stay columnar.
 
   Timestamps come back timezone-aware in UTC, matching what ``to_arrow()``
   labels them. ``TIMESTAMP_NS`` is rounded down to microseconds, because
@@ -33,62 +98,61 @@ Changelog
   ``UUID`` columns come back as the canonical RFC-4122 value, agreeing with
   ``to_arrow()``, with ``to_pandas()`` and with the server's own text output.
 
-- **Behaviour change for ``UUID`` on the Arrow paths:** UUID bytes in Arrow
-  data are now the canonical RFC-4122 order, ``uuid.UUID.bytes``, in both
-  directions, following the native client's `#186
-  <https://github.com/questdb/c-questdb-client/pull/186>`_.
-
-  - ``to_arrow()``, ``iter_arrow()``, ``to_polars()``, ``iter_polars()`` and
-    the Arrow PyCapsule stream previously returned UUIDs in QWP wire order
-    (two little-endian 64-bit halves, low half first) while labelling them
-    ``arrow.uuid``; they now return the canonical bytes.
-  - :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` reads a
-    ``pa.fixed_size_binary(16)`` / ``arrow.uuid`` column as canonical bytes
-    too. Code that converted ``uuid.UUID`` values to the wire layout before
-    ingesting must now pass ``uuid.UUID.bytes`` unchanged.
-  - An Arrow table or polars frame passed straight to ``dataframe()`` that
-    carries a ``fixed_size_binary(16)`` / ``(32)`` column with no
-    ``arrow.uuid`` or ``questdb.column_type`` label now lands as ``BINARY``;
-    ``schema_overrides`` accepts ``'uuid'`` and ``'long256'`` to say otherwise.
-
-  Values already stored are unaffected: binds, ``to_pandas()`` and object
-  ``uuid.UUID`` dataframe columns always carried the right UUID and still do.
-
-- :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` reports a
-  non-SELECT statement's terminal ``EXEC_DONE`` as
-  ``(op_type, rows_affected)`` once the result has been drained, and
-  :meth:`QuestDB.execute <questdb.QuestDB.execute>` /
-  :meth:`PooledReader.execute <questdb.PooledReader.execute>` return the same
-  tuple instead of ``None``. It is ``None`` for a statement that streamed a
-  result set. The protocol does carry the count — the previous
-  documentation saying otherwise was wrong. ``rows_affected`` is meaningful
-  for ``INSERT`` and ``UPDATE``, and ``None`` when the server reports no
-  count, as statements executed at parse time currently do.
-
 - Queries can be given their own timeout instead of running under the
   server-wide ``query.timeout``. ``query_timeout_ms`` in the connection
   string sets a default for every query on that handle (``0``, the default,
   means none), and ``timeout=`` on ``query()`` / ``execute()`` of both
   :class:`QuestDB <questdb.QuestDB>` and
   :class:`PooledReader <questdb.PooledReader>` overrides it per query, with
-  ``timeout=0`` clearing it. An
-  ``int`` is milliseconds; a ``datetime.timedelta`` works too, with a
+  ``timeout=0`` clearing it. An ``int`` is milliseconds (any integer type);
+  a ``datetime.timedelta`` or ``pandas.Timedelta`` works too, with a
   positive value below one millisecond rounded *up* to 1 ms. The server
   applies no ceiling, so a value above ``query.timeout`` is honoured — which
   is the point for a long transform.
 
   Requires a server advertising ``CAP_QUERY_TIMEOUT``
-  (questdb/questdb#7768). Against an older one the query fails fast with the
-  new :class:`QuestDBErrorCode.QueryTimeout
-  <questdb.QuestDBErrorCode>` rather than silently running under the server
-  default; raise the server's ``query.timeout`` instead, or pass
-  ``timeout=0``. On expiry the error carries that same code and the
-  pooled connection stays open and authenticated, so the next query runs on
-  it without reconnecting. **Do not retry a write after a timeout:** a
+  (questdb/questdb#7768). Against an older one the query is refused before
+  anything is sent, with ``QuestDBErrorCode.UnsupportedServer``, rather
+  than silently running under the server default; the connection is
+  untouched by the refusal, so raise the server's ``query.timeout`` instead,
+  or pass ``timeout=0`` on the same handle or lease. On expiry the error
+  carries the new :class:`QuestDBErrorCode.QueryTimeout
+  <questdb.QuestDBErrorCode>` and the pooled connection stays open and
+  authenticated, so the next query runs on it without reconnecting. **Do
+  not retry a write after a timeout:** a
   statement that completes past its timeout is reported as ``EXEC_DONE``
   rather than a timeout, precisely so a retry cannot apply it twice, and a
   DDL / ``INSERT`` / ``UPDATE`` that timed out waiting for the table writer
   may still be applied afterwards.
+
+- A pooled connection whose query ended in a server-side error — a parse
+  error, a timeout — now goes back to the pool instead of being dropped, on
+  every path: the result reached a terminal frame, so the connection is as
+  healthy as after a clean drain. A :class:`PooledReader
+  <questdb.PooledReader>` lease likewise stays usable after such an error.
+  A result abandoned mid-stream still drops its connection.
+
+Fixed
+~~~~~
+
+- A :class:`PooledReader <questdb.PooledReader>` that had become reachable
+  only through a reference cycle could be collected by the cyclic garbage
+  collector while one of its results was being decoded, on the same
+  thread; its finaliser then freed the native cursor under the decoder and
+  the process crashed. ``to_pandas()`` and ``iter_pandas()`` were exposed,
+  and the new row path more so. The free is now deferred until the decoder
+  has let go of the batch, and the consumer sees a plain
+  ``QuestDBError('cursor is closed')``. For the same reason,
+  :meth:`QueryResult.cancel <questdb.QueryResult.cancel>` called from a
+  signal handler while a batch of that result is being decoded now raises
+  ``QuestDBErrorCode.InvalidApiCall`` instead of invalidating the batch.
+- A ``KeyboardInterrupt`` that arrived while ``PooledReader.close()`` was
+  waiting for a worker thread to finish a batch was lost, and the lease's
+  connection leaked. The interrupt is now re-raised once the connection has
+  been released.
+
+5.0.1 (unreleased)
+------------------
 
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread

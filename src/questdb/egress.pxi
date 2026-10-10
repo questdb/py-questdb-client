@@ -48,13 +48,15 @@ cdef class _ReaderHandle:
     even if the user's ``QuestDB.close()`` ran after ``query()``
     returned but before the reader closed.
 
-    ``_must_close`` defaults to ``True``: only the generator's
-    clean-drain path (or code that explicitly knows the cursor
-    reached terminal) clears it. Any error path or abandon-without-
-    consume path forces the reader to drop, since the Rust
-    Cursor::Drop closes the transport whenever ``cursor_active`` is
-    still set at drop time — recycling such a reader would hand the
-    next borrower a broken pipe.
+    ``_must_close`` defaults to ``True`` and is cleared only once the
+    cursor is known to sit at a terminal frame on a live transport:
+    by the clean-drain paths, and by ``_CursorHandle._free()`` itself
+    whenever the native cursor reports its connection reusable (a
+    clean end, a successful cancel, or a server-side error such as a
+    parse error or a query timeout). An abandoned-mid-stream cursor
+    never qualifies: the Rust Cursor::Drop closes the transport
+    whenever ``cursor_active`` is still set at drop time, so recycling
+    such a reader would hand the next borrower a broken pipe.
     """
     cdef qwp_reader* _reader
     cdef bint _must_close
@@ -87,23 +89,35 @@ cdef class _CursorHandle:
 
     The re-entrant lock is the publication boundary for every native
     cursor field. It serialises cursor operations, close, Arrow consumer
-    callbacks, and GC finalisation, and supplies the happens-before edge
-    required when those operations move between threads. Concurrent
-    public operations are still unsupported.
+    callbacks, and cross-thread GC finalisation, and supplies the
+    happens-before edge required when those operations move between
+    threads. Concurrent public operations are still unsupported.
+
+    Being re-entrant, the lock does not protect a decoder from code
+    running on its *own* thread: a cyclic-GC finaliser (a
+    ``PooledReader`` reachable only through a cycle, collected while a
+    per-cell constructor runs) or a signal handler calling ``close()``
+    re-acquires it freely. The decoders therefore ``_pin()`` the handle
+    while they hold pointers into the current batch; a ``_free()`` that
+    arrives while pinned is deferred to ``_unpin()``, and ``cancel()``
+    refuses, instead of pulling the batch out from under the decoder.
 
     ``_free()`` releases both: the cursor is freed and the reader closed
     (returned to its pool or dropped) in the same locked section. The
     drain / close / consumer-teardown paths call it eagerly;
-    ``__dealloc__`` is the backstop.
+    ``__dealloc__`` is the backstop. Before freeing, it asks the native
+    cursor whether its connection is reusable — at a terminal frame on
+    a live transport — and clears ``_reader_ref._must_close`` when so.
+    That covers clean drains, successful cancels and server-side error
+    terminals alike; a cursor abandoned mid-stream stays unrecyclable.
 
     ``_owns_reader`` selects who releases the reader. The one-shot
     ``QuestDB.query(sql)`` path leaves it ``True``: the cursor is the
     reader's sole owner, so ``_free()`` closes the reader eagerly. A
     ``PooledReader`` lease sets it ``False``: the lease keeps its
     reader across queries, so ``_free()`` releases only the cursor and
-    drops the back-reference. The clean-drain paths clear
-    ``_reader_ref._must_close`` *before* calling ``_free()``, so the
-    lease still observes whether the stream reached its terminal.
+    drops the back-reference. A lease that is finalised while one of
+    its cursors is pinned hands the reader back to that cursor.
 
     ``_reset_seq`` counts mid-query failover resets. The
     ``_failover_reset_trampoline`` installed on the materialise-whole
@@ -120,6 +134,9 @@ cdef class _CursorHandle:
     cdef bint _owns_reader
     cdef object _lock
     cdef int _reset_seq
+    cdef int _pinned
+    cdef bint _free_pending
+    cdef bint _cancelled
     cdef bint _exec_done_valid
     cdef uint8_t _exec_done_op_type
     cdef uint64_t _exec_done_rows
@@ -130,6 +147,9 @@ cdef class _CursorHandle:
         self._owns_reader = True
         self._lock = threading.RLock()
         self._reset_seq = 0
+        self._pinned = 0
+        self._free_pending = False
+        self._cancelled = False
         self._exec_done_valid = False
         self._exec_done_op_type = 0
         self._exec_done_rows = 0
@@ -178,23 +198,59 @@ cdef class _CursorHandle:
                 self._exec_done_rows = rows_affected
                 self._exec_done_valid = True
 
+    cdef void _pin(self) noexcept:
+        # Called under `_lock` by a decoder about to read the current
+        # batch's buffers while running Python code (per-cell
+        # constructors, list growth, GC). Until the matching `_unpin`, a
+        # same-thread re-entrant `_free()` is deferred rather than freeing
+        # the batch under the decoder; see the class docstring.
+        self._pinned += 1
+
+    cdef void _unpin(self) noexcept:
+        self._pinned -= 1
+        if self._pinned == 0 and self._free_pending:
+            self._free_pending = False
+            self._free()
+
     cdef void _free(self) noexcept:
         cdef PyThreadState* gs = NULL
-        with self._lock:
-            if self._cursor != NULL:
-                # A query that failed server-side (a timeout, a parse error)
-                # still ends at a terminal frame on a healthy connection; the
-                # reader goes back to the pool rather than being dropped.
-                if qwp_reader_cursor_connection_reusable(self._cursor):
-                    self._mark_drained()
-                _ensure_doesnt_have_gil(&gs)
-                qwp_reader_cursor_free(self._cursor)
-                _ensure_has_gil(&gs)
-                self._cursor = NULL
-            if self._reader_ref is not None:
-                if self._owns_reader:
-                    self._reader_ref._close()
-                self._reader_ref = None
+        cdef bint interrupted = False
+        # A contended acquire can be interrupted by a signal handler that
+        # raises (Ctrl-C on the main thread while a worker drives the
+        # cursor). This function is `noexcept`: letting that escape would
+        # print it as unraisable and leak the cursor and its reader. Retry
+        # the acquire and re-arm the interrupt once the handles are gone.
+        while True:
+            try:
+                self._lock.acquire()
+                break
+            except KeyboardInterrupt:
+                interrupted = True
+        try:
+            if self._pinned > 0:
+                # Same-thread re-entry while a decoder holds pointers into
+                # the current batch; `_unpin` finishes the free.
+                self._free_pending = True
+            else:
+                if self._cursor != NULL:
+                    # A query that failed server-side (a timeout, a parse
+                    # error) still ends at a terminal frame on a healthy
+                    # connection; the reader goes back to the pool rather
+                    # than being dropped.
+                    if qwp_reader_cursor_connection_reusable(self._cursor):
+                        self._mark_drained()
+                    _ensure_doesnt_have_gil(&gs)
+                    qwp_reader_cursor_free(self._cursor)
+                    _ensure_has_gil(&gs)
+                    self._cursor = NULL
+                if self._reader_ref is not None:
+                    if self._owns_reader:
+                        self._reader_ref._close()
+                    self._reader_ref = None
+        finally:
+            self._lock.release()
+        if interrupted:
+            PyErr_SetInterrupt()
 
     def __dealloc__(self):
         self._free()
@@ -561,23 +617,25 @@ cdef int64_t _query_timeout_to_millis(object timeout) except -2:
     asked for. Mirrors ``ReaderQuery::timeout`` in the Rust client and
     ``QueryImpl.setTimeout`` in the Java one.
     """
-    cdef object micros
     cdef object millis
     if timeout is None:
         return -1
     if isinstance(timeout, datetime.timedelta):
-        micros = timeout // datetime.timedelta(microseconds=1)
-        if micros < 0:
+        if timeout < datetime.timedelta(0):
             raise ValueError('timeout must not be negative')
-        millis = micros // 1000
-        if millis == 0 and micros > 0:
+        # Floor on the timedelta itself rather than on a microsecond count:
+        # a `pandas.Timedelta` carries nanoseconds, and 500 ns floored to
+        # microseconds first would read as "no timeout".
+        millis = timeout // datetime.timedelta(milliseconds=1)
+        if millis == 0 and timeout > datetime.timedelta(0):
             millis = 1
-    elif isinstance(timeout, bool) or not isinstance(timeout, int):
+    elif (isinstance(timeout, bool)
+            or not isinstance(timeout, numbers.Integral)):
         raise TypeError(
             'timeout must be an int (milliseconds), a '
             f'datetime.timedelta, or None, not {_fqn(type(timeout))}')
     else:
-        millis = timeout
+        millis = int(timeout)
         if millis < 0:
             raise ValueError('timeout must not be negative')
     if millis > INT64_MAX:
@@ -589,6 +647,26 @@ cdef int64_t _query_timeout_to_millis(object timeout) except -2:
 
 def _debug_query_timeout_to_millis(timeout):
     return _query_timeout_to_millis(timeout)
+
+
+cdef inline bint _execute_failed_before_send(questdb_error* err) noexcept:
+    """Whether an execute failure happened before the request was written.
+
+    `qwp_reader_query_execute` returns these codes only from the checks that
+    run ahead of the write: the `CAP_QUERY_TIMEOUT` gate
+    (`UnsupportedServer`; native clients before c-questdb-client d30ed9dd
+    used `QueryTimeout` for it), request validation such as SQL length and
+    bind count (`InvalidApiCall`), and bind encoding (`InvalidBind`,
+    `InvalidUtf8`). A `SocketError` is the write itself failing and must
+    keep the connection marked for dropping.
+    """
+    cdef questdb_error_code code = questdb_error_get_code(err)
+    return (
+        code == line_sender_error_query_timeout
+        or code == line_sender_error_unsupported_server
+        or code == line_sender_error_invalid_api_call
+        or code == line_sender_error_invalid_bind
+        or code == line_sender_error_invalid_utf8)
 
 
 cdef _CursorHandle _execute_query(
@@ -650,6 +728,7 @@ cdef _CursorHandle _execute_query(
     # Mark the reader unrecyclable only once we cross the network boundary:
     # a client-side failure above (bad SQL/bind) leaves the reader clean, so
     # a pooled lease must not drop a healthy connection over it.
+    cdef bint was_armed = reader_handle._must_close
     reader_handle._must_close = True
 
     with nogil:
@@ -663,6 +742,11 @@ cdef _CursorHandle _execute_query(
             raise QuestDBError(
                 QuestDBErrorCode.ServerFlushError,
                 'qwp_reader_query_execute returned NULL without setting err')
+        if _execute_failed_before_send(err):
+            # Nothing reached the socket: the connection is exactly as
+            # healthy as before this call, so hand back whatever state the
+            # previous query left rather than dropping it.
+            reader_handle._must_close = was_armed
         raise _reader_err_to_py(err)
 
     handle._attach(cursor, reader_handle, owns_reader)
@@ -1902,23 +1986,18 @@ cdef tuple _numpy_batch_columns(
 # results still belong on `to_pandas()` / `to_arrow()`, which stay columnar.
 # ---------------------------------------------------------------------------
 
-cdef object _EPOCH_UTC = None
 cdef object _IPV4_TYPE = None
 
 # `datetime.min` / `datetime.max` as microseconds since the epoch.
 cdef int64_t _DATETIME_MIN_MICROS = -62_135_596_800_000_000
 cdef int64_t _DATETIME_MAX_MICROS = 253_402_300_799_999_999
+# Typed on purpose: an untyped literal this wide is a Python object to
+# Cython, which would turn the per-cell day split below into boxed
+# `PyNumber_*` arithmetic.
+cdef int64_t _MICROS_PER_DAY = 86_400_000_000
 
 # Geohash base-32 alphabet, matching `GeoHashes.base32` on the server.
-_GEOHASH_BASE32 = '0123456789bcdefghjkmnpqrstuvwxyz'
-
-
-cdef object _epoch_utc():
-    global _EPOCH_UTC
-    if _EPOCH_UTC is None:
-        _EPOCH_UTC = datetime.datetime(
-            1970, 1, 1, tzinfo=datetime.timezone.utc)
-    return _EPOCH_UTC
+cdef const char* _GEOHASH_BASE32 = b'0123456789bcdefghjkmnpqrstuvwxyz'
 
 
 cdef object _ipv4_type():
@@ -1951,6 +2030,8 @@ _QDB_TYPE_NAMES = {
     # kind, so a legacy STRING column is reported as VARCHAR here.
     <int>qwp_reader_column_kind_varchar: 'VARCHAR',
     <int>qwp_reader_column_kind_timestamp_nanos: 'TIMESTAMP_NS',
+    # The wire schema carries no dimension count, so every array column is
+    # reported in its 1-D spelling; the server writes a 2-D one `DOUBLE[][]`.
     <int>qwp_reader_column_kind_double_array: 'DOUBLE[]',
     <int>qwp_reader_column_kind_long_array: 'LONG[]',
     <int>qwp_reader_column_kind_char: 'CHAR',
@@ -1998,19 +2079,19 @@ cdef str _geohash_text(uint64_t value, int bits):
     raw integer instead would be unusable against a `where geohash = '...'`
     predicate.
     """
+    # `bits` is 1..60 (checked by the caller), so at most 60 characters.
+    cdef char[64] buf
     cdef int i
-    cdef int chars
-    alphabet = _GEOHASH_BASE32
+    cdef int n
     if bits > 0 and bits % 5 == 0:
-        chars = bits // 5
-        return ''.join([
-            alphabet[(value >> ((chars - 1 - i) * 5)) & 0x1F]
-            for i in range(chars)
-        ])
-    return ''.join([
-        '1' if (value >> (bits - 1 - i)) & 1 else '0'
-        for i in range(bits)
-    ])
+        n = bits // 5
+        for i in range(n):
+            buf[i] = _GEOHASH_BASE32[(value >> ((n - 1 - i) * 5)) & 0x1F]
+    else:
+        n = bits
+        for i in range(n):
+            buf[i] = c'1' if (value >> (n - 1 - i)) & 1 else c'0'
+    return PyUnicode_FromStringAndSize(buf, n)
 
 
 cdef inline bint _cell_is_null(const uint8_t* validity, size_t row) noexcept:
@@ -2085,7 +2166,7 @@ cdef list _row_column_values(
             return out
         if kind == <int>qwp_reader_column_kind_long_array:
             raise QuestDBError(
-                QuestDBErrorCode.ArrowUnsupportedColumnKind,
+                QuestDBErrorCode.InvalidApiCall,
                 f'column {col_name!r}: row egress does not support LONG[] '
                 'columns yet')
         chunk = _numpy_array_chunk(
@@ -2268,7 +2349,7 @@ cdef list _row_column_values(
         # temporal kinds `Timestamp(unit, "UTC")`. A naive datetime would be
         # read as local time by most downstream code. TIMESTAMP_NS is
         # rounded down to microseconds: `datetime` has no nanosecond field.
-        epoch = _epoch_utc()
+        epoch = _UTC_EPOCH
         for r in range(row_count):
             if _cell_is_null(validity, r):
                 out.append(None)
@@ -2285,8 +2366,8 @@ cdef list _row_column_values(
                 micros = i64
             if micros < _DATETIME_MIN_MICROS or micros > _DATETIME_MAX_MICROS:
                 _raise_temporal_out_of_range(col_name, r, i64)
-            days = micros // 86_400_000_000
-            rem = micros - days * 86_400_000_000
+            days = micros // _MICROS_PER_DAY
+            rem = micros - days * _MICROS_PER_DAY
             secs = rem // 1_000_000
             out.append(epoch + timedelta_new(
                 <int>days, <int>secs, <int>(rem - secs * 1_000_000)))
@@ -2351,7 +2432,7 @@ cdef list _row_column_values(
         return out
 
     raise QuestDBError(
-        QuestDBErrorCode.ArrowUnsupportedColumnKind,
+        QuestDBErrorCode.InvalidApiCall,
         'row egress does not support column kind 0x{:02X} yet; use '
         'to_arrow() / to_pandas() for this result'.format(kind))
 
@@ -2408,7 +2489,7 @@ cdef tuple _row_batch_decode(
     return (list(zip(*columns)), prev_dict_n)
 
 
-def _open_row_stream(_CursorHandle handle):
+cdef tuple _open_row_stream(_CursorHandle handle):
     """Start a row stream: returns ``(columns, row_iterator)``.
 
     Batches are pulled eagerly up to the first one carrying rows, so the
@@ -2472,18 +2553,24 @@ def _open_row_stream(_CursorHandle handle):
                     # empty and `exec_done` carries the outcome instead.
                     terminal = True
                     break
-                if not have_schema:
-                    col_names, col_kinds, col_scales, col_precision, _ = (
-                        _numpy_extract_meta(batch))
-                    have_schema = True
-                if qwp_reader_batch_row_count(batch) == 0:
-                    continue
+                # Pinned while the decoders below hold pointers into the
+                # batch and run Python code (per-cell constructors, GC).
+                handle._pin()
                 try:
-                    first_rows, prev_dict_n = _row_batch_decode(
-                        batch, col_names, col_kinds, symbol_cats,
-                        prev_dict_n, np)
-                except Exception as exc:
-                    pending = exc
+                    if not have_schema:
+                        col_names, col_kinds, col_scales, col_precision, _ = (
+                            _numpy_extract_meta(batch))
+                        have_schema = True
+                    if qwp_reader_batch_row_count(batch) == 0:
+                        continue
+                    try:
+                        first_rows, prev_dict_n = _row_batch_decode(
+                            batch, col_names, col_kinds, symbol_cats,
+                            prev_dict_n, np)
+                    except Exception as exc:
+                        pending = exc
+                finally:
+                    handle._unpin()
             break
 
         columns = [
@@ -2520,7 +2607,12 @@ def _row_stream_iter(
         object pending,
         int seen_seq,
         object np):
-    """Yield row tuples, continuing from the eagerly-read first batch."""
+    """Yield row tuples, continuing from the eagerly-read first batch.
+
+    Only the batch being handed out is held: the buffered first batch and
+    each decoded batch are dropped as soon as their rows are out, so the
+    peak is one batch of row tuples plus the one being decoded.
+    """
     cdef qwp_reader_cursor* cursor
     cdef questdb_error* err = NULL
     cdef const qwp_reader_batch* batch
@@ -2529,13 +2621,19 @@ def _row_stream_iter(
         yield None
         if pending is not None:
             raise pending
-        # Liveness is read without the lock: a stale read only delays the
-        # "closed" error by one row, and the next batch pull re-checks it.
+        # Liveness and cancellation are read without the lock: a stale read
+        # only delays the "closed" verdict by one row, and the next batch
+        # pull re-checks under the lock. After `cancel()` the rows already
+        # decoded are not handed out: the stream runs on to its terminal
+        # and ends, as the Arrow iterators do.
         for row in first_rows:
+            if handle._cancelled:
+                break
             if handle._cursor == NULL:
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
             yield row
+        first_rows = None
         while True:
             with handle._lock:
                 cursor = handle._cursor
@@ -2561,16 +2659,25 @@ def _row_stream_iter(
                         raise _reader_err_to_py(err)
                     _mark_reader_drained(handle)
                     return
-                rows, prev_dict_n = _row_batch_decode(
-                    batch, col_names, col_kinds, symbol_cats,
-                    prev_dict_n, np)
+                # Pinned while the decoder holds pointers into the batch
+                # and runs Python code (per-cell constructors, GC).
+                handle._pin()
+                try:
+                    rows, prev_dict_n = _row_batch_decode(
+                        batch, col_names, col_kinds, symbol_cats,
+                        prev_dict_n, np)
+                finally:
+                    handle._unpin()
             # Yield outside the lock: a consumer is free to do anything
             # between rows, including abandoning the iterator.
             for row in rows:
+                if handle._cancelled:
+                    break
                 if handle._cursor == NULL:
                     raise QuestDBError(
                         QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
                 yield row
+            rows = None
     finally:
         handle._free()
 
@@ -2626,23 +2733,29 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
                         raise _reader_err_to_py(err)
                     break
                 row_count = qwp_reader_batch_row_count(batch)
-                if first:
-                    (col_names, col_kinds, col_scales, col_precision,
-                     has_symbol) = _numpy_extract_meta(batch)
-                    n_cols = <size_t>len(col_names)
-                    col_chunks = [[] for _ in range(n_cols)]
-                    col_masks = [[] for _ in range(n_cols)]
-                    first = False
-                if has_symbol:
-                    _reader_check(
-                        qwp_reader_batch_symbol_dict(batch, &sd, &err), &err,
-                        'qwp_reader_batch_symbol_dict')
-                    if sd.entry_count > prev_dict_n:
-                        _symbol_categories_extend(
-                            symbol_categories, &sd, prev_dict_n)
-                        prev_dict_n = sd.entry_count
-                batch_chunks, batch_masks = _numpy_batch_columns(
-                    batch, col_kinds, n_cols, row_count, np)
+                # Pinned while the decoders below hold pointers into the
+                # batch and run Python code (per-cell constructors, GC).
+                handle._pin()
+                try:
+                    if first:
+                        (col_names, col_kinds, col_scales, col_precision,
+                         has_symbol) = _numpy_extract_meta(batch)
+                        n_cols = <size_t>len(col_names)
+                        col_chunks = [[] for _ in range(n_cols)]
+                        col_masks = [[] for _ in range(n_cols)]
+                        first = False
+                    if has_symbol:
+                        _reader_check(
+                            qwp_reader_batch_symbol_dict(batch, &sd, &err),
+                            &err, 'qwp_reader_batch_symbol_dict')
+                        if sd.entry_count > prev_dict_n:
+                            _symbol_categories_extend(
+                                symbol_categories, &sd, prev_dict_n)
+                            prev_dict_n = sd.entry_count
+                    batch_chunks, batch_masks = _numpy_batch_columns(
+                        batch, col_kinds, n_cols, row_count, np)
+                finally:
+                    handle._unpin()
             for col_idx in range(n_cols):
                 col_chunks[col_idx].append(batch_chunks[col_idx])
                 col_masks[col_idx].append(batch_masks[col_idx])
@@ -2944,24 +3057,31 @@ cdef class _NumpyBatchIter:
                     _mark_reader_drained(self.handle)
                     raise StopIteration
                 row_count = qwp_reader_batch_row_count(batch)
-                if self.first:
-                    (self.col_names, self.col_kinds, self.col_scales,
-                     self.col_precision, self.has_symbol) = \
-                        _numpy_extract_meta(batch)
-                    self.first = False
-                n_cols = <size_t>len(self.col_names)
-                if self.has_symbol:
-                    _reader_check(
-                        qwp_reader_batch_symbol_dict(batch, &sd, &err), &err,
-                        'qwp_reader_batch_symbol_dict')
-                    if sd.entry_count > self.prev_dict_n:
-                        _symbol_categories_extend(
-                            self.symbol_categories, &sd, self.prev_dict_n)
-                        self.symbol_dtype = self.pd.CategoricalDtype(
-                            self.symbol_categories)
-                        self.prev_dict_n = sd.entry_count
-                batch_chunks, batch_masks = _numpy_batch_columns(
-                    batch, self.col_kinds, n_cols, row_count, self.np)
+                # Pinned while the decoders below hold pointers into the
+                # batch and run Python code (per-cell constructors, GC).
+                self.handle._pin()
+                try:
+                    if self.first:
+                        (self.col_names, self.col_kinds, self.col_scales,
+                         self.col_precision, self.has_symbol) = \
+                            _numpy_extract_meta(batch)
+                        self.first = False
+                    n_cols = <size_t>len(self.col_names)
+                    if self.has_symbol:
+                        _reader_check(
+                            qwp_reader_batch_symbol_dict(batch, &sd, &err),
+                            &err, 'qwp_reader_batch_symbol_dict')
+                        if sd.entry_count > self.prev_dict_n:
+                            _symbol_categories_extend(
+                                self.symbol_categories, &sd,
+                                self.prev_dict_n)
+                            self.symbol_dtype = self.pd.CategoricalDtype(
+                                self.symbol_categories)
+                            self.prev_dict_n = sd.entry_count
+                    batch_chunks, batch_masks = _numpy_batch_columns(
+                        batch, self.col_kinds, n_cols, row_count, self.np)
+                finally:
+                    self.handle._unpin()
             # Assembly needs no cursor state, so it runs off the lock —
             # but inside the try, so a failure here ends the iterator and
             # frees the cursor like every other error path. Resuming
@@ -3031,6 +3151,28 @@ cdef bint _cursor_handle_is_live(_CursorHandle h):
     return h is not None and h._is_live()
 
 
+# Imported here rather than relying on `_client.pyx`'s imports: this file is
+# `include`d ahead of them, and the class below is built at module init.
+import collections
+
+ExecDone = collections.namedtuple(
+    'ExecDone', ['op_type', 'rows_affected'], module=__name__)
+ExecDone.__doc__ = """A non-SELECT statement's terminal ``EXEC_DONE`` report.
+
+Returned by :meth:`QuestDB.execute` / :meth:`PooledReader.execute` and
+carried on :attr:`QueryResult.exec_done`. A named tuple, so it unpacks as
+``op_type, rows_affected = db.execute(sql)`` and reads as
+``done.rows_affected``.
+
+``rows_affected`` is the number of rows an ``INSERT`` or ``UPDATE``
+touched, and ``None`` when the server reports no count, as statements
+executed at parse time (``TRUNCATE``, ``RENAME TABLE``, ``SET``, ...)
+currently do. ``op_type`` is the server's QWP operation-type byte, carried
+through as an opaque ``int``: its values are the server's, not part of
+this client's API.
+"""
+
+
 class QueryResult:
     """Result of ``QuestDB.query(sql)``.
 
@@ -3087,6 +3229,10 @@ class QueryResult:
         self._row_iter = None
 
     def _take_cursor_handle(self):
+        if self._cancel_handle is None:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'QueryResult is closed')
         if self._consumed:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -3306,12 +3452,19 @@ class QueryResult:
         Does not consume the rows — :meth:`iter_rows` continues from the
         same stream — but does consume the result, so it rules out
         :meth:`to_pandas`, :meth:`to_arrow` and the other materialisation
-        methods. Cheap to call repeatedly.
+        methods. Cheap to call repeatedly, and still answers after
+        :meth:`close`.
+
+        A result that returned rows is not at its terminal until they have
+        been read, so closing it straight after ``columns()`` drops the
+        connection (and on a :class:`PooledReader` lease makes the lease
+        terminal). Iterate the rows, or call :meth:`cancel` before
+        :meth:`close`, to keep it; a ``LIMIT 0`` probe needs neither.
 
         Empty for a statement that ships no result set at all (a
         non-SELECT); see :attr:`exec_done` for that outcome.
 
-        Two limits are the protocol's, not this client's:
+        Three limits are the protocol's, not this client's:
 
         - A ``DECIMAL`` column is reported with its storage width's maximum
           precision (18, 38 or 76) because the wire carries only the scale:
@@ -3319,6 +3472,9 @@ class QueryResult:
           ``DECIMAL(18,2)``. Compare on scale when that matters.
         - A legacy ``STRING`` column is reported as ``VARCHAR``: QWP has no
           separate STRING column kind.
+        - An array column is reported as ``DOUBLE[]`` / ``LONG[]`` whatever
+          its dimensionality, because the wire schema carries no dimension
+          count; the server spells a 2-D column ``DOUBLE[][]``.
 
         .. code-block:: python
 
@@ -3326,7 +3482,8 @@ class QueryResult:
                 for name, type_name in result.columns():
                     print(name, type_name)
         """
-        self._open_rows()
+        if self._row_columns is None:
+            self._open_rows()
         return list(self._row_columns)
 
     def iter_rows(self):
@@ -3344,42 +3501,56 @@ class QueryResult:
 
         Value mapping:
 
-        ===================  ===============================================
-        QuestDB              Python
-        ===================  ===============================================
-        ``BOOLEAN``          ``bool``
-        ``BYTE``/``SHORT``/``INT``/``LONG``  ``int``
-        ``FLOAT``/``DOUBLE`` ``float`` (never NaN — the server sends NULL)
-        ``VARCHAR``/``SYMBOL``  ``str``
-        ``CHAR``             one-character ``str``; code point 0 is ``None``
-        ``TIMESTAMP``        ``datetime`` (UTC-aware, microseconds)
-        ``TIMESTAMP_NS``     ``datetime`` (UTC-aware), rounded down to micros
-        ``DATE``             ``datetime`` (UTC-aware, milliseconds)
-        ``UUID``             ``uuid.UUID``
-        ``LONG256``          ``int`` (unsigned)
-        ``DECIMAL(p,s)``     ``decimal.Decimal`` (scale preserved)
-        ``GEOHASH(nc)``      ``str`` (base-32, or '0'/'1' bits when n%5)
-        ``IPv4``             ``ipaddress.IPv4Address``
-        ``BINARY``           ``bytes``
-        ``DOUBLE[]``         ``numpy.ndarray``
-        ===================  ===============================================
+        ========================================  ==========================
+        QuestDB                                   Python
+        ========================================  ==========================
+        ``BOOLEAN``                               ``bool``
+        ``BYTE``, ``SHORT``, ``INT``, ``LONG``    ``int``
+        ``FLOAT``, ``DOUBLE``                     ``float`` (never NaN: the
+                                                  server sends NULL)
+        ``VARCHAR``, ``SYMBOL``                   ``str``
+        ``CHAR``                                  one-character ``str``;
+                                                  code point 0 is ``None``
+        ``TIMESTAMP``                             ``datetime`` (UTC-aware,
+                                                  microseconds)
+        ``TIMESTAMP_NS``                          ``datetime`` (UTC-aware),
+                                                  rounded down to
+                                                  microseconds
+        ``DATE``                                  ``datetime`` (UTC-aware,
+                                                  milliseconds)
+        ``UUID``                                  ``uuid.UUID``
+        ``LONG256``                               ``int`` (unsigned)
+        ``DECIMAL(p,s)``                          ``decimal.Decimal``
+                                                  (scale preserved)
+        ``GEOHASH(nc)``                           ``str`` (base-32, or
+                                                  '0'/'1' bits when n is
+                                                  not a multiple of 5)
+        ``IPv4``                                  ``ipaddress.IPv4Address``
+        ``BINARY``                                ``bytes``
+        ``DOUBLE[]``                              ``numpy.ndarray``
+        ========================================  ==========================
 
         Datetimes are timezone-aware UTC, matching what
         :meth:`to_arrow` labels them. ``TIMESTAMP_NS`` is rounded down
         (towards the past) because ``datetime`` has no nanosecond field; use
         :meth:`to_pandas` or :meth:`to_arrow` for full precision. A temporal
         value outside ``datetime``'s years 1..9999 raises
-        ``QuestDBErrorCode.InvalidTimestamp`` naming the column; like any
-        other error during iteration it closes the result, which on a
-        :class:`PooledReader` lease tears the connection down. A ``CHAR``
-        holding a UTF-16 surrogate code unit comes back as that lone
-        surrogate, which cannot be encoded to UTF-8. ``LONG[]`` columns are
-        not supported on this path.
+        ``QuestDBErrorCode.InvalidTimestamp`` naming the column. Like any
+        other error raised while decoding, it closes the result before its
+        terminal, so the connection is dropped (on a :class:`PooledReader`
+        lease, the lease becomes terminal). A server-side error — a parse
+        error, a timeout — ends at a terminal frame instead and keeps the
+        connection. A ``CHAR`` holding a UTF-16 surrogate code unit comes
+        back as that lone surrogate, which cannot be encoded to UTF-8.
+        ``LONG[]`` columns are not supported on this path.
 
         Every call returns the same iterator, so :meth:`columns` and
         ``iter_rows()`` share one stream and an exhausted iterator stays
-        empty. A mid-query
-        failover after iteration has begun raises
+        empty. The batch being handed out is the only one held in memory.
+        After :meth:`cancel` no further rows are yielded, including any
+        already decoded; after :meth:`close` the iterator raises, and a
+        fresh ``iter_rows()`` call raises too. A mid-query failover after
+        iteration has begun raises
         ``QuestDBErrorCode.FailoverWouldDuplicate`` rather than replaying
         rows the caller already holds.
 
@@ -3395,23 +3566,24 @@ class QueryResult:
     def exec_done(self):
         """The statement's terminal ``EXEC_DONE`` report, or ``None``.
 
-        ``(op_type, rows_affected)`` once a non-SELECT has been drained to
-        its clean end; ``None`` before that, and ``None`` for a statement
-        that streamed a result set instead (a ``SELECT`` ends with ``END``,
-        which carries no counts).
+        An :class:`ExecDone` ``(op_type, rows_affected)`` once a non-SELECT
+        has been drained to its clean end; ``None`` before that, and
+        ``None`` for a statement that streamed a result set instead (a
+        ``SELECT`` ends with ``END``, which carries no counts).
 
-        ``op_type`` is the server's QWP operation-type byte.
         ``rows_affected`` is meaningful for ``INSERT`` and ``UPDATE``, and
         ``None`` when the server reports no count — statements executed at
         parse time (``TRUNCATE``, ``RENAME TABLE``, ``SET``,
-        ``ALTER TABLE ... RESUME WAL``, ...) currently do. Still available
-        after :meth:`close`.
+        ``ALTER TABLE ... RESUME WAL``, ...) currently do. ``op_type`` is
+        the server's QWP operation-type byte, carried through as an opaque
+        ``int``: its values are the server's, not part of this client's
+        API. Still available after :meth:`close`.
 
         .. code-block:: python
 
             with db.query('insert into t values (1)') as result:
                 list(result.iter_rows())    # drains it
-            op_type, rows = result.exec_done
+            print(result.exec_done.rows_affected)
         """
         cdef _CursorHandle handle = self._exec_done_handle
         if handle is None:
@@ -3419,7 +3591,7 @@ class QueryResult:
         with handle._lock:
             if not handle._exec_done_valid:
                 return None
-            return (
+            return ExecDone(
                 int(handle._exec_done_op_type),
                 None if handle._exec_done_rows == UINT64_MAX
                 else int(handle._exec_done_rows))
@@ -3429,7 +3601,13 @@ class QueryResult:
 
         The result remains open; call :meth:`close` before starting
         another query on the same reader. On failure, the result is
-        closed. Idempotent after success.
+        closed. Idempotent after success. Rows already decoded but not
+        yet handed out by :meth:`iter_rows` are not yielded afterwards.
+
+        Cancel between rows, not from a signal handler that interrupts a
+        batch being decoded on the same thread: that call is refused with
+        ``QuestDBErrorCode.InvalidApiCall``, because it would invalidate
+        the batch under the decoder.
         """
         cdef _CursorHandle handle = self._cancel_handle
         cdef questdb_error* err = NULL
@@ -3443,9 +3621,19 @@ class QueryResult:
             cursor = handle._cursor
             if cursor == NULL:
                 return
+            if handle._pinned > 0:
+                # Same-thread re-entry (a signal handler) while a decoder
+                # holds pointers into the current batch: cancelling would
+                # drop that batch under it.
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    'cancel() called while this result is being decoded '
+                    'on the same thread; cancel it between rows instead')
             with nogil:
                 ok = qwp_reader_cursor_cancel(cursor, &err)
                 reusable = qwp_reader_cursor_connection_reusable(cursor)
+            # Rows decoded ahead of the consumer stop flowing from here.
+            handle._cancelled = True
         if not ok:
             if err != NULL:
                 exc = _reader_err_to_py(err)
@@ -3478,6 +3666,10 @@ class QueryResult:
         self._cursor_handle = None
         self._cancel_handle = None
         self._consumed = True
+        # Let go of a suspended row stream so its buffered batch can be
+        # collected; a caller still holding the iterator sees 'cursor is
+        # closed' on its next step. The column list stays answerable.
+        self._row_iter = None
         if handle is not None:
             handle._free()
 

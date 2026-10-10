@@ -33,6 +33,7 @@ API for fast data ingestion into and querying from QuestDB.
 __all__ = [
     'ConnectionEvent',
     'ConnectionEventKind',
+    'ExecDone',
     'PooledReader',
     'PooledSender',
     'Protocol',
@@ -67,6 +68,7 @@ from libc.math cimport isnan, floor
 from cpython.datetime cimport datetime as cp_datetime
 from cpython.datetime cimport timedelta as cp_timedelta
 from cpython.datetime cimport import_datetime, timedelta_new
+from cpython.exc cimport PyErr_SetInterrupt
 from cpython.datetime cimport (
     PyDateTime_GET_YEAR, PyDateTime_GET_MONTH, PyDateTime_GET_DAY,
     PyDateTime_DATE_GET_HOUR, PyDateTime_DATE_GET_MINUTE,
@@ -104,7 +106,9 @@ from dataclasses import dataclass
 from cpython.bytes cimport (PyBytes_FromStringAndSize,
                             PyBytes_GET_SIZE, PyBytes_AsString)
 
+import collections
 import datetime
+import numbers
 import os
 import threading
 import time
@@ -3521,9 +3525,12 @@ cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
                     second = PyDateTime_DATE_GET_SECOND(dt)
                     us = PyDateTime_DATE_GET_MICROSECOND(dt)
                     days = _days_from_civil(year, month, day)
+                    # The two wide literals are cast: untyped, Cython
+                    # treats a literal beyond 32 bits as a Python object
+                    # and boxes the whole expression per row.
                     values[i] = (
-                        days * 86_400_000_000
-                        + <int64_t>hour * 3_600_000_000
+                        days * <int64_t>86_400_000_000
+                        + <int64_t>hour * <int64_t>3_600_000_000
                         + <int64_t>minute * 60_000_000
                         + <int64_t>second * 1_000_000
                         + <int64_t>us)
@@ -6540,9 +6547,9 @@ cdef class QuestDB:
         ``binds`` and ``timeout`` behave exactly as on :meth:`query`.
 
         Returns the statement's ``EXEC_DONE`` report as an
-        ``(op_type, rows_affected)`` tuple, or ``None`` for a statement
-        that streamed a result set instead (a ``SELECT``). See
-        :attr:`QueryResult.exec_done` for the caveats on
+        :class:`ExecDone` named tuple ``(op_type, rows_affected)``, or
+        ``None`` for a statement that streamed a result set instead (a
+        ``SELECT``). See :attr:`QueryResult.exec_done` for the caveats on
         ``rows_affected``.
         """
         self._begin_db_use('execute')
@@ -6620,13 +6627,16 @@ cdef class QuestDB:
             one millisecond rounded *up* to 1 ms. ``None`` (the default)
             keeps the connect string's ``query_timeout_ms``; ``0`` clears
             it. Requires a server advertising ``CAP_QUERY_TIMEOUT``: against
-            an older one a non-zero timeout fails the query with
-            ``QuestDBErrorCode.QueryTimeout`` rather than silently running
-            under the server default. On expiry the error carries that same
-            code and the connection stays usable — but do not retry a write
-            on it: a statement that outlives its timeout is reported as done
-            instead, and a DDL / INSERT / UPDATE that timed out waiting for
-            the table writer may still be applied.
+            an older one a non-zero timeout is refused before anything is
+            sent, with ``QuestDBErrorCode.UnsupportedServer``, rather than
+            silently running under the server default; the connection is
+            untouched, so pass ``timeout=0`` or raise the server's
+            ``query.timeout`` instead. On expiry the error carries
+            ``QuestDBErrorCode.QueryTimeout`` and the connection stays
+            usable — but do not retry a write on it: a statement that
+            outlives its timeout is reported as done instead, and a DDL /
+            INSERT / UPDATE that timed out waiting for the table writer may
+            still be applied.
 
         :return: A :class:`QueryResult`. Materialise it via
             ``iter_rows()``, ``to_pandas()``, ``to_arrow()``,
@@ -8977,8 +8987,10 @@ cdef class PooledReader:
     :meth:`QuestDB.reader`; it holds one pooled reader connection for
     its lifetime and runs queries on it sequentially via :meth:`query`.
     ``close()`` (or leaving the ``with`` block) releases the
-    connection: back to the pool if the last query was drained cleanly,
-    dropped otherwise.
+    connection: back to the pool if the last query reached its terminal
+    on a live connection (a clean drain, a successful ``cancel()``, or a
+    server-side error such as a parse error or a query timeout), dropped
+    otherwise.
 
     Queries are strictly sequential — one result at a time. Fully drain
     (or ``close()``) each :class:`QueryResult` before calling
@@ -9034,7 +9046,15 @@ cdef class PooledReader:
         self._handle = None
         if last is not None:
             last._free()
-        reader._close()
+            if last._cursor != NULL:
+                # The free was deferred: this thread is finalising the
+                # lease from inside a decode of that very cursor (cyclic
+                # GC, a signal handler). Hand the reader to the cursor;
+                # the deferred free closes it once the decoder lets go.
+                last._owns_reader = True
+                reader = None
+        if reader is not None:
+            reader._close()
         if handle is not None:
             handle._end_db_use()
 
@@ -9085,8 +9105,8 @@ cdef class PooledReader:
                     raise QuestDBError(
                         QuestDBErrorCode.InvalidApiCall,
                         "the lease's connection is terminal: the "
-                        'previous query was not drained to its clean '
-                        'end, so its transport was torn down. close() '
+                        'previous query did not reach its terminal '
+                        'frame, so its transport was torn down. close() '
                         'this lease and obtain a new one with '
                         'QuestDB.reader().')
             cursor_handle = _execute_query(
@@ -9101,7 +9121,8 @@ cdef class PooledReader:
         it returns.
 
         Mirrors :meth:`QuestDB.execute`, including the
-        ``(op_type, rows_affected)`` return value. The result is drained
+        :class:`ExecDone` ``(op_type, rows_affected)`` return value. The
+        result is drained
         to its clean end, so the lease stays usable for the next call,
         and the connection's SYMBOL dictionary is left untouched — an
         interleaved statement does not invalidate a warm dictionary

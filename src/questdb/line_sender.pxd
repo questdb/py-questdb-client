@@ -77,6 +77,9 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_batch_too_large,
         line_sender_error_store_resend_required,
         line_sender_error_symbol_dict_full,
+        # QWP/WebSocket reader: the per-query timeout expired (38). A timeout
+        # requested against a server without CAP_QUERY_TIMEOUT is refused
+        # with line_sender_error_unsupported_server instead.
         line_sender_error_query_timeout
 
     ctypedef line_sender_error_code questdb_error_code

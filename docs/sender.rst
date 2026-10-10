@@ -1125,15 +1125,18 @@ SQL, drains the result and returns the pooled connection in one call
 Statement output (a ``COPY`` status row, admin-function rows, a stray
 ``SELECT``) is discarded — use ``query()`` when you want it.
 
-``execute()`` returns the statement's ``(op_type, rows_affected)``, or
-``None`` for a statement that streamed a result set instead. The same report
-is on :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` once a
-result has been drained, and stays there after the result is closed.
+``execute()`` returns the statement's :class:`ExecDone <questdb.ExecDone>`
+named tuple ``(op_type, rows_affected)``, or ``None`` for a statement that
+streamed a result set instead. The same report is on
+:attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` once a result
+has been drained, and stays there after the result is closed.
 ``rows_affected`` is meaningful for ``INSERT`` and ``UPDATE``, and ``None``
 when the server reports no count, as statements executed at parse time
-currently do::
+currently do; ``op_type`` is the server's operation-type byte, carried
+through as an opaque ``int``::
 
-    op_type, rows = db.execute('INSERT INTO trades VALUES (now(), \'AAPL\', 1.5)')
+    done = db.execute('INSERT INTO trades VALUES (now(), \'AAPL\', 1.5)')
+    print(done.rows_affected)
 
 Positional bind parameters fill the ``$1``..``$N`` placeholders — always
 prefer them over interpolating values into the SQL text. Supported bind
@@ -1159,14 +1162,20 @@ tuple per row and
 ``type_name`` is the QuestDB DDL spelling (``VARCHAR``, ``TIMESTAMP_NS``,
 ``IPv4``, ``GEOHASH(8c)``, ``DECIMAL(18,2)``, ``DOUBLE[]``), so it can be
 compared against ``tables()`` / ``information_schema.questdb_columns()``
-without normalising. A ``DECIMAL`` is reported at its storage width's
-precision (18, 38 or 76), since the wire carries only the scale. Asking for
-the columns does not consume the rows, so a DB-API-style caller can read its
-``description`` first, but it does rule out ``to_pandas()`` and the other
-columnar methods on that result. ``SELECT ... LIMIT 0`` reads a schema
-without fetching anything, and the connection goes back to the pool. Both are
-empty for a statement that ships no result set — see ``exec_done`` for that
-outcome.
+without normalising. Two things the wire does not carry: a ``DECIMAL`` is
+reported at its storage width's precision (18, 38 or 76), since only the
+scale is sent, and an array column is reported as ``DOUBLE[]`` / ``LONG[]``
+whatever its dimensionality, where the server would spell a 2-D column
+``DOUBLE[][]``. Asking for the columns does not consume the rows, so a
+DB-API-style caller can read its ``description`` first, but it does rule
+out ``to_pandas()`` and the other columnar methods on that result.
+``SELECT ... LIMIT 0`` reads a schema without fetching anything, and the
+connection goes back to the pool. A result that returned rows is not at its
+end until they are read: iterate it, or call ``cancel()`` before closing it,
+to keep its connection (closing it straight after ``columns()`` drops the
+connection, and makes a :class:`PooledReader <questdb.PooledReader>` lease
+terminal). Both are empty for a statement that ships no result set — see
+``exec_done`` for that outcome.
 
 Rows stream one batch at a time and map SQL NULL to ``None``. Timestamps are
 timezone-aware UTC (``TIMESTAMP_NS`` rounded down to microseconds, since
@@ -1192,17 +1201,24 @@ connection string sets a default for every query on a handle, and
 
     with questdb.connect('ws::addr=localhost:9000;query_timeout_ms=600000;') as db:
         db.execute('INSERT INTO ohlc SELECT ... FROM trades SAMPLE BY 1m')
-        db.execute('REFRESH MATERIALIZED VIEW ohlc_1m FULL', timeout=3_600_000)
+        db.execute("CREATE TABLE trades_2025 AS (SELECT * FROM trades WHERE ts IN '2025')",
+                   timeout=3_600_000)
 
 The server applies no ceiling, so a value above ``query.timeout`` is
 honoured. ``timeout=None`` (the default) keeps the connection string's
-``query_timeout_ms``; ``timeout=0`` clears it for that query.
+``query_timeout_ms``; ``timeout=0`` clears it for that query. An ``int`` is
+milliseconds (any integer type, a ``numpy.int64`` included); a
+``datetime.timedelta`` or ``pandas.Timedelta`` works too, with a positive
+value below one millisecond rounded up to 1 ms.
 
 This needs a server advertising ``CAP_QUERY_TIMEOUT``. Against an older one
-the query fails fast with ``QuestDBErrorCode.QueryTimeout`` instead of
-silently running under the server default — raise the server's
-``query.timeout`` instead, or pass ``timeout=0`` to clear it. On expiry the
-error carries that same code and the pooled connection stays open and
+the query is refused before anything is sent, with
+``QuestDBErrorCode.UnsupportedServer``, instead of silently running under
+the server default. The connection is untouched by the refusal, so raise the
+server's ``query.timeout`` instead, or pass ``timeout=0`` on the same handle
+or lease to clear it. (The Java client behaves differently here: it enforces
+the timeout itself against such a server.) On expiry the error carries
+``QuestDBErrorCode.QueryTimeout`` and the pooled connection stays open and
 authenticated, so the next query runs on it without reconnecting.
 
 .. warning::

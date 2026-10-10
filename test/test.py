@@ -39,6 +39,7 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
     from test_client_row_egress import (
         TestRowEgressLive,
         TestQueryTimeoutLive,
+        TestQueryTimeoutWithoutCapability,
         TestUuidByteOrder)
     from system_test import (
         TestWithDatabase,

@@ -2782,12 +2782,14 @@ cdef void_int _dataframe_serialize_cell_column_ts__datetime_pyobj(
             _fqn(type(<object>cell)) + '.')
     dt = <object>cell
     if dt.tzinfo is None:
+        # The two wide literals are cast: untyped, Cython treats a literal
+        # beyond 32 bits as a Python object and boxes the expression per row.
         micros = (
             _days_from_civil(
                 PyDateTime_GET_YEAR(dt),
                 PyDateTime_GET_MONTH(dt),
-                PyDateTime_GET_DAY(dt)) * 86_400_000_000
-            + <int64_t>PyDateTime_DATE_GET_HOUR(dt) * 3_600_000_000
+                PyDateTime_GET_DAY(dt)) * <int64_t>86_400_000_000
+            + <int64_t>PyDateTime_DATE_GET_HOUR(dt) * <int64_t>3_600_000_000
             + <int64_t>PyDateTime_DATE_GET_MINUTE(dt) * 60_000_000
             + <int64_t>PyDateTime_DATE_GET_SECOND(dt) * 1_000_000
             + <int64_t>PyDateTime_DATE_GET_MICROSECOND(dt))
