@@ -41,6 +41,11 @@ questdb
    :undoc-members:
    :show-inheritance:
 
+.. autoclass:: questdb.ExecDone
+   :members: op_type, rows_affected
+   :no-special-members:
+   :no-undoc-members:
+
 .. autoclass:: questdb.ConnectionEvent
    :members:
    :undoc-members:

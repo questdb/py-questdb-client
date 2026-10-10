@@ -25,6 +25,7 @@
 __all__ = [
     "ConnectionEvent",
     "ConnectionEventKind",
+    "ExecDone",
     "PooledReader",
     "PooledSender",
     "Protocol",
@@ -53,7 +54,8 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from typing import (Any, Callable, Dict, Iterator, List, NamedTuple,
+                    Optional, Tuple, Union)
 
 import numpy as np
 import pandas as pd
@@ -100,6 +102,7 @@ class QuestDBErrorCode(Enum):
     BatchTooLarge = ...
     StoreResendRequired = ...
     SymbolDictFull = ...
+    QueryTimeout = ...
     BadDataFrame = ...
 
 
@@ -1097,6 +1100,7 @@ class PooledReader:
         binds: Optional[Union[list, tuple]] = None,
         *,
         reset_symbol_dict: bool = True,
+        timeout: Optional[Union[int, timedelta]] = None,
     ) -> QueryResult:
         """
         Execute a SQL query on the lease's connection and return a
@@ -1112,11 +1116,14 @@ class PooledReader:
         self,
         sql: str,
         binds: Optional[Union[list, tuple]] = None,
-    ) -> None:
+        *,
+        timeout: Optional[Union[int, timedelta]] = None,
+    ) -> Optional[ExecDone]:
         """
         Run a statement on the lease's connection and discard whatever
-        it returns. Mirrors :meth:`QuestDB.execute`; the lease stays
-        usable for the next call.
+        it returns. Mirrors :meth:`QuestDB.execute`, including the
+        :class:`ExecDone` ``(op_type, rows_affected)`` return value; the
+        lease stays usable for the next call.
         """
 
     def close(self) -> None:
@@ -1263,6 +1270,7 @@ class QuestDB:
         binds: Optional[Union[list, tuple]] = None,
         *,
         reset_symbol_dict: bool = True,
+        timeout: Optional[Union[int, timedelta]] = None,
     ) -> QueryResult:
         """
         Execute a SQL query and return a :class:`QueryResult`.
@@ -1274,13 +1282,33 @@ class QuestDB:
         ``to_pandas()``. Set ``False`` to keep the dictionary warm across
         repeated identical queries. No-op against servers that predate the
         capability.
+
+        ``timeout`` runs this query under its own budget instead of the
+        server-wide ``query.timeout``, overriding the connect string's
+        ``query_timeout_ms``. An ``int`` is milliseconds; a
+        ``datetime.timedelta`` works too, with a positive value below one
+        millisecond rounded *up* to 1 ms. ``None`` (the default) keeps the
+        connect string's ``query_timeout_ms``; ``0`` clears it, so the query
+        runs under the server-wide ``query.timeout``.
+
+        Requires a server advertising ``CAP_QUERY_TIMEOUT``: against an older
+        one the query is refused before anything is sent, with
+        ``QuestDBErrorCode.UnsupportedServer``, rather than silently running
+        under the server default; the connection is untouched. On expiry the
+        error carries ``QuestDBErrorCode.QueryTimeout`` and the connection
+        stays usable — but do not retry a write on it, because a statement
+        that outlives its timeout is reported as done instead, and a DDL /
+        INSERT / UPDATE that timed out waiting for the table writer may still
+        be applied.
         """
 
     def execute(
         self,
         sql: str,
         binds: Optional[Union[list, tuple]] = None,
-    ) -> None:
+        *,
+        timeout: Optional[Union[int, timedelta]] = None,
+    ) -> Optional[ExecDone]:
         """
         Run a statement and discard whatever it returns.
 
@@ -1288,8 +1316,13 @@ class QuestDB:
         clean end and returns the pooled connection. Statement output
         (a ``COPY`` status row, admin-function rows, a stray
         ``SELECT``) is discarded; use :meth:`query` when you want the
-        result. Returns ``None``: the protocol carries no
-        rows-affected count.
+        result. ``timeout`` behaves as on :meth:`query`.
+
+        Returns the statement's ``EXEC_DONE`` report as an
+        :class:`ExecDone` named tuple ``(op_type, rows_affected)``, or
+        ``None`` for a statement that streamed a result set instead. See
+        :attr:`QueryResult.exec_done` for the caveats on
+        ``rows_affected``.
         """
 
     def reader(self) -> PooledReader:
@@ -1342,6 +1375,18 @@ class QuestDB:
     def __exit__(self, exc_type, _exc_val, _exc_tb): ...
 
 
+class ExecDone(NamedTuple):
+    """A non-SELECT statement's terminal ``EXEC_DONE`` report, as returned
+    by :meth:`QuestDB.execute` / :meth:`PooledReader.execute` and carried on
+    :attr:`QueryResult.exec_done`. ``rows_affected`` is the number of rows
+    an ``INSERT`` or ``UPDATE`` touched, and ``None`` when the server reports
+    no count (statements executed at parse time). ``op_type`` is the server's
+    QWP operation-type byte, carried through as an opaque ``int``."""
+
+    op_type: int
+    rows_affected: Optional[int]
+
+
 class QueryResult:
     """
     Result of :meth:`QuestDB.query`. Single-use: each materialisation
@@ -1357,7 +1402,7 @@ class QueryResult:
     :meth:`to_arrow` / :meth:`iter_arrow` / :meth:`__arrow_c_stream__` give a
     generic compact-dictionary Arrow form a consumer reconciles. When the
     target is a polars / pandas frame, the dedicated methods avoid the
-    re-reconciliation that ``polars.from_arrow(result)`` /
+    re-reconciliation that ``polars.DataFrame(result)`` /
     ``to_arrow().to_pandas()`` pay on SYMBOL-heavy results.
     """
 
@@ -1365,7 +1410,7 @@ class QueryResult:
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
-        (e.g. ``polars.from_arrow``) reconciles them."""
+        (e.g. ``polars.DataFrame(result)``) reconciles them."""
 
     def to_arrow(self) -> Any:
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow."""
@@ -1402,6 +1447,30 @@ class QueryResult:
         """Iterate result batches as ``pandas.DataFrame``. With no arguments
         the batches are materialised via numpy (pyarrow-free); passing
         ``dtype_backend`` or ``types_mapper`` selects the pyarrow path."""
+
+    def columns(self) -> List[Tuple[str, str]]:
+        """Column names and QuestDB DDL type names, as
+        ``[(name, type_name), ...]``. Does not consume the rows —
+        :meth:`iter_rows` continues from the same stream — but rules out the
+        other materialisation methods. Empty for a non-SELECT. A ``DECIMAL``
+        is reported at its storage width's precision (18, 38 or 76), because
+        the wire carries only the scale, and an array column as ``DOUBLE[]``
+        / ``LONG[]`` whatever its dimensionality. A result with unread rows
+        is not at its terminal: call :meth:`cancel` before :meth:`close` to
+        keep its connection."""
+
+    def iter_rows(self) -> Iterator[Tuple[Any, ...]]:
+        """Iterate the result as tuples of Python objects, one batch at a
+        time, with ``None`` for SQL NULL. Needs neither pyarrow nor pandas.
+        Every call returns the same iterator; after :meth:`cancel` no
+        further rows are yielded, after :meth:`close` it raises."""
+
+    @property
+    def exec_done(self) -> Optional[ExecDone]:
+        """A non-SELECT's terminal ``EXEC_DONE`` as an :class:`ExecDone`
+        ``(op_type, rows_affected)`` once the result has been drained, else
+        ``None``. ``rows_affected`` is ``None`` when the server reports no
+        count. Still available after :meth:`close`."""
 
     def cancel(self) -> None:
         """Cancel the query and drain to terminal. The result remains

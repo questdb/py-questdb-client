@@ -185,7 +185,9 @@ stages:
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
             env:
-              CIBW_BUILD: pp*
+              # No pp312: NumPy, a build dependency, ships no PyPy 3.12
+              # wheels and its source build fails there.
+              CIBW_BUILD: "pp310-* pp311-*"
               CIBW_ENABLE: pypy pypy-eol
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}

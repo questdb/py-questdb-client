@@ -8,6 +8,7 @@ from questdb import _client
 from questdb._client import (
     ConnectionEvent,
     ConnectionEventKind,
+    ExecDone,
     PooledReader,
     PooledSender,
     Protocol,
@@ -35,6 +36,7 @@ from questdb._client import (
 __all__ = [
     'ConnectionEvent',
     'ConnectionEventKind',
+    'ExecDone',
     'PooledReader',
     'PooledSender',
     'Protocol',

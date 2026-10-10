@@ -263,6 +263,17 @@ Query egress (QWP/WebSocket)
 These keys shape :meth:`QuestDB.query <questdb.QuestDB.query>` /
 :meth:`QuestDB.reader <questdb.QuestDB.reader>` connections.
 
+* ``query_timeout_ms`` - ``int``: Default per-query timeout in milliseconds
+  for queries run through :class:`QuestDB <questdb.QuestDB>` and
+  :class:`PooledReader <questdb.PooledReader>`, replacing the server-wide
+  ``query.timeout``. ``timeout=`` on ``query()`` / ``execute()`` overrides it
+  per query, and ``timeout=0`` clears it. Requires a server advertising
+  ``CAP_QUERY_TIMEOUT``: against an older one every query is refused before
+  it is sent, with ``QuestDBErrorCode.UnsupportedServer``, while a non-zero
+  value is in effect; the connection is untouched by the refusal.
+
+  Default: 0 (no client-supplied timeout).
+
 * ``compression`` - ``'raw'`` | ``'zstd'`` | ``'auto'``: Result-set
   compression. ``auto`` accepts Zstandard when the server supports it;
   decompression is transparent.

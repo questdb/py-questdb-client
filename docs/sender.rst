@@ -1125,18 +1125,121 @@ SQL, drains the result and returns the pooled connection in one call
 Statement output (a ``COPY`` status row, admin-function rows, a stray
 ``SELECT``) is discarded — use ``query()`` when you want it.
 
+``execute()`` returns the statement's :class:`ExecDone <questdb.ExecDone>`
+named tuple ``(op_type, rows_affected)``, or ``None`` for a statement that
+streamed a result set instead. The same report is on
+:attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` once a result
+has been drained, and stays there after the result is closed.
+``rows_affected`` is meaningful for ``INSERT`` and ``UPDATE``, and ``None``
+when the server reports no count, as statements executed at parse time
+currently do; ``op_type`` is the server's operation-type byte, carried
+through as an opaque ``int``::
+
+    done = db.execute('INSERT INTO trades VALUES (now(), \'AAPL\', 1.5)')
+    print(done.rows_affected)
+
 Positional bind parameters fill the ``$1``..``$N`` placeholders — always
 prefer them over interpolating values into the SQL text. Supported bind
 types: ``None`` (SQL NULL), ``bool``, ``int``, ``float``, ``str``,
 ``datetime.datetime``, :class:`TimestampMicros <questdb.TimestampMicros>`,
-:class:`TimestampNanos <questdb.TimestampNanos>`, and ``uuid.UUID``.
+:class:`TimestampNanos <questdb.TimestampNanos>`, ``datetime.date`` (a
+``DATE``), ``decimal.Decimal`` (a ``DECIMAL`` of the narrowest width that
+holds it, with its fractional digits as the scale; ``NaN`` and infinities
+raise ``ValueError``) and ``uuid.UUID``.
+
+Rows of Python objects
+----------------------
+
+For a row-shaped consumer — a PEP 249 cursor, dbt, plain scripting —
+:func:`QueryResult.iter_rows <questdb.QueryResult.iter_rows>` yields one
+tuple per row and
+:func:`QueryResult.columns <questdb.QueryResult.columns>` gives
+``(name, type_name)`` pairs, with neither pyarrow nor pandas involved::
+
+    with db.query('SELECT ts, symbol, price FROM trades LIMIT 3') as result:
+        for name, type_name in result.columns():
+            print(name, type_name)       # ts TIMESTAMP / symbol SYMBOL / ...
+        for ts, symbol, price in result.iter_rows():
+            print(ts, symbol, price)
+
+``type_name`` is the QuestDB DDL spelling (``VARCHAR``, ``TIMESTAMP_NS``,
+``IPv4``, ``GEOHASH(8c)``, ``DECIMAL(18,2)``, ``DOUBLE[]``), so it can be
+compared against ``tables()`` / ``information_schema.questdb_columns()``
+without normalising. Two things the wire does not carry: a ``DECIMAL`` is
+reported at its storage width's precision (18, 38 or 76), since only the
+scale is sent, and an array column is reported as ``DOUBLE[]`` / ``LONG[]``
+whatever its dimensionality, where the server would spell a 2-D column
+``DOUBLE[][]``. Asking for the columns does not consume the rows, so a
+DB-API-style caller can read its ``description`` first, but it does rule
+out ``to_pandas()`` and the other columnar methods on that result.
+``SELECT ... LIMIT 0`` reads a schema without fetching anything, and the
+connection goes back to the pool. A result that returned rows is not at its
+end until they are read: iterate it, or call ``cancel()`` before closing it,
+to keep its connection (closing it straight after ``columns()`` drops the
+connection, and makes a :class:`PooledReader <questdb.PooledReader>` lease
+terminal). Both are empty for a statement that ships no result set — see
+``exec_done`` for that outcome.
+
+Rows stream one batch at a time and map SQL NULL to ``None``. Timestamps are
+timezone-aware UTC (``TIMESTAMP_NS`` rounded down to microseconds, since
+``datetime`` has no nanosecond field), ``DECIMAL`` keeps its scale,
+``GEOHASH`` comes back as the text form the server itself prints, ``IPv4`` as
+``ipaddress.IPv4Address``, and ``DOUBLE[]`` as ``numpy.ndarray`` (``LONG[]``
+is not supported on this path). ``BOOLEAN``,
+``BYTE`` and ``SHORT`` have no NULL representation in QuestDB, so an inserted
+``null`` reads back as ``False`` / ``0``.
+
+This path costs an allocation per cell, so it suits small result sets —
+metadata lookups, test rows, schema probes. Large analytical results belong
+on the columnar methods below.
+
+Per-query timeouts
+------------------
+
+Every query otherwise runs under the server-wide ``query.timeout`` (60 s by
+default), which is short for a long transform. ``query_timeout_ms`` in the
+connection string sets a default for every query on a handle, and
+``timeout=`` overrides it per query (milliseconds, or a
+``datetime.timedelta``)::
+
+    with questdb.connect('ws::addr=localhost:9000;query_timeout_ms=600000;') as db:
+        db.execute('INSERT INTO ohlc SELECT ... FROM trades SAMPLE BY 1m')
+        db.execute("CREATE TABLE trades_2025 AS (SELECT * FROM trades WHERE ts IN '2025')",
+                   timeout=3_600_000)
+
+The server applies no ceiling, so a value above ``query.timeout`` is
+honoured. ``timeout=None`` (the default) keeps the connection string's
+``query_timeout_ms``; ``timeout=0`` clears it for that query. An ``int`` is
+milliseconds (any integer type, a ``numpy.int64`` included); a
+``datetime.timedelta`` or ``pandas.Timedelta`` works too, with a positive
+value below one millisecond rounded up to 1 ms.
+
+This needs a server advertising ``CAP_QUERY_TIMEOUT``. Against an older one
+the query is refused before anything is sent, with
+``QuestDBErrorCode.UnsupportedServer``, instead of silently running under
+the server default. The connection is untouched by the refusal, so raise the
+server's ``query.timeout`` instead, or pass ``timeout=0`` on the same handle
+or lease to clear it. (The Java client behaves differently here: it enforces
+the timeout itself against such a server.) On expiry the error carries
+``QuestDBErrorCode.QueryTimeout`` and the pooled connection stays open and
+authenticated, so the next query runs on it without reconnecting.
+
+.. warning::
+
+   Do not retry a write after a timeout. A statement that completes past its
+   timeout is reported as done rather than as a timeout, precisely so a retry
+   cannot apply it twice, and a DDL / ``INSERT`` / ``UPDATE`` that timed out
+   waiting for the table writer may still be applied afterwards.
+
+Columnar results
+----------------
 
 A :class:`QueryResult <questdb.QueryResult>` can be materialised with ``to_arrow`` / ``to_pandas`` or
 streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
 ``iter_arrow`` (and ``to_pandas`` / ``iter_pandas`` with ``dtype_backend`` or
 ``types_mapper``) require pyarrow; the default ``to_pandas`` / ``iter_pandas``
 are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
-(``__arrow_c_stream__``), so ``polars.from_arrow(result)`` or
+(``__arrow_c_stream__``), so ``polars.DataFrame(result)`` or
 ``duckdb.from_arrow(result)`` consume it directly without pyarrow installed.
 Each result is consumed once. Fully drain it, use it as a context manager
 (``with db.query(...) as result:``), or call :func:`QueryResult.close <questdb.QueryResult.close>`. A
@@ -1157,7 +1260,7 @@ concurrent consumption, cancellation, and close are unsupported.
 per-batch ``SYMBOL`` dictionary is compacted to the values each batch uses,
 which a generic consumer reconciles. So when the target is a polars / pandas
 frame, the dedicated methods avoid the re-reconciliation that
-``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
+``polars.DataFrame(result)`` / ``to_arrow().to_pandas()`` pay on
 ``SYMBOL``-heavy results.
 
 For several queries in a row, call :meth:`QuestDB.reader <questdb.QuestDB.reader>` to take a
