@@ -1,9 +1,176 @@
-===================
-5.0 Migration Guide
-===================
+================
+Migration Guide
+================
+
+5.0 to 6.0
+==========
+
+Ten changes need action: the two UUID / fixed-size-binary items below, the
+stricter ``schema_overrides`` tuple validation, caps on callback inbox
+capacities and config-string length, the exception a commit raises once its
+sender is closed, the error a query failover that runs out of time raises, a
+warning an abandoned query result now surfaces instead of swallowing,
+``QuestDB.close()`` raising instead of waiting for its own thread's lease, and
+a sender's own callbacks no longer being able to append to it. The new ``ConnectionEventKind.CredentialUnavailable`` event kind
+needs none — it is additive, and an existing listener keeps working.
+
+* **UUID bytes are canonical RFC 4122.** UUID values are read and written in
+  canonical big-endian order at every API boundary; the client byte-swaps to
+  QWP wire order internally. The wire format is unchanged and still matches the
+  Java client, so stored data and round-trips are unaffected — only the bytes
+  your application supplies or receives change. A well-formed ``uuid.UUID``
+  object column needs no byte-order change; malformed or subclassed UUID objects
+  whose integer representation does not produce exactly 16 bytes are rejected.
+  If you pre-reversed bytes to work around the old layout, remove that workaround
+  — on the **read** path too. The bytes a UUID column
+  yields changed in the same way and just as silently, on every Arrow-backed
+  reader: :meth:`~questdb.QueryResult.to_arrow`,
+  :meth:`~questdb.QueryResult.to_polars`,
+  :meth:`~questdb.QueryResult.iter_arrow`,
+  :meth:`~questdb.QueryResult.iter_polars`, ``__arrow_c_stream__`` and
+  :meth:`~questdb.QueryResult.to_pandas` /
+  :meth:`~questdb.QueryResult.iter_pandas` with either ``dtype_backend`` (both
+  ``"pyarrow"`` and ``"numpy_nullable"``) or ``types_mapper``. Only the
+  argument-free :meth:`~questdb.QueryResult.to_pandas` /
+  :meth:`~questdb.QueryResult.iter_pandas` build ``uuid.UUID`` objects and are
+  unaffected.
+
+* **A 16-byte Arrow column needs the** ``arrow.uuid`` **label to be a UUID,
+  and** ``fixed_size_binary(32)`` **no longer maps to LONG256.** The width alone
+  no longer claims either type — pyarrow drops field metadata when it exports a
+  single pandas column. An unlabelled column now lands as ``BINARY``, which the
+  server rejects against an existing UUID or LONG256 column rather than storing
+  the wrong type silently. Claim it explicitly:
+
+  .. code-block:: python
+
+      sender.dataframe(df, table_name='trades', at='ts',
+                       schema_overrides={'id': 'uuid', 'hash': 'long256'})
+
+  ``schema_overrides`` accepts the new ``'uuid'`` and ``'long256'`` kinds for
+  this purpose, but it **requires fully Arrow-backed input** — pyarrow,
+  polars, or a pandas frame where *every* column uses ``ArrowDtype`` — and no
+  ``table_name_col``. One NumPy-dtype column is enough to take the NumPy
+  planner instead, which does not apply overrides and raises
+  :class:`~questdb.UnsupportedDataFrameShapeError`; a plain ``datetime64``
+  ``at=`` column does it. That is exactly the shape that used to write
+  LONG256 with no override, so convert the frame first::
+
+      df = df.convert_dtypes(dtype_backend='pyarrow')
+
+  Wrapping the column in pyarrow's ``arrow.uuid`` extension type also works
+  for the 16-byte case, on either path and with no conversion. LONG256 has no
+  equivalent label, so an Arrow-backed frame plus ``schema_overrides`` is the
+  only route for it.
+
+* **Only a geohash schema override accepts an argument.** A tuple such as
+  ``{'x': ('symbol', 16)}`` previously worked by silently discarding ``16``;
+  write ``{'x': 'symbol'}`` instead. The two-item form is reserved for
+  ``('geohash', bits)``. :data:`questdb.SchemaOverride` is now importable for
+  annotating these values.
+
+* **Callback inbox capacities are capped at 65536.**
+  ``connection_event_inbox_capacity`` and ``error_event_inbox_capacity``, and
+  the ``error_inbox_capacity`` config-string key, now reject a larger value
+  where one was previously accepted. Lower any value above the cap; these
+  inboxes bound memory when a listener cannot keep up, and a capacity that
+  large is an allocation failure waiting to happen rather than useful
+  buffering.
+
+* **Config strings are capped at 1 MiB.** This applies to
+  :meth:`Sender.from_conf <questdb.Sender.from_conf>`,
+  :meth:`Sender.from_env <questdb.Sender.from_env>` (``QDB_CLIENT_CONF``),
+  :func:`questdb.connect` and :meth:`QuestDB.from_conf
+  <questdb.QuestDB.from_conf>`, which raise ``QuestDBError(InvalidApiCall)``
+  for a longer string. Remove accidentally duplicated or attacker-controlled
+  content from any string above that bound.
+
+* :meth:`SenderTransaction.commit <questdb.SenderTransaction.commit>` **after
+  the owning sender was closed now raises** ``QuestDBError(InvalidApiCall)``
+  instead of an internal ``TypeError``. A commit whose flush fails leaves the
+  sender's buffer empty and the transaction completed, exactly as in 5.0.
+
+* **A query failover that runs out of time raises what it found.** When
+  ``failover_max_duration_ms`` expires while reconnect attempts remain and the
+  last round was rejected on role, at the WebSocket upgrade or at TLS, the
+  query raises that ``RoleMismatch`` / ``HandshakeError`` / ``TlsError``
+  instead of the connection failure that started the failover, as a failover
+  that ran out of attempts already did. Code that branches on
+  ``QuestDBError.code`` after a failed query should treat these codes as a
+  possible outcome of a timed-out failover. These codes describe *why* the
+  query failed, not whether an immediate retry is safe or useful: wait for a
+  matching-role endpoint after ``RoleMismatch``. A late HTTP 401/403 is a
+  credential rejection (``AuthError``), not a transient socket failure; fix
+  the credentials before retrying. See :doc:`auth` for OIDC-specific handling.
+
+* **An abandoned** :class:`~questdb.QueryResult` **now reports its**
+  ``ResourceWarning``. The finalizer previously swallowed it; it is now routed
+  through :func:`sys.unraisablehook`, which is what makes the leak visible.
+  Under warnings-as-errors this becomes a failure — and because it fires
+  whenever garbage collection happens to run, pytest attributes it to whatever
+  test was executing at the time rather than to the one that abandoned the
+  result. Close results deterministically::
+
+      with db.query('select * from trades') as result:
+          ...
+
+  or filter :class:`ResourceWarning` if a suite runs with ``-W error``.
+
+* :meth:`QuestDB.close <questdb.QuestDB.close>` **raises instead of waiting
+  for a lease held by the calling thread.** It raises
+  ``QuestDBError(InvalidApiCall)`` while the calling thread owns an active pool
+  operation or a lease attributed to it; 5.0 waited, which never ended for a
+  same-thread lease. A sender lease handed to a worker stays attributed to the
+  borrowing thread until the worker first uses it, so a ``close()`` there that
+  5.0 would have waited through now raises. A reader lease (``db.reader()``)
+  stays attributed to the borrowing thread however it is used, so close the
+  pool from another thread while one is open. For a sender lease, have the
+  worker use the lease and signal that before closing, or close from a thread
+  that never held it::
+
+      sender = db.sender()
+      used = threading.Event()
+
+      def work():
+          with sender:
+              used.set()
+              sender.row('trades', columns={'price': 1.0},
+                         at=questdb.ServerTimestamp)
+
+      threading.Thread(target=work).start()
+      used.wait()
+      db.close()  # waits for the worker to return the lease
+
+* **A sender's own callbacks can no longer append to it.** Called from the
+  sender's own ``connection_listener`` or ``error_handler``, ``row()``,
+  ``dataframe()``, ``new_buffer()``, ``establish()``, ``transaction()`` and the
+  :class:`~questdb.SenderTransaction` operations raise
+  ``QuestDBError(InvalidApiCall)``, as ``flush()`` and ``close()`` already did,
+  even while the sender is idle. 5.0 accepted ``row()`` there. The read-only
+  ``max_name_len``, ``protocol_version``, ``connection_events_dropped`` and
+  ``connection_events_delivered`` also raise, from any thread, while the sender
+  is inside a native call such as ``flush()``. So do ``len()``, ``bytes()``,
+  truthiness, ``capacity()``, ``reserve()``, ``clear()`` and ``row()`` on a
+  :class:`~questdb.ingress.Buffer` that a native call is modifying (the internal buffer
+  during ``flush()``, an explicit one during ``flush(buffer)``, or any one
+  during ``dataframe()``, ``SenderTransaction.dataframe()`` included); a
+  ``flush(buffer, clear=False)`` only reads the buffer, so
+  concurrent reads and other ``clear=False`` flushes of it still work. Hand
+  listener events to another sender or to the owning thread instead::
+
+      events = queue.SimpleQueue()
+      sender = Sender.from_conf(conf, connection_listener=events.put)
+      ...
+      while not events.empty():  # on the sender's own thread
+          event = events.get()
+          sender.row('conn_events', symbols={'kind': event.kind.tag},
+                     at=questdb.ServerTimestamp)
+
+4.x to 5.0
+==========
 
 Connect once, then stream, load, or query
-=========================================
+-----------------------------------------
 
 The QWP/WebSocket API has one connection-owning root, the :class:`QuestDB
 <questdb.QuestDB>` handle returned by :func:`questdb.connect`:
@@ -56,7 +223,7 @@ rejections are never silent. To ingest concurrently, borrow one sender per
 thread.
 
 DataFrame bulk loads over QWP/WebSocket
-=======================================
+---------------------------------------
 
 Over ``ws::`` / ``wss::``, DataFrame bulk loads use the direct columnar
 path — a database operation, not stream serialization. The recommended
@@ -113,7 +280,7 @@ fully supported (over UDP it serializes row by row into fire-and-forget
 datagrams, with the same delivery caveats as ``row()``).
 
 Update imports from questdb.ingress
-===================================
+-----------------------------------
 
 The 4.x ``questdb.ingress`` module is now a deprecated compatibility shim.
 It keeps ILP/HTTP and ILP/TCP code running — including ``IngressError`` /
@@ -134,7 +301,7 @@ by senders. Where 4.x code built buffers on worker threads and flushed them
 through one sender, borrow one pooled sender per thread instead.
 
 Behavioural changes to watch for
-================================
+--------------------------------
 
 * **Removed QWP flight-window keys.** ``max_in_flight`` and
   ``in_flight_window`` are no longer accepted. Remove them from ws/wss

@@ -108,6 +108,8 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -125,6 +127,8 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -142,6 +146,8 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -159,6 +165,8 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -176,6 +184,8 @@ stages:
         pool: {vmImage: 'ubuntu-latest'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -185,7 +195,12 @@ stages:
           - bash: cibuildwheel --output-dir wheelhouse .
             displayName: Build wheels
             env:
-              CIBW_BUILD: pp*
+              # List versions explicitly, as the other jobs do. A `pp*`
+              # wildcard picks up every PyPy that cibuildwheel adds: 4.3.0
+              # added pp312, and NumPy (a build dependency) has no PyPy 3.12
+              # wheels. Its source build fails under PyPy 3.12, so pp312 is
+              # left out until NumPy supports it.
+              CIBW_BUILD: "pp310-* pp311-*"
               CIBW_ENABLE: pypy pypy-eol
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
@@ -194,6 +209,8 @@ stages:
         pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -216,6 +233,8 @@ stages:
         pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -233,6 +252,8 @@ stages:
         pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -250,6 +271,8 @@ stages:
         pool: {vmImage: 'macOS-15'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -267,6 +290,8 @@ stages:
         pool: {vmImage: 'windows-2025'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -292,7 +317,11 @@ stages:
               # List versions explicitly, as the other jobs do. A `*win32*`
               # wildcard also matches pre-release Pythons, which cibuildwheel
               # starts building at the first release candidate.
-              CIBW_BUILD: "cp310-win32 cp311-win32 cp312-win32 cp313-win32 cp314-win32"
+              # `cp314t-win32` is included: cibuildwheel does define it (there
+              # is no `cp313t` for Windows at all), and the `*win32*` wildcard
+              # this list replaced had been matching it. Dropping it was an
+              # unintended loss of the only free-threaded 32-bit coverage.
+              CIBW_BUILD: "cp310-win32 cp311-win32 cp312-win32 cp313-win32 cp314-win32 cp314t-win32"
           - task: PublishBuildArtifacts@1
             inputs: {pathtoPublish: 'wheelhouse'}
 
@@ -300,6 +329,8 @@ stages:
         pool: {vmImage: 'windows-2025'}
         timeoutInMinutes: 120
         steps:
+          - checkout: self
+            submodules: true
           - task: UsePythonVersion@0
           - bash: |
               set -o errexit
@@ -324,9 +355,16 @@ stages:
               # List versions explicitly, as the other jobs do. A `*win_amd64*`
               # wildcard also matches pre-release Pythons, which cibuildwheel
               # starts building at the first release candidate.
-              # `cp314t-win_amd64` is left out: it was blocked by missing
-              # pandas wheels, which now exist, so it can be added and tested.
-              CIBW_BUILD: "cp310-win_amd64 cp311-win_amd64 cp312-win_amd64 cp313-win_amd64 cp314-win_amd64"
+              #
+              # `cp314t-win_amd64` is included, as the comment this replaces
+              # said it should be: the pandas wheels that blocked it now exist.
+              # Replacing the `*win_amd64*` wildcard with an explicit list had
+              # dropped it silently -- cibuildwheel >= 3.0 builds `t` targets by
+              # default, so the wildcard had been matching it -- removing the
+              # matrix's free-threaded Windows coverage in the same change that
+              # added code whose thread-safety assumes the GIL. There is no
+              # `cp313t` for Windows on any arch, so 3.14 is the first.
+              CIBW_BUILD: "cp310-win_amd64 cp311-win_amd64 cp312-win_amd64 cp313-win_amd64 cp314-win_amd64 cp314t-win_amd64"
               CIBW_ENVIRONMENT: "MSSdk=1 DISTUTILS_USE_SDK=1 SETUP_DO_GIT_SUBMODULE_INIT=1"
               CIBW_BUILD_VERBOSITY: "3"
               DISTUTILS_DEBUG: "1"

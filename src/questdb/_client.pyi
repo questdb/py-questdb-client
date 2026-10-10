@@ -25,6 +25,7 @@
 __all__ = [
     "ConnectionEvent",
     "ConnectionEventKind",
+    "OidcDeviceAuth",
     "PooledReader",
     "PooledSender",
     "Protocol",
@@ -34,6 +35,7 @@ __all__ = [
     "QuestDBErrorCode",
     "QuestDBServerRejectionError",
     "QwpWsProgress",
+    "SchemaOverride",
     "Sender",
     "SenderError",
     "SenderErrorCategory",
@@ -50,14 +52,102 @@ __all__ = [
     "WARN_HIGH_RECONNECTS",
 ]
 
+import os
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from typing import (
+    Any, Callable, Dict, Iterable, Iterator, List, Literal, Optional, Tuple,
+    Union)
 
 import numpy as np
 import pandas as pd
 from decimal import Decimal
+
+from .auth._config import OidcConfig
+from .auth._render import Renderer
+from .auth._store import FileTokenStore
+
+
+#: One ``schema_overrides`` value: a QuestDB column kind to reclassify a
+#: column as. ``'uuid'`` and ``'long256'`` claim binary columns of exactly 16
+#: and 32 bytes respectively; ``('geohash', bits)`` takes 1-60 bits.
+SchemaOverride = Union[
+    Literal['symbol', 'ipv4', 'char', 'uuid', 'long256'],
+    Tuple[Literal['geohash'], int],
+]
+
+
+class OidcDeviceAuth:
+    """Native-backed OAuth 2.0 device-flow token provider."""
+
+    def __init__(
+        self,
+        client_id: str,
+        *,
+        device_authorization_endpoint: str,
+        token_endpoint: str,
+        scope: str = "openid",
+        groups_in_token: bool = False,
+        audience: Optional[str] = None,
+        issuer: Optional[str] = None,
+        insecure: bool = False,
+        ca_bundle: Optional[Union[str, bytes, os.PathLike]] = None,
+        open_browser: Optional[bool] = None,
+        interactive: Optional[bool] = None,
+        qr: bool = False,
+        renderer: Optional[Renderer] = None,
+        default_interval: int = 5,
+        timeout: float = 30,
+        token_store: Optional[FileTokenStore] = None,
+    ) -> None: ...
+
+    @classmethod
+    def from_questdb(
+        cls,
+        url: str,
+        *,
+        client_id: Optional[str] = None,
+        scope: Optional[str] = None,
+        audience: Optional[str] = None,
+        groups_in_token: Optional[bool] = None,
+        issuer: Optional[str] = None,
+        token_endpoint: Optional[str] = None,
+        device_authorization_endpoint: Optional[str] = None,
+        insecure: bool = False,
+        ca_bundle: Optional[Union[str, bytes, os.PathLike]] = None,
+        open_browser: Optional[bool] = None,
+        interactive: Optional[bool] = None,
+        qr: bool = False,
+        renderer: Optional[Renderer] = None,
+        default_interval: int = 5,
+        timeout: float = 30,
+        token_store: Optional[FileTokenStore] = None,
+    ) -> OidcDeviceAuth: ...
+
+    def sign_in(self) -> None:
+        """Run the interactive device flow when sign-in is required."""
+
+    def cancel_sign_in(self) -> None:
+        """Cancel the current sign-in attempt without closing the provider."""
+
+    def token(self) -> str:
+        """Return a cached or silently refreshed token; never prompt."""
+
+    def headers(self) -> Dict[str, str]: ...
+
+    def clear(self) -> None: ...
+
+    def close(self) -> None:
+        """Close the provider and cancel device-poll or token-store lock waits."""
+
+    def __enter__(self) -> OidcDeviceAuth: ...
+
+    def __exit__(self, exc_type: object, exc_value: object,
+                 traceback: object) -> Literal[False]: ...
+
+    @property
+    def config(self) -> OidcConfig: ...
 
 class QuestDBErrorCode(Enum):
     """Category of Error."""
@@ -106,6 +196,15 @@ class QuestDBErrorCode(Enum):
 class QuestDBError(Exception):
     """An error whilst using the QuestDB client."""
 
+    def __init__(
+        self,
+        code: QuestDBErrorCode,
+        msg: str,
+        sender_error: Optional["SenderError"] = None,
+        *,
+        in_doubt: bool = False,
+    ) -> None: ...
+
     @property
     def code(self) -> QuestDBErrorCode:
         """Return the error code."""
@@ -141,6 +240,12 @@ class UnsupportedDataFrameShapeError(QuestDBError):
     A DataFrame shape is not supported by the optimized columnar client path.
     """
 
+    def __init__(
+        self,
+        msg: str,
+        column_failures: Optional[Iterable[Dict[str, Any]]] = None,
+    ) -> None: ...
+
     column_failures: tuple
 
 
@@ -154,6 +259,7 @@ class ConnectionEventKind(Enum):
     EndpointAttemptFailed = ...
     AllEndpointsUnreachable = ...
     AuthFailed = ...
+    CredentialUnavailable = ...
 
     @property
     def tag(self) -> str: ...
@@ -1009,7 +1115,7 @@ class PooledSender:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[Dict[str, SchemaOverride]] = None,
     ) -> PooledSender:
         """
         Bulk-load a DataFrame over a direct columnar connection borrowed
@@ -1033,7 +1139,14 @@ class PooledSender:
         """Wait for everything published through this lease to receive an
         OK ack; returns immediately if the lease published nothing. Only a
         terminal connection failure raises; server rejections go to the
-        pool's ``error_handler``."""
+        pool's ``error_handler``.
+
+        ``timeout_millis`` is a no-progress timeout (``0`` waits
+        indefinitely); when it expires this raises ``QuestDBError`` with
+        ``code`` set to ``QuestDBErrorCode.FailoverRetry`` and the rows stay
+        queued. While the lease cannot reconnect because an attached OIDC
+        provider needs a new sign-in, that error is
+        :class:`~questdb.auth.OidcInteractionRequired`."""
 
     def flush_and_get_fsn(self) -> Optional[int]:
         """Publish and clear buffered rows, returning the published
@@ -1139,6 +1252,7 @@ class QuestDB:
     def from_conf(
         conf_str: str,
         *,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
         error_handler: Optional[Callable[[SenderError], None]] = None,
@@ -1197,7 +1311,7 @@ class QuestDB:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[Dict[str, SchemaOverride]] = None,
     ) -> QuestDB:
         """
         Ingest a dataframe through the pooled columnar QWP path.
@@ -1332,11 +1446,25 @@ class QuestDB:
         """
         Close the client and its connection pool.
 
-        Idempotent. When called from inside one of this handle's own
+        Idempotent. Raises ``QuestDBError(InvalidApiCall)`` instead of
+        waiting while the calling thread owns an active pool operation or a
+        lease attributed to it: a sender lease belongs to the thread that last
+        used it, a reader lease always to the thread that borrowed it.
+        When called from inside one of this handle's own
         ``error_handler`` / ``connection_listener`` callbacks, it does
         not wait for a concurrent ``close()`` on another thread to
         finish; the in-flight callback completes after that close
-        returns.
+        returns. Closing a pool from inside its OIDC provider's
+        persistence-warning callback raises ``QuestDBError(InvalidApiCall)``.
+        A close on any other thread waits for that callback to return, and
+        gives up with the same error after two seconds; that is how a close
+        the callback delegated to another thread, and waits for, is released.
+        Called from any other OIDC callback -- a renderer callback, or a
+        persistence-warning handler of another provider -- it waits at most
+        two seconds for leases other threads hold, or for a concurrent
+        ``close()`` on another thread, and then raises the same error: such a
+        lease may be blocked on a token the provider cannot supply until the
+        callback returns.
         """
 
     def __exit__(self, exc_type, _exc_val, _exc_tb): ...
@@ -1357,7 +1485,7 @@ class QueryResult:
     :meth:`to_arrow` / :meth:`iter_arrow` / :meth:`__arrow_c_stream__` give a
     generic compact-dictionary Arrow form a consumer reconciles. When the
     target is a polars / pandas frame, the dedicated methods avoid the
-    re-reconciliation that ``polars.from_arrow(result)`` /
+    re-reconciliation that ``polars.DataFrame(result)`` /
     ``to_arrow().to_pandas()`` pay on SYMBOL-heavy results.
     """
 
@@ -1365,7 +1493,7 @@ class QueryResult:
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
-        (e.g. ``polars.from_arrow``) reconciles them."""
+        (e.g. ``polars.DataFrame(result)``) reconciles them."""
 
     def to_arrow(self) -> Any:
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow."""
@@ -1441,6 +1569,7 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,
@@ -1475,6 +1604,7 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,
@@ -1519,6 +1649,7 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,
@@ -1687,7 +1818,7 @@ class Sender:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[Dict[str, SchemaOverride]] = None,
     ) -> Sender:
         """
         Write a Pandas DataFrame to QuestDB.
@@ -1806,6 +1937,9 @@ class Sender:
     def await_acked_fsn(self, fsn: int, timeout_millis: int = 0) -> bool:
         """
         Wait until the QWP/WebSocket completion watermark reaches ``fsn``.
+
+        Returns ``False`` if the no-progress timeout elapses first;
+        ``timeout_millis=0`` waits indefinitely.
         """
 
     def drive_once(self) -> bool:
