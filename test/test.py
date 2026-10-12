@@ -10137,6 +10137,138 @@ finish()
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_claimed_fixed_size_binary_column_is_sent_without_a_copy(self):
+        # In a mixed frame, a UUID or LONG256 claim on a bare 16- or
+        # 32-byte Arrow column sends the column's own value buffer when
+        # it is one array starting at offset zero. A column in several
+        # chunks, or sliced away from its start, is copied to object
+        # dtype instead, the fallback `_dataframe_normalize_claimed_arrow`
+        # documents. Every layout lands as the claimed type, and each
+        # single-array layout in the same bytes the zero-copy Arrow path
+        # sends.
+        stamps = [
+            datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)] * 6
+        real_astype = pd.Series.astype
+        object_copies = []
+
+        def recording_astype(series, dtype, *args, **kwargs):
+            if dtype is object:
+                object_copies.append(series.name)
+            return real_astype(series, dtype, *args, **kwargs)
+
+        for kind, width, type_tag in (
+                ('uuid', 16, 0x0C), ('long256', 32, 0x0D)):
+            values = [bytes([i]) * width for i in range(1, 7)]
+            ty = pyarrow.binary(width)
+            layouts = (
+                ('one array', False,
+                 pyarrow.chunked_array([pyarrow.array(values, ty)])),
+                ('one array with a null', False,
+                 pyarrow.chunked_array([pyarrow.array(
+                     [values[0], None] + values[2:], ty)])),
+                ('all null', False,
+                 pyarrow.chunked_array([pyarrow.array([None] * 6, ty)])),
+                ('extension type', False,
+                 pyarrow.chunked_array([pyarrow.ExtensionArray.from_storage(
+                     self._custom_extension_type(width),
+                     pyarrow.array(values, ty))])),
+                ('sliced', True,
+                 pyarrow.chunked_array([pyarrow.array(
+                     [bytes(width)] * 2 + values, ty).slice(2)])),
+                ('two chunks', True,
+                 pyarrow.chunked_array([
+                     pyarrow.array(values[:3], ty),
+                     pyarrow.array(values[3:], ty)])),
+            )
+            for label, copies, column in layouts:
+                with self.subTest(kind=kind, layout=label):
+                    def frame(ts_col):
+                        df = pd.DataFrame({
+                            'c': pd.arrays.ArrowExtensionArray(column),
+                            'ts': ts_col,
+                        })
+                        df.attrs['questdb'] = {
+                            'version': 1, 'columns': {'c': {'kind': kind}}}
+                        return df
+
+                    # A NumPy timestamp column routes the frame onto the
+                    # manual planner; the unit is pinned as in
+                    # `test_a_reshaped_claimed_column_matches_the_arrow_path`.
+                    mixed = frame(pd.to_datetime(stamps).as_unit('us'))
+                    del object_copies[:]
+                    with mock.patch.object(
+                            pd.Series, 'astype', recording_astype):
+                        payload = self._dataframe_wire_payload(
+                            mixed, table_name='attrs_round_trip', at='ts')
+                    self.assertEqual(object_copies, ['c'] if copies else [])
+                    self.assertEqual(
+                        dict(_first_qwp_table_column_types(payload))['c'],
+                        type_tag)
+                    if label != 'two chunks':
+                        # The Arrow path sends one message per chunk,
+                        # so only a single array compares byte for byte.
+                        self.assertEqual(
+                            payload,
+                            self._dataframe_wire_payload(
+                                frame(pd.array(stamps, dtype=pd.ArrowDtype(
+                                    pyarrow.timestamp('us', 'UTC')))),
+                                table_name='attrs_round_trip', at='ts'))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_claimed_fixed_size_binary_column_splits_into_batches(self):
+        # A write split into several batches slices the column's own
+        # buffer and null bitmap at each batch boundary. The same values
+        # in two chunks take the object-dtype copy instead, so both
+        # routes are split the same way and owe the same bytes in every
+        # batch.
+        rows = 21
+        stamps = pd.to_datetime(
+            [datetime.datetime(2025, 1, 1)] * rows).as_unit('us')
+
+        def payloads(df):
+            with QwpAckServer(record_payloads=True) as server:
+                conf = (
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+                with qi.QuestDB.from_conf(conf) as client:
+                    client.dataframe(
+                        df, table_name='attrs_round_trip', at='ts',
+                        max_rows_per_batch=5)
+                stats = server.snapshot()
+            self.assertEqual(stats['errors'], [])
+            return [
+                payload for payload in stats['binary_payloads']
+                if int.from_bytes(payload[6:8], 'little') > 0]
+
+        for kind, width in (('uuid', 16), ('long256', 32)):
+            with self.subTest(kind=kind):
+                column = pyarrow.array(
+                    [None if row % 3 == 1 else bytes([row]) * width
+                     for row in range(rows)],
+                    pyarrow.binary(width))
+
+                def frame(chunks):
+                    df = pd.DataFrame({
+                        'c': pd.arrays.ArrowExtensionArray(
+                            pyarrow.chunked_array(chunks)),
+                        'ts': stamps,
+                    })
+                    df.attrs['questdb'] = {
+                        'version': 1, 'columns': {'c': {'kind': kind}}}
+                    return df
+
+                own_buffer = payloads(frame([column]))
+                # A null bitmap holds batch boundaries to whole bytes,
+                # so five rows per batch become eight.
+                self.assertEqual(len(own_buffer), 3)
+                self.assertEqual(
+                    own_buffer,
+                    payloads(frame(
+                        [column.slice(0, 10), column.slice(10)])))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_an_all_null_column_keeps_only_a_claim_it_can_carry(self):
         # The object and masked shapes reach the planner the same way,
         # and a claim it cannot use leaves the column where it found

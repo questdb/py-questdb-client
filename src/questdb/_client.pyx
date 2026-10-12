@@ -3892,9 +3892,9 @@ cdef object _dataframe_columnar_plan_failures(
                 col_target_t.col_target_column_binary,
                 col_target_t.col_target_column_arrow):
             # Column-QWP-only targets reached via `_FIELD_TARGETS_QWP`.
-            # Each currently reachable target's source-set in
-            # `_TARGET_TO_SOURCES` is a singleton, so the source is
-            # already constrained by routing. The contiguous-buffer +
+            # Routing has already held each one's source to its set in
+            # `_TARGET_TO_SOURCES`, and the append handles every member
+            # of that set. The contiguous-buffer +
             # validity checks above cover layout; the per-type FFI
             # handles the wire encoding. col_target_column_arrow delegates
             # type validation to the Rust importer.
@@ -5483,7 +5483,37 @@ cdef void_int _dataframe_columnar_append_field(
             _dataframe_columnar_append_pyobj_bytes(
                 chunk, col, prebuilt, row_offset, row_count)
             return 0
-        raise RuntimeError('Unsupported columnar binary field source.')
+        if col.setup.source == col_source_t.col_source_fsb_claimed_arrow:
+            # The Arrow value buffer is already packed 16- or 32-byte
+            # rows, the layout the claimed kind's NumPy dtype reads, so
+            # it goes out as it stands with the column's own validity.
+            # The plan checks have held it to one zero-offset array.
+            if strncmp(col.setup.arrow_schema.format,
+                       _ARROW_FMT_FSB16, 5) == 0:
+                numpy_dtype = qwp_numpy_dtype.qwp_numpy_s16
+                element_size = 16
+            elif strncmp(col.setup.arrow_schema.format,
+                         _ARROW_FMT_FSB32, 5) == 0:
+                numpy_dtype = qwp_numpy_dtype.qwp_numpy_s32
+                element_size = 32
+            else:
+                raise RuntimeError(
+                    'Claimed fixed-size binary column is neither 16 nor '
+                    '32 bytes wide.')
+            with nogil:
+                ok = qwp_chunk_append_numpy_column(
+                    chunk,
+                    col.name.buf,
+                    col.name.len,
+                    numpy_dtype,
+                    (<const uint8_t*>data) + row_offset * element_size,
+                    row_count * element_size,
+                    row_count,
+                    validity_ptr,
+                    NULL,
+                    &err)
+        else:
+            raise RuntimeError('Unsupported columnar binary field source.')
     elif col.setup.target == col_target_t.col_target_column_str:
         if col.setup.source == col_source_t.col_source_str_pyobj:
             _dataframe_columnar_append_pyobj_str(
@@ -5732,16 +5762,17 @@ cdef object _dataframe_normalize_at_timestamp(object df, object at):
 
 
 cdef object _claimed_arrow_col_reshape_dtype(
-        object types, object raw_ty, object ty, str kind):
+        object types, object raw_ty, object ty, str kind, object series):
     """The dtype an Arrow-backed claimed column has to be copied to for
     the manual planner to honour its claim, or None where the column
     carries it as it stands.
 
-    A claim reaches the wire as the NumPy dtype named in the append
-    call, so it only lands on columns the planner sends as raw buffers.
-    A column handed to the native Arrow importer instead carries no type
-    hint, and `qwp_chunk_append_arrow_column` takes no per-column type
-    override, so those are the ones that need reshaping.
+    An integer claim reaches the wire as the NumPy dtype named in the
+    append call, so it only lands on columns the planner sends as raw
+    buffers. A column handed to the native Arrow importer instead
+    carries no type hint, and `qwp_chunk_append_arrow_column` takes no
+    per-column type override, so those are the ones that need
+    reshaping.
 
     The matching NumPy width is the copy to make where the claim has
     one: it keeps the column a raw buffer and costs a memcpy, where
@@ -5749,6 +5780,13 @@ cdef object _claimed_arrow_col_reshape_dtype(
     more for a column of any size. The caller downgrades a NumPy width
     to object for a column holding a null, which a NumPy integer dtype
     cannot express.
+
+    UUID on a bare 16-byte column and LONG256 on a 32-byte one depend
+    on the column's layout, which is why `series` is passed in. The
+    classifier reads those two claims itself and sends the Arrow value
+    buffer as it stands, so a column that is one zero-offset array
+    needs no copy and gets None; any other layout gets object, the
+    fallback `_dataframe_normalize_claimed_arrow` describes.
 
     `_attrs_override_fits` has already held each kind to the Arrow
     types listed here, so the widths not named are the ones it rejects.
@@ -5774,15 +5812,44 @@ cdef object _claimed_arrow_col_reshape_dtype(
         return 'uint16'
     if kind == 'uuid':
         # A `pa.uuid()` column states its own type to the importer and
-        # already lands as UUID. A bare 16-byte column is refused by the
-        # planner outright, which reshaping avoids.
+        # already lands as UUID.
         if (isinstance(raw_ty, _PYARROW.lib.BaseExtensionType)
                 and raw_ty.extension_name == _ARROW_EXT_UUID):
             return None
-        return object
-    # LONG256 is a 32-byte fixed binary, a width NumPy has no integer
-    # dtype for, so object is the only shape left.
+    # UUID on a bare 16-byte column and LONG256 on a 32-byte one: the
+    # planner sends the Arrow value buffer as it stands when there is
+    # one buffer to send, and object dtype is the fallback for the rest.
+    # `_dataframe_normalize_claimed_arrow` sets out what that costs.
+    if _arrow_col_is_one_zero_offset_buffer(series):
+        return None
     return object
+
+
+cdef bint _arrow_col_is_one_zero_offset_buffer(object series) except -1:
+    """Whether the planner can send this Arrow-backed column's value
+    buffer as it stands.
+
+    The planner's direct encoders address `buffers[1]` and the validity
+    bitmap from their first byte, and take one array for the whole
+    column, so `_dataframe_columnar_plan_failures` refuses any other
+    layout with "v1 requires one contiguous zero-offset buffer". This
+    asks the same question of the arrays the planner will export: it
+    reads them through the same `pa.Array.from_pandas` call
+    `_dataframe_series_to_arrow_chunks` makes, which for an `ArrowDtype`
+    column hands back the arrays pandas holds without copying them.
+    """
+    cdef object array = _PYARROW.Array.from_pandas(series)
+    cdef object buffers
+    if isinstance(array, _PYARROW.ChunkedArray):
+        if array.num_chunks != 1:
+            return False
+        array = array.chunk(0)
+    if array.offset != 0:
+        return False
+    buffers = array.buffers()
+    return (len(buffers) >= 2
+            and buffers[1] is not None
+            and (array.null_count == 0 or buffers[0] is not None))
 
 
 cdef int _geohash_slot_for_width(Py_ssize_t width) noexcept:
@@ -6025,23 +6092,56 @@ cdef object _polars_reinterpret_unsigned_geohash(
 
 
 cdef object _dataframe_normalize_claimed_arrow(object df):
-    """NumPy-dtype copies of the Arrow-backed columns whose round-trip
-    claim the manual planner cannot otherwise honour.
+    """NumPy-dtype or object-dtype copies of the Arrow-backed columns
+    whose round-trip claim the manual planner cannot honour in the
+    shape they arrive in.
 
     A frame mixing Arrow-backed and NumPy columns routes whole to this
-    planner, where a claim rides on the NumPy dtype named in the append
-    call. Columns handed to the native Arrow importer have nowhere to
-    put it, so their claim would be dropped and the column would land as
-    its storage type — IPV4, CHAR and GEOHASH as plain integers, UUID
-    and LONG256 refused — auto-creating the destination table with the
-    wrong column types.
+    planner, where an integer claim rides on the NumPy dtype named in
+    the append call. Columns handed to the native Arrow importer have
+    nowhere to put it, so their claim would be dropped and the column
+    would land as its storage type — CHAR and GEOHASH as plain
+    integers — auto-creating the destination table with the wrong
+    column types. A UUID or LONG256 claim on a bare fixed-size binary
+    column is read by the classifier instead, whose route sends the
+    column's own buffer, and the planner refuses that route for a column
+    in any layout but one zero-offset array.
 
     An integer claim copies to the NumPy width that carries it, which
-    stays a raw buffer the whole way to the wire. UUID, LONG256, and any
-    column holding a null copy to object dtype instead: that is the
-    shape `_dataframe_apply_roundtrip_overrides` covers for every
-    claimed kind, and what `dtype_backend='numpy_nullable'` hands these
-    columns back as, so both backends write the same bytes again.
+    stays a raw buffer the whole way to the wire. An integer column
+    holding a null copies to object dtype instead: that is the shape
+    `_dataframe_apply_roundtrip_overrides` covers for every claimed
+    kind, and what `dtype_backend='numpy_nullable'` hands these columns
+    back as, so both backends write the same bytes again.
+
+    UUID on a bare 16-byte column and LONG256 on a 32-byte one need no
+    copy. The Arrow value buffer of such a column is already a packed
+    run of 16- or 32-byte values, the layout `qwp_numpy_s16` and
+    `qwp_numpy_s32` read, and its validity bitmap is the one the append
+    call takes, nulls included. The classifier makes such a column
+    `col_source_fsb_claimed_arrow`, and the append sends the buffer as
+    it stands.
+
+    TRADE-OFF, kept on purpose: that route needs the column to be one
+    Arrow array starting at offset zero
+    (`_arrow_col_is_one_zero_offset_buffer`). A column in several
+    chunks -- a query result read in more than one batch, a
+    `pd.concat` -- or one sliced away from its start (`df.iloc[n:]`
+    with n > 0) copies to object dtype. That copy boxes one
+    `bytes` per cell, roughly 4-5x the per-cell cost and about 73 MB
+    of Python objects per million 32-byte cells, but it writes the
+    column where the alternative is a refusal. This planner refuses an
+    Arrow-backed column of any other type in several chunks, and one
+    sliced away from its start too unless it goes to the native Arrow
+    importer (variable-length binary, lists, millisecond timestamps):
+    integer, float, boolean and string columns get "v1 requires one
+    contiguous zero-offset buffer". So the fallback runs only on frames
+    whose other Arrow-backed columns are all in one array, or are
+    sliced and of those importer-bound types. Gathering the chunks into
+    one fresh Arrow buffer would make the copy a memcpy, but it would be
+    a third route for two kinds on layouts most kinds refuse, so the
+    fallback stays on the object route the `numpy_nullable` backend
+    already takes for the same columns.
 
     Only a frame that already fell back from the zero-copy Arrow path
     reaches here, and within it only the claimed columns that have no
@@ -6089,7 +6189,7 @@ cdef object _dataframe_normalize_claimed_arrow(object df):
             _log_roundtrip_claim_dropped(name, kind, dtype)
             continue
         target_dtype = _claimed_arrow_col_reshape_dtype(
-            types, raw_ty, ty, kind)
+            types, raw_ty, ty, kind, df.iloc[:, pos])
         if target_dtype is None:
             continue
         if target_dtype is not object and df.iloc[:, pos].isna().any():
@@ -6268,9 +6368,19 @@ cdef bint _roundtrip_claim_already_carried(
     it and none is missing. Without this, the claim such a frame comes
     back with would be reported as dropped on every write, on the one
     path the claim exists to serve.
+
+    `col_source_fsb_claimed_arrow` is the classifier acting on the
+    claim itself: it takes that source only for a `uuid` claim on a
+    16-byte column or a `long256` claim on a 32-byte one, so the width
+    already names the kind.
     """
     if kind == 'uuid':
-        return col.setup.source == col_source_t.col_source_uuid_pyobj
+        return (col.setup.source == col_source_t.col_source_uuid_pyobj
+                or col.setup.source
+                    == col_source_t.col_source_fsb_claimed_arrow)
+    if kind == 'long256':
+        return (col.setup.source
+                == col_source_t.col_source_fsb_claimed_arrow)
     if kind == 'ipv4':
         return col.setup.source == col_source_t.col_source_ipv4_pyobj
     return False

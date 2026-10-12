@@ -734,10 +734,17 @@ cdef enum col_source_t:
     col_source_decimal256_arrow =       805000
     # `arrow.uuid`-labeled FixedSizeBinary(16) — the canonical Arrow
     # shape egress emits for UUID columns. The label is what claims the
-    # column as UUID: an unlabeled 16-byte column is opaque bytes and
-    # routes through `col_source_arrow_passthrough` to BINARY. Column-QWP
-    # only; row-ILP has no serializer for this source.
+    # column as UUID: this planner refuses an unlabelled 16-byte column
+    # (see `_dataframe_series_resolve_arrow`). Column-QWP only; row-ILP
+    # has no serializer for this source.
     col_source_fsb16_arrow =            901000
+    # A bare 16- or 32-byte FixedSizeBinary column whose round-trip
+    # claim names UUID or LONG256, the width matching the kind. The
+    # claim is the label the column itself lacks, so the width alone
+    # decides the wire type, and the value buffer goes out as it is.
+    # `_dataframe_normalize_claimed_arrow` explains which such columns
+    # reach the planner in this shape. Column-QWP only.
+    col_source_fsb_claimed_arrow =      902000
     # PyObject sniff outputs for QuestDB-specific wire kinds.
     col_source_uuid_pyobj =             903100
     col_source_ipv4_pyobj =             904100
@@ -855,6 +862,7 @@ cdef dict _TARGET_TO_SOURCES = {
     },
     col_target_t.col_target_column_binary: {
         col_source_t.col_source_bytes_pyobj,
+        col_source_t.col_source_fsb_claimed_arrow,
     },
     col_target_t.col_target_column_arrow: {
         col_source_t.col_source_arrow_passthrough,
@@ -948,12 +956,14 @@ cdef tuple _FIELD_TARGETS_QWP = (
     col_target_t.col_target_column_arr_f64,
     col_target_t.col_target_column_decimal,
     # QuestDB-extension types whose Arrow source is unique
-    # (`arrow.uuid`-labeled FixedSizeBinary(16)). LONG256 is absent:
-    # its only claim is `questdb.column_type=long256` field metadata,
-    # which pyarrow drops when it exports a single column, so this
-    # planner can never select that target. Claiming LONG256 belongs to
-    # the Rust Arrow ingestion path, via `schema_overrides`, and a
-    # 32-byte column is refused here rather than sent as opaque bytes.
+    # (`arrow.uuid`-labeled FixedSizeBinary(16)). LONG256 is absent: no
+    # pandas column states it by its own type, since pyarrow drops the
+    # `questdb.column_type=long256` field metadata when it exports a
+    # single column, so nothing here could select that target. A
+    # `df.attrs['questdb']` LONG256 claim reaches the wire through
+    # `col_target_column_binary`, whose source or override names the
+    # 32-byte encoding, and an unclaimed 32-byte column is refused
+    # rather than sent as opaque bytes.
     col_target_t.col_target_column_uuid,
     col_target_t.col_target_column_binary,
     col_target_t.col_target_column_arrow)
@@ -1125,6 +1135,8 @@ cdef enum col_dispatch_code_t:
         col_target_t.col_target_at + col_source_t.col_source_datetime_pyobj
     col_dispatch_code_column_binary__bytes_pyobj = \
         col_target_t.col_target_column_binary + col_source_t.col_source_bytes_pyobj
+    col_dispatch_code_column_binary__fsb_claimed_arrow = \
+        col_target_t.col_target_column_binary + col_source_t.col_source_fsb_claimed_arrow
 
 
 # Int values in order for sorting (as needed for API's sequential coupling).
@@ -1557,6 +1569,9 @@ cdef class PandasCol:
     cdef str name
     cdef object dtype
     cdef object series
+    # The `kind` of the column's `df.attrs['questdb']` claim, read only
+    # for the column-QWP planner, or None.
+    cdef str claim_kind
 
     def __init__(
             self,
@@ -1566,6 +1581,7 @@ cdef class PandasCol:
         self.name = name
         self.dtype = dtype
         self.series = series
+        self.claim_kind = None
 
 cdef void_int _dataframe_resolve_symbols(
         object df,
@@ -2438,6 +2454,23 @@ cdef void_int _dataframe_series_resolve_arrow(
         ext_name = arrowtype.extension_name
         arrowtype = arrowtype.storage_type
 
+    # A round-trip claim is a label: `uuid` on a 16-byte column or
+    # `long256` on a 32-byte one makes it `col_source_fsb_claimed_arrow`,
+    # whose value buffer is already the wire layout. An `arrow.uuid`
+    # column keeps its own source below, which states UUID to the
+    # native importer.
+    if (qwp_planner
+            and arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
+            and ext_name != _ARROW_EXT_UUID
+            and ((arrowtype.byte_width == 16
+                    and pandas_col.claim_kind == 'uuid')
+                or (arrowtype.byte_width == 32
+                    and pandas_col.claim_kind == 'long256'))):
+        _dataframe_series_as_arrow(pandas_col, col)
+        col.setup.source = col_source_t.col_source_fsb_claimed_arrow
+        col.scale = 0
+        return 0
+
     # An unlabelled 16- or 32-byte column is refused: this planner only
     # ever sees pandas frames, and a pandas frame may have dropped the
     # label on the way in. `_ARROW_FMT_FSB16` explains the rule, which
@@ -2950,11 +2983,21 @@ cdef void_int _dataframe_resolve_args(
         tuple field_targets) except -1:
     cdef ssize_t name_col
     cdef ssize_t at_col
+    cdef object cols_meta
+    cdef PandasCol pandas_col
 
     cdef list pandas_cols = [
         PandasCol(name, df.dtypes.iloc[index], series)
         for index, (name, series) in enumerate(df.items())]
     cdef bint qwp_planner = field_targets is _FIELD_TARGETS_QWP
+    if qwp_planner:
+        # The classifier reads the claim for one shape only: a bare
+        # 16- or 32-byte Arrow column, which it refuses without one.
+        cols_meta = _roundtrip_columns_meta(df)
+        if cols_meta:
+            for pandas_col in pandas_cols:
+                pandas_col.claim_kind = _roundtrip_kind(
+                    cols_meta.get(pandas_col.name))
     _dataframe_resolve_cols(
         b, pandas_cols, cols, any_cols_need_gil_out, qwp_planner)
     name_col = _dataframe_resolve_table_name(
