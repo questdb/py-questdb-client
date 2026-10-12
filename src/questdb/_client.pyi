@@ -1083,8 +1083,9 @@ class PooledReader:
     :meth:`QuestDB.reader`; it holds one pooled reader connection for
     its lifetime and runs queries on it sequentially via :meth:`query`.
     ``close()`` (or leaving the ``with`` block) releases the
-    connection: back to the pool if the last query was drained cleanly,
-    dropped otherwise.
+    connection: back to the pool if the last query reached its terminal
+    on a live connection (a clean drain, a successful ``cancel()``, or a
+    server-side error), dropped otherwise.
 
     Queries are strictly sequential. Closing an undrained result
     terminates the lease; call ``cancel()`` before ``close()`` to
@@ -1100,7 +1101,7 @@ class PooledReader:
         binds: Optional[Union[list, tuple]] = None,
         *,
         reset_symbol_dict: bool = True,
-        timeout: Optional[Union[int, timedelta]] = None,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
     ) -> QueryResult:
         """
         Execute a SQL query on the lease's connection and return a
@@ -1117,7 +1118,7 @@ class PooledReader:
         sql: str,
         binds: Optional[Union[list, tuple]] = None,
         *,
-        timeout: Optional[Union[int, timedelta]] = None,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
     ) -> Optional[ExecDone]:
         """
         Run a statement on the lease's connection and discard whatever
@@ -1270,7 +1271,7 @@ class QuestDB:
         binds: Optional[Union[list, tuple]] = None,
         *,
         reset_symbol_dict: bool = True,
-        timeout: Optional[Union[int, timedelta]] = None,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
     ) -> QueryResult:
         """
         Execute a SQL query and return a :class:`QueryResult`.
@@ -1292,7 +1293,7 @@ class QuestDB:
         runs under the server-wide ``query.timeout``.
 
         Requires a server advertising ``CAP_QUERY_TIMEOUT``: against an older
-        one the query is refused before anything is sent, with
+        one a non-zero timeout is refused before anything is sent, with
         ``QuestDBErrorCode.UnsupportedServer``, rather than silently running
         under the server default; the connection is untouched. On expiry the
         error carries ``QuestDBErrorCode.QueryTimeout`` and the connection
@@ -1307,7 +1308,7 @@ class QuestDB:
         sql: str,
         binds: Optional[Union[list, tuple]] = None,
         *,
-        timeout: Optional[Union[int, timedelta]] = None,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
     ) -> Optional[ExecDone]:
         """
         Run a statement and discard whatever it returns.
@@ -1463,7 +1464,9 @@ class QueryResult:
         """Iterate the result as tuples of Python objects, one batch at a
         time, with ``None`` for SQL NULL. Needs neither pyarrow nor pandas.
         Every call returns the same iterator; after :meth:`cancel` no
-        further rows are yielded, after :meth:`close` it raises."""
+        further rows are yielded, after :meth:`close` it raises. A fresh
+        call raises once the stream ended with an error or its iterator was
+        closed."""
 
     @property
     def exec_done(self) -> Optional[ExecDone]:
@@ -1475,7 +1478,8 @@ class QueryResult:
     def cancel(self) -> None:
         """Cancel the query and drain to terminal. The result remains
         open until :meth:`close` or context exit. On failure, it is
-        closed. Idempotent after success."""
+        closed. Idempotent after success. A result not yet read cannot be
+        read afterwards: every read method raises."""
 
     def close(self) -> None:
         """Release the cursor and reader. Terminal connections return
@@ -1512,7 +1516,7 @@ class Sender:
         token: Optional[str] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,
+        auth_timeout: Union[int, timedelta] = 15000,
         tls_verify: bool = True,
         tls_ca: Optional[TlsCa] = None,
         tls_roots=None,
@@ -1546,7 +1550,7 @@ class Sender:
         token: Optional[str] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,
+        auth_timeout: Union[int, timedelta] = 15000,
         tls_verify: bool = True,
         tls_ca: Optional[TlsCa] = None,
         tls_roots=None,
@@ -1590,7 +1594,7 @@ class Sender:
         token: Optional[str] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,
+        auth_timeout: Union[int, timedelta] = 15000,
         tls_verify: bool = True,
         tls_ca: Optional[TlsCa] = None,
         tls_roots=None,

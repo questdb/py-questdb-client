@@ -29,6 +29,9 @@ import decimal
 import gc
 import ipaddress
 import os
+import signal
+import threading
+import time
 import unittest
 import uuid
 
@@ -192,6 +195,18 @@ class TestTimeoutArgument(unittest.TestCase):
             conv(np.int64(-1))
         with self.assertRaises(TypeError):
             conv(np.float64(1.0))
+
+    def test_numpy_timedelta64_and_bool_rejected(self):
+        # `np.timedelta64` registers as an integer: read as a count, 2 s in
+        # nanoseconds would become a 23-day timeout.
+        import numpy as np
+        conv = qdb._client._debug_query_timeout_to_millis
+        for bad in (np.timedelta64(2_000_000_000, 'ns'),
+                    np.timedelta64(2, 's'), np.timedelta64('NaT'),
+                    np.bool_(True)):
+            with self.subTest(bad=bad):
+                with self.assertRaises(TypeError):
+                    conv(bad)
 
     def test_pandas_timedelta_rounds_up_below_a_millisecond(self):
         # A `pandas.Timedelta` is a `datetime.timedelta` with nanoseconds.
@@ -581,8 +596,8 @@ class TestRowEgressLive(_LiveCase):
             result = db.query('select x from long_sequence(100000)')
             rows = result.iter_rows()
             next(rows)
-            del rows
-            result.close()
+            del rows, result
+            gc.collect()
             self.assertEqual(_pool_stats(db), (0, 0))
             self.assertEqual(
                 list(db.query('select 1 as a').iter_rows()), [(1,)])
@@ -618,6 +633,21 @@ class TestRowEgressLive(_LiveCase):
                 list(result.iter_rows())
         self.assertEqual(
             ctx.exception.code, qdb.QuestDBErrorCode.InvalidTimestamp)
+
+    def test_iter_rows_after_an_error_raises(self):
+        # A stream that ended in an error must not look like an empty one
+        # when asked for its rows again.
+        sql = ('select case when x = 30000 '
+               'then cast(253402300800000000 as timestamp) '
+               'else cast(x as timestamp) end as t from long_sequence(40000)')
+        with self.db.query(sql) as result:
+            with self.assertRaises(qdb.QuestDBError):
+                list(result.iter_rows())
+            with self.assertRaises(qdb.QuestDBError) as ctx:
+                result.iter_rows()
+            self.assertEqual(result.columns(), [('t', 'TIMESTAMP')])
+        self.assertEqual(
+            ctx.exception.code, qdb.QuestDBErrorCode.InvalidApiCall)
 
     def test_schema_probe_keeps_the_lease_usable(self):
         # `columns()` on a `LIMIT 0` probe must read the result to its end,
@@ -675,6 +705,50 @@ class TestRowEgressLive(_LiveCase):
                 result.cancel()
                 self.assertEqual(list(rows), [])
             self.assertEqual(_pool_stats(db), (0, 1))
+            with db.query('select x from long_sequence(100000)') as result:
+                rows = result.iter_rows()
+                for _ in range(20000):
+                    next(rows)
+                result.cancel()
+                self.assertEqual(list(rows), [])
+            self.assertEqual(_pool_stats(db), (0, 1))
+
+    def test_cancel_before_reading_refuses_every_read(self):
+        # The cancelled stream carries no schema any more; an empty result
+        # would read as a non-SELECT.
+        reads = {
+            'columns': lambda r: r.columns(),
+            'iter_rows': lambda r: r.iter_rows(),
+        }
+        try:
+            import pandas  # noqa: F401
+            reads['to_pandas'] = lambda r: r.to_pandas()
+            reads['iter_pandas'] = lambda r: r.iter_pandas()
+        except ImportError:
+            pass
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            for name, read in reads.items():
+                with self.subTest(read=name):
+                    with db.query('select x from long_sequence(10)') as result:
+                        result.cancel()
+                        for _ in range(2):
+                            with self.assertRaises(qdb.QuestDBError) as ctx:
+                                read(result)
+                            self.assertEqual(
+                                ctx.exception.code,
+                                qdb.QuestDBErrorCode.InvalidApiCall)
+                            self.assertIn('cancelled', str(ctx.exception))
+                    self.assertEqual(_pool_stats(db), (0, 1))
+
+    def test_iter_rows_after_closing_the_iterator_raises(self):
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            with db.query('select x from long_sequence(100000)') as result:
+                rows = result.iter_rows()
+                next(rows)
+                rows.close()
+                with self.assertRaises(qdb.QuestDBError):
+                    result.iter_rows()
+            self.assertEqual(_pool_stats(db)[0], 0)
 
     def test_columns_answer_after_close_but_iter_rows_raises(self):
         result = self.db.query('select 1 as a')
@@ -714,14 +788,22 @@ class TestRowEgressLive(_LiveCase):
                     self.assertEqual(_pool_stats(db), (0, 1))
 
     def test_lease_survives_a_server_error(self):
+        bad = 'select no_such_column from long_sequence(1)'
+        paths = {'iter_rows': lambda r: list(r.query(bad).iter_rows())}
+        try:
+            import pyarrow  # noqa: F401
+            paths['iter_arrow'] = lambda r: list(r.query(bad).iter_arrow())
+        except ImportError:
+            pass
         with self.db.reader() as r:
-            for _ in range(2):
-                with self.assertRaises(qdb.QuestDBError):
-                    list(r.query(
-                        'select no_such_column from long_sequence(1)'
-                    ).iter_rows())
-                self.assertEqual(
-                    list(r.query('select 1 as a').iter_rows()), [(1,)])
+            for name, path in paths.items():
+                with self.subTest(path=name):
+                    for _ in range(2):
+                        with self.assertRaises(qdb.QuestDBError):
+                            path(r)
+                        self.assertEqual(
+                            list(r.query('select 1 as a').iter_rows()),
+                            [(1,)])
 
     def test_pooled_reader_rejects_a_bad_timeout_and_stays_usable(self):
         # Argument validation runs before the lease is touched, so a bad
@@ -733,6 +815,130 @@ class TestRowEgressLive(_LiveCase):
                 r.execute('select 1', timeout='1s')
             self.assertEqual(
                 list(r.query('select 1 as a').iter_rows()), [(1,)])
+
+    def test_too_many_binds_keeps_the_connection(self):
+        # Refused before anything is written, so the connection is untouched.
+        too_many = [1] * 1025
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            list(db.query('select 1 as a').iter_rows())
+            with self.assertRaises(qdb.QuestDBError) as ctx:
+                db.query('select 1 as a', too_many)
+            self.assertEqual(
+                ctx.exception.code, qdb.QuestDBErrorCode.InvalidApiCall)
+            self.assertEqual(_pool_stats(db), (0, 1))
+        with self.db.reader() as r:
+            list(r.query('select 1 as a').iter_rows())
+            with self.assertRaises(qdb.QuestDBError):
+                r.query('select 1 as a', too_many)
+            self.assertEqual(
+                list(r.query('select 2 as a').iter_rows()), [(2,)])
+
+    def test_decimal_binds_round_trip(self):
+        D = decimal.Decimal
+        cases = [
+            (D('12.3400'), 'DECIMAL(18,4)'),
+            (D('-0.00'), 'DECIMAL(18,2)'),
+            (D('1E+17'), 'DECIMAL(18,0)'),
+            (D('-' + '9' * 18), 'DECIMAL(18,0)'),
+            (D('9' * 19), 'DECIMAL(38,0)'),
+            (D('-1E-20'), 'DECIMAL(38,20)'),
+            (D('9' * 38), 'DECIMAL(38,0)'),
+            (D('-' + '9' * 39), 'DECIMAL(76,0)'),
+            (D('9' * 76), 'DECIMAL(76,0)'),
+            (D('0E-100'), 'DECIMAL(76,76)'),
+            (D('0E+999999999'), 'DECIMAL(18,0)'),
+        ]
+        for value, type_name in cases:
+            with self.subTest(value=value):
+                with self.db.query('select $1 as v', [value]) as result:
+                    self.assertEqual(result.columns(), [('v', type_name)])
+                    (got,), = result.iter_rows()
+                self.assertEqual(got, value)
+
+    def test_decimal_bind_rejections(self):
+        # Range-checked before the value is built: a huge exponent must not
+        # cost a ~10**9-digit integer first.
+        D = decimal.Decimal
+        for bad in (D('1E+999999999'), D('9' * 77), D('1E-80'),
+                    D('NaN'), D('-Infinity')):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    self.db.query('select $1 as v', [bad])
+
+    def test_decimal_bind_reads_the_real_digits(self):
+        # A subclass overriding `as_tuple` cannot steer the encoding.
+        class Shifty(decimal.Decimal):
+            def as_tuple(self):
+                return decimal.DecimalTuple(0, (9,) * 80, 0)
+
+        with self.db.query('select $1 as v', [Shifty('1.5')]) as result:
+            (got,), = result.iter_rows()
+        self.assertEqual(got, decimal.Decimal('1.5'))
+
+    def test_iter_pandas_raises_after_close(self):
+        try:
+            import pandas  # noqa: F401
+        except ImportError:
+            self.skipTest('needs pandas')
+        result = self.db.query('select x from long_sequence(100000)')
+        frames = result.iter_pandas()
+        next(frames)
+        result.close()
+        with self.assertRaises(qdb.QuestDBError):
+            next(frames)
+
+    def _interrupt_close_while_a_worker_reads(self, result, close):
+        # Ctrl-C during a `close()` that waits on a worker blocked in a
+        # network read gets through at once; the worker stops after the
+        # batch it is reading.
+        try:
+            list(self.db.query('select * from sleep(0.001)').iter_rows())
+        except qdb.QuestDBError:
+            self.skipTest('sleep() needs QuestDB 10.0+')
+        errors = []
+
+        def consume():
+            try:
+                list(result.iter_rows())
+            except qdb.QuestDBError as e:
+                errors.append(e)
+
+        old_handler = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, old_handler)
+        worker = threading.Thread(target=consume)
+        worker.start()
+        time.sleep(0.5)
+        timer = threading.Timer(
+            0.3, signal.pthread_kill,
+            (threading.main_thread().ident, signal.SIGINT))
+        self.addCleanup(timer.cancel)
+        with self.assertRaises(KeyboardInterrupt):
+            timer.start()
+            close()
+            time.sleep(10)
+        self.assertTrue(worker.is_alive())
+        worker.join(60)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIn('closed', str(errors[0]))
+
+    @unittest.skipUnless(
+        hasattr(signal, 'pthread_kill'), 'needs signal.pthread_kill')
+    def test_interrupt_while_close_waits_for_a_worker(self):
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            result = db.query('select * from sleep(3)')
+            self._interrupt_close_while_a_worker_reads(result, result.close)
+            result.close()
+            self.assertEqual(_pool_stats(db)[0], 0)
+
+    @unittest.skipUnless(
+        hasattr(signal, 'pthread_kill'), 'needs signal.pthread_kill')
+    def test_interrupt_while_lease_close_waits_for_a_worker(self):
+        with qdb.connect(f'ws::addr={self.addr};') as db:
+            lease = db.reader()
+            result = lease.query('select * from sleep(3)')
+            self._interrupt_close_while_a_worker_reads(result, lease.close)
+            self.assertEqual(_pool_stats(db)[0], 0)
 
     def test_lease_finalised_mid_decode_is_safe(self):
         # A `PooledReader` reachable only through a reference cycle can be
@@ -852,7 +1058,8 @@ class TestRowEgressLive(_LiveCase):
             'with db.query("select 1 as a") as r:\n'
             '    assert r.columns() == [("a", "INT")]\n'
             '    assert list(r.iter_rows()) == [(1,)]\n'
-            'db.close()\n')
+            'db.close()\n'
+            'assert "pyarrow" not in sys.modules\n')
         subprocess.run(
             [sys.executable, '-c', code], check=True,
             cwd=str(patch_path.PROJ_ROOT))

@@ -1468,6 +1468,8 @@ cdef extern from "questdb/egress/qwp_reader.h":
         uint64_t* out_rows_affected
         ) noexcept nogil
 
+    const uint64_t QWP_READER_ROWS_AFFECTED_UNKNOWN
+
     qwp_reader_arrow_batch_result qwp_reader_cursor_next_arrow_batch(
         qwp_reader_cursor* cursor,
         ArrowArray* out_array,

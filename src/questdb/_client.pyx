@@ -61,7 +61,7 @@ __all__ = [
 
 # For prototypes: https://github.com/cython/cython/tree/master/Cython/Includes
 from libc.stdint cimport uint8_t, uint64_t, int64_t, int32_t, uint32_t, \
-    uintptr_t, INT64_MAX, INT64_MIN, UINT64_MAX
+    uintptr_t, INT64_MAX, INT64_MIN
 from libc.stdlib cimport malloc, calloc, realloc, free, qsort
 from libc.string cimport strncmp, memset, memcpy, strlen
 from libc.math cimport isnan, floor
@@ -82,6 +82,7 @@ from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
 from cpython.pycapsule cimport (PyCapsule_GetPointer, PyCapsule_IsValid,
                                 PyCapsule_New)
 from cpython.ref cimport Py_INCREF, Py_DECREF
+from cpython.exc cimport PyErr_Fetch, PyErr_Restore
 
 from .line_sender cimport *
 from .rpyutils cimport *
@@ -105,10 +106,9 @@ from dataclasses import dataclass
 from cpython.bytes cimport (PyBytes_FromStringAndSize,
                             PyBytes_GET_SIZE, PyBytes_AsString)
 
-import collections
 import datetime
 import decimal
-import numbers
+import operator
 import os
 import threading
 import time
@@ -1858,8 +1858,7 @@ cdef uint64_t _timedelta_to_millis(cp_timedelta timedelta):
     if millis < 0:
         raise ValueError(
             f'Negative timedelta not allowed: {timedelta!r}.')
-    if millis == 0 and (
-            timedelta.days or timedelta.seconds or timedelta.microseconds):
+    if millis == 0 and timedelta:
         # Never silently turn a positive finite duration into 0ms, which
         # several options interpret as "no deadline".
         return 1
@@ -3525,9 +3524,6 @@ cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
                     second = PyDateTime_DATE_GET_SECOND(dt)
                     us = PyDateTime_DATE_GET_MICROSECOND(dt)
                     days = _days_from_civil(year, month, day)
-                    # The two wide literals are cast: untyped, Cython
-                    # treats a literal beyond 32 bits as a Python object
-                    # and boxes the whole expression per row.
                     values[i] = (
                         days * <int64_t>86_400_000_000
                         + <int64_t>hour * <int64_t>3_600_000_000
@@ -3536,10 +3532,10 @@ cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
                         + <int64_t>us)
                 else:
                     delta = dt - epoch_aware
-                    values[i] = <int64_t>(
-                        delta.days * 86_400_000_000
-                        + delta.seconds * 1_000_000
-                        + delta.microseconds)
+                    values[i] = (
+                        <int64_t>delta.days * <int64_t>86_400_000_000
+                        + <int64_t>delta.seconds * 1_000_000
+                        + <int64_t>delta.microseconds)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
             else:
@@ -5426,6 +5422,8 @@ cdef list _pandas_fixed_size_binary_overrides(object df):
             kind = <int>qwp_arrow_override_long256
         else:
             continue
+        if isinstance(name, bytes):
+            name = name.decode('utf-8')
         out.append((str(name).encode('utf-8'), kind, 0))
     return out
 
@@ -6602,6 +6600,10 @@ cdef class QuestDB:
               in the API)
             - :class:`TimestampMicros` → TIMESTAMP
             - :class:`TimestampNanos` → TIMESTAMP_NS
+            - ``datetime.date`` → DATE
+            - ``decimal.Decimal`` → the narrowest DECIMAL that holds it,
+              with its fractional digits as the scale (up to 76 digits and
+              scale 76; NaN and infinities raise :class:`ValueError`)
             - ``uuid.UUID`` → UUID
 
             Any other type raises :class:`TypeError` naming the placeholder.
@@ -6672,9 +6674,13 @@ cdef class QuestDB:
         db = self._begin_db_use('query')
         try:
             reader_handle = _borrow_reader_from_pool(db)
-            cursor_handle = _execute_query(
-                reader_handle, sql, binds, reset_symbol_dict, True,
-                timeout_ms)
+            try:
+                cursor_handle = _execute_query(
+                    reader_handle, sql, binds, reset_symbol_dict, True,
+                    timeout_ms)
+            except:
+                reader_handle._close()
+                raise
         finally:
             self._end_db_use()
         return QueryResult(cursor_handle)
@@ -9044,19 +9050,19 @@ cdef class PooledReader:
         self._reader = None
         self._last_cursor = None
         self._handle = None
-        if last is not None:
-            last._free()
-            if last._cursor != NULL:
-                # The free was deferred: this thread is finalising the
-                # lease from inside a decode of that very cursor (cyclic
-                # GC, a signal handler). Hand the reader to the cursor;
-                # the deferred free closes it once the decoder lets go.
+        try:
+            if last is not None:
+                last._close()
+        finally:
+            if last is not None and last._cursor != NULL:
+                # Deferred or interrupted: whoever frees the cursor closes
+                # the reader.
                 last._owns_reader = True
                 reader = None
-        if reader is not None:
-            reader._close()
-        if handle is not None:
-            handle._end_db_use()
+            if reader is not None:
+                reader._close()
+            if handle is not None:
+                handle._end_db_use()
 
     def __enter__(self):
         with self._lock:
@@ -9143,9 +9149,10 @@ cdef class PooledReader:
         Release the lease's reader connection. Idempotent.
 
         A still-open (undrained) last result is freed first, which
-        tears down the connection; a cleanly-drained connection is
-        returned to the pool, any other is dropped and the pool refills
-        on demand.
+        tears down the connection; a connection whose last query reached
+        its terminal (a clean drain, a successful ``cancel()``, or a
+        server-side error) is returned to the pool, any other is dropped
+        and the pool refills on demand.
         """
         with self._lock:
             self._release_locked()
@@ -9155,5 +9162,8 @@ cdef class PooledReader:
 
     def __dealloc__(self):
         if self._lock is not None:
-            with self._lock:
-                self._release_locked()
+            try:
+                with self._lock:
+                    self._release_locked()
+            except KeyboardInterrupt:
+                _rearm_interrupt()

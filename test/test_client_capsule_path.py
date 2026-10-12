@@ -164,6 +164,39 @@ class TestCapsulePathPyArrow(unittest.TestCase):
         self.assertGreaterEqual(stats['qwp1_frames'], 4)
 
 
+    @unittest.skipIf(
+        pa is None or pd is None
+        or not hasattr(pd.DataFrame, '__arrow_c_stream__'),
+        'needs pyarrow and pandas >= 2.2')
+    def test_pandas_fixed_size_binary_claim_with_non_str_labels(self):
+        # The claim must name the column the way pyarrow exports it. A
+        # claimed UUID goes out in wire order; unclaimed, it would land
+        # verbatim as BINARY.
+        value = bytes(range(16))
+        for label in ('u', 0, b'u'):
+            df = pd.DataFrame({
+                label: pd.Series(
+                    pa.array([value], pa.binary(16)),
+                    dtype=pd.ArrowDtype(pa.binary(16))),
+                'ts': pd.Series(
+                    pa.array([_ts_us(2025, 1, 1)], pa.timestamp('us')),
+                    dtype=pd.ArrowDtype(pa.timestamp('us'))),
+            })
+            with self.subTest(label=label):
+                with QwpAckServer(record_payloads=True) as server:
+                    client = qi.QuestDB.from_conf(_client_conf(server.port))
+                    try:
+                        client.dataframe(df, table_name='u', at='ts')
+                    finally:
+                        client.close()
+                    server.wait_binary_frames_settled()
+                    stats = server.snapshot()
+                self.assertEqual(stats['errors'], [])
+                payload = b''.join(stats['binary_payloads'])
+                self.assertIn(value[::-1], payload)
+                self.assertNotIn(value, payload)
+
+
 class TestCapsulePathPolars(unittest.TestCase):
 
     @unittest.skipIf(pl is None, 'polars not installed')
@@ -436,6 +469,24 @@ class TestScalarAt(unittest.TestCase):
             server_bytes = self._ingest_recorded(df, qi.ServerTimestamp)
             self.assertIn(sentinel, scalar_bytes)
             self.assertNotIn(sentinel, server_bytes)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_tz_aware_datetime_object_column_on_wire(self):
+        cells = [
+            datetime.datetime(
+                2021, 1, 1, 12, 0, 0, 123456, tzinfo=datetime.timezone.utc),
+            datetime.datetime(
+                1960, 6, 1, 7, 30, 0, 1,
+                tzinfo=datetime.timezone(datetime.timedelta(hours=-5))),
+            pd.Timestamp('2021-03-04T05:06:07.890123', tz='UTC'),
+        ]
+        utc = [c.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+               for c in cells]
+        obj_df = pd.DataFrame({'ts': pd.Series(cells, dtype=object)})
+        np_df = pd.DataFrame({'ts': pd.Series(utc).astype('datetime64[us]')})
+        self.assertEqual(
+            self._ingest_recorded(obj_df, qi.ServerTimestamp),
+            self._ingest_recorded(np_df, qi.ServerTimestamp))
 
     @unittest.skipIf(pl is None, 'polars not installed')
     def test_pre_epoch_datetime_rejected(self):

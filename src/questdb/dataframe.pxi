@@ -2782,8 +2782,6 @@ cdef void_int _dataframe_serialize_cell_column_ts__datetime_pyobj(
             _fqn(type(<object>cell)) + '.')
     dt = <object>cell
     if dt.tzinfo is None:
-        # The two wide literals are cast: untyped, Cython treats a literal
-        # beyond 32 bits as a Python object and boxes the expression per row.
         micros = (
             _days_from_civil(
                 PyDateTime_GET_YEAR(dt),
@@ -2795,10 +2793,10 @@ cdef void_int _dataframe_serialize_cell_column_ts__datetime_pyobj(
             + <int64_t>PyDateTime_DATE_GET_MICROSECOND(dt))
     else:
         delta = dt - _EPOCH_AWARE_UTC
-        micros = <int64_t>(
-            delta.days * 86_400_000_000
-            + delta.seconds * 1_000_000
-            + delta.microseconds)
+        micros = (
+            <int64_t>delta.days * <int64_t>86_400_000_000
+            + <int64_t>delta.seconds * 1_000_000
+            + <int64_t>delta.microseconds)
     if not line_sender_buffer_column_ts_micros(ls_buf, col.name, micros, &err):
         raise c_err_to_py(err)
     return 0

@@ -2130,7 +2130,19 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.Protocol.Http,
             '127.0.0.1',
             9000,
-            auth_timeout=datetime.timedelta(microseconds=500))
+            request_timeout=datetime.timedelta(microseconds=500))
+        sender.close(False)
+
+    def test_sub_microsecond_pandas_timedelta_is_not_truncated_to_zero(self):
+        try:
+            import pandas as pd
+        except ImportError:
+            self.skipTest('needs pandas')
+        sender = qi.Sender(
+            qi.Protocol.Http,
+            '127.0.0.1',
+            9000,
+            request_timeout=pd.Timedelta(500, 'ns'))
         sender.close(False)
 
     def test_from_conf_preserves_escaped_semicolon_in_c_only_qwpws_key(self):

@@ -65,6 +65,13 @@ Breaking changes
   :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` once a
   result has been drained, and stays there after the result is closed.
 
+- A :class:`QueryResult <questdb.QueryResult>` cancelled before it was read
+  can no longer be read: ``to_pandas()``, ``to_arrow()``, the ``iter_*``
+  methods and the Arrow PyCapsule stream raise
+  ``QuestDBErrorCode.InvalidApiCall`` instead of returning an empty result
+  with no columns, which was indistinguishable from a statement that has
+  no result set.
+
 New
 ~~~
 
@@ -111,8 +118,8 @@ New
   is the point for a long transform.
 
   Requires a server advertising ``CAP_QUERY_TIMEOUT``
-  (questdb/questdb#7768). Against an older one the query is refused before
-  anything is sent, with ``QuestDBErrorCode.UnsupportedServer``, rather
+  (questdb/questdb#7768). Against an older one a non-zero timeout is refused
+  before anything is sent, with ``QuestDBErrorCode.UnsupportedServer``, rather
   than silently running under the server default; the connection is
   untouched by the refusal, so raise the server's ``query.timeout`` instead,
   or pass ``timeout=0`` on the same handle or lease. On expiry the error
@@ -135,7 +142,8 @@ New
   is bound as ``DATE``; a decimal as the narrowest ``DECIMAL`` that holds it
   — 64, 128 or 256 bits for up to 18, 38 or 76 digits — with its fractional
   digits as the scale, so it reaches a ``DECIMAL`` column exactly instead of
-  through a ``DOUBLE``. ``NaN`` and infinities raise ``ValueError``.
+  through a ``DOUBLE``. ``NaN``, infinities, and values needing more than 76
+  digits or a scale above 76 raise ``ValueError``.
 
 Fixed
 ~~~~~
@@ -144,17 +152,24 @@ Fixed
   only through a reference cycle could be collected by the cyclic garbage
   collector while one of its results was being decoded, on the same
   thread; its finaliser then freed the native cursor under the decoder and
-  the process crashed. ``to_pandas()`` and ``iter_pandas()`` were exposed,
-  and the new row path more so. The free is now deferred until the decoder
+  the process crashed. ``to_pandas()`` and ``iter_pandas()`` were exposed.
+  The free is now deferred until the decoder
   has let go of the batch, and the consumer sees a plain
   ``QuestDBError('cursor is closed')``. For the same reason,
   :meth:`QueryResult.cancel <questdb.QueryResult.cancel>` called from a
   signal handler while a batch of that result is being decoded now raises
   ``QuestDBErrorCode.InvalidApiCall`` instead of invalidating the batch.
-- A ``KeyboardInterrupt`` that arrived while ``PooledReader.close()`` was
-  waiting for a worker thread to finish a batch was lost, and the lease's
-  connection leaked. The interrupt is now re-raised once the connection has
-  been released.
+- On POSIX, a ``KeyboardInterrupt`` that arrived while
+  ``QueryResult.close()`` or ``PooledReader.close()`` waited for another
+  thread's in-flight batch (Ctrl-C while joining a worker, say) was lost,
+  and the connection leaked. The interrupt now propagates at once, and the
+  worker stops after its current batch and releases the connection.
+- The default ``iter_pandas()`` stopped as if the result were complete when
+  the result was closed underneath it; it now raises
+  ``QuestDBError('cursor is closed')``, like the other iterators.
+- A sub-microsecond ``pandas.Timedelta`` given as a sender timeout or
+  interval (``auth_timeout``, ``retry_timeout``, ...) became 0 ms instead of
+  rounding up to 1 ms.
 
 5.0.1 (unreleased)
 ------------------

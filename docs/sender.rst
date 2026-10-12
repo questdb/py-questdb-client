@@ -162,6 +162,23 @@ faster than appending rows one by one.
 For how the 4.x row-buffer dataframe methods map onto the 5.0 API, see the
 :doc:`5.0 migration guide <migration>`.
 
+:meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` ingests through the
+pooled columnar QWP path and always uses the direct (non-store-and-forward)
+column sender, independent of ``sf_dir``.
+
+On success, the call returns only after every row has been committed. Most
+loads queue their batches and commit once at the end. A very large Arrow load
+checkpoints about every 100 batches to keep memory bounded. The client may
+checkpoint earlier if the connection cannot queue another batch or if a batch
+must be split to fit. If a later batch fails, the exception means that the load
+did not finish, not necessarily that no rows landed. Any already committed
+prefix from that call remains in the table, and retrying the entire DataFrame
+can duplicate it unless the table uses suitable ``DEDUP UPSERT KEYS``.
+
+On a transient connection failure, the client re-sends from the caller's
+DataFrame only when it knows that no rows landed. Otherwise it reports the
+error instead of risking a blind retry.
+
 String vs Symbol Columns
 ------------------------
 QuestDB has a concept of symbols which are a more efficient way of storing
@@ -1099,6 +1116,8 @@ Either way, you can easily switch between the two protocols by changing:
 * The port number (ILP/TCP default is 9009, ILP/HTTP default is 9000,
   QWP/UDP default is 9007).
 
+* Any :ref:`authentication parameters <sender_conf_auth>` such as ``username``, ``token``, et cetera.
+
 .. _query_egress:
 
 Querying data
@@ -1144,8 +1163,9 @@ types: ``None`` (SQL NULL), ``bool``, ``int``, ``float``, ``str``,
 ``datetime.datetime``, :class:`TimestampMicros <questdb.TimestampMicros>`,
 :class:`TimestampNanos <questdb.TimestampNanos>`, ``datetime.date`` (a
 ``DATE``), ``decimal.Decimal`` (a ``DECIMAL`` of the narrowest width that
-holds it, with its fractional digits as the scale; ``NaN`` and infinities
-raise ``ValueError``) and ``uuid.UUID``.
+holds it, with its fractional digits as the scale; ``NaN``, infinities and
+values beyond 76 digits or a scale of 76 raise ``ValueError``) and
+``uuid.UUID``.
 
 Rows of Python objects
 ----------------------
@@ -1215,7 +1235,7 @@ milliseconds (any integer type, a ``numpy.int64`` included); a
 value below one millisecond rounded up to 1 ms.
 
 This needs a server advertising ``CAP_QUERY_TIMEOUT``. Against an older one
-the query is refused before anything is sent, with
+a non-zero timeout is refused before anything is sent, with
 ``QuestDBErrorCode.UnsupportedServer``, instead of silently running under
 the server default. The connection is untouched by the refusal, so raise the
 server's ``query.timeout`` instead, or pass ``timeout=0`` on the same handle
@@ -1263,6 +1283,9 @@ frame, the dedicated methods avoid the re-reconciliation that
 ``polars.DataFrame(result)`` / ``to_arrow().to_pandas()`` pay on
 ``SYMBOL``-heavy results.
 
+Reader leases
+-------------
+
 For several queries in a row, call :meth:`QuestDB.reader <questdb.QuestDB.reader>` to take a
 **reader lease** — the read-side twin of :meth:`QuestDB.sender <questdb.QuestDB.sender>`. The
 lease borrows one reader connection from the pool for its lifetime and runs
@@ -1290,22 +1313,3 @@ on the thread that created it (threads sharing a
 :class:`QuestDB <questdb.QuestDB>` handle each take their own lease). A
 :class:`QueryResult <questdb.QueryResult>` may be handed to a worker thread;
 join that worker before using the lease for its next query.
-
-The same :class:`QuestDB <questdb.QuestDB>` can ingest DataFrames through the pooled columnar QWP
-path with :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`. DataFrame ingestion always uses the direct
-(non-store-and-forward) column sender, independent of ``sf_dir``.
-
-On success, the call returns only after every row has been committed. Most
-loads queue their batches and commit once at the end. A very large Arrow load
-checkpoints about every 100 batches to keep memory bounded. The client may
-checkpoint earlier if the connection cannot queue another batch or if a batch
-must be split to fit. If a later batch fails, the exception means that the load
-did not finish, not necessarily that no rows landed. Any already committed
-prefix from that call remains in the table, and retrying the entire DataFrame
-can duplicate it unless the table uses suitable ``DEDUP UPSERT KEYS``.
-
-On a transient connection failure, the client re-sends from the caller's
-DataFrame only when it knows that no rows landed. Otherwise it reports the
-error instead of risking a blind retry.
-
-* Any :ref:`authentication parameters <sender_conf_auth>` such as ``username``, ``token``, et cetera.

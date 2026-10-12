@@ -36,7 +36,7 @@ except ImportError:
 import questdb._client as qi
 
 
-QUESTDB_VERSION = '9.4.3'
+QUESTDB_VERSION = '10.0.1'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
@@ -5944,23 +5944,29 @@ class TestEgressFailover(unittest.TestCase):
         self.qdb_plain.retry_check_table(table, min_rows=n_rows)
         return table
 
+    def _hard_bounce(self):
+        # Since QuestDB 10.0 a graceful stop ends a stream still in flight
+        # with QUERY_ERROR(CANCELLED), which is not failed over.
+        self.qdb_plain._proc.kill()
+        self.qdb_plain._proc.wait()
+        self.qdb_plain.stop()
+        self.qdb_plain.start()
+
     def test_materialise_whole_transparent_across_bounce(self):
         """``to_arrow`` / ``to_pandas`` / ``to_polars`` complete with the
         full, in-order result even when the server bounces mid-stream:
         the installed reset callback discards the partial accumulation
         and the query replays from batch-0."""
         n = 200000
-        table = self._seed(n)
         expected = list(range(n))
 
         with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000')) as client:
-            result = client.query(f'SELECT v FROM {table} ORDER BY ts')
+            result = client.query(f'SELECT x - 1 AS v FROM long_sequence({n})')
             # Bounce before the (single-use) materialisation drains the
             # stream: a mid-query failover re-executes and the reset
             # discards anything already buffered.
-            self.qdb_plain.stop()
-            self.qdb_plain.start()
+            self._hard_bounce()
             table_out = result.to_arrow()
         self.assertEqual(table_out.column('v').to_pylist(), expected)
 
@@ -5968,13 +5974,11 @@ class TestEgressFailover(unittest.TestCase):
         """Default ``to_pandas`` (the numpy accumulator we own) is
         likewise transparent across a bounce."""
         n = 200000
-        table = self._seed(n)
         expected = list(range(n))
         with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000')) as client:
-            result = client.query(f'SELECT v FROM {table} ORDER BY ts')
-            self.qdb_plain.stop()
-            self.qdb_plain.start()
+            result = client.query(f'SELECT x - 1 AS v FROM long_sequence({n})')
+            self._hard_bounce()
             df = result.to_pandas()
         self.assertEqual(df['v'].tolist(), expected)
 
@@ -5984,13 +5988,11 @@ class TestEgressFailover(unittest.TestCase):
         except ImportError:
             self.skipTest('polars not installed')
         n = 200000
-        table = self._seed(n)
         expected = list(range(n))
         with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000')) as client:
-            result = client.query(f'SELECT v FROM {table} ORDER BY ts')
-            self.qdb_plain.stop()
-            self.qdb_plain.start()
+            result = client.query(f'SELECT x - 1 AS v FROM long_sequence({n})')
+            self._hard_bounce()
             df = result.to_polars()
         self.assertEqual(df['v'].to_list(), expected)
 
@@ -6042,8 +6044,8 @@ class TestEgressFailover(unittest.TestCase):
         re-reading."""
         # Use a generated result large enough that the server is still
         # producing after the first small batch. A pre-seeded table can
-        # finish and buffer before the graceful fixture bounce breaks the
-        # WebSocket, making the test depend on timing.
+        # finish and buffer before the bounce breaks the WebSocket, making
+        # the test depend on timing.
         n = 100000000
         with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000',
@@ -6053,8 +6055,7 @@ class TestEgressFailover(unittest.TestCase):
             first = next(it)
             self.assertGreater(first.num_rows, 0)
             # First batch delivered; bounce so the next pull fails over.
-            self.qdb_plain.stop()
-            self.qdb_plain.start()
+            self._hard_bounce()
             with self.assertRaises(qi.QuestDBError) as cm:
                 for _ in it:
                     pass
@@ -6072,14 +6073,33 @@ class TestEgressFailover(unittest.TestCase):
                 f'SELECT x - 1 AS v FROM long_sequence({n})').iter_pandas()
             first = next(it)
             self.assertGreater(len(first), 0)
-            self.qdb_plain.stop()
-            self.qdb_plain.start()
+            self._hard_bounce()
             with self.assertRaises(qi.QuestDBError) as cm:
                 for _ in it:
                     pass
             self.assertEqual(
                 cm.exception.code,
                 qi.QuestDBErrorCode.FailoverWouldDuplicate)
+
+    def test_iter_rows_surfaces_failover_would_duplicate(self):
+        """Same contract for ``iter_rows``; a fresh ``iter_rows()`` call
+        afterwards raises rather than looking like an empty result."""
+        n = 100000000
+        with qi.QuestDB.from_conf(
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
+            result = client.query(f'SELECT x - 1 AS v FROM long_sequence({n})')
+            it = result.iter_rows()
+            self.assertEqual(next(it), (0,))
+            self._hard_bounce()
+            with self.assertRaises(qi.QuestDBError) as cm:
+                for _ in it:
+                    pass
+            self.assertEqual(
+                cm.exception.code,
+                qi.QuestDBErrorCode.FailoverWouldDuplicate)
+            with self.assertRaises(qi.QuestDBError):
+                result.iter_rows()
 
 
 class _FakeStatusServer:
