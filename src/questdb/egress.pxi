@@ -9,6 +9,8 @@
 
 cimport numpy as cnp
 
+import _thread
+
 
 cdef inline object _reader_err_code_to_py(questdb_error_code code):
     # The error model is unified: `questdb_error_code` is an alias of
@@ -250,7 +252,10 @@ cdef class _CursorHandle:
         finally:
             self._lock.release()
         if interrupted:
-            PyErr_SetInterrupt()
+            try:
+                _thread.interrupt_main()
+            except BaseException:
+                pass
 
     def __dealloc__(self):
         self._free()

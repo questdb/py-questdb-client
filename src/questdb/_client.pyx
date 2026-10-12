@@ -68,7 +68,6 @@ from libc.math cimport isnan, floor
 from cpython.datetime cimport datetime as cp_datetime
 from cpython.datetime cimport timedelta as cp_timedelta
 from cpython.datetime cimport import_datetime, timedelta_new
-from cpython.exc cimport PyErr_SetInterrupt
 from cpython.datetime cimport (
     PyDateTime_GET_YEAR, PyDateTime_GET_MONTH, PyDateTime_GET_DAY,
     PyDateTime_DATE_GET_HOUR, PyDateTime_DATE_GET_MINUTE,
