@@ -105,7 +105,7 @@ Once Step 1 resolves the target, begin the final review report with its immutabl
 
 `Reviewing PR #<number> at level <N>, head <full headRefOid>, base <full baseRefOid>.`
 
-Use the complete lowercase 40-character GitHub OIDs; never abbreviate them. In range mode, identify the resolved base and head commits, or label an uncommitted head as the working tree. This identity line is mandatory even when the review has no findings because `approve-pr` and `reject-pr` consume it. If the level was defaulted, mention separately that level 3 exists for full review.
+Use the complete lowercase 40-character GitHub OIDs; never abbreviate them. In range mode, identify the resolved base and head commits, or label an uncommitted head as the working tree. This identity line is mandatory even when the review has no findings: it records exactly which revisions the verdict applies to. If the level was defaulted, mention separately that level 3 exists for full review.
 
 ## Spawning review agents
 
