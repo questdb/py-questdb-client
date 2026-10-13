@@ -1380,12 +1380,12 @@ class ExecDone(NamedTuple):
     """A non-SELECT statement's terminal ``EXEC_DONE`` report, as returned
     by :meth:`QuestDB.execute` / :meth:`PooledReader.execute` and carried on
     :attr:`QueryResult.exec_done`. ``rows_affected`` is the number of rows
-    an ``INSERT`` or ``UPDATE`` touched, and ``None`` when the server reports
-    no count (statements executed at parse time). ``op_type`` is the server's
+    an ``INSERT`` or ``UPDATE`` touched, and ``0`` for a statement that
+    carries no count (one executed at parse time). ``op_type`` is the server's
     QWP operation-type byte, carried through as an opaque ``int``."""
 
     op_type: int
-    rows_affected: Optional[int]
+    rows_affected: int
 
 
 class QueryResult:
@@ -1472,7 +1472,7 @@ class QueryResult:
     def exec_done(self) -> Optional[ExecDone]:
         """A non-SELECT's terminal ``EXEC_DONE`` as an :class:`ExecDone`
         ``(op_type, rows_affected)`` once the result has been drained, else
-        ``None``. ``rows_affected`` is ``None`` when the server reports no
+        ``None``. ``rows_affected`` is ``0`` for a statement that carries no
         count. Still available after :meth:`close`."""
 
     def cancel(self) -> None:

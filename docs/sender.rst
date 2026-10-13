@@ -1149,9 +1149,9 @@ named tuple ``(op_type, rows_affected)``, or ``None`` for a statement that
 streamed a result set instead. The same report is on
 :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` once a result
 has been drained, and stays there after the result is closed.
-``rows_affected`` is meaningful for ``INSERT`` and ``UPDATE``, and ``None``
-when the server reports no count, as statements executed at parse time
-currently do; ``op_type`` is the server's operation-type byte, carried
+``rows_affected`` is meaningful for ``INSERT`` and ``UPDATE``, and ``0``
+for a statement that carries no count, such as one executed at parse time;
+``op_type`` is the server's operation-type byte, carried
 through as an opaque ``int``::
 
     done = db.execute('INSERT INTO trades VALUES (now(), \'AAPL\', 1.5)')

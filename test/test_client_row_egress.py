@@ -32,6 +32,7 @@ import os
 import signal
 import threading
 import time
+import tracemalloc
 import unittest
 import uuid
 
@@ -325,6 +326,30 @@ class TestRowEgressLive(_LiveCase):
         with self.db.query('select 1 as a') as result:
             self.assertEqual(result.columns(), result.columns())
 
+    def test_columns_decode_no_rows(self):
+        built = []
+        real_uuid = uuid.UUID
+
+        class CountingUUID(real_uuid):
+            __slots__ = ()
+
+            def __init__(self, *args, **kwargs):
+                built.append(None)
+                super().__init__(*args, **kwargs)
+
+        uuid.UUID = CountingUUID
+        try:
+            with self.db.query(
+                    'select to_uuid(x, x) as u from long_sequence(1000)'
+                    ) as result:
+                self.assertEqual(result.columns(), [('u', 'UUID')])
+                self.assertEqual(len(built), 0)
+                rows = list(result.iter_rows())
+        finally:
+            uuid.UUID = real_uuid
+        self.assertEqual(len(rows), 1000)
+        self.assertEqual(len(built), 1000)
+
     def test_timestamp_ns_type_name(self):
         row_type = self.db.query(
             "select cast(0 as timestamp_ns) as t").columns()
@@ -572,6 +597,16 @@ class TestRowEgressLive(_LiveCase):
                 expected += 1
         self.assertEqual(expected, n + 1)
 
+    def test_repeated_symbols_across_columns_and_batches(self):
+        sql = ("select cast('k' || (x % 3) as symbol) s, "
+               "cast('k' || (x % 3) as symbol) t, 'k' || (x % 3) v "
+               'from long_sequence(30000)')
+        with self.db.query(sql) as result:
+            rows = list(result.iter_rows())
+        self.assertEqual(len(rows), 30000)
+        self.assertEqual(
+            [(s, t) for s, t, _ in rows], [(v, v) for _, _, v in rows])
+
     def test_symbol_dictionary_carries_over_on_a_lease(self):
         # With `reset_symbol_dict=False` the second query's batches code
         # their symbols against the connection dictionary the first query
@@ -586,6 +621,24 @@ class TestRowEgressLive(_LiveCase):
                 reset_symbol_dict=False).iter_rows())
         self.assertEqual([s for s, in first], [str(x) for x in range(1, 51)])
         self.assertEqual([s for s, in second], [str(x) for x in range(26, 76)])
+
+    def test_warm_symbol_dictionary_is_decoded_on_demand(self):
+        with self.db.reader() as r:
+            for _ in r.query(
+                    "select cast('k' || cast(x as string) as symbol) as s "
+                    'from long_sequence(50000)',
+                    reset_symbol_dict=False).iter_rows():
+                pass
+            tracemalloc.start()
+            try:
+                rows = list(r.query(
+                    "select cast('k7' as symbol) as s",
+                    reset_symbol_dict=False).iter_rows())
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        self.assertEqual(rows, [('k7',)])
+        self.assertLess(peak, 256 * 1024)
 
     def test_abandoned_iterator_drops_the_connection(self):
         # Walking away mid-stream must not wedge the pool. The cursor never
@@ -976,25 +1029,27 @@ class TestRowEgressLive(_LiveCase):
                     keep = exc
                 return lease.query(sql).iter_rows(), keep
 
-            gc.disable()
-            uuid_module.UUID = CollectingUUID
-            try:
-                rows, keep = open_rows()
-                # The first batch was decoded while the lease was alive;
-                # hand it out, then make the cycle garbage and arm the
-                # collection for the decode of the second batch.
-                for _ in range(64):
-                    next(rows)
-                keep = None
-                state['armed'] = True
-                with self.assertRaises(qdb.QuestDBError) as ctx:
-                    for _ in rows:
-                        pass
-                self.assertIn('closed', str(ctx.exception))
-                self.assertGreater(state['collected'], 0)
-            finally:
-                uuid_module.UUID = real_uuid
-                gc.enable()
+            # Arm for the first batch, which `iter_rows()` leaves undecoded
+            # on the cursor, or for the second, after the first is out.
+            for rows_before_arming in (0, 64):
+                with self.subTest(rows_before_arming=rows_before_arming):
+                    state.update(armed=False, collected=None)
+                    gc.disable()
+                    uuid_module.UUID = CollectingUUID
+                    try:
+                        rows, keep = open_rows()
+                        for _ in range(rows_before_arming):
+                            next(rows)
+                        keep = None
+                        state['armed'] = True
+                        with self.assertRaises(qdb.QuestDBError) as ctx:
+                            for _ in rows:
+                                pass
+                        self.assertIn('closed', str(ctx.exception))
+                        self.assertGreater(state['collected'], 0)
+                    finally:
+                        uuid_module.UUID = real_uuid
+                        gc.enable()
             self.assertEqual(
                 list(db.query('select 1 as a').iter_rows()), [(1,)])
 
@@ -1148,14 +1203,14 @@ class TestRowEgressLive(_LiveCase):
         finally:
             self.db.execute('drop table if exists py_exec_done_paths')
 
-    def test_rows_affected_is_none_when_the_server_reports_none(self):
+    def test_rows_affected_is_zero_without_a_server_count(self):
         self.db.execute('drop table if exists py_exec_done_truncate')
         self.db.execute('create table py_exec_done_truncate (a int)')
         try:
             op_type, rows = self.db.execute(
                 'truncate table py_exec_done_truncate')
             self.assertIsInstance(op_type, int)
-            self.assertIsNone(rows)
+            self.assertEqual(rows, 0)
         finally:
             self.db.execute('drop table if exists py_exec_done_truncate')
 

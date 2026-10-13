@@ -4018,6 +4018,14 @@ class TestQueryResultFinalizer(unittest.TestCase):
         self.assertEqual(unraisable, [])
 
 
+class TestQueryResultCopy(unittest.TestCase):
+    def test_copy_is_refused(self):
+        import copy
+        result = qi.QueryResult(qi._CursorHandle())
+        with self.assertRaisesRegex(TypeError, 'cannot be copied'):
+            copy.copy(result)
+
+
 class TestBufferConstruction(unittest.TestCase):
     def test_ilp_construction(self):
         with mock.patch.object(warnings, 'warn') as warn:

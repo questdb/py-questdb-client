@@ -58,10 +58,10 @@ Breaking changes
   rows_affected)`` instead of ``None``; ``None`` is now returned only for a
   statement that streamed a result set. The protocol does carry the count —
   the previous documentation saying otherwise was wrong. ``rows_affected``
-  is meaningful for ``INSERT`` and ``UPDATE``, and ``None`` when the server
-  reports no count, as statements executed at parse time currently do;
-  ``op_type`` is the server's operation-type byte, carried through as an
-  opaque ``int``. The same report is on
+  is meaningful for ``INSERT`` and ``UPDATE``, and ``0`` for a statement
+  that carries no count, such as one executed at parse time; ``op_type`` is
+  the server's operation-type byte, carried through as an opaque ``int``.
+  The same report is on
   :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` once a
   result has been drained, and stays there after the result is closed.
 
@@ -170,6 +170,10 @@ Fixed
 - A sub-microsecond ``pandas.Timedelta`` given as a sender timeout or
   interval (``auth_timeout``, ``retry_timeout``, ...) became 0 ms instead of
   rounding up to 1 ms.
+- ``copy.copy()`` of a :class:`QueryResult <questdb.QueryResult>` produced
+  a second result over the same cursor: reading from both lost rows, and
+  dropping the copy closed the original's stream. It now raises
+  ``TypeError``.
 
 5.0.1 (unreleased)
 ------------------
