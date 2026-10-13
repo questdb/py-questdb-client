@@ -5142,81 +5142,55 @@ cdef bint _capsule_pyarrow_type_is_string_like(object field_type) except -1:
     return False
 
 
-cdef bint _capsule_pandas_dtype_is_string_like(object dtype) except -1:
-    cdef object storage
-    cdef object arrow_type
-    cdef object cat_dtype
-    if _PANDAS is None:
-        return False
-    if isinstance(dtype, _PANDAS.StringDtype):
-        storage = getattr(dtype, 'storage', None)
-        return storage == 'pyarrow'
-    if isinstance(dtype, _PANDAS.ArrowDtype):
-        _dataframe_require_pyarrow()
-        arrow_type = dtype.pyarrow_dtype
-        return _capsule_pyarrow_type_is_string_like(arrow_type)
-    if isinstance(dtype, _PANDAS.CategoricalDtype):
-        cat_dtype = dtype.categories.dtype
-        if cat_dtype == object:
-            return True
-        return _capsule_pandas_dtype_is_string_like(cat_dtype)
-    return False
-
-
-cdef object _capsule_get_string_column_names(object sliceable):
-    """Return names of all string-like columns (utf8 / large_utf8 /
-    utf8_view / dict-of-utf8). Supports polars DataFrame and pyarrow
-    Table / RecordBatch. Returns None if schema introspection is not
-    available on the input."""
-    cdef object schema
-    cdef object out
-    cdef object name
-    cdef object dtype
-    cdef object field_type
-    cdef int i
+cdef object _capsule_schema(object sliceable):
+    """Arrow schema of what pyarrow or pandas input exports through
+    ``__arrow_c_stream__`` (for pandas, index levels included), or None
+    for other input."""
     if _is_pandas_dataframe_object(sliceable):
-        _dataframe_may_import_deps()
-        out = []
-        for name, dtype in sliceable.dtypes.items():
-            if _capsule_pandas_dtype_is_string_like(dtype):
-                out.append(name)
-        return out
-    if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
-        out = []
-        for name, dtype in sliceable.schema.items():
-            if _capsule_polars_dtype_is_string_like(dtype):
-                out.append(name)
-        return out
+        if _PYARROW is None:
+            _dataframe_require_pyarrow()
+        return _PYARROW.Schema.from_pandas(sliceable)
     if _PYARROW is None:
         try:
             _dataframe_require_pyarrow()
         except ImportError:
             return None
     if isinstance(sliceable, (_PYARROW.Table, _PYARROW.RecordBatch)):
-        schema = sliceable.schema
-        out = []
-        for i in range(len(schema.names)):
-            field_type = schema.field(i).type
-            if _capsule_pyarrow_type_is_string_like(field_type):
-                out.append(schema.names[i])
-        return out
+        return sliceable.schema
     return None
 
 
-cdef object _capsule_column_is_string_like(object sliceable, str name):
+cdef object _capsule_get_string_column_names(
+        object sliceable, object schema):
+    """Return names of all string-like columns (utf8 / large_utf8 /
+    dict-of-utf8). Returns None if schema introspection is not
+    available on the input."""
+    cdef object out
+    cdef object name
+    cdef object dtype
+    cdef object field
+    if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
+        out = []
+        for name, dtype in sliceable.schema.items():
+            if _capsule_polars_dtype_is_string_like(dtype):
+                out.append(name)
+        return out
+    if schema is None:
+        return None
+    out = []
+    for field in schema:
+        if _capsule_pyarrow_type_is_string_like(field.type):
+            out.append(field.name)
+    return out
+
+
+cdef object _capsule_column_is_string_like(
+        object sliceable, object schema, str name):
     """Returns True iff `name` is a string-like column on `sliceable`,
     False iff it is some other type, or None if schema introspection
     is not available on the input."""
     cdef object dtype
     cdef object field_type
-    if _is_pandas_dataframe_object(sliceable):
-        _dataframe_may_import_deps()
-        try:
-            dtype = sliceable.dtypes[name]
-        except KeyError:
-            raise KeyError(
-                f'symbols column {name!r} not found in the dataframe.')
-        return _capsule_pandas_dtype_is_string_like(dtype)
     if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
         try:
             dtype = sliceable.schema[name]
@@ -5224,49 +5198,27 @@ cdef object _capsule_column_is_string_like(object sliceable, str name):
             raise KeyError(
                 f'symbols column {name!r} not found in the dataframe.')
         return _capsule_polars_dtype_is_string_like(dtype)
-    if _PYARROW is None:
-        try:
-            _dataframe_require_pyarrow()
-        except ImportError:
-            return None
-    if isinstance(sliceable, (_PYARROW.Table, _PYARROW.RecordBatch)):
-        try:
-            field_type = sliceable.schema.field(name).type
-        except (KeyError, ValueError):
-            raise KeyError(
-                f'symbols column {name!r} not found in the dataframe.')
-        return _capsule_pyarrow_type_is_string_like(field_type)
-    return None
+    if schema is None:
+        return None
+    try:
+        field_type = schema.field(name).type
+    except (KeyError, ValueError):
+        raise KeyError(
+            f'symbols column {name!r} not found in the dataframe.')
+    return _capsule_pyarrow_type_is_string_like(field_type)
 
 
-cdef object _capsule_get_dict_string_column_names(object sliceable):
+cdef object _capsule_get_dict_string_column_names(
+        object sliceable, object schema):
     """Return names of dict-encoded string-like columns (polars
     Categorical / Enum or pyarrow Dictionary(*, utf8/large_utf8)).
     Returns None if schema introspection is not available."""
-    cdef object schema
     cdef object out
     cdef object name
     cdef object dtype
-    cdef object field_type
+    cdef object field
     cdef object value_type
     cdef object enum_t
-    cdef int i
-    if _is_pandas_dataframe_object(sliceable):
-        _dataframe_may_import_deps()
-        out = []
-        for name, dtype in sliceable.dtypes.items():
-            if (isinstance(dtype, _PANDAS.CategoricalDtype)
-                    and _capsule_pandas_dtype_is_string_like(dtype)):
-                out.append(name)
-            elif isinstance(dtype, _PANDAS.ArrowDtype):
-                _dataframe_require_pyarrow()
-                field_type = dtype.pyarrow_dtype
-                if _PYARROW.types.is_dictionary(field_type):
-                    value_type = field_type.value_type
-                    if (_PYARROW.types.is_string(value_type)
-                            or _PYARROW.types.is_large_string(value_type)):
-                        out.append(name)
-        return out
     if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
         out = []
         enum_t = getattr(_POLARS, 'Enum', None)
@@ -5276,26 +5228,20 @@ cdef object _capsule_get_dict_string_column_names(object sliceable):
             elif enum_t is not None and isinstance(dtype, enum_t):
                 out.append(name)
         return out
-    if _PYARROW is None:
-        try:
-            _dataframe_require_pyarrow()
-        except ImportError:
-            return None
-    if isinstance(sliceable, (_PYARROW.Table, _PYARROW.RecordBatch)):
-        schema = sliceable.schema
-        out = []
-        for i in range(len(schema.names)):
-            field_type = schema.field(i).type
-            if _PYARROW.types.is_dictionary(field_type):
-                value_type = field_type.value_type
-                if (_PYARROW.types.is_string(value_type)
-                        or _PYARROW.types.is_large_string(value_type)):
-                    out.append(schema.names[i])
-        return out
-    return None
+    if schema is None:
+        return None
+    out = []
+    for field in schema:
+        if _PYARROW.types.is_dictionary(field.type):
+            value_type = field.type.value_type
+            if (_PYARROW.types.is_string(value_type)
+                    or _PYARROW.types.is_large_string(value_type)):
+                out.append(field.name)
+    return out
 
 
-cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
+cdef object _resolve_symbols_to_overrides(
+        object sliceable, object schema, object symbols):
     """Translate `symbols` into a list of
     (name_bytes, kind, arg) tuples matching the shape returned by
     _validate_schema_overrides. `kind` is `qwp_arrow_override_symbol`
@@ -5328,7 +5274,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
         return []
 
     if symbols is False:
-        col_names = _capsule_get_dict_string_column_names(sliceable)
+        col_names = _capsule_get_dict_string_column_names(sliceable, schema)
         if col_names is None:
             return None
         out = []
@@ -5337,7 +5283,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
         return out
 
     if symbols is True:
-        col_names = _capsule_get_string_column_names(sliceable)
+        col_names = _capsule_get_string_column_names(sliceable, schema)
         if col_names is None:
             return None
         out = []
@@ -5371,7 +5317,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
             raise TypeError(
                 f'symbols entry must be str or int, got '
                 f'{type(entry).__name__}.')
-        is_str = _capsule_column_is_string_like(sliceable, name)
+        is_str = _capsule_column_is_string_like(sliceable, schema, name)
         if is_str is None:
             return None
         if not is_str:
@@ -5385,7 +5331,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
     # Match the row/numpy planner: an explicit symbols list marks only the
     # listed columns as symbols; every other dict-encoded (categorical)
     # column is forced to a plain VARCHAR field rather than auto-symbolized.
-    dict_names = _capsule_get_dict_string_column_names(sliceable)
+    dict_names = _capsule_get_dict_string_column_names(sliceable, schema)
     if dict_names is None:
         return None
     for name in dict_names:
@@ -5394,26 +5340,22 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
     return out
 
 
-cdef list _pandas_fixed_size_binary_overrides(object df):
-    """UUID / LONG256 claims for a pandas frame's ``FixedSizeBinary(16)``
-    / ``(32)`` columns.
+cdef list _pandas_fixed_size_binary_overrides(
+        object sliceable, object schema):
+    """UUID / LONG256 claims for the ``FixedSizeBinary(16)`` / ``(32)``
+    fields a pandas frame exports, index levels included.
 
     Pandas drops Arrow field metadata, and the native importer only maps a
     FixedSizeBinary column to UUID / LONG256 on an explicit claim, so these
     keep the per-column planner's classification on the capsule path.
     """
     cdef list out = []
-    cdef object name, dtype, pa_type
+    cdef object field, pa_type
     cdef int kind
-    if not _is_pandas_dataframe_object(df):
+    if not _is_pandas_dataframe_object(sliceable):
         return out
-    for name, dtype in df.dtypes.items():
-        pa_type = getattr(dtype, 'pyarrow_dtype', None)
-        if pa_type is None:
-            continue
-        if _PYARROW is None:
-            _dataframe_require_pyarrow()
-        pa_type = getattr(pa_type, 'storage_type', pa_type)
+    for field in schema:
+        pa_type = getattr(field.type, 'storage_type', field.type)
         if pa_type.id != _PYARROW.lib.Type_FIXED_SIZE_BINARY:
             continue
         if pa_type.byte_width == 16:
@@ -5422,9 +5364,7 @@ cdef list _pandas_fixed_size_binary_overrides(object df):
             kind = <int>qwp_arrow_override_long256
         else:
             continue
-        if isinstance(name, bytes):
-            name = name.decode('utf-8')
-        out.append((str(name).encode('utf-8'), kind, 0))
+        out.append((field.name.encode('utf-8'), kind, 0))
     return out
 
 
@@ -5678,12 +5618,14 @@ cdef bint _dataframe_client_try_capsule_path(
     if total_rows == 0:
         return True
 
-    symbol_overrides = _resolve_symbols_to_overrides(sliceable, symbols)
+    schema = _capsule_schema(sliceable)
+    symbol_overrides = _resolve_symbols_to_overrides(
+        sliceable, schema, symbols)
     if symbol_overrides is None:
         return False
     symbol_overrides = (
         list(symbol_overrides)
-        + _pandas_fixed_size_binary_overrides(sliceable))
+        + _pandas_fixed_size_binary_overrides(sliceable, schema))
     merged_overrides = _merge_capsule_overrides(
         symbol_overrides, validated_overrides)
 

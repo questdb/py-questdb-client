@@ -5321,6 +5321,38 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(col_types['region'], 'SYMBOL')
         self.assertEqual(col_types['note'], 'VARCHAR')
 
+    def test_arrow_symbols_apply_to_the_exported_index(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        ts_type = pa.timestamp('us', tz='UTC')
+        columns = {
+            'ts': pd.array(
+                [1700000000_000000, 1700000001_000000, 1700000002_000000],
+                dtype=pd.ArrowDtype(ts_type)),
+            'v': pd.array([1, 2, 3], dtype=pd.ArrowDtype(pa.int64())),
+        }
+        regions = ['us-east', 'us-west', 'us-east']
+        categorical = pd.CategoricalIndex(regions, name='region')
+        strings = pd.Index(
+            pd.array(regions, dtype=pd.ArrowDtype(pa.string())),
+            name='region')
+        cases = [
+            (categorical, False, 'VARCHAR'),
+            (categorical, [], 'VARCHAR'),
+            (categorical, ['region'], 'SYMBOL'),
+            (strings, True, 'SYMBOL'),
+        ]
+        for index, symbols, expected in cases:
+            with self.subTest(index=type(index).__name__, symbols=symbols):
+                table = self._table()
+                with qi.QuestDB.from_conf(self._conf()) as client:
+                    client.dataframe(
+                        pd.DataFrame(columns, index=index),
+                        table_name=table, at='ts', symbols=symbols)
+                resp = self.qdb_plain.retry_check_table(table, min_rows=3)
+                col_types = {c['name']: c['type'] for c in resp['columns']}
+                self.assertEqual(col_types['region'], expected)
+
     def test_ipv4_string_coercion_is_unsupported(self):
         """Unlike UUID (where the server parses VARCHAR strings
         into UUIDs), QuestDB does NOT currently support VARCHAR →

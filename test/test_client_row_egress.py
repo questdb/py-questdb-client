@@ -32,7 +32,6 @@ import os
 import signal
 import threading
 import time
-import tracemalloc
 import unittest
 import uuid
 
@@ -607,6 +606,18 @@ class TestRowEgressLive(_LiveCase):
         self.assertEqual(
             [(s, t) for s, t, _ in rows], [(v, v) for _, _, v in rows])
 
+    def test_symbol_cache_releases_its_strings(self):
+        if not hasattr(sys, 'getrefcount'):
+            self.skipTest('needs sys.getrefcount')
+        with self.db.query(
+                "select cast('k' || (x % 3) as symbol) s "
+                'from long_sequence(30000)') as result:
+            rows = list(result.iter_rows())
+        probe = rows[0][0]
+        del rows
+        control = ''.join(['k', probe[1:]])
+        self.assertEqual(sys.getrefcount(probe), sys.getrefcount(control))
+
     def test_symbol_dictionary_carries_over_on_a_lease(self):
         # With `reset_symbol_dict=False` the second query's batches code
         # their symbols against the connection dictionary the first query
@@ -623,6 +634,10 @@ class TestRowEgressLive(_LiveCase):
         self.assertEqual([s for s, in second], [str(x) for x in range(26, 76)])
 
     def test_warm_symbol_dictionary_is_decoded_on_demand(self):
+        try:
+            import tracemalloc
+        except ImportError:
+            self.skipTest('needs tracemalloc')
         with self.db.reader() as r:
             for _ in r.query(
                     "select cast('k' || cast(x as string) as symbol) as s "
@@ -1542,6 +1557,38 @@ class TestUuidByteOrder(_LiveCase):
         if isinstance(storage.type, pa.BaseExtensionType):
             storage = storage.storage
         self.assertIn(self.U.bytes, storage.to_pylist())
+
+    def test_arrow_fixed_size_binary_uuid_index(self):
+        try:
+            import pandas as pd
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('needs pandas and pyarrow')
+        uuids = pd.array([self.U.bytes], dtype=pd.ArrowDtype(pa.binary(16)))
+        indexes = {
+            'named': pd.Index(uuids, name='u'),
+            'multi': pd.MultiIndex.from_arrays(
+                [pd.array(['a'], dtype=pd.ArrowDtype(pa.string())), uuids],
+                names=['k', 'u']),
+        }
+        for shape, index in indexes.items():
+            with self.subTest(index=shape):
+                table = self._new_table()
+                frame = pd.DataFrame(
+                    {'v': pd.array([7], dtype=pd.ArrowDtype(pa.int64()))},
+                    index=index)
+                self.db.dataframe(
+                    frame, table_name=table, at=qdb.ServerTimestamp)
+                self._wait(table)
+                columns = dict(self.db.query(
+                    f"select \"column\", type from table_columns('{table}')"
+                    ).iter_rows())
+                self.assertEqual(columns['u'], 'UUID')
+                self.assertEqual(
+                    list(self.db.query(
+                        f'select cast(u as varchar), v from {table}'
+                        ).iter_rows()),
+                    [(str(self.U), 7)])
 
     def test_arrow_fixed_size_binary_long256_column(self):
         try:

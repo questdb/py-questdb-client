@@ -1559,23 +1559,27 @@ cdef class _SymbolStrings:
     (``reset_symbol_dict=False``) can carry far more entries than a result
     references, so nothing is decoded up front. Within one query the
     dictionary only grows, so a decoded string stays valid for the whole
-    result. Every non-NULL slot below ``_hi`` holds its own reference.
+    result. Each slot named in ``_decoded`` holds its own reference.
     """
     cdef PyObject** _slots
     cdef size_t _cap
-    cdef size_t _hi
+    cdef uint32_t* _decoded
+    cdef size_t _n_decoded
+    cdef size_t _decoded_cap
 
     def __cinit__(self):
         self._slots = NULL
         self._cap = 0
-        self._hi = 0
+        self._decoded = NULL
+        self._n_decoded = 0
+        self._decoded_cap = 0
 
     def __dealloc__(self):
         cdef size_t i
-        if self._slots != NULL:
-            for i in range(self._hi):
-                Py_XDECREF(self._slots[i])
-            free(self._slots)
+        for i in range(self._n_decoded):
+            Py_XDECREF(self._slots[self._decoded[i]])
+        free(self._decoded)
+        free(self._slots)
 
     cdef int _reserve(self, size_t entry_count) except -1:
         cdef size_t cap
@@ -1598,17 +1602,27 @@ cdef class _SymbolStrings:
 
     cdef str _decode(self, const qwp_reader_symbol_dict* sd, uint32_t code):
         cdef const qwp_reader_symbol_entry* e = &sd.entries[code]
+        cdef size_t cap
+        cdef uint32_t* decoded
         cdef str s
         if <uint64_t>e.offset + <uint64_t>e.length > <uint64_t>sd.heap_len:
             raise QuestDBError(
                 QuestDBErrorCode.ServerFlushError,
                 'corrupt symbol dictionary heap offsets')
+        if self._n_decoded == self._decoded_cap:
+            cap = max(<size_t>16, 2 * self._decoded_cap)
+            decoded = <uint32_t*>realloc(
+                self._decoded, cap * sizeof(uint32_t))
+            if decoded == NULL:
+                raise MemoryError()
+            self._decoded = decoded
+            self._decoded_cap = cap
         s = PyUnicode_FromStringAndSize(
             <const char*>(sd.heap + e.offset), <Py_ssize_t>e.length)
         Py_INCREF(s)
         self._slots[code] = <PyObject*>s
-        if <size_t>code >= self._hi:
-            self._hi = <size_t>code + 1
+        self._decoded[self._n_decoded] = code
+        self._n_decoded += 1
         return s
 
 
