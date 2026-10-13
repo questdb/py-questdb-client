@@ -1249,6 +1249,43 @@ class TestPandasPlannerRouting(unittest.TestCase):
         self.assertGreaterEqual(stats['qwp1_frames'], 1)
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_arrow_backed_pandas_index_is_not_expanded_up_front(self):
+        try:
+            import tracemalloc
+        except ImportError:
+            self.skipTest('needs tracemalloc')
+        import numpy as np
+        import pandas as pd
+
+        def frame(n):
+            return pd.DataFrame(
+                {'v': pd.array(
+                    np.arange(n), dtype=pd.ArrowDtype(pa.int64()))},
+                index=pd.MultiIndex.from_arrays(
+                    [np.arange(n), np.arange(n) % 97], names=['a', 'b']))
+
+        df = frame(50_000)
+        with QwpAckServer() as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    frame(10), table_name='multi_index',
+                    at=qi.ServerTimestamp)
+                tracemalloc.start()
+                try:
+                    client.dataframe(
+                        df, table_name='multi_index',
+                        at=qi.ServerTimestamp, max_rows_per_batch=1024)
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertLess(peak, 512 * 1024)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_mixed_arrow_numpy_symbol_override_uses_manual(self):
         # A numpy column routes the whole frame to the manual planner; the
         # Arrow string column overridden to SYMBOL is ingested via the

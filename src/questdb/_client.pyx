@@ -5142,14 +5142,46 @@ cdef bint _capsule_pyarrow_type_is_string_like(object field_type) except -1:
     return False
 
 
+cdef object _pandas_export_schema(object df):
+    """``Schema.from_pandas(df)`` without converting the index: types come
+    from a zero-row slice, and an object-dtype index level, which pyarrow
+    can only type from its values, is typed from them by ``infer_dtype``.
+    """
+    cdef object schema = _PYARROW.Schema.from_pandas(df.iloc[:0])
+    cdef object index = df.index
+    cdef bint multi = isinstance(index, _PANDAS.MultiIndex)
+    cdef Py_ssize_t level
+    cdef Py_ssize_t pos
+    cdef object name
+    cdef object field
+    cdef object inferred
+    for level, name in enumerate(schema.pandas_metadata['index_columns']):
+        if not isinstance(name, str):
+            continue
+        pos = schema.get_field_index(name)
+        if pos < 0:
+            continue
+        field = schema.field(pos)
+        if not _PYARROW.types.is_null(field.type):
+            continue
+        inferred = _PANDAS.api.types.infer_dtype(
+            index.levels[level] if multi else index, skipna=True)
+        if inferred == 'string':
+            schema = schema.set(pos, field.with_type(_PYARROW.string()))
+        elif inferred == 'bytes':
+            schema = schema.set(pos, field.with_type(_PYARROW.binary()))
+    return schema
+
+
 cdef object _capsule_schema(object sliceable):
     """Arrow schema of what pyarrow or pandas input exports through
     ``__arrow_c_stream__`` (for pandas, index levels included), or None
     for other input."""
     if _is_pandas_dataframe_object(sliceable):
+        _dataframe_may_import_deps()
         if _PYARROW is None:
             _dataframe_require_pyarrow()
-        return _PYARROW.Schema.from_pandas(sliceable)
+        return _pandas_export_schema(sliceable)
     if _PYARROW is None:
         try:
             _dataframe_require_pyarrow()

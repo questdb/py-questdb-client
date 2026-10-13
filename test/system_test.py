@@ -5332,18 +5332,27 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             'v': pd.array([1, 2, 3], dtype=pd.ArrowDtype(pa.int64())),
         }
         regions = ['us-east', 'us-west', 'us-east']
-        categorical = pd.CategoricalIndex(regions, name='region')
-        strings = pd.Index(
-            pd.array(regions, dtype=pd.ArrowDtype(pa.string())),
-            name='region')
+        indexes = {
+            'categorical': pd.CategoricalIndex(regions, name='region'),
+            'arrow string': pd.Index(
+                pd.array(regions, dtype=pd.ArrowDtype(pa.string())),
+                name='region'),
+            'object': pd.Index(regions, dtype=object, name='region'),
+            'multi object level': pd.MultiIndex.from_arrays(
+                [regions, [1, 2, 3]], names=['region', 'n']),
+        }
         cases = [
-            (categorical, False, 'VARCHAR'),
-            (categorical, [], 'VARCHAR'),
-            (categorical, ['region'], 'SYMBOL'),
-            (strings, True, 'SYMBOL'),
+            ('categorical', False, 'VARCHAR'),
+            ('categorical', [], 'VARCHAR'),
+            ('categorical', ['region'], 'SYMBOL'),
+            ('arrow string', True, 'SYMBOL'),
+            ('object', True, 'SYMBOL'),
+            ('object', ['region'], 'SYMBOL'),
+            ('multi object level', True, 'SYMBOL'),
         ]
-        for index, symbols, expected in cases:
-            with self.subTest(index=type(index).__name__, symbols=symbols):
+        for shape, symbols, expected in cases:
+            index = indexes[shape]
+            with self.subTest(index=shape, symbols=symbols):
                 table = self._table()
                 with qi.QuestDB.from_conf(self._conf()) as client:
                     client.dataframe(

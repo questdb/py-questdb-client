@@ -562,6 +562,24 @@ class TestRowEgressLive(_LiveCase):
         self.assertIsNone(px)
         self.assertIsNone(f)
 
+    def test_nulls_past_the_first_bitmap_byte(self):
+        sql = (
+            'select '
+            'case when x in (8, 17) then null else x end as n, '
+            'case when x in (9, 16) then null else x * 0.5 end as d, '
+            "case when x in (8, 16) then null else 'v' || x end as s, "
+            "cast(case when x in (9, 17) then null else 'k' || x end "
+            'as symbol) as sym '
+            'from long_sequence(17)')
+        with self.db.query(sql) as result:
+            rows = list(result.iter_rows())
+        self.assertEqual(rows, [
+            (None if x in (8, 17) else x,
+             None if x in (9, 16) else x * 0.5,
+             None if x in (8, 16) else f'v{x}',
+             None if x in (9, 17) else f'k{x}')
+            for x in range(1, 18)])
+
     # --- stream semantics -----------------------------------------------
 
     def test_empty_result_has_columns_but_no_rows(self):
@@ -1032,8 +1050,34 @@ class TestRowEgressLive(_LiveCase):
                     state['collected'] = gc.collect()
                 super().__init__(*args, **kwargs)
 
+        def advanced(items, before):
+            items = iter(items)
+            for _ in range(before):
+                next(items)
+            return items
+
+        def materialised(result):
+            yield result.to_pandas()
+
+        starts = {
+            'iter_rows, first batch': lambda r: advanced(r.iter_rows(), 0),
+            'iter_rows, second batch': lambda r: advanced(r.iter_rows(), 64),
+        }
+        try:
+            import pandas  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            starts.update({
+                'to_pandas': materialised,
+                'iter_pandas, first batch':
+                    lambda r: advanced(r.iter_pandas(), 0),
+                'iter_pandas, second batch':
+                    lambda r: advanced(r.iter_pandas(), 1),
+            })
+
         with qdb.connect(f'ws::addr={self.addr};max_batch_rows=64;') as db:
-            def open_rows():
+            def open_result():
                 lease = db.reader()
                 try:
                     raise ValueError('keeps the frame alive')
@@ -1042,23 +1086,21 @@ class TestRowEgressLive(_LiveCase):
                     # caller drops `exc`, the lease is reachable only
                     # through that cycle.
                     keep = exc
-                return lease.query(sql).iter_rows(), keep
+                return lease.query(sql), keep
 
-            # Arm for the first batch, which `iter_rows()` leaves undecoded
-            # on the cursor, or for the second, after the first is out.
-            for rows_before_arming in (0, 64):
-                with self.subTest(rows_before_arming=rows_before_arming):
+            for name, start in starts.items():
+                with self.subTest(consumer=name):
                     state.update(armed=False, collected=None)
                     gc.disable()
                     uuid_module.UUID = CollectingUUID
                     try:
-                        rows, keep = open_rows()
-                        for _ in range(rows_before_arming):
-                            next(rows)
+                        result, keep = open_result()
+                        items = start(result)
+                        del result
                         keep = None
                         state['armed'] = True
                         with self.assertRaises(qdb.QuestDBError) as ctx:
-                            for _ in rows:
+                            for _ in items:
                                 pass
                         self.assertIn('closed', str(ctx.exception))
                         self.assertGreater(state['collected'], 0)
