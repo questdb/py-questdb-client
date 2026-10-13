@@ -5339,7 +5339,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
                 name='region'),
             'object': pd.Index(regions, dtype=object, name='region'),
             'multi object level': pd.MultiIndex.from_arrays(
-                [regions, [1, 2, 3]], names=['region', 'n']),
+                [pd.Index(regions, dtype=object), [1, 2, 3]],
+                names=['region', 'n']),
         }
         cases = [
             ('categorical', False, 'VARCHAR'),

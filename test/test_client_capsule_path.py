@@ -1348,7 +1348,8 @@ class TestPandasPlannerRouting(unittest.TestCase):
              'tag': pd.array(
                  ['a', 'b'] * (n // 2), dtype=pd.ArrowDtype(pa.string()))},
             index=pd.MultiIndex.from_arrays(
-                [[f'k{i}' for i in range(n)], np.arange(n)],
+                [pd.Index([f'k{i}' for i in range(n)], dtype=object),
+                 np.arange(n)],
                 names=['k', 'j']))
         batch = parent.iloc[:64]
         real_infer_dtype = pd.api.types.infer_dtype
