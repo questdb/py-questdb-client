@@ -5142,11 +5142,13 @@ cdef bint _capsule_pyarrow_type_is_string_like(object field_type) except -1:
     return False
 
 
-cdef object _pandas_export_schema(object df, bint type_string_levels):
+cdef object _pandas_export_schema(object df, object string_levels):
     """``Schema.from_pandas(df)`` without converting the index: types come
     from a zero-row slice. An object-dtype index level, which pyarrow can
-    only type from its values, stays ``null`` unless `type_string_levels`
-    asks ``infer_dtype`` to recognise a string level.
+    only type from its values, stays ``null`` unless `string_levels` (True
+    for every level, or a set of level names) asks ``infer_dtype`` to
+    recognise it as a string level, scanning the smaller of the level's
+    labels and the frame's rows.
     """
     cdef object schema = _PYARROW.Schema.from_pandas(df.iloc[:0])
     cdef object index = df.index
@@ -5155,10 +5157,13 @@ cdef object _pandas_export_schema(object df, bint type_string_levels):
     cdef Py_ssize_t pos
     cdef object name
     cdef object field
-    if not type_string_levels:
+    cdef object values
+    if not string_levels:
         return schema
     for level, name in enumerate(schema.pandas_metadata['index_columns']):
         if not isinstance(name, str):
+            continue
+        if string_levels is not True and name not in string_levels:
             continue
         pos = schema.get_field_index(name)
         if pos < 0:
@@ -5166,9 +5171,12 @@ cdef object _pandas_export_schema(object df, bint type_string_levels):
         field = schema.field(pos)
         if not _PYARROW.types.is_null(field.type):
             continue
-        if _PANDAS.api.types.infer_dtype(
-                index.levels[level] if multi else index,
-                skipna=True) == 'string':
+        values = index
+        if multi:
+            values = index.levels[level]
+            if len(values) > len(index):
+                values = index.get_level_values(level)
+        if _PANDAS.api.types.infer_dtype(values, skipna=True) == 'string':
             schema = schema.set(pos, field.with_type(_PYARROW.string()))
     return schema
 
@@ -5182,9 +5190,11 @@ cdef object _capsule_schema(object sliceable, object symbols):
         _dataframe_may_import_deps()
         if _PYARROW is None:
             _dataframe_require_pyarrow()
-        return _pandas_export_schema(
-            sliceable,
-            symbols is True or isinstance(symbols, (list, tuple)))
+        if isinstance(symbols, (list, tuple)):
+            return _pandas_export_schema(
+                sliceable,
+                {entry for entry in symbols if isinstance(entry, str)})
+        return _pandas_export_schema(sliceable, symbols is True)
     if (symbols is None or symbols == 'auto'
             or _is_polars_dataframe_or_lazy(sliceable)):
         return None

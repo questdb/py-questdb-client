@@ -1339,6 +1339,49 @@ class TestPandasPlannerRouting(unittest.TestCase):
         self.assertLess(peak, 512 * 1024)
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_object_index_typing_scans_only_what_symbols_need(self):
+        import numpy as np
+        import pandas as pd
+        n = 10_000
+        parent = pd.DataFrame(
+            {'v': pd.array(np.arange(n), dtype=pd.ArrowDtype(pa.int64())),
+             'tag': pd.array(
+                 ['a', 'b'] * (n // 2), dtype=pd.ArrowDtype(pa.string()))},
+            index=pd.MultiIndex.from_arrays(
+                [[f'k{i}' for i in range(n)], np.arange(n)],
+                names=['k', 'j']))
+        batch = parent.iloc[:64]
+        real_infer_dtype = pd.api.types.infer_dtype
+        scanned = []
+
+        def recording(value, skipna=True):
+            if skipna:
+                scanned.append(len(value))
+            return real_infer_dtype(value, skipna=skipna)
+
+        cases = [
+            ('auto', []), ([], []), (['tag'], []),
+            (['k'], [64]), (True, [64])]
+        pd.api.types.infer_dtype = recording
+        try:
+            with QwpAckServer() as server:
+                client = qi.QuestDB.from_conf(_client_conf(server.port))
+                try:
+                    for symbols, expected in cases:
+                        with self.subTest(symbols=symbols):
+                            scanned.clear()
+                            client.dataframe(
+                                batch, table_name='micro_batch',
+                                at=qi.ServerTimestamp, symbols=symbols)
+                            self.assertEqual(scanned, expected)
+                finally:
+                    client.close()
+                stats = server.snapshot()
+        finally:
+            pd.api.types.infer_dtype = real_infer_dtype
+        self.assertEqual(stats['errors'], [])
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_mixed_arrow_numpy_symbol_override_uses_manual(self):
         # A numpy column routes the whole frame to the manual planner; the
         # Arrow string column overridden to SYMBOL is ingested via the

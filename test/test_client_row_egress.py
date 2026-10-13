@@ -1110,6 +1110,59 @@ class TestRowEgressLive(_LiveCase):
             self.assertEqual(
                 list(db.query('select 1 as a').iter_rows()), [(1,)])
 
+    def test_cancel_during_decode_is_refused(self):
+        import uuid as uuid_module
+        sql = 'select to_uuid(x, x) as u, x from long_sequence(1000)'
+        state = {'result': None, 'refused': None}
+        real_uuid = uuid_module.UUID
+
+        class CancellingUUID(real_uuid):
+            __slots__ = ()
+
+            def __init__(self, *args, **kwargs):
+                result = state['result']
+                if result is not None and state['refused'] is None:
+                    try:
+                        result.cancel()
+                    except qdb.QuestDBError as exc:
+                        state['refused'] = exc
+                    else:
+                        state['refused'] = False
+                super().__init__(*args, **kwargs)
+
+        consumers = {
+            'iter_rows': lambda r: [x for _, x in r.iter_rows()],
+        }
+        try:
+            import pandas  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            consumers.update({
+                'to_pandas': lambda r: list(r.to_pandas()['x']),
+                'iter_pandas': lambda r: [
+                    x for frame in r.iter_pandas() for x in frame['x']],
+            })
+
+        with qdb.connect(f'ws::addr={self.addr};max_batch_rows=64;') as db:
+            for name, consume in consumers.items():
+                with self.subTest(consumer=name):
+                    state.update(result=None, refused=None)
+                    uuid_module.UUID = CancellingUUID
+                    try:
+                        with db.query(sql) as result:
+                            state['result'] = result
+                            xs = consume(result)
+                    finally:
+                        state['result'] = None
+                        uuid_module.UUID = real_uuid
+                    self.assertIsInstance(state['refused'], qdb.QuestDBError)
+                    self.assertEqual(
+                        state['refused'].code,
+                        qdb.QuestDBErrorCode.InvalidApiCall)
+                    self.assertEqual(xs, list(range(1, 1001)))
+                    self.assertEqual(_pool_stats(db), (0, 1))
+
     def test_dropped_row_result_does_not_wedge_the_lease(self):
         # Dropping an un-iterated row result must free its cursor, so the
         # lease reports a torn-down connection rather than a result that
