@@ -168,15 +168,16 @@ _HEAP_READER = _heap_reader()
 _NO_HEAP_STATS = 'no C heap statistics on this platform or interpreter'
 
 
-def _assert_no_heap_growth(test, work, per_window, windows=4):
+def _assert_no_heap_growth(test, work, per_window, windows=6):
     """Fail if the C heap grows in every one of `windows` windows of
     `per_window` calls to `work`, after one window of warmup.
 
     A native allocation that is never freed adds at least one block per
     call -- 16 bytes on macOS, 32 on glibc -- so it grows the heap by
     more than 8 bytes a call in every window. The smallest window is
-    what is judged, so a one-off step, such as glibc's per-thread cache
-    filling, does not read as a leak."""
+    what is judged, so the occasional step of a few pages -- the
+    allocator taking a new region, glibc's per-thread cache filling --
+    does not read as a leak unless it lands in every window."""
     read, wrap = _HEAP_READER
     for _ in range(per_window):
         work()
@@ -705,27 +706,26 @@ class TestClosedHandleDataframeLeak(unittest.TestCase):
 
 
 @unittest.skipUnless(pa is not None, 'pyarrow not installed')
-@unittest.skipUnless(psutil is not None, 'psutil not installed')
+@unittest.skipIf(_HEAP_READER is None, _NO_HEAP_STATS)
 class TestCapsuleOverridesLeak(unittest.TestCase):
-    """The Arrow capsule path allocates an override array per call and
-    imports a schema per stream. Cover both successful override sends and
-    streams refused by the guarded FFI preflight."""
+    """The Arrow capsule path allocates an override array and imports a
+    schema on every call, and releases both on the way out. Cover a
+    successful send with overrides and two streams the client refuses:
+    one by the guarded FFI preflight, one by the 8-byte fixed-size
+    binary check, which runs after the schema is imported and before
+    the first batch is read."""
 
-    # Each override is 24 bytes, so a leak of one array per call only
-    # shows up when many columns are claimed at once: at 1000 columns a
-    # leaked array is 24 KiB, so the 400 calls in one window add up to
-    # about 9.6 MB. `_assert_no_leak` reads anything under 3 MiB a
-    # window as allocator noise.
-    #
-    # The call count stays small because every call waits for a
-    # WebSocket ack, which costs about 40 ms on the Linux CI agents
-    # however small the frame is -- tens of thousands of calls would run
-    # for hours there. More columns per call give the same signal in far
-    # less time. An imported Arrow schema holds 4096 nodes including its
-    # root envelope, so at most 4095 are top-level columns. The `gh` and
-    # `ts` columns below consume two of those slots, leaving 4093 as the
-    # largest usable `COLUMNS` value for this fixture.
-    COLUMNS = 1000
+    # A leaked override array is 24 bytes a column, which the C heap
+    # shows at any column count; a few columns keep each call cheap.
+    COLUMNS = 16
+
+    @staticmethod
+    def _conf(port):
+        return (f'ws::addr=127.0.0.1:{port};'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                # Ingest-only mock server: skip the eager reader-pool
+                # connect, which would time out waiting for server info.
+                'query_pool_min=0;')
 
     def test_overrides_leak_nothing(self):
         from qwp_ws_ack_server import QwpAckServer
@@ -739,80 +739,53 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
         data['ts'] = pa.array([0], pa.timestamp('us'))
         frame = pa.table(data)
         with QwpAckServer() as server:
-            conf = (f'ws::addr=127.0.0.1:{server.port};'
-                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
-                    # Ingest-only mock server: skip the eager reader-pool
-                    # connect, which would time out waiting for server info.
-                    'query_pool_min=0;')
-            with qi.QuestDB.from_conf(conf) as client:
+            with qi.QuestDB.from_conf(self._conf(server.port)) as client:
                 def work():
                     client.dataframe(
                         frame, table_name='caps', at='ts',
                         schema_overrides=overrides)
 
-                _assert_no_leak(self, work, warmup=200, measure=2400)
+                # Every call waits for a WebSocket ack, which costs about
+                # 40 ms on the Linux CI agents, so the windows are short.
+                _assert_no_heap_growth(self, work, per_window=50)
 
-    def test_rejected_stream_leaks_nothing(self):
+    def _assert_refusals_leak_nothing(self, frame, code):
         from qwp_ws_ack_server import QwpAckServer
-        nested = pa.StructArray.from_arrays(
-            [pa.array([1], type=pa.int32())], names=['value'])
-        frame = pa.table({
-            'nested': nested,
-            'ts': pa.array([0], type=pa.timestamp('us')),
-        })
-        # This intentionally sends no frames for several minutes on slower
-        # wheel builders. Keep the otherwise useful mock-server idle timeout
-        # from turning that expected silence into a harness error.
-        with QwpAckServer(idle_timeout_s=None) as server:
-            conf = (f'ws::addr=127.0.0.1:{server.port};'
-                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
-                    'query_pool_min=0;')
-            with qi.QuestDB.from_conf(conf) as client:
+        with QwpAckServer() as server:
+            with qi.QuestDB.from_conf(self._conf(server.port)) as client:
                 def work():
                     with self.assertRaises(qi.QuestDBError) as raised:
-                        client.dataframe(
-                            frame, table_name='caps', at='ts')
-                    self.assertEqual(
-                        raised.exception.code,
-                        qi.QuestDBErrorCode.ArrowUnsupportedColumnKind)
+                        client.dataframe(frame, table_name='caps', at='ts')
+                    self.assertEqual(raised.exception.code, code)
 
-                # Rejection happens before a WebSocket send, so enough calls
-                # to expose a small per-stream leak remain inexpensive.
-                _assert_no_leak(self, work, warmup=20000, measure=900000)
+                # Refused before anything is sent, so calls are cheap.
+                _assert_no_heap_growth(self, work, per_window=1000)
             frames = server.wait_binary_frames_settled()
             stats = server.snapshot()
         self.assertEqual(frames, 0)
         self.assertEqual(stats['errors'], [])
+
+    def test_rejected_stream_leaks_nothing(self):
+        nested = pa.StructArray.from_arrays(
+            [pa.array([1], type=pa.int32())], names=['value'])
+        self._assert_refusals_leak_nothing(
+            pa.table({
+                'nested': nested,
+                'ts': pa.array([0], type=pa.timestamp('us')),
+            }),
+            qi.QuestDBErrorCode.ArrowUnsupportedColumnKind)
 
     def test_fsb8_refusal_leaks_nothing(self):
         """The 8-byte fixed-size binary refusal (the shape of a polars
         `Object` column) happens on the client, after the stream's schema
         is imported and before its first batch is read. The stream, its
         schema and the borrowed connection must all be released."""
-        from qwp_ws_ack_server import QwpAckServer
-        frame = pa.table({
-            'handles': pa.array([b'\x00' * 8], type=pa.binary(8)),
-            'ts': pa.array([0], type=pa.timestamp('us')),
-        })
-        # Idle for the whole run, as in `test_rejected_stream_leaks_nothing`.
-        with QwpAckServer(idle_timeout_s=None) as server:
-            conf = (f'ws::addr=127.0.0.1:{server.port};'
-                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
-                    'query_pool_min=0;')
-            with qi.QuestDB.from_conf(conf) as client:
-                def work():
-                    with self.assertRaises(qi.QuestDBError) as raised:
-                        client.dataframe(
-                            frame, table_name='caps', at='ts')
-                    self.assertEqual(
-                        raised.exception.code,
-                        qi.QuestDBErrorCode.ArrowUnsupportedColumnKind)
-
-                _assert_no_leak(self, work, warmup=20000, measure=900000)
-            frames = server.wait_binary_frames_settled()
-            stats = server.snapshot()
-        self.assertEqual(frames, 0)
-        self.assertEqual(stats['errors'], [])
+        self._assert_refusals_leak_nothing(
+            pa.table({
+                'handles': pa.array([b'\x00' * 8], type=pa.binary(8)),
+                'ts': pa.array([0], type=pa.timestamp('us')),
+            }),
+            qi.QuestDBErrorCode.ArrowUnsupportedColumnKind)
 
 
 class _BottomReached(Exception):
