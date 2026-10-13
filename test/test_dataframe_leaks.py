@@ -3,6 +3,7 @@ sys.dont_write_bytecode = True
 import ctypes
 import gc
 import ipaddress
+import threading
 import unittest
 import uuid
 
@@ -87,6 +88,116 @@ def _assert_no_leak(test, work, warmup, measure):
         f'RSS not plateauing: per-window growth {growths} bytes over '
         f'{windows} windows of {per} iterations (head {head:.0f}, '
         f'tail {tail:.0f}); likely a leaked native buffer.')
+
+
+class _MallocZoneStatistics(ctypes.Structure):
+    _fields_ = [
+        ('blocks_in_use', ctypes.c_uint),
+        ('size_in_use', ctypes.c_size_t),
+        ('max_size_in_use', ctypes.c_size_t),
+        ('size_allocated', ctypes.c_size_t),
+    ]
+
+
+def _mallinfo_type(field_type):
+    class MallInfo(ctypes.Structure):
+        _fields_ = [
+            (name, field_type) for name in (
+                'arena', 'ordblks', 'smblks', 'hblks', 'hblkhd', 'usmblks',
+                'fsmblks', 'uordblks', 'fordblks', 'keepcost')]
+    return MallInfo
+
+
+def _heap_reader():
+    """A `(read, wrap)` pair, where `read()` returns the bytes the C
+    allocator has handed out and not taken back, or None where this
+    platform offers no such count.
+
+    The client's Cython code and its Rust library both allocate through
+    the C allocator, so this sees a native allocation that is never
+    freed directly, where RSS sees it only once it outgrows allocator
+    noise. On macOS it is `malloc_zone_statistics`; on glibc it is
+    `mallinfo2`, or `mallinfo` before glibc 2.33, whose fields are
+    `int`s that wrap at 2**32 (`wrap`). musl and Windows have no
+    equivalent. PyPy is left out because its garbage collector, not
+    the end of a call or a thread, decides when the objects owning
+    native memory are freed."""
+    if sys.implementation.name != 'cpython':
+        return None
+    if sys.platform == 'darwin':
+        try:
+            statistics = ctypes.CDLL(
+                '/usr/lib/libSystem.B.dylib').malloc_zone_statistics
+        except (OSError, AttributeError):
+            return None
+        statistics.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(_MallocZoneStatistics)]
+        statistics.restype = None
+
+        def read_zones():
+            stats = _MallocZoneStatistics()
+            statistics(None, ctypes.byref(stats))
+            return stats.size_in_use
+
+        return read_zones, None
+    if sys.platform.startswith('linux'):
+        try:
+            libc = ctypes.CDLL('libc.so.6', use_errno=False)
+        except OSError:
+            return None
+        for name, field_type, wrap in (
+                ('mallinfo2', ctypes.c_size_t, None),
+                ('mallinfo', ctypes.c_int, 1 << 32)):
+            mallinfo = getattr(libc, name, None)
+            if mallinfo is None:
+                continue
+            mallinfo.argtypes = []
+            mallinfo.restype = _mallinfo_type(field_type)
+
+            def read_mallinfo(mallinfo=mallinfo):
+                info = mallinfo()
+                # `uordblks` counts the arena chunks in use, `hblkhd` the
+                # large blocks glibc maps on their own.
+                return info.uordblks + info.hblkhd
+
+            return read_mallinfo, wrap
+    return None
+
+
+_HEAP_READER = _heap_reader()
+_NO_HEAP_STATS = 'no C heap statistics on this platform or interpreter'
+
+
+def _assert_no_heap_growth(test, work, per_window, windows=4):
+    """Fail if the C heap grows in every one of `windows` windows of
+    `per_window` calls to `work`, after one window of warmup.
+
+    A native allocation that is never freed adds at least one block per
+    call -- 16 bytes on macOS, 32 on glibc -- so it grows the heap by
+    more than 8 bytes a call in every window. The smallest window is
+    what is judged, so a one-off step, such as glibc's per-thread cache
+    filling, does not read as a leak."""
+    read, wrap = _HEAP_READER
+    for _ in range(per_window):
+        work()
+    gc.collect()
+    prev = read()
+    growths = []
+    for _ in range(windows):
+        for _ in range(per_window):
+            work()
+        gc.collect()
+        now = read()
+        growth = now - prev
+        if wrap is not None:
+            growth = (growth + wrap // 2) % wrap - wrap // 2
+        growths.append(growth)
+        prev = now
+    test.assertLess(
+        min(growths), per_window * 8,
+        f'C heap grew in every window: {growths} bytes over {windows} '
+        f'windows of {per_window} calls; a native allocation is likely '
+        f'never freed.')
 
 
 @unittest.skipUnless(pd is not None, 'pandas not installed')
@@ -502,6 +613,68 @@ class TestBinaryBufferRelease(unittest.TestCase):
         gc.collect()
         self._assert_released(backing, view)
 
+    # The claimed kinds that send an object column of bytes-like cells
+    # through `_dataframe_columnar_build_fsb_pyobj`, a second builder with
+    # its own `PyObject_GetBuffer` / `PyBuffer_Release` pair.
+    _FIXED_WIDTH_CLAIMS = (('uuid', 16), ('long256', 32))
+
+    @staticmethod
+    def _claimed_frame(cells, kind):
+        frame = pd.DataFrame({'c': pd.Series(cells, dtype=object)})
+        frame.attrs['questdb'] = {
+            'version': 1, 'columns': {'c': {'kind': kind}}}
+        return frame
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_claimed_fixed_width_good_path_releases(self):
+        """A `uuid` or `long256` claim writes an object column of
+        `bytes`-like cells at a fixed width. The `bytearray` cell after
+        the memoryview takes the branch beside it, which borrows
+        nothing."""
+        from qwp_ws_ack_server import QwpAckServer
+        for kind, width in self._FIXED_WIDTH_CLAIMS:
+            with self.subTest(kind=kind):
+                backing = bytearray(b'\x01' * width)
+                view = memoryview(backing)
+                frame = self._claimed_frame(
+                    [view, bytearray(b'\x02' * width)], kind)
+                with QwpAckServer() as server:
+                    with qi.QuestDB.from_conf(
+                            self._conf(server.port)) as client:
+                        client.dataframe(
+                            frame, table_name='t', at=qi.ServerTimestamp,
+                            symbols=False)
+                del frame
+                gc.collect()
+                self._assert_released(backing, view)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_claimed_fixed_width_error_path_releases(self):
+        """The short cell is refused after its buffer is borrowed, so the
+        `finally` inside the row loop releases it, as it released the
+        good cell before it."""
+        from qwp_ws_ack_server import QwpAckServer
+        for kind, width in self._FIXED_WIDTH_CLAIMS:
+            with self.subTest(kind=kind):
+                good_backing = bytearray(b'\x01' * width)
+                good = memoryview(good_backing)
+                short_backing = bytearray(b'\x02' * (width - 1))
+                short = memoryview(short_backing)
+                frame = self._claimed_frame([good, short], kind)
+                with QwpAckServer() as server:
+                    with qi.QuestDB.from_conf(
+                            self._conf(server.port)) as client:
+                        with self.assertRaisesRegex(
+                                qi.QuestDBError,
+                                f'exactly {width} bytes, got {width - 1}'):
+                            client.dataframe(
+                                frame, table_name='t',
+                                at=qi.ServerTimestamp, symbols=False)
+                del frame
+                gc.collect()
+                self._assert_released(good_backing, good)
+                self._assert_released(short_backing, short)
+
 
 @unittest.skipUnless(pd is not None, 'pandas not installed')
 @unittest.skipUnless(psutil is not None, 'psutil not installed')
@@ -640,6 +813,189 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
             stats = server.snapshot()
         self.assertEqual(frames, 0)
         self.assertEqual(stats['errors'], [])
+
+
+class _BottomReached(Exception):
+    pass
+
+
+class _NestingAddr(ipaddress.IPv4Address):
+    """An IPV4 cell whose conversion to an int is pure Python, so it runs
+    inside the `row()` writing it. From there it writes the next cell
+    through the next lease, so every lease before it still has its
+    `row()` in progress -- each on a handle of its own."""
+
+    def __init__(self, leases, level, raise_at_bottom, reached):
+        super().__init__('192.0.2.1')
+        self._nest = (leases, level, raise_at_bottom, reached)
+
+    def __int__(self):
+        leases, level, raise_at_bottom, reached = self._nest
+        reached.append(level)
+        if level + 1 < len(leases):
+            leases[level + 1].row(
+                'nested',
+                columns={'ip': _NestingAddr(
+                    leases, level + 1, raise_at_bottom, reached)},
+                at=qi.ServerTimestamp)
+        elif raise_at_bottom:
+            raise _BottomReached()
+        return 0xC0000201
+
+
+def _nested_rows(leases, raise_at_bottom=False):
+    """Write one row through each lease, each from inside the one before
+    it, and return the levels that ran. With `raise_at_bottom`, the
+    innermost conversion raises `_BottomReached`, so every row is
+    rewound and every lease is left with nothing buffered."""
+    reached = []
+    leases[0].row(
+        'nested',
+        columns={'ip': _NestingAddr(leases, 0, raise_at_bottom, reached)},
+        at=qi.ServerTimestamp)
+    return reached
+
+
+class TestCallTableMemory(unittest.TestCase):
+    """Each thread keeps a native table of the calls it has in progress
+    on each `QuestDB` handle (`_scoped_table_ensure`). The table starts
+    with four slots and doubles when a fifth handle has a call in
+    progress on the same thread, and it is freed when the thread's
+    Python state ends (`_scoped_table_free`)."""
+
+    HANDLES = 6
+
+    @classmethod
+    def _handles(cls, port):
+        # One connection per handle, opened here and reused by every
+        # lease, so the server accepts nothing while a test measures.
+        conf = (f'ws::addr=127.0.0.1:{port};'
+                'sender_pool_min=1;sender_pool_max=1;'
+                'query_pool_min=0;pool_reap=manual;')
+        return [qi.QuestDB.from_conf(conf) for _ in range(cls.HANDLES)]
+
+    def _close_all(self, handles):
+        # `close()` refuses while this thread still has a call counted on
+        # the handle, so every handle closing is what shows the table's
+        # counts went back to zero.
+        refusals = []
+        for db in handles:
+            try:
+                db.close()
+            except qi.QuestDBError as exc:
+                refusals.append(exc)
+        self.assertEqual(refusals, [])
+
+    def test_the_table_grows_past_its_first_slots(self):
+        """Six handles with a call in progress at once take the table
+        past its first four slots. The second pass runs on the grown
+        table."""
+        from qwp_ws_ack_server import QwpAckServer
+        with QwpAckServer() as server:
+            handles = self._handles(server.port)
+            try:
+                for _ in range(2):
+                    leases = [db.sender() for db in handles]
+                    try:
+                        reached = _nested_rows(leases)
+                    finally:
+                        for lease in leases:
+                            lease.close()
+                    self.assertEqual(reached, list(range(self.HANDLES)))
+            finally:
+                self._close_all(handles)
+
+    @unittest.skipIf(_HEAP_READER is None, _NO_HEAP_STATS)
+    def test_a_threads_table_is_freed_when_it_exits(self):
+        """Every thread grows its own table to eight slots and exits.
+        Neither the table nor its slots may outlive the thread."""
+        from qwp_ws_ack_server import QwpAckServer
+        errors = []
+        with QwpAckServer() as server:
+            handles = self._handles(server.port)
+            try:
+                def nest_and_exit():
+                    leases = [db.sender() for db in handles]
+                    try:
+                        _nested_rows(leases, raise_at_bottom=True)
+                    except _BottomReached:
+                        pass
+                    except BaseException as exc:
+                        errors.append(exc)
+                    finally:
+                        for lease in leases:
+                            lease.close()
+
+                def work():
+                    worker = threading.Thread(target=nest_and_exit)
+                    worker.start()
+                    worker.join()
+
+                accepted = server.snapshot()['accepted_connections']
+                _assert_no_heap_growth(self, work, per_window=300)
+                self.assertEqual(
+                    server.snapshot()['accepted_connections'], accepted)
+            finally:
+                self._close_all(handles)
+        self.assertEqual(errors, [])
+
+
+@unittest.skipIf(_HEAP_READER is None, _NO_HEAP_STATS)
+class TestNativeHeapLeak(unittest.TestCase):
+    """Allocations made once per call outside the dataframe builders,
+    each freed on the way out of the call. The C heap shows a missed
+    free after a few hundred calls; RSS would need hundreds of
+    thousands.
+
+    Neither test runs a mock server in this process: `QwpAckServer`
+    keeps an object per connection it accepts, which would grow the
+    heap on its own."""
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_ws_sender_dataframe_frees_its_options(self):
+        """`Sender.dataframe()` over ws:: clones the sender's options for
+        the length of the call and frees the clone in a `finally` that
+        every outcome passes through. Here each call fails to connect,
+        which is quick, and its `SocketError` shows it got as far as
+        connecting, and so past the clone."""
+        sender = qi.Sender.from_conf(
+            'ws::addr=127.0.0.1:1;auto_flush=off;initial_connect_retry=off;')
+        frame = pd.DataFrame({
+            'v': np.arange(2, dtype=np.int64),
+            'ts': pd.to_datetime([0, 1], unit='s')})
+
+        def work():
+            with self.assertRaises(qi.QuestDBError) as raised:
+                sender.dataframe(frame, table_name='t', at='ts')
+            self.assertEqual(
+                raised.exception.code, qi.QuestDBErrorCode.SocketError)
+
+        try:
+            _assert_no_heap_growth(self, work, per_window=1000)
+        finally:
+            sender.close()
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_a_refused_nul_column_name_leaks_nothing(self):
+        """A column name holding a NUL is refused with the error `row()`
+        raises for it, which the check produces by converting the name
+        in a string buffer of its own. The refusal comes before any
+        connection is attempted, so no server is needed."""
+        frame = pa.table({
+            'a\x00b': pa.array([1]),
+            'ts': pa.array([0], pa.timestamp('us')),
+        })
+        with qi.QuestDB.from_conf(
+                'ws::addr=127.0.0.1:1;lazy_connect=true;'
+                'sender_pool_min=0;query_pool_min=0;'
+                'pool_reap=manual;') as client:
+            def work():
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    client.dataframe(frame, table_name='t', at='ts')
+                self.assertEqual(
+                    raised.exception.code, qi.QuestDBErrorCode.InvalidName)
+
+            _assert_no_heap_growth(self, work, per_window=1000)
 
 
 if __name__ == '__main__':

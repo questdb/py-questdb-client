@@ -135,6 +135,8 @@ from test_dataframe_leaks import (
     TestBinaryBufferRelease,
     TestCapsuleOverridesLeak,
     TestClosedHandleDataframeLeak,
+    TestCallTableMemory,
+    TestNativeHeapLeak,
 )
 
 if pd is not None and pyarrow is not None:
