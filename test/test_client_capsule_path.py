@@ -911,6 +911,38 @@ class TestSchemaOverrides(unittest.TestCase):
             qi._debug_dataframe_pyarrow_loaded(),
             'polars + schema_overrides path must not lazy-import pyarrow')
 
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_symbols_list_no_pyarrow(self):
+        if qi._debug_dataframe_pyarrow_loaded():
+            self.skipTest(
+                'an earlier test already lazy-loaded pyarrow inside this '
+                'process; the no-pyarrow assertion only holds when this '
+                'test runs first.')
+        df = pl.DataFrame({
+            'region': pl.Series('region', ['us-east', 'us-west', 'us-east']),
+            'price':  pl.Series('price', [1.0, 2.0, 3.0], dtype=pl.Float64),
+            'ts':     pl.Series('ts', [
+                datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc),
+                datetime.datetime(2025, 1, 2, tzinfo=datetime.timezone.utc),
+                datetime.datetime(2025, 1, 3, tzinfo=datetime.timezone.utc),
+            ], dtype=pl.Datetime('us', time_zone='UTC')),
+        })
+        with QwpAckServer() as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df,
+                    table_name='polars_symbols',
+                    at='ts',
+                    symbols=['region'])
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertFalse(
+            qi._debug_dataframe_pyarrow_loaded(),
+            'polars + symbols path must not lazy-import pyarrow')
+
     def test_schema_overrides_rejects_decimal_kind(self):
         with self.assertRaisesRegex(ValueError, 'kind'):
             with QwpAckServer() as server:
@@ -1011,6 +1043,27 @@ class TestPyArrowRecordBatchDirect(unittest.TestCase):
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
         self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+
+class TestPolarsWithoutPyarrow(unittest.TestCase):
+    """Runs the no-pyarrow polars checks in a fresh interpreter, where no
+    earlier test can have loaded pyarrow and turned them into skips."""
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_paths_do_not_load_pyarrow(self):
+        import subprocess
+        names = [
+            f'test_client_capsule_path.TestSchemaOverrides.{name}'
+            for name in (
+                'test_polars_schema_overrides_ipv4_no_pyarrow',
+                'test_polars_schema_overrides_symbol_no_pyarrow',
+                'test_polars_symbols_list_no_pyarrow')]
+        proc = subprocess.run(
+            [sys.executable, '-m', 'unittest', '-v', *names],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=300)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn('skipped', proc.stderr)
 
 
 class TestSchemaOverridesPandas(unittest.TestCase):

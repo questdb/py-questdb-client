@@ -120,6 +120,7 @@ from test_client_capsule_path import (
     TestSchemaOverrides,
     TestPyArrowRecordBatchDirect,
     TestSchemaOverridesPandas,
+    TestPolarsWithoutPyarrow,
     TestBenchFlushArrowBatch,
     TestCapsulePathPolarsMissing,
     TestWriterMixingInOneChunk,

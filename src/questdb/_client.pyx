@@ -5142,10 +5142,11 @@ cdef bint _capsule_pyarrow_type_is_string_like(object field_type) except -1:
     return False
 
 
-cdef object _pandas_export_schema(object df):
+cdef object _pandas_export_schema(object df, bint type_string_levels):
     """``Schema.from_pandas(df)`` without converting the index: types come
-    from a zero-row slice, and an object-dtype index level, which pyarrow
-    can only type from its values, is typed from them by ``infer_dtype``.
+    from a zero-row slice. An object-dtype index level, which pyarrow can
+    only type from its values, stays ``null`` unless `type_string_levels`
+    asks ``infer_dtype`` to recognise a string level.
     """
     cdef object schema = _PYARROW.Schema.from_pandas(df.iloc[:0])
     cdef object index = df.index
@@ -5154,7 +5155,8 @@ cdef object _pandas_export_schema(object df):
     cdef Py_ssize_t pos
     cdef object name
     cdef object field
-    cdef object inferred
+    if not type_string_levels:
+        return schema
     for level, name in enumerate(schema.pandas_metadata['index_columns']):
         if not isinstance(name, str):
             continue
@@ -5164,24 +5166,28 @@ cdef object _pandas_export_schema(object df):
         field = schema.field(pos)
         if not _PYARROW.types.is_null(field.type):
             continue
-        inferred = _PANDAS.api.types.infer_dtype(
-            index.levels[level] if multi else index, skipna=True)
-        if inferred == 'string':
+        if _PANDAS.api.types.infer_dtype(
+                index.levels[level] if multi else index,
+                skipna=True) == 'string':
             schema = schema.set(pos, field.with_type(_PYARROW.string()))
-        elif inferred == 'bytes':
-            schema = schema.set(pos, field.with_type(_PYARROW.binary()))
     return schema
 
 
-cdef object _capsule_schema(object sliceable):
+cdef object _capsule_schema(object sliceable, object symbols):
     """Arrow schema of what pyarrow or pandas input exports through
     ``__arrow_c_stream__`` (for pandas, index levels included), or None
-    for other input."""
+    when neither resolving `symbols` nor the pandas UUID / LONG256 claims
+    need one."""
     if _is_pandas_dataframe_object(sliceable):
         _dataframe_may_import_deps()
         if _PYARROW is None:
             _dataframe_require_pyarrow()
-        return _pandas_export_schema(sliceable)
+        return _pandas_export_schema(
+            sliceable,
+            symbols is True or isinstance(symbols, (list, tuple)))
+    if (symbols is None or symbols == 'auto'
+            or _is_polars_dataframe_or_lazy(sliceable)):
+        return None
     if _PYARROW is None:
         try:
             _dataframe_require_pyarrow()
@@ -5650,7 +5656,7 @@ cdef bint _dataframe_client_try_capsule_path(
     if total_rows == 0:
         return True
 
-    schema = _capsule_schema(sliceable)
+    schema = _capsule_schema(sliceable, symbols)
     symbol_overrides = _resolve_symbols_to_overrides(
         sliceable, schema, symbols)
     if symbol_overrides is None:
