@@ -86,10 +86,12 @@ class TestWithDatabase(unittest.TestCase):
             wrap_tls=True,
             http=True,
             qwp_udp=cls._qwp_udp_enabled)
+        cls.addClassCleanup(cls.qdb_plain.stop)
         cls.qdb_plain.start()
 
         cls.qdb_auth = QuestDbFixture(
             QUESTDB_AUTH_INSTALL_PATH, auth=True, wrap_tls=True)
+        cls.addClassCleanup(cls.qdb_auth.stop)
         cls.qdb_auth.start()
 
     @classmethod
