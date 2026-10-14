@@ -4273,6 +4273,17 @@ class TestEgressLeaks(unittest.TestCase):
 
             _assert_no_leak(self, work, warmup=40, measure=240)
 
+    def test_symbol_row_stream_does_not_leak(self):
+        from test_dataframe_leaks import _assert_no_leak
+        sql = ("SELECT cast('k' || cast(x AS STRING) AS SYMBOL) s "
+               'FROM long_sequence(50000)')
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            def work():
+                for _ in client.query(sql).iter_rows():
+                    pass
+
+            _assert_no_leak(self, work, warmup=40, measure=240)
+
 
 class TestColumnIngressNarrowTypes(unittest.TestCase):
     """End-to-end tests for the narrow Arrow primitive types added to
