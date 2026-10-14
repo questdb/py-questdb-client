@@ -316,8 +316,10 @@ cdef object _fetch_one_batch(
         # _import_from_c moves the structs and nulls their release
         # callbacks; pyarrow's RecordBatch owns the buffers from here.
         try:
-            return pa_module.RecordBatch._import_from_c(
+            batch = pa_module.RecordBatch._import_from_c(
                 <uintptr_t>&array, <uintptr_t>&schema)
+            _oidc_raise_unscheduled_main()
+            return batch
         except:
             if array.release != NULL:
                 array.release(&array)
@@ -326,6 +328,7 @@ cdef object _fetch_one_batch(
             raise
 
     if result == qwp_reader_arrow_batch_end:
+        _oidc_raise_unscheduled_main()
         return None
 
     # Error path.
@@ -482,7 +485,9 @@ cdef void_int _drain_cursor(_CursorHandle handle) except -1:
         if batch == NULL:
             if err != NULL:
                 raise _reader_err_to_py(err)
+            _oidc_raise_unscheduled_main()
             break
+        _oidc_raise_unscheduled_main()
     try:
         _mark_reader_drained(handle)
     finally:
@@ -517,6 +522,7 @@ cdef _ReaderHandle _borrow_reader_from_pool(questdb_db* db):
     # A freshly borrowed reader is pristine: recycle it unless a query
     # arms _must_close at the network boundary (_execute_query).
     handle._must_close = False
+    _oidc_raise_unscheduled_main()
     return handle
 
 
@@ -723,6 +729,7 @@ cdef _CursorHandle _execute_query(
         raise _reader_err_to_py(err)
 
     handle._attach(cursor, reader_handle, owns_reader)
+    _oidc_raise_unscheduled_main()
     return handle
 
 
@@ -2079,6 +2086,8 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
                         batch = qwp_reader_cursor_next_batch(cursor, &err)
                 finally:
                     handle._native_in_flight = False
+                if err == NULL:
+                    _oidc_raise_unscheduled_main()
                 if handle._reset_seq != seen_seq:
                     # Mid-query failover replayed from batch-0: discard the
                     # pre-failover accumulation and re-derive the schema.
@@ -2388,6 +2397,8 @@ cdef class _NumpyBatchIter:
                         batch = qwp_reader_cursor_next_batch(cursor, &err)
                 finally:
                     self.handle._native_in_flight = False
+                if err == NULL:
+                    _oidc_raise_unscheduled_main()
                 if self.handle._reset_seq != self.seen_seq:
                     if self.delivered:
                         # Mid-query failover after batches were already yielded:

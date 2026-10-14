@@ -3,6 +3,10 @@ sys.dont_write_bytecode = True
 import ctypes
 import gc
 import ipaddress
+import logging
+import os
+import tempfile
+import time
 import unittest
 import uuid
 from unittest import mock
@@ -24,7 +28,8 @@ _limit_malloc_arenas()
 import patch_path
 
 import questdb._client as qi
-from questdb.auth import OidcConfigError, OidcDeviceAuth, OidcError, Renderer
+from questdb.auth import (
+    FileTokenStore, OidcConfigError, OidcDeviceAuth, OidcError, Renderer)
 from oidc_test_server import OidcTestServer
 
 try:
@@ -110,9 +115,9 @@ class TestOidcNativeLeak(unittest.TestCase):
     carries the large payload, so a dropped free is visible to the RSS
     harness. That loop asserts the error is native: a path that Python
     validation rejects first never reaches the free, and leaves the test green
-    whether or not the free happens. Not covered: the interrupt and
-    callback-cancel error frees, which need a signal or a renderer callback
-    landing mid-call on every iteration.
+    whether or not the free happens. The separate interrupt/callback-cancel
+    exits have deterministic native-release assertions in
+    ``TestOidcNativeInterruptOwnership`` below.
     """
 
     # Each native object owns a copy of this field. Twenty leaked objects in one
@@ -209,6 +214,93 @@ class TestOidcNativeLeak(unittest.TestCase):
                 auth.clear()
 
             _assert_no_leak(self, sign_in_cycle, warmup=4, measure=120)
+
+
+class TestOidcNativeInterruptOwnership(unittest.TestCase):
+    """Reclamation oracles for early exits outside normal conversion/finally.
+
+    These count calls to the real native free functions, not Python weakrefs
+    or registry drainage. The RSS workloads above separately detect omission
+    of the native release itself in the shared release wrappers.
+    """
+
+    def test_interrupted_sign_in_releases_native_cancellation_error(self):
+        interrupt = KeyboardInterrupt('renderer cancellation')
+
+        class InterruptingRenderer(Renderer):
+            def on_prompt(self, challenge):
+                raise interrupt
+
+        with OidcTestServer(device_expires_in=3) as server:
+            auth = OidcDeviceAuth.from_questdb(
+                server.url, interactive=True, open_browser=False,
+                renderer=InterruptingRenderer(), timeout=5)
+            try:
+                qi._debug_oidc_native_free_counts(True)
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    auth.sign_in()
+                self.assertIs(caught.exception, interrupt)
+                self.assertEqual(
+                    qi._debug_oidc_native_free_counts(), (0, 1),
+                    'cancelled sign-in must release its owned native error')
+            finally:
+                qi._debug_oidc_native_free_counts()
+                auth.close()
+
+    def test_interrupted_successful_refresh_releases_returned_native_token(self):
+        interrupt = KeyboardInterrupt('refresh persistence diagnostic')
+        credential = [None]
+        sabotaged = []
+        diagnostics = []
+
+        def fail_save():
+            if sabotaged:
+                return
+            if os.path.isfile(credential[0]):
+                os.remove(credential[0])
+            os.mkdir(credential[0])
+            sabotaged.append(True)
+            # Ignore ordinary cache-hit token frees before the refresh. Start
+            # counting at the successful refresh's deterministic injection.
+            qi._debug_oidc_native_free_counts(True)
+
+        class InterruptingDiagnostic(logging.Handler):
+            def emit(self, record):
+                if 'token store save failed' in record.getMessage():
+                    diagnostics.append(record.getMessage())
+                    raise interrupt
+
+        handler = InterruptingDiagnostic()
+        logger = logging.getLogger('questdb')
+        with tempfile.TemporaryDirectory() as directory, \
+                OidcTestServer(initial_expires_in=4,
+                               refresh_request_hook=fail_save) as server:
+            auth = OidcDeviceAuth.from_questdb(
+                server.url, token_store=FileTokenStore.at(directory),
+                interactive=True, open_browser=False,
+                renderer=Renderer(), timeout=5)
+            auth.sign_in()
+            credential[0] = os.path.join(directory, next(
+                name for name in os.listdir(directory) if name.endswith('.json')))
+            logger.addHandler(handler)
+            try:
+                deadline = time.monotonic() + 15
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    while not sabotaged:
+                        self.assertLess(time.monotonic(), deadline)
+                        auth.token()
+                        if not sabotaged:
+                            time.sleep(0.05)
+                self.assertIs(caught.exception, interrupt)
+                self.assertEqual(len(diagnostics), 1)
+                self.assertEqual(
+                    qi._debug_oidc_native_free_counts(), (1, 0),
+                    'successful native return interrupted before conversion '
+                    'must still release its owned token')
+            finally:
+                qi._debug_oidc_native_free_counts()
+                logger.removeHandler(handler)
+                auth.close()
 
 
 class TestLeakHarness(unittest.TestCase):

@@ -305,7 +305,10 @@ are mode ``0700`` and files mode ``0600``. An existing directory is tightened to
 ``0700`` on first use, and one that was group- or other-writable is swept before
 its contents are trusted: entries named like store records (64 lowercase hex
 characters then ``.json``, or a ``.tmp`` temporary) are deleted, whoever wrote
-them. Point the store at a directory dedicated to it. Non-POSIX platforms currently reject
+them. On POSIX, distrust is made durable before permissions are tightened,
+and the sweep is made durable before its distrust marker is removed, so crash
+recovery cannot make surviving untrusted records look trustworthy. Point the
+store at a directory dedicated to it. Non-POSIX platforms currently reject
 file-store *mutations* before changing the stored entry because they lack the
 durable metadata barrier required for safe refresh-token rotation; reads remain
 available, so the coordination protocol may still leave empty ``.lock`` files
@@ -365,7 +368,10 @@ resubmit a rotating token. The exception is ``sign_in()`` against a store that
 can never be used as configured -- a directory it may not create or write, a
 read-only filesystem, or a path that is not a directory: that raises
 :class:`~questdb.auth.OidcConfigError` before any device code is shown, rather
-than a retryable error that would fail identically on every retry. Enabling persistence stores a long-lived refresh token on disk, so use it
+than a retryable error that would fail identically on every retry. Transient
+preflight contention or I/O failures are warnings, not configuration refusals:
+sign-in may proceed and its in-memory credential remains usable if a later
+save also fails. Enabling persistence stores a long-lived refresh token on disk, so use it
 only when that at-rest tradeoff is acceptable. Custom Python token stores are
 not supported by the native provider.
 
@@ -585,6 +591,11 @@ Security notes
   later is a no-op, ``sign_in()`` completes, and the renderer receives its
   ``on_success`` or ``on_failure`` call. Use
   :meth:`~questdb.auth.OidcDeviceAuth.close` only for permanent shutdown.
+* On CPython, an exception raised by a signal handler during a synchronous
+  transport persistence diagnostic is returned to the caller without invoking
+  the handler again. If the pending-call queue is full, delivery takes place at
+  the exception-safe native-return boundary; multiple saved exceptions are
+  preserved through ``__context__`` rather than discarded.
 
 Optional dependencies
 =====================

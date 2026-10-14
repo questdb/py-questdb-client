@@ -309,8 +309,10 @@ Highlights:
   on disk.
 * Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes plaintext
   credentials atomically and coordinates refresh across processes. Its
-  directories/files are owner-only (``0700``/``0600``) on Unix. Non-Unix
-  platforms reject mutation before changing the stored entry until an
+  directories/files are owner-only (``0700``/``0600``) on Unix. Recovery of an
+  insecure directory durably publishes distrust before tightening permissions
+  and makes record deletion durable before removing the distrust marker.
+  Non-Unix platforms reject mutation before changing the stored entry until an
   equivalent durable metadata barrier is available; reads, and therefore the
   empty ``.lock`` files of the shared coordination protocol, remain available,
   as does in-memory authentication.
@@ -328,8 +330,9 @@ Highlights:
   is opt-in, so this is reported rather than silently skipped; previously the
   sign-in succeeded, wrote nothing, and the whole device flow ran again on
   every start. The check runs before any device code is shown, and a provider
-  with no token store is unaffected. Transient write failures (a full disk, an
-  NFS blip) warn through the ``questdb`` logger and keep the in-process
+  with no token store is unaffected. Transient preflight contention and I/O
+  failures are warnings rather than terminal configuration errors. Transient
+  write failures (a full disk, an NFS blip) warn through the ``questdb`` logger and keep the in-process
   credential working.
 * A ``FileTokenStore`` directory is expanded with :func:`os.path.expanduser`
   and made absolute at construction; one whose leading ``~`` cannot be
@@ -405,6 +408,10 @@ Highlights:
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.InvalidApiCall`` and clears nothing, so cancel the sign-in
   first or retry once it completes.
+* On CPython, failed pending-call registration no longer strands a signal
+  exception caught during a synchronous transport persistence diagnostic.
+  An exception-safe native-return boundary delivers it without rerunning the
+  signal handler; additional saved exceptions retain their context chain.
 * Renderer prompts receive the device code's bounded lifetime and polling
   interval (``expires_in`` / ``interval``), matching the complete Java device
   challenge, plus ``browser_target``, the single natively vetted URL that

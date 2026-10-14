@@ -486,6 +486,7 @@ cdef inline object c_err_to_fields(questdb_error* err):
         return (py_code, py_msg, py_sender_error, in_doubt)
     finally:
         questdb_error_free(err)
+        _oidc_raise_unscheduled_main()
 
 
 cdef inline object c_err_to_py(line_sender_error* err):
@@ -7057,6 +7058,7 @@ cdef class QuestDB:
         finally:
             _ensure_has_gil(&gs)
             qdb_pystr_buf_free(b)
+            _oidc_raise_unscheduled_main()
 
     def __enter__(self):
         self._state_cond.acquire()
@@ -7113,6 +7115,7 @@ cdef class QuestDB:
                 questdb_db_return_sender(db, sender)
             if db_use:
                 self._end_db_use()
+            _oidc_raise_unscheduled_main()
 
     def dataframe(
             self,
@@ -7298,6 +7301,7 @@ cdef class QuestDB:
             qdb_pystr_buf_free(b)
             if db_use:
                 self._end_db_use()
+            _oidc_raise_unscheduled_main()
 
     def execute(self, str sql, object binds=None):
         """
@@ -8755,6 +8759,7 @@ cdef class Sender:
                     UserWarning,
                     stacklevel=1
                 )
+        _oidc_raise_unscheduled_main()
 
     def __enter__(self) -> Sender:
         """Call :func:`Sender.establish` at the start of a ``with`` block."""
@@ -8931,6 +8936,7 @@ cdef class Sender:
             finally:
                 self._native_in_flight = False
                 qdb_pystr_buf_free(ws_b)
+                _oidc_raise_unscheduled_main()
         if schema_overrides is not None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -8971,6 +8977,7 @@ cdef class Sender:
         finally:
             self._buffer._end_native_borrow(True)
             self._native_in_flight = False
+            _oidc_raise_unscheduled_main()
         return self
 
     cpdef flush(
@@ -9097,6 +9104,9 @@ cdef class Sender:
                 raise c_err_to_py_fmt(err, _FLUSH_FMT)
             else:
                 raise c_err_to_py(err)
+        # Native errors above are consumed before the fallback raises. On
+        # success all sender/buffer borrows have already been released.
+        _oidc_raise_unscheduled_main()
 
     cdef inline void_int _check_not_in_own_callback(
             self, str method, bint allow_idle_callback=False) except -1:
@@ -9184,6 +9194,7 @@ cdef class Sender:
             raise c_err_to_py(err)
         if c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
+        _oidc_raise_unscheduled_main()
         if fsn.has_value:
             return fsn.value
         return None
@@ -9229,6 +9240,7 @@ cdef class Sender:
             raise c_err_to_py(err)
         if c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
+        _oidc_raise_unscheduled_main()
         if fsn.has_value:
             return fsn.value
         return None
@@ -9324,6 +9336,7 @@ cdef class Sender:
         # with no progress; the current ack level is the answer.
         if not line_sender_qwpws_acked_fsn(self._impl, &acked, &err):
             raise c_err_to_py(err)
+        _oidc_raise_unscheduled_main()
         return bool(acked.has_value and acked.value >= c_fsn)
 
     def drive_once(self):
@@ -9343,6 +9356,7 @@ cdef class Sender:
         self._native_in_flight = False
         if not ok:
             raise c_err_to_py(err)
+        _oidc_raise_unscheduled_main()
         return bool(progressed)
 
     def poll_error(self):
@@ -9417,6 +9431,7 @@ cdef class Sender:
         self._native_in_flight = False
         if not ok:
             raise c_err_to_py(err)
+        _oidc_raise_unscheduled_main()
 
     cdef _close(self):
         cdef PyThreadState* gs = NULL

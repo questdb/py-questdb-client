@@ -8439,7 +8439,8 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
 
     def _flush_with_signal(
             self, signum, handler, busy_worker=False,
-            inside_logging=False, handler_failure=False):
+            inside_logging=False, handler_failure=False,
+            pending_call_failures=0, use_dataframe=False):
         self._surfaced_after_flush = False
         self._handler_called = threading.Event()
         outer = self
@@ -8481,6 +8482,8 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
                 os.remove(credential[0])
             os.mkdir(credential[0])
             sabotaged.set()
+            if pending_call_failures:
+                _client._debug_oidc_fail_pending_calls(pending_call_failures)
             if not inside_logging and not handler_failure:
                 signal.pthread_kill(threading.get_ident(), signum)
 
@@ -8519,18 +8522,28 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
                     self.assertTrue(worker_in_handler.wait(15))
                 elif inside_logging or handler_failure:
                     questdb_logger.addHandler(blocking_handler)
+                sender_kwargs = ({
+                    'auto_flush_rows': 1,
+                    'auto_flush_bytes': False,
+                    'auto_flush_interval': False,
+                } if use_dataframe else {'auto_flush': False})
                 sender = questdb.Sender.from_conf(
                     f'http::addr=127.0.0.1:{server.port};',
-                    oidc_auth=auth, auto_flush=False)
+                    oidc_auth=auth, **sender_kwargs)
                 sender.establish()
                 try:
                     deadline = time.monotonic() + 20
                     while not sabotaged.is_set():
                         self.assertLess(time.monotonic(), deadline)
-                        sender.row(
-                            't', columns={'v': 1},
-                            at=questdb.ServerTimestamp)
-                        sender.flush()
+                        if use_dataframe:
+                            sender.dataframe(
+                                pd.DataFrame({'v': [1]}), table_name='t',
+                                at=questdb.ServerTimestamp)
+                        else:
+                            sender.row(
+                                't', columns={'v': 1},
+                                at=questdb.ServerTimestamp)
+                            sender.flush()
                         if not sabotaged.is_set():
                             time.sleep(0.05)
                     # A bytecode boundary after the flush that ran the refresh.
@@ -8549,6 +8562,76 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
                 worker.join(15)
             questdb_logger.removeHandler(blocking_handler)
             signal.signal(signum, previous)
+
+    def _check_failed_pending_call_delivery(self, use_dataframe=False):
+        for signum, exception in (
+                (signal.SIGALRM, TimeoutError('deadline during diagnostic')),
+                (signal.SIGINT, KeyboardInterrupt('interrupt during diagnostic')),
+                (signal.SIGTERM, SystemExit(5))):
+            with self.subTest(exception=type(exception).__name__):
+                calls = []
+
+                def handler(signum, frame):
+                    calls.append(signum)
+                    raise exception
+
+                try:
+                    with self.assertRaises(type(exception)) as caught:
+                        self._flush_with_signal(
+                            signum, handler, inside_logging=True,
+                            pending_call_failures=1, use_dataframe=use_dataframe)
+                    self.assertIs(caught.exception, exception)
+                    self.assertEqual(calls, [signum])
+                    self.assertTrue(self._surfaced_after_flush)
+                    self.assertEqual(
+                        _client._debug_oidc_pending_call_failures_remaining(), 0,
+                        'the regression must exercise failed registration')
+                finally:
+                    _client._debug_oidc_fail_pending_calls(0)
+
+    def test_failed_pending_call_enqueue_delivers_the_original_exception(self):
+        self._check_failed_pending_call_delivery()
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_failed_pending_call_enqueue_during_dataframe_auto_flush(self):
+        self._check_failed_pending_call_delivery(use_dataframe=True)
+
+    def test_enqueue_failure_preserves_all_saved_exceptions(self):
+        class FrozenDeadline(TimeoutError):
+            def __setattr__(self, name, value):
+                raise AssertionError('exception attributes must not run Python hooks')
+
+        for fail_initial in (True, False):
+            with self.subTest(fail_initial=fail_initial):
+                exceptions = tuple(FrozenDeadline(str(index)) for index in range(4))
+                try:
+                    with self.assertRaises(FrozenDeadline) as caught:
+                        _client._debug_oidc_deliver_test_exceptions(
+                            exceptions, fail_initial)
+                    current = caught.exception
+                    for expected in reversed(exceptions):
+                        self.assertIs(current, expected)
+                        current = current.__context__
+                    self.assertIsNone(current)
+                    self.assertEqual(
+                        _client._debug_oidc_pending_call_failures_remaining(), 0)
+                finally:
+                    _client._debug_oidc_fail_pending_calls(0)
+
+    def test_enqueue_failure_with_reused_exception_does_not_create_a_cycle(self):
+        for fail_initial in (True, False):
+            with self.subTest(fail_initial=fail_initial):
+                first = TimeoutError('reusable handler exception')
+                second = TimeoutError('other handler exception')
+                try:
+                    with self.assertRaises(TimeoutError) as caught:
+                        _client._debug_oidc_deliver_test_exceptions(
+                            (first, second, first), fail_initial)
+                    self.assertIs(caught.exception, first)
+                    self.assertIs(first.__context__, second)
+                    self.assertIsNone(second.__context__)
+                finally:
+                    _client._debug_oidc_fail_pending_calls(0)
 
     def test_exception_from_a_signal_handler_reaches_the_flush_caller(self):
         def on_alarm(signum, frame):

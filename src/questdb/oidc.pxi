@@ -213,6 +213,12 @@ def _oidc_exception_is_from_signal_handler(object exc):
 cdef list _OIDC_MAIN_PARKED = []
 cdef Py_ssize_t _OIDC_MAIN_PARKED_MAX = 64
 cdef bint _OIDC_MAIN_PARK_SCHEDULED = False
+# Internal fault injection, used to exercise CPython's documented full-queue
+# return without a racy native producer flooding the process-wide queue.
+cdef int _OIDC_PENDING_CALL_FAILURES_REMAINING = 0
+cdef bint _OIDC_COUNT_NATIVE_FREES = False
+cdef uint64_t _OIDC_TOKEN_FREES = 0
+cdef uint64_t _OIDC_ERROR_FREES = 0
 # Diagnostic dispatches currently running Python code ON THE MAIN THREAD. A
 # pending call that fires inside one (the logging call runs bytecode) must not
 # raise there, where the dispatcher would take the exception for a
@@ -283,6 +289,12 @@ cdef int _oidc_raise_parked_main(void* unused) noexcept:
         return 0
     exc = _OIDC_MAIN_PARKED.pop(0)
     _oidc_schedule_parked_main()
+    # Queue producers can fill the slot freed by this callback. If registering
+    # the next exception fails, deliver the rest in this exception's context
+    # chain rather than stranding them after the Python call already returned.
+    if not _OIDC_MAIN_PARK_SCHEDULED and _OIDC_MAIN_PARKED:
+        _OIDC_MAIN_PARKED.insert(0, exc)
+        exc = _oidc_take_unscheduled_main()
     PyErr_SetObject(type(exc), exc)
     return -1
 
@@ -294,11 +306,108 @@ cdef void _oidc_park_main(object exc) noexcept:
 
 
 cdef void _oidc_schedule_parked_main() noexcept:
-    global _OIDC_MAIN_PARK_SCHEDULED
+    global _OIDC_MAIN_PARK_SCHEDULED, _OIDC_PENDING_CALL_FAILURES_REMAINING
     if not _OIDC_MAIN_PARKED or _OIDC_MAIN_PARK_SCHEDULED:
+        return
+    if _OIDC_PENDING_CALL_FAILURES_REMAINING > 0:
+        _OIDC_PENDING_CALL_FAILURES_REMAINING -= 1
         return
     if questdb_add_pending_call(_oidc_raise_parked_main, NULL) == 0:
         _OIDC_MAIN_PARK_SCHEDULED = True
+    # A failed enqueue is delivered by the Python-visible native-return
+    # boundary below, after native ownership/borrow cleanup. No bytecode or
+    # retry thread may be started here: that could deliver an exception while
+    # this noexcept foreign callback is still running and swallow it again.
+
+
+cdef object _oidc_take_unscheduled_main():
+    """Take saved signals if CPython could not register their pending call.
+
+    Call only at an exception-safe native-return boundary, not inside a
+    callback or before freeing an owned native result/error. Successfully
+    queued delivery remains asynchronous. When even re-enqueueing successive
+    signals is impossible, preserve all of them in the exception context chain
+    instead of leaving another one stranded in the queue.
+    """
+    cdef object exc
+    if (_OIDC_MAIN_PARK_SCHEDULED or _OIDC_MAIN_DIAGNOSTIC_DEPTH != 0
+            or questdb_thread_ident() != _OIDC_MAIN_THREAD_IDENT
+            or not _OIDC_MAIN_PARKED):
+        return None
+    exc = _OIDC_MAIN_PARKED.pop(0)
+    try:
+        raise exc
+    except BaseException:
+        if _OIDC_MAIN_PARKED:
+            # Let normal exception normalization chain these, rather than
+            # invoking a subclass's __setattr__ or creating a context cycle
+            # when two handlers raise the same reusable exception instance.
+            # Recursion is bounded by _OIDC_MAIN_PARKED_MAX (64).
+            return _oidc_take_unscheduled_main()
+        return exc
+
+
+cdef void_int _oidc_raise_unscheduled_main() except -1:
+    cdef object exc = _oidc_take_unscheduled_main()
+    if exc is not None:
+        raise exc
+    return 0
+
+
+def _debug_oidc_fail_pending_calls(int count):
+    """Internal test hook: fail the next count pending-call registrations."""
+    global _OIDC_PENDING_CALL_FAILURES_REMAINING
+    if count < 0:
+        raise ValueError('count must be non-negative')
+    _OIDC_PENDING_CALL_FAILURES_REMAINING = count
+
+
+def _debug_oidc_pending_call_failures_remaining():
+    return _OIDC_PENDING_CALL_FAILURES_REMAINING
+
+
+def _debug_oidc_deliver_test_exceptions(tuple exceptions, bint fail_initial):
+    """Exercise initial and successive enqueue failures without native races."""
+    global _OIDC_PENDING_CALL_FAILURES_REMAINING
+    for exc in exceptions:
+        if not isinstance(exc, BaseException):
+            raise TypeError('expected exception instances')
+    for exc in exceptions:
+        _oidc_park_main(exc)
+    if fail_initial:
+        _OIDC_PENDING_CALL_FAILURES_REMAINING = 1
+    _oidc_schedule_parked_main()
+    if not fail_initial:
+        # No bytecode runs between successful C registration and this write.
+        # The already-queued callback will fail to enqueue its successor.
+        _OIDC_PENDING_CALL_FAILURES_REMAINING = 1
+    _oidc_raise_unscheduled_main()
+
+
+def _debug_oidc_native_free_counts(bint enabled=False):
+    """Count actual native release calls; enabling starts a fresh measurement."""
+    global _OIDC_COUNT_NATIVE_FREES, _OIDC_TOKEN_FREES, _OIDC_ERROR_FREES
+    if enabled:
+        _OIDC_TOKEN_FREES = 0
+        _OIDC_ERROR_FREES = 0
+    _OIDC_COUNT_NATIVE_FREES = enabled
+    return (_OIDC_TOKEN_FREES, _OIDC_ERROR_FREES)
+
+
+cdef void _oidc_release_token(questdb_oidc_token* token) noexcept:
+    global _OIDC_TOKEN_FREES
+    cdef bint counted = _OIDC_COUNT_NATIVE_FREES and token != NULL
+    questdb_oidc_token_free(token)
+    if counted:
+        _OIDC_TOKEN_FREES += 1
+
+
+cdef void _oidc_release_error(questdb_error* err) noexcept:
+    global _OIDC_ERROR_FREES
+    cdef bint counted = _OIDC_COUNT_NATIVE_FREES and err != NULL
+    questdb_error_free(err)
+    if counted:
+        _OIDC_ERROR_FREES += 1
 
 
 cdef void _oidc_rearm_keyboard_interrupt() noexcept:
@@ -941,7 +1050,8 @@ cdef object _oidc_err_to_py(questdb_error* err):
     try:
         return _oidc_err_to_py_unowned(err)
     finally:
-        questdb_error_free(err)
+        _oidc_release_error(err)
+        _oidc_raise_unscheduled_main()
 
 
 cdef inline bytes _oidc_required_utf8(object value, str name):
@@ -1007,7 +1117,7 @@ cdef void _oidc_cancel_sign_in_from_callback(
     _ensure_has_gil(&gs)
     if not ok:
         if err != NULL:
-            questdb_error_free(err)
+            _oidc_release_error(err)
 
 
 cdef inline bint _oidc_event_has_browser_target(size_t struct_size):
@@ -2317,7 +2427,7 @@ cdef class OidcDeviceAuth:
                 # The interrupt is what the user asked for; the native error is
                 # just the cancellation it caused.
                 if err != NULL:
-                    questdb_error_free(err)
+                    _oidc_release_error(err)
                 _oidc_report_unfinished_prompt(prompted, None)
                 raise interrupt
             if not ok:
@@ -2326,6 +2436,7 @@ cdef class OidcDeviceAuth:
                 raise exc
         finally:
             self._sign_in_lock.release()
+            _oidc_raise_unscheduled_main()
 
     def _sign_in_without_renderer(self):
         """``sign_in()`` once interpreter shutdown has detached the renderer.
@@ -2416,12 +2527,18 @@ cdef class OidcDeviceAuth:
             # Ctrl-C landed in a persistence diagnostic during a refresh. The
             # user asked to stop; the outcome of the call is moot.
             if token != NULL:
-                questdb_oidc_token_free(token)
+                _oidc_release_token(token)
             if err != NULL:
-                questdb_error_free(err)
-            raise interrupt
+                _oidc_release_error(err)
+            try:
+                raise interrupt
+            finally:
+                _oidc_raise_unscheduled_main()
         if token == NULL:
-            raise _oidc_err_to_py(err)
+            try:
+                raise _oidc_err_to_py(err)
+            finally:
+                _oidc_raise_unscheduled_main()
         try:
             data = questdb_oidc_token_data(token)
             length = questdb_oidc_token_len(token)
@@ -2433,7 +2550,8 @@ cdef class OidcDeviceAuth:
             # this is the one function that returns a credential.
             return _oidc_text(data, length) or ''
         finally:
-            questdb_oidc_token_free(token)
+            _oidc_release_token(token)
+            _oidc_raise_unscheduled_main()
 
     def headers(self):
         """Return an HTTP Authorization header containing the current token.
@@ -2474,10 +2592,16 @@ cdef class OidcDeviceAuth:
         interrupt = _oidc_foreground_exit(call)
         if interrupt is not None:
             if err != NULL:
-                questdb_error_free(err)
-            raise interrupt
-        if not ok:
-            raise _oidc_err_to_py(err)
+                _oidc_release_error(err)
+            try:
+                raise interrupt
+            finally:
+                _oidc_raise_unscheduled_main()
+        try:
+            if not ok:
+                raise _oidc_err_to_py(err)
+        finally:
+            _oidc_raise_unscheduled_main()
 
     def close(self):
         """Permanently close this provider and cancel interruptible waits.

@@ -172,6 +172,7 @@ from test_dataframe_leaks import (
     TestCategoricalArrowLeak,
     TestLeakHarness,
     TestOidcNativeLeak,
+    TestOidcNativeInterruptOwnership,
     TestPyobjColumnarLeak,
 )
 
