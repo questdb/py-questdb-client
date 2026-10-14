@@ -2020,18 +2020,18 @@
   "outer_outcome": "completed"
  },
  "PooledSender.dataframe | QuestDB.execute": {
-  "result": "refused",
-  "reason": "Resource temporarily unavailable (os error 35)",
+  "result": "clean",
+  "reason": "raised SocketError: Resource temporarily unavailable",
   "outer_outcome": "completed"
  },
  "PooledSender.dataframe | QuestDB.query": {
-  "result": "refused",
-  "reason": "Resource temporarily unavailable (os error 35)",
+  "result": "clean",
+  "reason": "raised SocketError: Resource temporarily unavailable",
   "outer_outcome": "completed"
  },
  "PooledSender.dataframe | QuestDB.reader": {
-  "result": "refused",
-  "reason": "Resource temporarily unavailable (os error 35)",
+  "result": "clean",
+  "reason": "raised SocketError: Resource temporarily unavailable",
   "outer_outcome": "completed"
  },
  "PooledSender.dataframe | QuestDB.reap_idle": {
@@ -2045,8 +2045,8 @@
   "outer_outcome": "completed"
  },
  "PooledSender.dataframe | QuestDB.server_info": {
-  "result": "refused",
-  "reason": "Resource temporarily unavailable (os error 35)",
+  "result": "clean",
+  "reason": "raised SocketError: Resource temporarily unavailable",
   "outer_outcome": "completed"
  },
  "PooledSender.dataframe | Sender.__bytes__": {
@@ -2465,18 +2465,18 @@
   "outer_outcome": "completed"
  },
  "PooledSender.row | QuestDB.execute": {
-  "result": "refused",
-  "reason": "Resource temporarily unavailable (os error 35)",
+  "result": "clean",
+  "reason": "raised SocketError: Resource temporarily unavailable",
   "outer_outcome": "completed"
  },
  "PooledSender.row | QuestDB.query": {
-  "result": "refused",
-  "reason": "Resource temporarily unavailable (os error 35)",
+  "result": "clean",
+  "reason": "raised SocketError: Resource temporarily unavailable",
   "outer_outcome": "completed"
  },
  "PooledSender.row | QuestDB.reader": {
-  "result": "refused",
-  "reason": "Resource temporarily unavailable (os error 35)",
+  "result": "clean",
+  "reason": "raised SocketError: Resource temporarily unavailable",
   "outer_outcome": "completed"
  },
  "PooledSender.row | QuestDB.reap_idle": {
@@ -2490,8 +2490,8 @@
   "outer_outcome": "completed"
  },
  "PooledSender.row | QuestDB.server_info": {
-  "result": "refused",
-  "reason": "Resource temporarily unavailable (os error 35)",
+  "result": "clean",
+  "reason": "raised SocketError: Resource temporarily unavailable",
   "outer_outcome": "completed"
  },
  "PooledSender.row | Sender.__bytes__": {
@@ -2910,18 +2910,18 @@
   "outer_outcome": "completed"
  },
  "QuestDB.dataframe | QuestDB.execute": {
-  "result": "refused",
-  "reason": "Resource temporarily unavailable (os error 35)",
+  "result": "clean",
+  "reason": "raised SocketError: Resource temporarily unavailable",
   "outer_outcome": "completed"
  },
  "QuestDB.dataframe | QuestDB.query": {
-  "result": "refused",
-  "reason": "Resource temporarily unavailable (os error 35)",
+  "result": "clean",
+  "reason": "raised SocketError: Resource temporarily unavailable",
   "outer_outcome": "completed"
  },
  "QuestDB.dataframe | QuestDB.reader": {
-  "result": "refused",
-  "reason": "Resource temporarily unavailable (os error 35)",
+  "result": "clean",
+  "reason": "raised SocketError: Resource temporarily unavailable",
   "outer_outcome": "completed"
  },
  "QuestDB.dataframe | QuestDB.reap_idle": {
@@ -2935,8 +2935,8 @@
   "outer_outcome": "completed"
  },
  "QuestDB.dataframe | QuestDB.server_info": {
-  "result": "refused",
-  "reason": "Resource temporarily unavailable (os error 35)",
+  "result": "clean",
+  "reason": "raised SocketError: Resource temporarily unavailable",
   "outer_outcome": "completed"
  },
  "QuestDB.dataframe | Sender.__bytes__": {

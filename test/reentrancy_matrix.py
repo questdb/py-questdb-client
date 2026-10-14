@@ -14,12 +14,18 @@ property of every class that Python can reach, taken from
 own subprocess under a watchdog, and its outcome is one of:
 
 ``refused``
-    The re-entered call raised. The good answer for anything that would
-    corrupt or reorder what the outer call is doing.
+    It raised a `QuestDBError` other than a `SocketError`: a guard's
+    refusal, or the client saying the call does not apply here (a
+    QWP-only method on an ILP sender, say). The good answer for anything
+    that would corrupt or reorder what the outer call is doing.
 ``clean``
-    It returned, and the outer call still ran to completion. Also a good
-    answer -- for reads, and for calls that touch nothing the outer one
-    holds.
+    It returned, or it was let through and failed on its own terms
+    rather than at a guard (see `score_raised`), and the outer call
+    still ran to completion. Also a good answer -- for reads, and for
+    calls that touch nothing the outer one holds. A clean cell is not
+    compared against what the outer call delivers, so a call that
+    leaves work pending for the outer call to finish still reads as
+    clean; that part of the re-entrancy contract is checked in review.
 ``unreachable``
     The combination cannot be built, with the reason recorded. A
     ``SenderTransaction`` over QWP, say, or a reader lease with no live
@@ -49,6 +55,7 @@ import ipaddress
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import traceback
@@ -599,14 +606,8 @@ def run_cell(outer_name, member):
                 getattr(target, member.split('.', 1)[1])
             else:
                 getattr(target, member.split('.', 1)[1])(*args, **kwargs)
-        except qi.QuestDBError as exc:
-            record['result'] = 'refused'
-            record['reason'] = _short(exc)
-        except (TypeError, ValueError, OSError) as exc:
-            # Not a guard: the call was let through and failed on its own
-            # terms. Recorded separately so a refusal cannot hide here.
-            record['result'] = 'clean'
-            record['reason'] = f'raised {type(exc).__name__}: {_short(exc)}'
+        except (qi.QuestDBError, TypeError, ValueError, OSError) as exc:
+            score_raised(record, exc)
         else:
             record['result'] = 'clean'
             record['reason'] = ''
@@ -620,10 +621,10 @@ def run_cell(outer_name, member):
             record['outer_outcome'] = 'not run'
             return record
         except qi.QuestDBError as exc:
-            record['outer_outcome'] = f'raised {_short(exc)}'
+            record['outer_outcome'] = f'raised {short_reason(exc)}'
         except Exception as exc:
             record['outer_outcome'] = (
-                f'raised {type(exc).__name__}: {_short(exc)}')
+                f'raised {type(exc).__name__}: {short_reason(exc)}')
         else:
             record['outer_outcome'] = 'completed'
         if not hook_ran[0] and record['result'] == 'unreachable':
@@ -635,8 +636,36 @@ def run_cell(outer_name, member):
     return record
 
 
-def _short(exc):
+def score_raised(record, exc):
+    """Record a re-entered call that raised: `refused` for a
+    `QuestDBError` other than a `SocketError` -- a guard's refusal, or
+    the client saying the call does not apply here -- and `clean` when it
+    was let through and failed on its own terms. The second kind is
+    recorded with its type in the reason, so a refusal cannot hide
+    behind a `clean`.
+
+    A `SocketError` is of the second kind. The code reports a transport
+    failure and no guard raises it, so it means the call went ahead and
+    tried to reach an endpoint the offline mock does not serve -- a read
+    endpoint, for `QuestDB.query` and its siblings.
+    """
+    if isinstance(exc, qi.QuestDBError):
+        if exc.code != qi.QuestDBErrorCode.SocketError:
+            record['result'] = 'refused'
+            record['reason'] = short_reason(exc)
+            return
+        kind = exc.code.name
+    else:
+        kind = type(exc).__name__
+    record['result'] = 'clean'
+    record['reason'] = f'raised {kind}: {short_reason(exc)}'
+
+
+def short_reason(exc):
     text = ' '.join(str(exc).split())
+    # The errno number is the platform's (EAGAIN is 35 on macOS and 11
+    # on Linux), so the stored reason leaves it out.
+    text = re.sub(r' \(os error \d+\)', '', text)
     return text[:140]
 
 

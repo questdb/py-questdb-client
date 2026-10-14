@@ -53,14 +53,22 @@ def read_varint(payload, pos):
             raise AssertionError('oversize QWP varint')
 
 
+#: Frame-header flag (byte 5) saying a delta symbol dictionary follows the
+#: header, from `questdb-rs/src/ingress/column_sender/wire.rs`. WebSocket
+#: frames set it; UDP datagrams do not.
+QWP_FLAG_DELTA_SYMBOL_DICT = 0x08
+
+
 def _first_table_start(payload):
-    """Position of the first table block, past the frame header and the
-    delta-symbol-dictionary prefix pooled row frames carry."""
+    """Position of the first table block, past the frame header and, when
+    the header's flag announces one, the delta symbol dictionary."""
     if len(payload) < 12 or payload[:4] != b'QWP1':
         raise AssertionError('not a QWP1 frame')
     if int.from_bytes(payload[6:8], 'little') < 1:
         raise AssertionError('QWP1 frame contains no table')
     pos = 12
+    if not payload[5] & QWP_FLAG_DELTA_SYMBOL_DICT:
+        return pos
     _delta_start, pos = read_varint(payload, pos)
     delta_count, pos = read_varint(payload, pos)
     for _ in range(delta_count):
@@ -87,6 +95,20 @@ def first_table_column_types(payload):
 
     The designated timestamp column carries an empty name.
     """
+    return _first_table_schema(payload)[0]
+
+
+def only_table_column_data(payload):
+    """The column data of a frame that holds exactly one table: every
+    byte after its schema, in column order."""
+    if int.from_bytes(payload[6:8], 'little') != 1:
+        raise AssertionError('QWP1 frame does not hold exactly one table')
+    return payload[_first_table_schema(payload)[1]:]
+
+
+def _first_table_schema(payload):
+    """The first table's ``(column name, type tag)`` pairs, and the
+    position its column data starts at."""
     pos = _first_table_start(payload)
     table_name_len, pos = read_varint(payload, pos)
     pos += table_name_len
@@ -101,7 +123,7 @@ def first_table_column_types(payload):
             raise AssertionError('truncated QWP column schema')
         columns.append((name.decode('utf-8'), payload[pos]))
         pos += 1
-    return columns
+    return columns, pos
 
 
 def type_name(tag):

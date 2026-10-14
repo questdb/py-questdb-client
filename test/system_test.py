@@ -3900,6 +3900,59 @@ class TestEgressQwpRowTypes(unittest.TestCase):
             except Exception:
                 pass
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_numpy_egress_geohash_width_follows_precision(self):
+        """A GEOHASH column comes back as the narrowest signed integer
+        that holds every value of its precision -- 1-7 bits in int8,
+        8-15 in int16, 16-31 in int32, 32-60 in int64 -- which is the
+        width the Arrow egress gives it as well. Each edge of each width
+        carries its all-ones value."""
+        widths = {
+            1: np.int8, 7: np.int8,
+            8: np.int16, 15: np.int16,
+            16: np.int32, 31: np.int32,
+            32: np.int64, 60: np.int64,
+        }
+        table_name = 't_gh_width_' + uuid.uuid4().hex[:8]
+        columns = ', '.join(f'gh{bits} GEOHASH({bits}b)' for bits in widths)
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} (ts TIMESTAMP, {columns}) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                with client.sender() as sender:
+                    for i, fill in enumerate((True, False)):
+                        sender.row(
+                            table_name,
+                            columns={
+                                f'gh{bits}': qi.Geohash(
+                                    (1 << bits) - 1 if fill else 0, bits)
+                                for bits in widths},
+                            at=qi.TimestampMicros(i + 1))
+                    sender.flush(wait=True)
+                self.qdb_plain.retry_check_table(table_name, min_rows=2)
+                query = f'SELECT * FROM {table_name} ORDER BY ts'
+                frame = client.query(query).to_pandas()
+                arrow = client.query(query).to_arrow()
+
+            for bits, dtype in widths.items():
+                with self.subTest(bits=bits):
+                    name = f'gh{bits}'
+                    self.assertEqual(frame[name].dtype, np.dtype(dtype))
+                    self.assertEqual(
+                        frame[name].tolist(), [(1 << bits) - 1, 0])
+                    self.assertEqual(
+                        frame.attrs['questdb']['columns'][name],
+                        {'kind': 'geohash', 'precision_bits': bits})
+                    self.assertEqual(
+                        arrow.schema.field(name).type.to_pandas_dtype(),
+                        dtype)
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
     def test_geohash_claim_survives_convert_dtypes_to_pyarrow(self):
         """A GEOHASH column keeps its type through
         ``to_pandas()`` followed by
@@ -4818,6 +4871,66 @@ class TestEgressPool(unittest.TestCase):
                 after = lease.query(
                     f'SELECT count() FROM {table}').to_arrow()
                 self.assertEqual(after.column(0).to_pylist(), [3])
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_reader_lease_call_refuses_to_end_the_lease(self):
+        """A bind value's conversion runs the caller's Python inside
+        `query()` and `execute()`. From there, a call back into the same
+        lease that would release its connection or start a second query
+        on it is refused, the outer call completes, and the lease stays
+        usable. `__enter__` just hands the lease back."""
+        ends_the_lease = (
+            r"close\(\) can't be called from inside a call on this "
+            r'reader lease')
+        second_query = 'another query or cursor is already in flight'
+        expected = {
+            'close': ends_the_lease,
+            '__exit__': ends_the_lease,
+            'query': second_query,
+            'execute': second_query,
+            '__enter__': None,
+        }
+        value = uuid.UUID(int=5)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            for outer in ('query', 'execute'):
+                for member, refusal in expected.items():
+                    with self.subTest(outer=outer, member=member):
+                        with client.reader() as lease:
+                            seen = []
+
+                            class ReentrantUuid(uuid.UUID):
+                                @property
+                                def bytes(self):
+                                    call = getattr(lease, member)
+                                    try:
+                                        if member == '__exit__':
+                                            got = call(None, None, None)
+                                        elif member in ('query', 'execute'):
+                                            got = call('SELECT 1')
+                                        else:
+                                            got = call()
+                                    except qi.QuestDBError as e:
+                                        got = e
+                                    seen.append(got)
+                                    return uuid.UUID.bytes.fget(self)
+
+                            bound = ReentrantUuid(int=value.int)
+                            if outer == 'query':
+                                frame = lease.query(
+                                    'SELECT $1 AS u', [bound]).to_pandas()
+                                self.assertEqual(frame['u'].tolist(), [value])
+                            else:
+                                self.assertIsNone(
+                                    lease.execute('SELECT $1 AS u', [bound]))
+
+                            self.assertEqual(len(seen), 1)
+                            if refusal is None:
+                                self.assertIs(seen[0], lease)
+                            else:
+                                self.assertIsInstance(seen[0], qi.QuestDBError)
+                                self.assertRegex(str(seen[0]), refusal)
+                            after = lease.query('SELECT 1 AS one').to_pandas()
+                            self.assertEqual(after['one'].tolist(), [1])
 
     def test_query_lease_arrow_c_stream_frees_cursor_for_reuse(self):
         """Consuming a lease result to end-of-stream through the native

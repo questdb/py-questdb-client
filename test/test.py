@@ -115,6 +115,7 @@ from test_client_dataframe_failures import (
     TestClientDataframeCellLifetime,
     TestClientDataframeDirectFailures,
     TestClientDataframeFaultFuzz,
+    TestClientDataframeNumpyRouteFailures,
 )
 from test_client_dataframe_fuzz import (
     TestClientDataframeFuzz,
@@ -2924,6 +2925,50 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
             at=qi.TimestampNanos(11))
         self.assertGreater(len(buffer), before)
 
+    def test_row_binary_sends_each_accepted_type_byte_for_byte(self):
+        # `bytes`, `bytearray` and a buffer view each take their own
+        # pointer and length into the native call, so each one is held
+        # to the frame a `bytes` value of the same content produces.
+        def capture(value):
+            with QwpAckServer(record_payloads=True) as server:
+                conf = (
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;')
+                with qi.QuestDB.from_conf(conf) as client:
+                    with client.sender() as sender:
+                        sender.row(
+                            'binary_wire', columns={'value': value},
+                            at=qi.ServerTimestamp)
+                        sender.flush(wait=True)
+                return next(
+                    payload
+                    for payload in server.snapshot()['binary_payloads']
+                    if int.from_bytes(payload[6:8], 'little') > 0)
+
+        data = b'\x00ab\xffcd'
+        reference = capture(data)
+        # No null bitmap, offsets [0, n], then the bytes. With a server
+        # timestamp, BINARY is the frame's last column.
+        self.assertTrue(reference.endswith(
+            b'\x00' + struct.pack('<II', 0, len(data)) + data))
+        forms = {
+            'bytearray': bytearray(data),
+            'memoryview of bytes': memoryview(data),
+            'memoryview of bytearray': memoryview(bytearray(data)),
+            'memoryview at an offset': memoryview(b'xx' + data + b'yy')[2:8],
+            'memoryview of uint8 array': memoryview(
+                np.frombuffer(data, dtype=np.uint8)),
+        }
+        for name, value in forms.items():
+            with self.subTest(form=name):
+                self.assertEqual(capture(value), reference)
+
+        empty_reference = capture(b'')
+        self.assertTrue(empty_reference.endswith(b'\x00' * 9))
+        for value in (bytearray(), memoryview(b'')):
+            with self.subTest(form=f'empty {type(value).__name__}'):
+                self.assertEqual(capture(value), empty_reference)
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_dataframe_binary_accepts_row_binary_types(self):
@@ -3953,6 +3998,60 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                 8, 'little', signed=True))
         self.assertEqual(pos, len(payload))
 
+    def test_udp_sends_every_qwp_only_type(self):
+        """A `udp::` sender's buffer takes the seven QWP-only types too,
+        and writes them with its own encoder, not the WebSocket one."""
+        binary = b'\x00ab\xffcd'
+        date_millis = 1234567890123
+        long256 = 2 ** 255 + 5
+        at_nanos = 1_700_000_000_000_000_000
+        with UdpServer() as server:
+            with qi.Sender.from_conf(
+                    f'udp::addr=127.0.0.1:{server.port};') as sender:
+                sender.row(
+                    'qwp_udp_types',
+                    columns={
+                        'uuid_col': self.UUID_VALUE,
+                        'ipv4_col': ipaddress.IPv4Address('192.0.2.1'),
+                        'binary_col': binary,
+                        'char_col': qi.Char('é'),
+                        'date_col': qi.DateMillis(date_millis),
+                        'long256_col': qi.Long256(long256),
+                        'geohash_col': qi.Geohash(0b10110, 5),
+                    },
+                    at=qi.TimestampNanos(at_nanos))
+                sender.flush()
+            datagrams = server.recv()
+        self.assertEqual(len(datagrams), 1)
+        datagram = datagrams[0]
+
+        self.assertEqual(
+            [(name, qwp_wire.type_name(tag))
+             for name, tag in qwp_wire.first_table_column_types(datagram)],
+            [('uuid_col', 'UUID'),
+             ('ipv4_col', 'IPV4'),
+             ('binary_col', 'BINARY'),
+             ('char_col', 'CHAR'),
+             ('date_col', 'DATE'),
+             ('long256_col', 'LONG256'),
+             ('geohash_col', 'GEOHASH'),
+             ('', 'TIMESTAMP_NANOS')])
+        self.assertEqual(qwp_wire.first_table_row_count(datagram), 1)
+
+        # Each column is dense (a zero byte: no null bitmap) and then
+        # its one value.
+        expected = b''.join(b'\x00' + value for value in (
+            self.UUID_VALUE.int.to_bytes(16, 'little'),
+            b'\x01\x02\x00\xc0',
+            struct.pack('<II', 0, len(binary)) + binary,
+            'é'.encode('utf-16-le'),
+            date_millis.to_bytes(8, 'little', signed=True),
+            long256.to_bytes(32, 'little'),
+            b'\x05\x16',  # precision 5, then one value byte
+            at_nanos.to_bytes(8, 'little', signed=True),
+        ))
+        self.assertEqual(qwp_wire.only_table_column_data(datagram), expected)
+
     def test_non_ascii_uuid_and_ipv4_column_names(self):
         """A UUID or IPV4 value reaches C through Python — `UUID.int` is a
         slot a subclass can turn into a property, and `IPv4Address.__int__`
@@ -4301,6 +4400,67 @@ print('OK')
                 self.assertEqual(len(buffer), before)
                 buffer.row('good', columns={'ok': 2}, at=qi.ServerTimestamp)
                 self.assertGreater(len(buffer), before)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_an_interrupt_from_a_cell_rewinds_the_frame(self):
+        """An aware datetime cell calls its `tzinfo.utcoffset()` while
+        its row and the frame's rewind point are live. Anything that is
+        not an `Exception` raised there -- an interrupt, an exit -- takes
+        the whole frame out of the buffer and comes out as itself."""
+
+        class Custom(BaseException):
+            pass
+
+        class RaisingTz(datetime.tzinfo):
+            calls = 0
+            raise_on = None
+            exc = None
+
+            def utcoffset(self, dt):
+                RaisingTz.calls += 1
+                if RaisingTz.calls == RaisingTz.raise_on:
+                    raise RaisingTz.exc
+                return datetime.timedelta(0)
+
+            def dst(self, dt):
+                return datetime.timedelta(0)
+
+            def tzname(self, dt):
+                return 'RAISING'
+
+        frame = pd.DataFrame({
+            'v': [1, 2, 3],
+            'ts': pd.Series(
+                [datetime.datetime(2020, 1, 1, tzinfo=RaisingTz())] * 3,
+                dtype=object)})
+
+        # `v` is written before `ts`, so row 0 is part-written when the
+        # first call raises, and row 1 follows a whole row.
+        for exc_type in (KeyboardInterrupt, SystemExit, Custom):
+            for row in (0, 1):
+                with self.subTest(exc=exc_type.__name__, row=row):
+                    buffer = qi.Buffer._new_qwp()
+                    buffer.row(
+                        'before', columns={'ok': 1}, at=qi.ServerTimestamp)
+                    before = len(buffer)
+                    RaisingTz.calls = 0
+                    RaisingTz.raise_on = row + 1
+                    RaisingTz.exc = exc_type()
+                    with self.assertRaises(exc_type) as raised:
+                        buffer.dataframe(
+                            frame, table_name='t', at=qi.ServerTimestamp)
+                    self.assertIs(raised.exception, RaisingTz.exc)
+                    self.assertEqual(RaisingTz.calls, row + 1)
+                    self.assertEqual(len(buffer), before)
+
+                    RaisingTz.raise_on = None
+                    buffer.row(
+                        'after', columns={'ok': 2}, at=qi.ServerTimestamp)
+                    after_row = len(buffer)
+                    self.assertGreater(after_row, before)
+                    buffer.dataframe(
+                        frame, table_name='t', at=qi.ServerTimestamp)
+                    self.assertGreater(len(buffer), after_row)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_dataframe_is_refused_while_a_row_is_being_written(self):
@@ -6848,7 +7008,10 @@ print('OK')
         'PooledReader.__enter__': (
             'a reader lease needs a live QuestDB read endpoint to '
             'borrow from; the offline fixtures are sender-side mocks. '
-            'Covered by system_test.py against a real server.'),
+            '`TestEgressPool.'
+            'test_a_reader_lease_call_refuses_to_end_the_lease` re-enters '
+            'every lease member from a bind value inside `query()` and '
+            '`execute()`, in system_test.py against a real server.'),
         'PooledReader.__exit__': 'as PooledReader.__enter__',
         'PooledReader.close': 'as PooledReader.__enter__',
         'PooledReader.execute': 'as PooledReader.__enter__',

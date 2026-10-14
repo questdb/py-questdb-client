@@ -77,6 +77,8 @@ from reentrancy_matrix import (
     hostile_dt,
     hostile_frame,
     reentry_args,
+    score_raised,
+    short_reason,
     summarize,
 )
 
@@ -135,11 +137,6 @@ HOLDER_CLOSE_WAIT_LIMIT_S = 300.0
 RESULT_PREFIX = 'CELL_RESULT '
 
 
-def _short(exc):
-    text = ' '.join(str(exc).split())
-    return text[:140]
-
-
 # ---------------------------------------------------------------------
 # Parking a thread at a known point
 # ---------------------------------------------------------------------
@@ -192,10 +189,10 @@ class Held:
                 fn()
                 self.outcomes[tag] = 'completed'
             except qi.QuestDBError as exc:
-                self.outcomes[tag] = f'raised {_short(exc)}'
+                self.outcomes[tag] = f'raised {short_reason(exc)}'
             except BaseException as exc:  # noqa: BLE001 -- recorded, not handled
                 self.outcomes[tag] = (
-                    f'raised {type(exc).__name__}: {_short(exc)}')
+                    f'raised {type(exc).__name__}: {short_reason(exc)}')
 
         thread = threading.Thread(target=run, name=tag, daemon=True)
         self.threads.append((tag, thread))
@@ -501,14 +498,8 @@ def _score_call(record, target, member, kind, args, kwargs):
             getattr(target, name)
         else:
             getattr(target, name)(*args, **kwargs)
-    except qi.QuestDBError as exc:
-        record['result'] = 'refused'
-        record['reason'] = _short(exc)
-    except (TypeError, ValueError, OSError) as exc:
-        # Not a guard: the call was let through and failed on its own
-        # terms. Recorded separately so a refusal cannot hide here.
-        record['result'] = 'clean'
-        record['reason'] = f'raised {type(exc).__name__}: {_short(exc)}'
+    except (qi.QuestDBError, TypeError, ValueError, OSError) as exc:
+        score_raised(record, exc)
     else:
         record['result'] = 'clean'
         record['reason'] = ''

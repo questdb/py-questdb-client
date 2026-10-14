@@ -495,6 +495,57 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
 
 
 @unittest.skipIf(pd is None, 'pandas not installed')
+class TestClientDataframeNumpyRouteFailures(unittest.TestCase):
+    """The committed-prefix contract `TestClientDataframeDirectFailures`
+    pins, on the route a NumPy-backed pandas frame takes. That route
+    needs no pyarrow, so neither does this class."""
+
+    def test_local_failure_covers_whole_dataframe(self):
+        # The NumPy route's own record of a committed prefix. After a
+        # dropped connection the native error on this route is nearly
+        # always `in_doubt` by itself, which would hide the record, so the
+        # failure here is local: the native client refuses the last row's
+        # UInt64 overflow with `in_doubt=False`, and only the record can
+        # widen it. After a one-batch prefix, that record comes from the
+        # successful flush alone. 128 batches fill the 127-frame deferred
+        # window, so the 128th flush is refused for capacity and the
+        # client commits (one extra frame) and retries it; that retry
+        # records the prefix as well.
+        for prefix in (0, 1, 128):
+            with self.subTest(prefix=prefix):
+                frame = pd.DataFrame({
+                    'ts': pd.to_datetime(np.arange(prefix + 1), unit='us'),
+                    'v': np.array(
+                        [1] * prefix + [2**64 - 1], dtype=np.uint64),
+                })
+                with QwpAckServer(defer_aware_acks=True) as server:
+                    with qi.QuestDB.from_conf(_conf(server.port)) as client:
+                        with self.assertRaises(qi.QuestDBError) as raised:
+                            client.dataframe(
+                                frame, table_name='t_numpy_prefix',
+                                at='ts', max_rows_per_batch=1)
+                        err = raised.exception
+                        self.assertEqual(
+                            err.code, qi.QuestDBErrorCode.InvalidApiCall)
+                        self.assertIn('does not fit', str(err))
+                        self.assertEqual(err.in_doubt, prefix != 0)
+                        if prefix:
+                            self.assertIsInstance(
+                                err.__cause__, qi.QuestDBError)
+                            self.assertFalse(err.__cause__.in_doubt)
+                        # A later independent call does not inherit this flag.
+                        with self.assertRaises(qi.QuestDBError) as fresh:
+                            client.dataframe(
+                                frame.iloc[prefix:],
+                                table_name='t_numpy_prefix',
+                                at='ts', max_rows_per_batch=1)
+                        self.assertFalse(fresh.exception.in_doubt)
+                    stats = server.snapshot_when_closed()
+                self.assertEqual(
+                    stats['binary_frames'], prefix + (prefix // 128))
+
+
+@unittest.skipIf(pd is None, 'pandas not installed')
 class TestClientDataframeCellLifetime(unittest.TestCase):
     """A cell's own code can replace that cell in the frame while
     ``QuestDB.dataframe()`` is reading it. Each case in ``hostile_cells.py``
