@@ -75,16 +75,13 @@ class _LiveCase(unittest.TestCase):
             system_test.may_install_questdb()
             cls._fixture = system_test.QuestDbFixture(
                 system_test.QUESTDB_PLAIN_INSTALL_PATH, http=True)
+            cls.addClassCleanup(cls._stop_fixture)
             cls._fixture.start()
             cls.addr = f'{cls._fixture.host}:{cls._fixture.http_server_port}'
         else:
             raise unittest.SkipTest(
                 'set QDB_HTTP_ADDR=host:port for a running QuestDB')
-        try:
-            cls.db = qdb.connect(f'ws::addr={cls.addr};')
-        except BaseException:
-            cls._stop_fixture()
-            raise
+        cls.db = qdb.connect(f'ws::addr={cls.addr};')
 
     @classmethod
     def tearDownClass(cls):
