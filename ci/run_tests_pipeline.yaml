@@ -146,8 +146,13 @@ stages:
             displayName: "Select and verify the psycopg2-only stack"
           - script: python3 proj.py build
             displayName: "Build"
+          # `proj.py build` leaves the extension in place under src/, which is
+          # not on sys.path; `proj.py test` sets this for the other jobs (see
+          # test/patch_path.py).
           - script: python3 test/test.py -v AdapterTest AdapterRealDriverTest
             displayName: "Test real legacy PG-wire adapters"
+            env:
+              TEST_QUESTDB_PATCH_PATH: "1"
       - job: TestsAgainstVariousNumpyVersion1x
         pool:
           name: "Azure Pipelines"
