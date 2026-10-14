@@ -14,8 +14,8 @@ UUID and fixed-size-binary DataFrame columns
 ********************************************
 
 UUID bytes are now **canonical RFC 4122 big-endian** at every API boundary, and
-a 16-byte Arrow column is only treated as a UUID when it carries the
-``arrow.uuid`` extension label. Three changes; the first affects **both
+a 16-byte Arrow column needs an explicit UUID type claim rather than its width
+alone. Three changes; the first affects **both
 ingestion and query results**, the other two ``dataframe()`` /
 ``Sender.dataframe()`` over QWP:
 
@@ -44,20 +44,24 @@ ingestion and query results**, the other two ``dataframe()`` /
   which build ``uuid.UUID`` objects directly, are unaffected and need no
   change.
 
-* **Unlabelled** ``pa.fixed_size_binary(16)`` **now lands as BINARY, not
-  UUID.** The ``arrow.uuid`` extension label is what claims a 16-byte column as
-  a UUID; without it the column is opaque bytes. If you were relying on the
-  width alone, either wrap the column in the ``arrow.uuid`` extension type or
-  claim it explicitly:
+* **Unclaimed** ``pa.fixed_size_binary(16)`` **now lands as BINARY, not
+  UUID.** The ``arrow.uuid`` extension label claims a 16-byte column as a UUID.
+  Whole-table or stream Arrow inputs can also claim it through column-field
+  metadata ``questdb.column_type=uuid``. Without a type claim the column is
+  opaque bytes. If you were relying on the width alone, either preserve this
+  metadata, wrap the column in the ``arrow.uuid`` extension type, or claim it
+  explicitly:
 
   .. code-block:: python
 
       sender.dataframe(df, table_name='t', at='ts',
                        schema_overrides={'u': 'uuid'})
 
-* ``pa.fixed_size_binary(32)`` **no longer maps to LONG256.** pyarrow drops
-  field metadata when it exports a single pandas column, so the width alone can
-  no longer claim the type. Claim it explicitly:
+* **Width alone no longer maps** ``pa.fixed_size_binary(32)`` **to LONG256.**
+  Whole-table or stream Arrow inputs retaining column-field metadata
+  ``questdb.column_type=long256`` still claim LONG256 without an override.
+  However, pyarrow drops field metadata when it exports a single pandas column,
+  so the pandas per-column planner cannot use that metadata. Claim it explicitly:
 
   .. code-block:: python
 
@@ -65,7 +69,7 @@ ingestion and query results**, the other two ``dataframe()`` /
                        schema_overrides={'h': 'long256'})
 
 ``schema_overrides`` accepts the new ``'uuid'`` and ``'long256'`` kinds for
-exactly this purpose. Writing an unlabelled 16- or 32-byte column to an
+exactly this purpose. Writing an unclaimed 16- or 32-byte column to an
 existing UUID or LONG256 table column without one of the above will be rejected
 by the server as a type mismatch, rather than silently storing the wrong type.
 
@@ -81,8 +85,11 @@ first::
     df = df.convert_dtypes(dtype_backend='pyarrow')
 
 For the 16-byte case the ``arrow.uuid`` extension type works on either path
-and needs no conversion; LONG256 has no such label, so ``schema_overrides``
-on an Arrow-backed frame is the only route.
+and needs no conversion. LONG256 has no equivalent extension label for the
+pandas per-column planner: use ``schema_overrides`` on a fully Arrow-backed
+frame, or supply a whole Arrow table/stream retaining the column-field metadata
+``questdb.column_type=long256``. Field metadata is distinct from top-level
+schema metadata and is preserved on the whole-table/stream ingestion path.
 
 ``schema_overrides`` now rejects an argument for any kind except ``'geohash'``.
 For example, ``{'x': ('symbol', 16)}`` previously worked by silently discarding

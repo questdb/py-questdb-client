@@ -269,6 +269,15 @@ class TestNumpyDecoderCompatibility(unittest.TestCase):
         self.assertEqual(decoded.dtype, np.dtype(object))
         self.assertEqual(decoded.tolist(), [values[0], None, values[2]])
 
+    def test_numpy_decoder_rejects_none_values(self):
+        for kind in ('uuid', 'long256'):
+            with self.subTest(kind=kind), self.assertRaises(TypeError):
+                qi._debug_decode_numpy_values(kind, None)
+
+    def test_numpy_decoder_rejects_none_kind(self):
+        with self.assertRaises(TypeError):
+            qi._debug_decode_numpy_values(None, b'')
+
     def test_long256_decoder_uses_little_endian_and_null_bitmap(self):
         values = [1, (1 << 255) + 17, (1 << 256) - 1]
         raw = b''.join(value.to_bytes(32, 'little') for value in values)
@@ -357,6 +366,10 @@ class TestQwpWebSocketApi(unittest.TestCase):
         for invalid in (b'', raw[:-1], raw + b'x'):
             with self.subTest(length=len(invalid)), self.assertRaises(ValueError):
                 qi._debug_decode_uuid_bytes(invalid)
+
+    def test_uuid_query_decoder_rejects_none(self):
+        with self.assertRaises(TypeError):
+            qi._debug_decode_uuid_bytes(None)
 
     def test_uuid_integer_constructor_positional_slot(self):
         # The query hot path passes `int` positionally to avoid one kwargs dict

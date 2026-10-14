@@ -35,12 +35,23 @@ needs none — it is additive, and an existing listener keeps working.
   :meth:`~questdb.QueryResult.iter_pandas` build ``uuid.UUID`` objects and are
   unaffected.
 
-* **A 16-byte Arrow column needs the** ``arrow.uuid`` **label to be a UUID,
-  and** ``fixed_size_binary(32)`` **no longer maps to LONG256.** The width alone
-  no longer claims either type — pyarrow drops field metadata when it exports a
-  single pandas column. An unlabelled column now lands as ``BINARY``, which the
-  server rejects against an existing UUID or LONG256 column rather than storing
-  the wrong type silently. Claim it explicitly:
+* **Fixed-size-binary width alone no longer claims UUID or LONG256.** An
+  unclaimed 16- or 32-byte column now lands as ``BINARY``, which the server
+  rejects against an existing UUID or LONG256 column rather than storing the
+  wrong type silently. The ``arrow.uuid`` extension label claims a 16-byte
+  column as UUID. Whole-table or stream Arrow inputs can also retain
+  column-field metadata ``questdb.column_type=uuid`` or
+  ``questdb.column_type=long256`` to claim either type without overrides.
+  This must be field metadata, not top-level schema metadata. For example:
+
+  .. code-block:: python
+
+      pa.field('id', pa.binary(16), metadata={'questdb.column_type': 'uuid'})
+      pa.field('hash', pa.binary(32), metadata={'questdb.column_type': 'long256'})
+
+  Pyarrow drops field metadata when exporting a single pandas column, so the
+  pandas per-column planner cannot use these metadata claims. Alternatively,
+  claim the columns explicitly:
 
   .. code-block:: python
 
@@ -60,8 +71,9 @@ needs none — it is additive, and an existing listener keeps working.
 
   Wrapping the column in pyarrow's ``arrow.uuid`` extension type also works
   for the 16-byte case, on either path and with no conversion. LONG256 has no
-  equivalent label, so an Arrow-backed frame plus ``schema_overrides`` is the
-  only route for it.
+  equivalent extension label for the pandas per-column planner: use a fully
+  Arrow-backed frame plus ``schema_overrides``, or a whole Arrow table/stream
+  retaining ``questdb.column_type=long256`` field metadata.
 
 * **Only a geohash schema override accepts an argument.** A tuple such as
   ``{'x': ('symbol', 16)}`` previously worked by silently discarding ``16``;

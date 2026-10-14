@@ -1559,7 +1559,7 @@ cdef inline object _uuid_from_canonical(
         ((<object>_be64(row)) << 64) | (<object>_be64(row + 8)))
 
 
-def _debug_decode_uuid_bytes(bytes value):
+def _debug_decode_uuid_bytes(bytes value not None):
     """Internal offline seam for the canonical query UUID decoder."""
     if PyBytes_GET_SIZE(value) != 16:
         raise ValueError('a UUID must contain exactly 16 bytes')
@@ -1670,7 +1670,8 @@ cdef object _numpy_long256_chunk(
     return _numpy_long256_values(values, cd.validity, row_count, stride, np)
 
 
-def _debug_decode_numpy_values(str kind, bytes values, object validity=None):
+def _debug_decode_numpy_values(
+        str kind not None, bytes values not None, object validity=None):
     """Offline seam for the exact UUID/LONG256 NumPy decoder loops."""
     cdef Py_ssize_t width
     cdef Py_ssize_t row_count

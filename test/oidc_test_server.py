@@ -35,6 +35,7 @@ class OidcTestServer:
             refreshed_expires_in=300,
             write_statuses=(),
             refresh_request_hook=None,
+            device_token_request_hook=None,
             device_token_response=None,
             device_token_responses=(),
             refresh_token_response=None,
@@ -60,6 +61,10 @@ class OidcTestServer:
         # arrived (and therefore after the client took its store lease), but
         # before the response that makes it persist the rotated credential.
         self.refresh_request_hook = refresh_request_hook
+        # Optional synchronization point after a device-grant poll arrives,
+        # before its scripted/default response. Tests can hold a successful
+        # response until another thread has observed acquisition in progress.
+        self.device_token_request_hook = device_token_request_hook
         # Optional error injection for the token endpoint. Each override is a
         # ``(status, body, headers)`` tuple where ``body`` is a dict (serialized
         # as JSON), raw ``bytes`` (e.g. a non-JSON error page), or ``None``, and
@@ -205,6 +210,8 @@ class OidcTestServer:
                     'expires_in': self.refreshed_expires_in,
                 })
             else:
+                if self.device_token_request_hook is not None:
+                    self.device_token_request_hook()
                 with self._lock:
                     override = (
                         self._device_token_responses.pop(0)

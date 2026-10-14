@@ -247,6 +247,8 @@ class TestOidcNativeInterruptOwnership(unittest.TestCase):
                 qi._debug_oidc_native_free_counts()
                 auth.close()
 
+    @unittest.skipUnless(os.name == 'posix',
+                         'file token store persistence requires POSIX')
     def test_interrupted_successful_refresh_releases_returned_native_token(self):
         interrupt = KeyboardInterrupt('refresh persistence diagnostic')
         credential = [None]

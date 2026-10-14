@@ -1406,6 +1406,10 @@ class NativeOidcTest(unittest.TestCase):
                 with self.assertRaisesRegex(OidcConfigError, callback_name):
                     make_auth(renderer=types.SimpleNamespace(**non_callable))
 
+    def test_renderer_inspection_rejects_none_provider(self):
+        with self.assertRaises(TypeError):
+            _client._debug_oidc_renderer_attached(None)
+
     def test_failed_construction_clears_renderer_back_reference(self):
         # Inspect the Cython slot directly through a test seam rather than
         # inferring it from immediate weakref destruction. The latter is a
@@ -4789,13 +4793,22 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         # The refusal carries the same retryable SocketError whether the probe
         # met the sign-in between polls or inside its callback.
         pending = (400, {'error': 'authorization_pending'}, None)
-        polled = threading.Event()
+        success_requested = threading.Event()
+        release_success = threading.Event()
+        device_polls = []
         probe_errors = []
         peer = []
+        peer_threads = []
+        test = self
 
-        class _Renderer(Renderer):
-            def on_waiting(self, seconds_left):
-                polled.set()
+        def before_device_token_response():
+            device_polls.append(True)
+            if len(device_polls) > 1:
+                # This poll is after on_waiting has returned, not inside a
+                # renderer callback. Keep its success response blocked until
+                # the probe has observed the ordinary acquisition-busy path.
+                success_requested.set()
+                test.assertTrue(release_success.wait(20))
 
         class _PeerSignInBeforeProbe(OidcDeviceAuth):
             probes = 0
@@ -4809,21 +4822,25 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                             peer.append('ok')
                         except BaseException as e:  # pragma: no cover
                             peer.append(e)
-                    threading.Thread(target=run, daemon=True).start()
-                    polled.wait(20)
-                    # on_waiting returned: native is now in its poll sleep.
-                    time.sleep(0.3)
+                    thread = threading.Thread(target=run, daemon=True)
+                    peer_threads.append(thread)
+                    thread.start()
                 try:
+                    if type(self).probes == 1:
+                        test.assertTrue(success_requested.wait(20))
                     return super().token()
                 except questdb.QuestDBError as e:
                     probe_errors.append(
                         (e.code, getattr(e, '_acquisition_busy', None)))
                     raise
+                finally:
+                    release_success.set()
 
         df = pd.DataFrame({
             'value': [1], 'ts': pd.to_datetime([1700000000], unit='s')})
         with OidcTestServer(
                 device_token_responses=[pending], device_interval=2,
+                device_token_request_hook=before_device_token_response,
                 device_expires_in=30) as server:
             cfg = make_discovered_auth(server).config
             auth = _PeerSignInBeforeProbe(
@@ -4832,7 +4849,7 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 token_endpoint=cfg.token_endpoint,
                 scope=cfg.scope, audience=cfg.audience,
                 issuer=cfg.issuer, interactive=True, open_browser=False,
-                renderer=_Renderer())
+                renderer=Renderer(), timeout=20)
             with QwpAckServer(
                     required_authorization='Bearer AT-initial') as qwp:
                 db = questdb.connect(
@@ -4844,8 +4861,15 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 try:
                     db.dataframe(df, table_name='busy_probe', at='ts')
                 finally:
-                    db.close()
-                    auth.close()
+                    release_success.set()
+                    try:
+                        db.close()
+                    finally:
+                        auth.close()
+                        for thread in peer_threads:
+                            thread.join(timeout=20)
+        self.assertTrue(peer_threads)
+        self.assertFalse(any(thread.is_alive() for thread in peer_threads))
         self.assertEqual(peer, ['ok'])
         self.assertIn((questdb.QuestDBErrorCode.SocketError, True), probe_errors)
 

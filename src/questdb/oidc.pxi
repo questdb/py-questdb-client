@@ -2745,7 +2745,7 @@ cdef class OidcDeviceAuth:
             issuer=_strip_control(issuer) if issuer is not None else None)
 
 
-def _debug_oidc_renderer_attached(OidcDeviceAuth provider):
+def _debug_oidc_renderer_attached(OidcDeviceAuth provider not None):
     """Internal test seam: whether construction published a renderer edge."""
     return provider._renderer is not None
 

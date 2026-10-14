@@ -1062,6 +1062,42 @@ class TestSchemaOverrides(unittest.TestCase):
         self.assertIn(value, payload)
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_field_metadata_claims_uuid_and_long256_without_overrides(self):
+        values = (
+            ('uuid', bytes.fromhex('123e4567e89b12d3a456426614174000'),
+             b'v\x0c'),
+            ('long256', bytes(range(32)), b'v\x0d'),
+        )
+        for kind, value, tag in values:
+            for as_stream in (False, True):
+                with self.subTest(kind=kind, as_stream=as_stream):
+                    schema = pa.schema([
+                        pa.field('v', pa.binary(len(value)), metadata={
+                            'questdb.column_type': kind}),
+                        pa.field('ts', pa.timestamp('us')),
+                    ])
+                    table = pa.Table.from_pydict({
+                        'v': [value], 'ts': [_ts_us(2025, 1, 1)],
+                    }, schema=schema)
+                    data = (pa.RecordBatchReader.from_batches(
+                        schema, table.to_batches()) if as_stream else table)
+                    with QwpAckServer(record_payloads=True) as server:
+                        client = qi.QuestDB.from_conf(_client_conf(server.port))
+                        try:
+                            client.dataframe(data, table_name='metadata', at='ts')
+                        finally:
+                            client.close()
+                        stats = server.snapshot()
+                    self.assertEqual(stats['errors'], [])
+                    payload = next(
+                        p for p in stats['binary_payloads']
+                        if int.from_bytes(p[6:8], 'little') > 0)
+                    self.assertIn(tag, payload)
+                    encoded = value[::-1] if kind == 'uuid' else value
+                    self.assertIn(encoded, payload)
+                    self.assertNotIn(encoded[::-1], payload)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_schema_overrides_uuid_rejects_wrong_width(self):
         schema = pa.schema([
             pa.field('u', pa.binary(8)),
