@@ -2211,6 +2211,19 @@ cdef void_int _raise_temporal_out_of_range(
         'to_arrow() for this result')
 
 
+cdef object _utc_datetime(int64_t days, int secs, int micros):
+    cdef int z = <int>days + 719468
+    cdef int era = z // 146097
+    cdef int doe = z - era * 146097
+    cdef int yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    cdef int doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    cdef int mp = (5 * doy + 2) // 153
+    cdef int month = mp + 3 if mp < 10 else mp - 9
+    return datetime_new(
+        era * 400 + yoe + (month <= 2), month, doy - (153 * mp + 2) // 5 + 1,
+        secs // 3600, secs // 60 % 60, secs % 60, micros, _UTC)
+
+
 cdef list _row_column_values(
         const qwp_reader_batch* batch,
         size_t col_idx,
@@ -2255,7 +2268,6 @@ cdef list _row_column_values(
     cdef int64_t rem
     cdef int64_t secs
     cdef list out = []
-    cdef object epoch
     cdef object ipv4_cls
     cdef object decimal_cls
     cdef object uuid_cls
@@ -2455,7 +2467,6 @@ cdef list _row_column_values(
         # temporal kinds `Timestamp(unit, "UTC")`. A naive datetime would be
         # read as local time by most downstream code. TIMESTAMP_NS is
         # rounded down to microseconds: `datetime` has no nanosecond field.
-        epoch = _UTC_EPOCH
         for r in range(row_count):
             if _cell_is_null(validity, r):
                 out.append(None)
@@ -2475,8 +2486,8 @@ cdef list _row_column_values(
             days = micros // _MICROS_PER_DAY
             rem = micros - days * _MICROS_PER_DAY
             secs = rem // 1_000_000
-            out.append(epoch + timedelta_new(
-                <int>days, <int>secs, <int>(rem - secs * 1_000_000)))
+            out.append(_utc_datetime(
+                days, <int>secs, <int>(rem - secs * 1_000_000)))
         return out
 
     if kind == <int>qwp_reader_column_kind_uuid:

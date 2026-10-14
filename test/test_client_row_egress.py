@@ -458,6 +458,22 @@ class TestRowEgressLive(_LiveCase):
         self.assertEqual(
             hi, datetime.datetime(9999, 12, 31, 23, 59, 59, 999000, tzinfo=utc))
 
+    def test_every_day_of_a_gregorian_cycle_decodes(self):
+        utc = datetime.timezone.utc
+        start = datetime.datetime(1601, 1, 1, tzinfo=utc)
+        day = 86400000000
+        with self.db.query(
+                'select cast(-11644473600000000 + (x - 1) * '
+                f'{day} + ((x - 1) * 1000003) % {day} as timestamp) as t '
+                'from long_sequence(146097)') as result:
+            rows = list(result.iter_rows())
+        self.assertEqual(len(rows), 146097)
+        for i, (value,) in enumerate(rows):
+            want = start + datetime.timedelta(
+                days=i, microseconds=(i * 1000003) % day)
+            if value != want:
+                self.fail(f'row {i}: {value!r} != {want!r}')
+
     def test_temporal_outside_datetime_range_is_a_clear_error(self):
         # Year 10000 is a valid QuestDB timestamp but not a `datetime`; the
         # int64 extremes exercise the overflow guards on the way to it.

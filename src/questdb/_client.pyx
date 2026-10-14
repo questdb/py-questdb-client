@@ -67,7 +67,7 @@ from libc.string cimport strncmp, memset, memcpy, strlen
 from libc.math cimport isnan, floor
 from cpython.datetime cimport datetime as cp_datetime
 from cpython.datetime cimport timedelta as cp_timedelta
-from cpython.datetime cimport import_datetime, timedelta_new
+from cpython.datetime cimport import_datetime, datetime_new
 from cpython.datetime cimport (
     PyDateTime_GET_YEAR, PyDateTime_GET_MONTH, PyDateTime_GET_DAY,
     PyDateTime_DATE_GET_HOUR, PyDateTime_DATE_GET_MINUTE,
@@ -647,8 +647,8 @@ cdef void_int str_to_column_name_copy(
         raise c_err_to_py(err)
 
 
-cdef object _UTC_EPOCH = datetime.datetime(
-    1970, 1, 1, tzinfo=datetime.timezone.utc)
+cdef object _UTC = datetime.timezone.utc
+cdef object _UTC_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=_UTC)
 
 
 _NAIVE_DATETIME_WARNED = False
