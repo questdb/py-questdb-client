@@ -33,6 +33,7 @@ API for fast data ingestion into and querying from QuestDB.
 __all__ = [
     'ConnectionEvent',
     'ConnectionEventKind',
+    'ExecDone',
     'PooledReader',
     'PooledSender',
     'Protocol',
@@ -66,6 +67,7 @@ from libc.string cimport strncmp, memset, memcpy, strlen
 from libc.math cimport isnan, floor
 from cpython.datetime cimport datetime as cp_datetime
 from cpython.datetime cimport timedelta as cp_timedelta
+from cpython.datetime cimport import_datetime, datetime_new
 from cpython.datetime cimport (
     PyDateTime_GET_YEAR, PyDateTime_GET_MONTH, PyDateTime_GET_DAY,
     PyDateTime_DATE_GET_HOUR, PyDateTime_DATE_GET_MINUTE,
@@ -80,6 +82,7 @@ from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
 from cpython.pycapsule cimport (PyCapsule_GetPointer, PyCapsule_IsValid,
                                 PyCapsule_New)
 from cpython.ref cimport Py_INCREF, Py_DECREF
+from cpython.exc cimport PyErr_Fetch, PyErr_Restore
 
 from .line_sender cimport *
 from .rpyutils cimport *
@@ -104,6 +107,8 @@ from cpython.bytes cimport (PyBytes_FromStringAndSize,
                             PyBytes_GET_SIZE, PyBytes_AsString)
 
 import datetime
+import decimal
+import operator
 import os
 import threading
 import time
@@ -119,6 +124,7 @@ from numpy cimport NPY_DOUBLE, PyArrayObject
 from .extra_numpy cimport *
 
 cnp.import_array()
+import_datetime()
 
 cdef bint _dataframe_columnar_count_io_stats = False
 cdef uint64_t _dataframe_columnar_flush_calls = 0
@@ -204,6 +210,7 @@ class QuestDBErrorCode(Enum):
     BatchTooLarge = line_sender_error_batch_too_large
     StoreResendRequired = line_sender_error_store_resend_required
     SymbolDictFull = line_sender_error_symbol_dict_full
+    QueryTimeout = line_sender_error_query_timeout
     # Python-only sentinel with no backing FFI code: raised by the Cython
     # DataFrame-shape validation path. Sits in a reserved high band, disjoint
     # from the contiguous FFI code space, so an appended FFI variant can never
@@ -388,6 +395,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return QuestDBErrorCode.StoreResendRequired
     elif code == line_sender_error_symbol_dict_full:
         return QuestDBErrorCode.SymbolDictFull
+    elif code == line_sender_error_query_timeout:
+        return QuestDBErrorCode.QueryTimeout
     else:
         raise ValueError('Internal error converting error code.')
 
@@ -638,8 +647,8 @@ cdef void_int str_to_column_name_copy(
         raise c_err_to_py(err)
 
 
-cdef object _UTC_EPOCH = datetime.datetime(
-    1970, 1, 1, tzinfo=datetime.timezone.utc)
+cdef object _UTC = datetime.timezone.utc
+cdef object _UTC_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=_UTC)
 
 
 _NAIVE_DATETIME_WARNED = False
@@ -1849,8 +1858,7 @@ cdef uint64_t _timedelta_to_millis(cp_timedelta timedelta):
     if millis < 0:
         raise ValueError(
             f'Negative timedelta not allowed: {timedelta!r}.')
-    if millis == 0 and (
-            timedelta.days or timedelta.seconds or timedelta.microseconds):
+    if millis == 0 and timedelta:
         # Never silently turn a positive finite duration into 0ms, which
         # several options interpret as "no deadline".
         return 1
@@ -3362,8 +3370,9 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
     cdef size_t buf_bytes = row_count * 16 if row_count > 0 else 16
     cdef size_t validity_bytes = (row_count + 7) // 8
     cdef size_t i
-    cdef object le_bytes
+    cdef object be_bytes
     cdef object uuid_cls = _uuid.UUID
+    cdef object int_to_bytes = int.to_bytes
 
     try:
         buf = <uint8_t*>calloc(buf_bytes, sizeof(uint8_t))
@@ -3377,12 +3386,14 @@ cdef pyobj_built_t* _dataframe_columnar_build_uuid_pyobj(
         for i in range(row_count):
             cell = access[i]
             if isinstance(<object>cell, uuid_cls):
-                # `.int.to_bytes(16, 'little')` produces exactly the
-                # QuestDB UUID wire layout: bytes 0..8 = lo half LE,
-                # bytes 8..16 = hi half LE. One C-implemented call +
-                # one 16-byte memcpy per row.
-                le_bytes = (<object>cell).int.to_bytes(16, 'little')
-                memcpy(buf + i * 16, PyBytes_AsString(le_bytes), 16)
+                # `qwp_numpy_s16` reads canonical RFC 4122 big-endian
+                # rows and byte-swaps them into QWP wire order itself.
+                # `int.to_bytes` is called unbound so that a replaced
+                # `UUID.int` cannot narrow the result: it is always the
+                # 16 bytes `UUID.bytes` would give, in one C-implemented
+                # call plus one 16-byte memcpy per row.
+                be_bytes = int_to_bytes((<object>cell).int, 16, 'big')
+                memcpy(buf + i * 16, PyBytes_AsString(be_bytes), 16)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
             elif _dataframe_is_null_pyobj(cell):
@@ -3514,17 +3525,17 @@ cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
                     us = PyDateTime_DATE_GET_MICROSECOND(dt)
                     days = _days_from_civil(year, month, day)
                     values[i] = (
-                        days * 86_400_000_000
-                        + <int64_t>hour * 3_600_000_000
+                        days * <int64_t>86_400_000_000
+                        + <int64_t>hour * <int64_t>3_600_000_000
                         + <int64_t>minute * 60_000_000
                         + <int64_t>second * 1_000_000
                         + <int64_t>us)
                 else:
                     delta = dt - epoch_aware
-                    values[i] = <int64_t>(
-                        delta.days * 86_400_000_000
-                        + delta.seconds * 1_000_000
-                        + delta.microseconds)
+                    values[i] = (
+                        <int64_t>delta.days * <int64_t>86_400_000_000
+                        + <int64_t>delta.seconds * 1_000_000
+                        + <int64_t>delta.microseconds)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
             else:
@@ -5023,7 +5034,8 @@ cdef object _validate_schema_overrides(object schema_overrides):
     if not isinstance(schema_overrides, dict):
         raise TypeError(
             'schema_overrides must be a dict mapping column name to '
-            "one of: 'symbol', 'ipv4', 'char', or ('geohash', bits).")
+            "one of: 'symbol', 'ipv4', 'char', 'uuid', 'long256', or "
+            "('geohash', bits).")
     cdef list out = []
     cdef object name, override, kind, value
     cdef int kind_int
@@ -5049,6 +5061,10 @@ cdef object _validate_schema_overrides(object schema_overrides):
             kind_int = <int>qwp_arrow_override_ipv4
         elif kind == 'char':
             kind_int = <int>qwp_arrow_override_char
+        elif kind == 'uuid':
+            kind_int = <int>qwp_arrow_override_uuid
+        elif kind == 'long256':
+            kind_int = <int>qwp_arrow_override_long256
         elif kind == 'geohash':
             if not isinstance(value, int) or value < 1 or value > 60:
                 raise ValueError(
@@ -5059,7 +5075,8 @@ cdef object _validate_schema_overrides(object schema_overrides):
         else:
             raise ValueError(
                 f'schema_overrides[{name!r}] kind {kind!r} not '
-                "in {'symbol', 'ipv4', 'char', 'geohash'}.")
+                "in {'symbol', 'ipv4', 'char', 'uuid', 'long256', "
+                "'geohash'}.")
         out.append((name.encode('utf-8'), kind_int, arg_int))
     return out
 
@@ -5109,97 +5126,73 @@ cdef bint _capsule_polars_dtype_is_string_like(object dtype) except -1:
     return False
 
 
+cdef bint _capsule_pyarrow_type_is_utf8(object pa_type) except -1:
+    cdef object is_string_view = getattr(
+        _PYARROW.types, 'is_string_view', None)
+    return (_PYARROW.types.is_string(pa_type)
+            or _PYARROW.types.is_large_string(pa_type)
+            or (is_string_view is not None and is_string_view(pa_type)))
+
+
 cdef bint _capsule_pyarrow_type_is_string_like(object field_type) except -1:
     """pyarrow: utf8 / large_utf8 / utf8_view, plus Dictionary whose
     value type is one of those."""
     if _PYARROW is None:
         return False
-    if (_PYARROW.types.is_string(field_type)
-            or _PYARROW.types.is_large_string(field_type)):
+    if _capsule_pyarrow_type_is_utf8(field_type):
         return True
-    if _PYARROW.types.is_dictionary(field_type):
-        value_type = field_type.value_type
-        if (_PYARROW.types.is_string(value_type)
-                or _PYARROW.types.is_large_string(value_type)):
-            return True
-    return False
+    return (_PYARROW.types.is_dictionary(field_type)
+            and _capsule_pyarrow_type_is_utf8(field_type.value_type))
 
 
-cdef bint _capsule_pandas_dtype_is_string_like(object dtype) except -1:
-    cdef object storage
-    cdef object arrow_type
-    cdef object cat_dtype
-    if _PANDAS is None:
-        return False
-    if isinstance(dtype, _PANDAS.StringDtype):
-        storage = getattr(dtype, 'storage', None)
-        return storage == 'pyarrow'
-    if isinstance(dtype, _PANDAS.ArrowDtype):
-        _dataframe_require_pyarrow()
-        arrow_type = dtype.pyarrow_dtype
-        return _capsule_pyarrow_type_is_string_like(arrow_type)
-    if isinstance(dtype, _PANDAS.CategoricalDtype):
-        cat_dtype = dtype.categories.dtype
-        if cat_dtype == object:
-            return True
-        return _capsule_pandas_dtype_is_string_like(cat_dtype)
-    return False
-
-
-cdef object _capsule_get_string_column_names(object sliceable):
-    """Return names of all string-like columns (utf8 / large_utf8 /
-    utf8_view / dict-of-utf8). Supports polars DataFrame and pyarrow
-    Table / RecordBatch. Returns None if schema introspection is not
-    available on the input."""
-    cdef object schema
-    cdef object out
-    cdef object name
-    cdef object dtype
-    cdef object field_type
-    cdef int i
-    if _is_pandas_dataframe_object(sliceable):
-        _dataframe_may_import_deps()
-        out = []
-        for name, dtype in sliceable.dtypes.items():
-            if _capsule_pandas_dtype_is_string_like(dtype):
-                out.append(name)
-        return out
-    if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
-        out = []
-        for name, dtype in sliceable.schema.items():
-            if _capsule_polars_dtype_is_string_like(dtype):
-                out.append(name)
-        return out
+cdef object _capsule_schema(object sliceable, object symbols):
+    """Arrow schema of a pyarrow Table / RecordBatch when resolving
+    `symbols` needs one, else None. Pandas input takes its schema from its
+    first exported batch instead."""
+    if (symbols is None or symbols == 'auto'
+            or _is_polars_dataframe_or_lazy(sliceable)):
+        return None
     if _PYARROW is None:
         try:
             _dataframe_require_pyarrow()
         except ImportError:
             return None
     if isinstance(sliceable, (_PYARROW.Table, _PYARROW.RecordBatch)):
-        schema = sliceable.schema
-        out = []
-        for i in range(len(schema.names)):
-            field_type = schema.field(i).type
-            if _capsule_pyarrow_type_is_string_like(field_type):
-                out.append(schema.names[i])
-        return out
+        return sliceable.schema
     return None
 
 
-cdef object _capsule_column_is_string_like(object sliceable, str name):
+cdef object _capsule_get_string_column_names(
+        object sliceable, object schema):
+    """Return names of all string-like columns (utf8 / large_utf8 /
+    dict-of-utf8). Returns None if schema introspection is not
+    available on the input."""
+    cdef object out
+    cdef object name
+    cdef object dtype
+    cdef object field
+    if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
+        out = []
+        for name, dtype in sliceable.schema.items():
+            if _capsule_polars_dtype_is_string_like(dtype):
+                out.append(name)
+        return out
+    if schema is None:
+        return None
+    out = []
+    for field in schema:
+        if _capsule_pyarrow_type_is_string_like(field.type):
+            out.append(field.name)
+    return out
+
+
+cdef object _capsule_column_is_string_like(
+        object sliceable, object schema, str name):
     """Returns True iff `name` is a string-like column on `sliceable`,
     False iff it is some other type, or None if schema introspection
     is not available on the input."""
     cdef object dtype
     cdef object field_type
-    if _is_pandas_dataframe_object(sliceable):
-        _dataframe_may_import_deps()
-        try:
-            dtype = sliceable.dtypes[name]
-        except KeyError:
-            raise KeyError(
-                f'symbols column {name!r} not found in the dataframe.')
-        return _capsule_pandas_dtype_is_string_like(dtype)
     if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
         try:
             dtype = sliceable.schema[name]
@@ -5207,49 +5200,26 @@ cdef object _capsule_column_is_string_like(object sliceable, str name):
             raise KeyError(
                 f'symbols column {name!r} not found in the dataframe.')
         return _capsule_polars_dtype_is_string_like(dtype)
-    if _PYARROW is None:
-        try:
-            _dataframe_require_pyarrow()
-        except ImportError:
-            return None
-    if isinstance(sliceable, (_PYARROW.Table, _PYARROW.RecordBatch)):
-        try:
-            field_type = sliceable.schema.field(name).type
-        except (KeyError, ValueError):
-            raise KeyError(
-                f'symbols column {name!r} not found in the dataframe.')
-        return _capsule_pyarrow_type_is_string_like(field_type)
-    return None
+    if schema is None:
+        return None
+    try:
+        field_type = schema.field(name).type
+    except (KeyError, ValueError):
+        raise KeyError(
+            f'symbols column {name!r} not found in the dataframe.')
+    return _capsule_pyarrow_type_is_string_like(field_type)
 
 
-cdef object _capsule_get_dict_string_column_names(object sliceable):
+cdef object _capsule_get_dict_string_column_names(
+        object sliceable, object schema):
     """Return names of dict-encoded string-like columns (polars
-    Categorical / Enum or pyarrow Dictionary(*, utf8/large_utf8)).
+    Categorical / Enum or pyarrow Dictionary(*, utf8/large_utf8/utf8_view)).
     Returns None if schema introspection is not available."""
-    cdef object schema
     cdef object out
     cdef object name
     cdef object dtype
-    cdef object field_type
-    cdef object value_type
+    cdef object field
     cdef object enum_t
-    cdef int i
-    if _is_pandas_dataframe_object(sliceable):
-        _dataframe_may_import_deps()
-        out = []
-        for name, dtype in sliceable.dtypes.items():
-            if (isinstance(dtype, _PANDAS.CategoricalDtype)
-                    and _capsule_pandas_dtype_is_string_like(dtype)):
-                out.append(name)
-            elif isinstance(dtype, _PANDAS.ArrowDtype):
-                _dataframe_require_pyarrow()
-                field_type = dtype.pyarrow_dtype
-                if _PYARROW.types.is_dictionary(field_type):
-                    value_type = field_type.value_type
-                    if (_PYARROW.types.is_string(value_type)
-                            or _PYARROW.types.is_large_string(value_type)):
-                        out.append(name)
-        return out
     if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
         out = []
         enum_t = getattr(_POLARS, 'Enum', None)
@@ -5259,26 +5229,18 @@ cdef object _capsule_get_dict_string_column_names(object sliceable):
             elif enum_t is not None and isinstance(dtype, enum_t):
                 out.append(name)
         return out
-    if _PYARROW is None:
-        try:
-            _dataframe_require_pyarrow()
-        except ImportError:
-            return None
-    if isinstance(sliceable, (_PYARROW.Table, _PYARROW.RecordBatch)):
-        schema = sliceable.schema
-        out = []
-        for i in range(len(schema.names)):
-            field_type = schema.field(i).type
-            if _PYARROW.types.is_dictionary(field_type):
-                value_type = field_type.value_type
-                if (_PYARROW.types.is_string(value_type)
-                        or _PYARROW.types.is_large_string(value_type)):
-                    out.append(schema.names[i])
-        return out
-    return None
+    if schema is None:
+        return None
+    out = []
+    for field in schema:
+        if (_PYARROW.types.is_dictionary(field.type)
+                and _capsule_pyarrow_type_is_utf8(field.type.value_type)):
+            out.append(field.name)
+    return out
 
 
-cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
+cdef object _resolve_symbols_to_overrides(
+        object sliceable, object schema, object symbols):
     """Translate `symbols` into a list of
     (name_bytes, kind, arg) tuples matching the shape returned by
     _validate_schema_overrides. `kind` is `qwp_arrow_override_symbol`
@@ -5311,7 +5273,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
         return []
 
     if symbols is False:
-        col_names = _capsule_get_dict_string_column_names(sliceable)
+        col_names = _capsule_get_dict_string_column_names(sliceable, schema)
         if col_names is None:
             return None
         out = []
@@ -5320,7 +5282,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
         return out
 
     if symbols is True:
-        col_names = _capsule_get_string_column_names(sliceable)
+        col_names = _capsule_get_string_column_names(sliceable, schema)
         if col_names is None:
             return None
         out = []
@@ -5354,7 +5316,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
             raise TypeError(
                 f'symbols entry must be str or int, got '
                 f'{type(entry).__name__}.')
-        is_str = _capsule_column_is_string_like(sliceable, name)
+        is_str = _capsule_column_is_string_like(sliceable, schema, name)
         if is_str is None:
             return None
         if not is_str:
@@ -5368,12 +5330,40 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
     # Match the row/numpy planner: an explicit symbols list marks only the
     # listed columns as symbols; every other dict-encoded (categorical)
     # column is forced to a plain VARCHAR field rather than auto-symbolized.
-    dict_names = _capsule_get_dict_string_column_names(sliceable)
+    dict_names = _capsule_get_dict_string_column_names(sliceable, schema)
     if dict_names is None:
         return None
     for name in dict_names:
         if name not in listed:
             out.append((name.encode('utf-8'), not_symbol_kind, 0))
+    return out
+
+
+cdef list _pandas_fixed_size_binary_overrides(
+        object sliceable, object schema):
+    """UUID / LONG256 claims for the ``FixedSizeBinary(16)`` / ``(32)``
+    fields a pandas frame exports, index levels included.
+
+    Pandas drops Arrow field metadata, and the native importer only maps a
+    FixedSizeBinary column to UUID / LONG256 on an explicit claim, so these
+    keep the per-column planner's classification on the capsule path.
+    """
+    cdef list out = []
+    cdef object field, pa_type
+    cdef int kind
+    if not _is_pandas_dataframe_object(sliceable):
+        return out
+    for field in schema:
+        pa_type = getattr(field.type, 'storage_type', field.type)
+        if pa_type.id != _PYARROW.lib.Type_FIXED_SIZE_BINARY:
+            continue
+        if pa_type.byte_width == 16:
+            kind = <int>qwp_arrow_override_uuid
+        elif pa_type.byte_width == 32:
+            kind = <int>qwp_arrow_override_long256
+        else:
+            continue
+        out.append((field.name.encode('utf-8'), kind, 0))
     return out
 
 
@@ -5552,6 +5542,8 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef size_t deferred_since_sync = 0
     cdef bint force_drop_conn = False
     cdef object row_slice = None
+    cdef object first_batch = None
+    cdef object schema
     cdef Py_ssize_t total_rows = 0
     cdef Py_ssize_t offset = 0
     cdef Py_ssize_t chunk_rows
@@ -5627,9 +5619,29 @@ cdef bint _dataframe_client_try_capsule_path(
     if total_rows == 0:
         return True
 
-    symbol_overrides = _resolve_symbols_to_overrides(sliceable, symbols)
+    if _is_pandas_dataframe_object(sliceable):
+        if _PYARROW is None:
+            _dataframe_require_pyarrow()
+        if not hasattr(_PYARROW.Table, '__arrow_c_stream__'):
+            raise ImportError(
+                '`pyarrow` >= 14.0.0 is required for Arrow-backed pandas '
+                f'DataFrames (version {_PYARROW.__version__} is installed). '
+                'Upgrade with `pip install -U pyarrow`.')
+        chunk_rows = max_rows_per_batch
+        if chunk_rows > total_rows:
+            chunk_rows = total_rows
+        first_batch = _PYARROW.Table.from_pandas(
+            _capsule_slice_rows(sliceable, 0, chunk_rows))
+        schema = first_batch.schema
+    else:
+        schema = _capsule_schema(sliceable, symbols)
+    symbol_overrides = _resolve_symbols_to_overrides(
+        sliceable, schema, symbols)
     if symbol_overrides is None:
         return False
+    symbol_overrides = (
+        list(symbol_overrides)
+        + _pandas_fixed_size_binary_overrides(sliceable, schema))
     merged_overrides = _merge_capsule_overrides(
         symbol_overrides, validated_overrides)
 
@@ -5682,8 +5694,12 @@ cdef bint _dataframe_client_try_capsule_path(
                     chunk_rows = max_rows_per_batch
                     if chunk_rows > total_rows - offset:
                         chunk_rows = total_rows - offset
-                    row_slice = _capsule_slice_rows(
-                        sliceable, offset, chunk_rows)
+                    if first_batch is not None:
+                        row_slice = first_batch
+                        first_batch = None
+                    else:
+                        row_slice = _capsule_slice_rows(
+                            sliceable, offset, chunk_rows)
                     _capsule_consume_stream_with_hint(
                         conn, row_slice, c_table_name, c_ts_column_ptr,
                         at_scalar_set, at_scalar_nanos,
@@ -6407,14 +6423,17 @@ cdef class QuestDB:
           ``numpy.ndarray`` cells (any rank; requires pyarrow). Both land as
           QuestDB ``ARRAY(DOUBLE)``. Null rows are allowed; null *elements*
           inside an array are not.
-        - **UUID**: ``pa.fixed_size_binary(16)`` and the ``arrow.uuid``
-          extension type. Bytes are forwarded verbatim as **QuestDB's
-          UUID wire layout** ("bytes 0..8 lo half LE, bytes 8..16 hi
-          half LE"), matching the convention shared across the
-          c-questdb-client family (Rust direct, Polars). Round-trip is
-          byte-identity at this layout; users who want
-          ``uuid.UUID.bytes`` (RFC 4122 big-endian) round-trip must
-          convert at their boundary.
+        - **UUID**: the ``arrow.uuid`` extension type, a pandas
+          ``pa.fixed_size_binary(16)`` column, or any ``fixed_size_binary(16)``
+          column named in ``schema_overrides`` as ``'uuid'``, holding
+          canonical RFC 4122 bytes — exactly ``uuid.UUID.bytes``, and what
+          :meth:`QueryResult.to_arrow` returns, so a UUID column round-trips
+          unchanged. Object-dtype columns of ``uuid.UUID`` work too. In an
+          Arrow table or polars frame passed directly, an unlabelled
+          ``fixed_size_binary`` column lands as ``BINARY``.
+        - **LONG256**: a pandas ``pa.fixed_size_binary(32)`` column, or one
+          named as ``'long256'`` in ``schema_overrides``, holding four 64-bit
+          little-endian limbs, least significant first.
 
         Server-side coercion handles cross-type writes (e.g. ``pa.string()``
         UUIDs landing in a UUID column are parsed server-side; narrow ints
@@ -6422,8 +6441,13 @@ cdef class QuestDB:
         ``QuestDBError`` from the ``flush()``.
 
         ``schema_overrides`` reclassifies columns by name, mapping each to
-        ``'symbol'``, ``'ipv4'``, ``'char'``, or ``'geohash'`` (e.g.
-        ``{'venue': 'symbol', 'src_ip': 'ipv4'}``). Unknown column names are
+        ``'symbol'``, ``'ipv4'``, ``'char'``, ``'uuid'``, ``'long256'``, or
+        ``('geohash', bits)`` (e.g.
+        ``{'venue': 'symbol', 'src_ip': 'ipv4'}``). ``'uuid'`` and
+        ``'long256'`` matter for Arrow tables and polars frames passed
+        directly: there a ``fixed_size_binary`` column without an
+        ``arrow.uuid`` / ``questdb.column_type`` label lands as BINARY.
+        Unknown column names are
         rejected. It requires the Arrow columnar path (fully Arrow-backed
         input without ``table_name_col``); on input that falls back to the
         NumPy planner it raises :class:`UnsupportedDataFrameShapeError`.
@@ -6468,7 +6492,7 @@ cdef class QuestDB:
             if db_use:
                 self._end_db_use()
 
-    def execute(self, str sql, object binds=None):
+    def execute(self, str sql, object binds=None, *, object timeout=None):
         """
         Run a statement and discard whatever it returns.
 
@@ -6480,14 +6504,21 @@ cdef class QuestDB:
         ``SELECT``) is discarded; use :meth:`query` when you want the
         result. The connection's SYMBOL dictionary is left untouched.
 
-        ``binds`` behaves exactly as on :meth:`query`. Returns
-        ``None``: the protocol carries no rows-affected count.
+        ``binds`` and ``timeout`` behave exactly as on :meth:`query`.
+
+        Returns the statement's ``EXEC_DONE`` report as an
+        :class:`ExecDone` named tuple ``(op_type, rows_affected)``, or
+        ``None`` for a statement that streamed a result set instead (a
+        ``SELECT``). See :attr:`QueryResult.exec_done` for the caveats on
+        ``rows_affected``.
         """
         self._begin_db_use('execute')
         try:
-            result = self.query(sql, binds, reset_symbol_dict=False)
+            result = self.query(
+                sql, binds, reset_symbol_dict=False, timeout=timeout)
             try:
                 result._drain()
+                return result.exec_done
             finally:
                 result.close()
         finally:
@@ -6498,7 +6529,8 @@ cdef class QuestDB:
             str sql,
             object binds=None,
             *,
-            bint reset_symbol_dict=True):
+            bint reset_symbol_dict=True,
+            object timeout=None):
         """
         Execute a SQL query and return a :class:`QueryResult`.
 
@@ -6530,6 +6562,10 @@ cdef class QuestDB:
               in the API)
             - :class:`TimestampMicros` → TIMESTAMP
             - :class:`TimestampNanos` → TIMESTAMP_NS
+            - ``datetime.date`` → DATE
+            - ``decimal.Decimal`` → the narrowest DECIMAL that holds it,
+              with its fractional digits as the scale (up to 76 digits and
+              scale 76; NaN and infinities raise :class:`ValueError`)
             - ``uuid.UUID`` → UUID
 
             Any other type raises :class:`TypeError` naming the placeholder.
@@ -6548,10 +6584,28 @@ cdef class QuestDB:
             the dictionary warm across repeated identical queries. No-op
             against servers that predate the capability.
 
+        :param timeout: Run this query under its own budget instead of the
+            server-wide ``query.timeout``, overriding the connect string's
+            ``query_timeout_ms``. An ``int`` is milliseconds; a
+            ``datetime.timedelta`` works too, with a positive value below
+            one millisecond rounded *up* to 1 ms. ``None`` (the default)
+            keeps the connect string's ``query_timeout_ms``; ``0`` clears
+            it. Requires a server advertising ``CAP_QUERY_TIMEOUT``: against
+            an older one a non-zero timeout is refused before anything is
+            sent, with ``QuestDBErrorCode.UnsupportedServer``, rather than
+            silently running under the server default; the connection is
+            untouched, so pass ``timeout=0`` or raise the server's
+            ``query.timeout`` instead. On expiry the error carries
+            ``QuestDBErrorCode.QueryTimeout`` and the connection stays
+            usable — but do not retry a write on it: a statement that
+            outlives its timeout is reported as done instead, and a DDL /
+            INSERT / UPDATE that timed out waiting for the table writer may
+            still be applied.
+
         :return: A :class:`QueryResult`. Materialise it via
-            ``to_pandas()``, ``to_arrow()``, ``iter_arrow()``,
-            ``iter_pandas()``, or the ``__arrow_c_stream__`` PyCapsule
-            protocol.
+            ``iter_rows()``, ``to_pandas()``, ``to_arrow()``,
+            ``iter_arrow()``, ``iter_pandas()``, or the
+            ``__arrow_c_stream__`` PyCapsule protocol.
 
         Sentinel-value collisions in the result frame round-trip QuestDB's
         contract: ``INT64_MIN`` in a LONG column, NaN in DOUBLE / FLOAT,
@@ -6578,11 +6632,17 @@ cdef class QuestDB:
             raise TypeError(
                 '"binds" must be a list or tuple of positional bind '
                 f'parameters (or None), not {_fqn(type(binds))}')
+        cdef int64_t timeout_ms = _query_timeout_to_millis(timeout)
         db = self._begin_db_use('query')
         try:
             reader_handle = _borrow_reader_from_pool(db)
-            cursor_handle = _execute_query(
-                reader_handle, sql, binds, reset_symbol_dict)
+            try:
+                cursor_handle = _execute_query(
+                    reader_handle, sql, binds, reset_symbol_dict, True,
+                    timeout_ms)
+            except:
+                reader_handle._close()
+                raise
         finally:
             self._end_db_use()
         return QueryResult(cursor_handle)
@@ -8895,8 +8955,10 @@ cdef class PooledReader:
     :meth:`QuestDB.reader`; it holds one pooled reader connection for
     its lifetime and runs queries on it sequentially via :meth:`query`.
     ``close()`` (or leaving the ``with`` block) releases the
-    connection: back to the pool if the last query was drained cleanly,
-    dropped otherwise.
+    connection: back to the pool if the last query reached its terminal
+    on a live connection (a clean drain, a successful ``cancel()``, or a
+    server-side error such as a parse error or a query timeout), dropped
+    otherwise.
 
     Queries are strictly sequential — one result at a time. Fully drain
     (or ``close()``) each :class:`QueryResult` before calling
@@ -8950,11 +9012,19 @@ cdef class PooledReader:
         self._reader = None
         self._last_cursor = None
         self._handle = None
-        if last is not None:
-            last._free()
-        reader._close()
-        if handle is not None:
-            handle._end_db_use()
+        try:
+            if last is not None:
+                last._close()
+        finally:
+            if last is not None and last._cursor != NULL:
+                # Deferred or interrupted: whoever frees the cursor closes
+                # the reader.
+                last._owns_reader = True
+                reader = None
+            if reader is not None:
+                reader._close()
+            if handle is not None:
+                handle._end_db_use()
 
     def __enter__(self):
         with self._lock:
@@ -8966,24 +9036,29 @@ cdef class PooledReader:
             str sql,
             object binds=None,
             *,
-            bint reset_symbol_dict=True) -> QueryResult:
+            bint reset_symbol_dict=True,
+            object timeout=None) -> QueryResult:
         """
         Execute a SQL query on the lease's connection and return a
         :class:`QueryResult`.
 
-        ``sql``, ``binds`` and ``reset_symbol_dict`` behave exactly as
-        on :meth:`QuestDB.query`, except the query runs on the reader
-        this lease holds instead of a per-call pool borrow. The
+        ``sql``, ``binds``, ``reset_symbol_dict`` and ``timeout`` behave
+        exactly as on :meth:`QuestDB.query`, except the query runs on the
+        reader this lease holds instead of a per-call pool borrow. The
         previous query's result must be fully drained (or closed)
         first; ``reset_symbol_dict=False`` reuses the connection's
         SYMBOL dictionary built up by the lease's earlier queries.
         """
         cdef _CursorHandle cursor_handle
         cdef _CursorHandle last
+        cdef int64_t timeout_ms
         if binds is not None and not isinstance(binds, (list, tuple)):
             raise TypeError(
                 '"binds" must be a list or tuple of positional bind '
                 f'parameters (or None), not {_fqn(type(binds))}')
+        # Validated before the lease is touched, so a bad argument is a
+        # plain TypeError / ValueError and never disturbs the connection.
+        timeout_ms = _query_timeout_to_millis(timeout)
         with self._lock:
             self._check_open('query')
             last = self._last_cursor
@@ -8998,31 +9073,36 @@ cdef class PooledReader:
                     raise QuestDBError(
                         QuestDBErrorCode.InvalidApiCall,
                         "the lease's connection is terminal: the "
-                        'previous query was not drained to its clean '
-                        'end, so its transport was torn down. close() '
+                        'previous query did not reach its terminal '
+                        'frame, so its transport was torn down. close() '
                         'this lease and obtain a new one with '
                         'QuestDB.reader().')
             cursor_handle = _execute_query(
-                self._reader, sql, binds, reset_symbol_dict, False)
+                self._reader, sql, binds, reset_symbol_dict, False,
+                timeout_ms)
             self._last_cursor = cursor_handle
         return QueryResult(cursor_handle)
 
-    def execute(self, str sql, object binds=None):
+    def execute(self, str sql, object binds=None, *, object timeout=None):
         """
         Run a statement on the lease's connection and discard whatever
         it returns.
 
-        Mirrors :meth:`QuestDB.execute`. The result is drained to its
-        clean end, so the lease stays usable for the next call, and the
-        connection's SYMBOL dictionary is left untouched — an
+        Mirrors :meth:`QuestDB.execute`, including the
+        :class:`ExecDone` ``(op_type, rows_affected)`` return value. The
+        result is drained
+        to its clean end, so the lease stays usable for the next call,
+        and the connection's SYMBOL dictionary is left untouched — an
         interleaved statement does not invalidate a warm dictionary
         built with ``reset_symbol_dict=False``.
         """
         with self._lock:
             self._check_open('execute')
-        result = self.query(sql, binds, reset_symbol_dict=False)
+        result = self.query(
+            sql, binds, reset_symbol_dict=False, timeout=timeout)
         try:
             result._drain()
+            return result.exec_done
         finally:
             result.close()
 
@@ -9031,9 +9111,10 @@ cdef class PooledReader:
         Release the lease's reader connection. Idempotent.
 
         A still-open (undrained) last result is freed first, which
-        tears down the connection; a cleanly-drained connection is
-        returned to the pool, any other is dropped and the pool refills
-        on demand.
+        tears down the connection; a connection whose last query reached
+        its terminal (a clean drain, a successful ``cancel()``, or a
+        server-side error) is returned to the pool, any other is dropped
+        and the pool refills on demand.
         """
         with self._lock:
             self._release_locked()
@@ -9043,5 +9124,8 @@ cdef class PooledReader:
 
     def __dealloc__(self):
         if self._lock is not None:
-            with self._lock:
-                self._release_locked()
+            try:
+                with self._lock:
+                    self._release_locked()
+            except KeyboardInterrupt:
+                _rearm_interrupt()

@@ -1367,6 +1367,17 @@ cdef void_int _dataframe_category_series_as_arrow(
             'Expected a category of strings, ' +
             f'got a category of {pandas_col.series.dtype.categories.dtype}.')
 
+cdef void_int _dataframe_claim_arrow_column_type(
+        object storage_type, bytes column_type, col_t* col) except -1:
+    # Unclaimed, a FixedSizeBinary column lands as BINARY.
+    if col.setup.arrow_schema.release != NULL:
+        col.setup.arrow_schema.release(&col.setup.arrow_schema)
+    _PYARROW.field(
+        '', storage_type,
+        metadata={b'questdb.column_type': column_type})._export_to_c(
+            <uintptr_t>&col.setup.arrow_schema)
+
+
 cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrowtype, col_t *col) except -1:
     cdef bint is_decimal_col = False
     _dataframe_require_pyarrow()
@@ -1423,9 +1434,11 @@ cdef void_int _dataframe_series_resolve_arrow(PandasCol pandas_col, object arrow
     elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
             and arrowtype.byte_width == 16):
         col.setup.source = col_source_t.col_source_fsb16_arrow
+        _dataframe_claim_arrow_column_type(arrowtype, b'uuid', col)
     elif (arrowtype.id == _PYARROW.lib.Type_FIXED_SIZE_BINARY
             and arrowtype.byte_width == 32):
         col.setup.source = col_source_t.col_source_fsb32_arrow
+        _dataframe_claim_arrow_column_type(arrowtype, b'long256', col)
     elif arrowtype.id == _PYARROW.lib.Type_UINT32:
         col.setup.source = col_source_t.col_source_u32_arrow
     else:
@@ -2773,17 +2786,17 @@ cdef void_int _dataframe_serialize_cell_column_ts__datetime_pyobj(
             _days_from_civil(
                 PyDateTime_GET_YEAR(dt),
                 PyDateTime_GET_MONTH(dt),
-                PyDateTime_GET_DAY(dt)) * 86_400_000_000
-            + <int64_t>PyDateTime_DATE_GET_HOUR(dt) * 3_600_000_000
+                PyDateTime_GET_DAY(dt)) * <int64_t>86_400_000_000
+            + <int64_t>PyDateTime_DATE_GET_HOUR(dt) * <int64_t>3_600_000_000
             + <int64_t>PyDateTime_DATE_GET_MINUTE(dt) * 60_000_000
             + <int64_t>PyDateTime_DATE_GET_SECOND(dt) * 1_000_000
             + <int64_t>PyDateTime_DATE_GET_MICROSECOND(dt))
     else:
         delta = dt - _EPOCH_AWARE_UTC
-        micros = <int64_t>(
-            delta.days * 86_400_000_000
-            + delta.seconds * 1_000_000
-            + delta.microseconds)
+        micros = (
+            <int64_t>delta.days * <int64_t>86_400_000_000
+            + <int64_t>delta.seconds * 1_000_000
+            + <int64_t>delta.microseconds)
     if not line_sender_buffer_column_ts_micros(ls_buf, col.name, micros, &err):
         raise c_err_to_py(err)
     return 0

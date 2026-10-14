@@ -36,7 +36,7 @@ except ImportError:
 import questdb._client as qi
 
 
-QUESTDB_VERSION = '9.4.3'
+QUESTDB_VERSION = '10.0.1'
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
@@ -86,10 +86,12 @@ class TestWithDatabase(unittest.TestCase):
             wrap_tls=True,
             http=True,
             qwp_udp=cls._qwp_udp_enabled)
+        cls.addClassCleanup(cls.qdb_plain.stop)
         cls.qdb_plain.start()
 
         cls.qdb_auth = QuestDbFixture(
             QUESTDB_AUTH_INSTALL_PATH, auth=True, wrap_tls=True)
+        cls.addClassCleanup(cls.qdb_auth.stop)
         cls.qdb_auth.start()
 
     @classmethod
@@ -2358,7 +2360,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 with client.query(
                         f'SELECT lg, vc FROM {table_name} ORDER BY lg DESC'
                         ) as result:
-                    df = pl.from_arrow(result)
+                    df = pl.DataFrame(result)
             self.assertEqual(df.shape, (2, 2))
             self.assertEqual(df['lg'].to_list(), [42, 7])
             self.assertEqual(df['vc'].to_list(), ['hello', 'world'])
@@ -2469,13 +2471,18 @@ class TestEgressWithDatabase(unittest.TestCase):
             self._exec(
                 f'CREATE TABLE {table_name} '
                 '(ts TIMESTAMP, lg LONG, dbl DOUBLE, sym SYMBOL, '
-                'flag BOOLEAN, u UUID) '
+                'flag BOOLEAN, u UUID, d DATE, dec DECIMAL(18,2), '
+                'wide DECIMAL(38,10), huge DECIMAL(76,20)) '
                 'TIMESTAMP(ts) PARTITION BY DAY WAL')
             bound_uuid = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
+            wide = decimal.Decimal('123456789012345678.1234567890')
+            huge = decimal.Decimal(
+                '1234567890123456789012345678901234567890.12345678901234567890')
             self._exec(
                 f'INSERT INTO {table_name} VALUES '
                 f"('2024-01-01T00:00:01.000000Z', 7, 1.5, 'BTC-USD', "
-                f"true, '{bound_uuid}')")
+                f"true, '{bound_uuid}', '2024-01-01', '1.25', "
+                f"'{wide}', '{huge}')")
             self.qdb_plain.retry_check_table(table_name, min_rows=1)
 
             def count(sql, binds):
@@ -2511,6 +2518,20 @@ class TestEgressWithDatabase(unittest.TestCase):
                 (f'SELECT count() AS n FROM {table_name} '
                  'WHERE $1 IS NULL', [None], 1),
                 (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE d = $1', [datetime.date(2024, 1, 1)], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE d = $1', [datetime.date(2024, 1, 2)], 0),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE dec = $1', [decimal.Decimal('1.25')], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE dec = $1', [decimal.Decimal('1.3')], 0),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE wide = $1', [wide], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE huge = $1', [huge], 1),
+                (f'SELECT count() AS n FROM {table_name} '
+                 'WHERE huge = $1', [-huge], 0),
+                (f'SELECT count() AS n FROM {table_name} '
                  'WHERE ts > $1 AND sym = $2',
                  [datetime.datetime(
                      2020, 1, 1, tzinfo=datetime.timezone.utc),
@@ -2531,6 +2552,14 @@ class TestEgressWithDatabase(unittest.TestCase):
                     client.query(
                         f'SELECT count() AS n FROM {table_name} '
                         'WHERE lg = $1', [object()])
+                with self.assertRaisesRegex(ValueError, 'NaN'):
+                    client.query(
+                        f'SELECT count() AS n FROM {table_name} '
+                        'WHERE dec = $1', [decimal.Decimal('NaN')])
+                with self.assertRaisesRegex(ValueError, '76 digits'):
+                    client.query(
+                        f'SELECT count() AS n FROM {table_name} '
+                        'WHERE dec = $1', [decimal.Decimal('1E+77')])
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -2545,13 +2574,13 @@ class TestEgressWithDatabase(unittest.TestCase):
         table_name = 't_execute_' + uuid.uuid4().hex[:8]
         try:
             with qi.QuestDB.from_conf(self._conf()) as client:
-                self.assertIsNone(client.execute(
+                self.assertIsInstance(client.execute(
                     f'CREATE TABLE {table_name} '
                     '(ts TIMESTAMP, lg LONG) '
-                    'TIMESTAMP(ts) PARTITION BY DAY WAL'))
-                self.assertIsNone(client.execute(
+                    'TIMESTAMP(ts) PARTITION BY DAY WAL'), tuple)
+                self.assertEqual(client.execute(
                     f'INSERT INTO {table_name} VALUES '
-                    "('2024-01-01T00:00:00.000000Z', 7)"))
+                    "('2024-01-01T00:00:00.000000Z', 7)")[1], 1)
                 self.qdb_plain.retry_check_table(table_name, min_rows=1)
                 self.assertIsNone(client.execute(
                     f'SELECT * FROM {table_name} WHERE lg = $1', [7]))
@@ -2559,9 +2588,9 @@ class TestEgressWithDatabase(unittest.TestCase):
                     f'SELECT count() AS n FROM {table_name}').to_pandas()
                 self.assertEqual(int(frame['n'][0]), 1)
                 with client.reader() as r:
-                    self.assertIsNone(r.execute(
+                    self.assertEqual(r.execute(
                         f'INSERT INTO {table_name} VALUES '
-                        "('2024-01-01T00:00:01.000000Z', 8)"))
+                        "('2024-01-01T00:00:01.000000Z', 8)")[1], 1)
                     self.qdb_plain.retry_check_table(
                         table_name, min_rows=2)
                     frame = r.query(
@@ -4246,6 +4275,17 @@ class TestEgressLeaks(unittest.TestCase):
 
             _assert_no_leak(self, work, warmup=40, measure=240)
 
+    def test_symbol_row_stream_does_not_leak(self):
+        from test_dataframe_leaks import _assert_no_leak
+        sql = ("SELECT cast('k' || cast(x AS STRING) AS SYMBOL) s "
+               'FROM long_sequence(50000)')
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            def work():
+                for _ in client.query(sql).iter_rows():
+                    pass
+
+            _assert_no_leak(self, work, warmup=40, measure=240)
+
 
 class TestColumnIngressNarrowTypes(unittest.TestCase):
     """End-to-end tests for the narrow Arrow primitive types added to
@@ -4691,16 +4731,6 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     # ---------- UUID (Category C — canonical mirror + extension type) ----------
 
     @staticmethod
-    def _uuid_to_wire(u):
-        """Convert a Python ``uuid.UUID`` to QuestDB's UUID wire
-        layout (the C header: "bytes 0..8 lo half LE,
-        bytes 8..16 hi half LE"). ``uuid.UUID.bytes`` is big-endian
-        per RFC 4122; the wire layout is two 64-bit LE halves with
-        ``lo`` first."""
-        b = u.bytes
-        return bytes(reversed(b[8:16])) + bytes(reversed(b[0:8]))
-
-    @staticmethod
     def _extract_uuid_storage(col):
         """Return the FSB(16) storage bytes from an egress UUID
         column, whether or not pyarrow has the `arrow.uuid`
@@ -4711,19 +4741,16 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         return col.to_pylist()
 
     def test_uuid_round_trip_via_fsb16(self):
-        """``pa.fixed_size_binary(16)`` → UUID wire → server stores
-        as UUID → egress emits the same FSB(16) storage bytes.
-        Canonical mirror path: no extension type wrapping. Round-trip
-        is byte-identity at the Arrow wire level (the
-        `_uuid_to_wire` helper converts the user-facing UUID to that
-        layout up front)."""
+        """``pa.fixed_size_binary(16)`` holding ``uuid.UUID.bytes`` →
+        server stores that UUID → egress emits the same canonical bytes.
+        The server's own text form pins the byte order."""
         import pyarrow as pa
         import uuid as uuid_mod
         self._require_qwp_ws()
         table = self._table()
         self._create_table(table, 'v UUID')
         uuids = [uuid_mod.uuid4() for _ in range(5)]
-        wire_bytes = [self._uuid_to_wire(u) for u in uuids]
+        wire_bytes = [u.bytes for u in uuids]
         values = pa.array(wire_bytes, type=pa.binary(16))
         df = self._make_df_with_ts('v', values, 5)
         with qi.QuestDB.from_conf(self._conf()) as client:
@@ -4732,8 +4759,13 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+            text = client.query(
+                f'SELECT cast(v AS varchar) AS s FROM {table} '
+                'ORDER BY ts').to_arrow()
         self.assertEqual(self._extract_uuid_storage(got.column('v')),
                          wire_bytes)
+        self.assertEqual(text.column('s').to_pylist(),
+                         [str(u) for u in uuids])
 
     def test_uuid_round_trip_via_arrow_uuid_extension(self):
         """If pyarrow has registered the `arrow.uuid` extension
@@ -4751,7 +4783,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         table = self._table()
         self._create_table(table, 'v UUID')
         uuids = [uuid_mod.uuid4() for _ in range(3)]
-        wire_bytes = [self._uuid_to_wire(u) for u in uuids]
+        wire_bytes = [u.bytes for u in uuids]
         values = pa.ExtensionArray.from_storage(
             uuid_type,
             pa.array(wire_bytes, type=pa.binary(16)))
@@ -4772,9 +4804,9 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self._require_qwp_ws()
         table = self._table()
         self._create_table(table, 'v UUID')
-        w0 = self._uuid_to_wire(uuid_mod.uuid4())
-        w2 = self._uuid_to_wire(uuid_mod.uuid4())
-        w4 = self._uuid_to_wire(uuid_mod.uuid4())
+        w0 = uuid_mod.uuid4().bytes
+        w2 = uuid_mod.uuid4().bytes
+        w4 = uuid_mod.uuid4().bytes
         values = pa.array(
             [w0, None, w2, None, w4], type=pa.binary(16))
         df = self._make_df_with_ts('v', values, 5)
@@ -4809,10 +4841,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
-        # Server-side coercion lands the value as a UUID; egress
-        # emits the FSB(16) storage in the same wire layout as
-        # the canonical mirror path.
-        expected = [self._uuid_to_wire(u) for u in uuids]
+        expected = [u.bytes for u in uuids]
         self.assertEqual(self._extract_uuid_storage(got.column('v')),
                          expected)
 
@@ -4852,19 +4881,24 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             with self.assertRaises(qi.QuestDBError):
                 sender.dataframe(df, table_name='dummy', at='ts')
 
-    def test_fsb_other_size_rejected(self):
-        """``FixedSizeBinary(k)`` for k != 16 is not UUID and has no
-        QuestDB analogue — should be rejected cleanly rather than
-        silently routed somewhere wrong."""
+    def test_fsb_other_size_lands_as_binary(self):
+        """``FixedSizeBinary(k)`` for k not 16 / 32 has no fixed-width
+        QuestDB analogue, so its bytes land verbatim in a BINARY
+        column."""
         import pyarrow as pa
         self._require_qwp_ws()
         table = self._table()
-        values = pa.array(
-            [b'\x00' * 8, b'\xff' * 8], type=pa.binary(8))
+        self._create_table(table, 'v BINARY')
+        raw = [b'\x00' * 8, b'\xff' * 8]
+        values = pa.array(raw, type=pa.binary(8))
         df = self._make_df_with_ts('v', values, 2)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            with self.assertRaises(qi.QuestDBError):
-                client.dataframe(df, table_name=table, at='ts')
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=2)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            got = list(client.query(
+                f'SELECT v FROM {table} ORDER BY ts').iter_rows())
+        self.assertEqual(got, [(raw[0],), (raw[1],)])
 
     # ---------- UInt32 / IPV4 policy ----------
 
@@ -5300,6 +5334,48 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(col_types['region'], 'SYMBOL')
         self.assertEqual(col_types['note'], 'VARCHAR')
 
+    def test_arrow_symbols_apply_to_the_exported_index(self):
+        import pyarrow as pa
+        self._require_qwp_ws()
+        ts_type = pa.timestamp('us', tz='UTC')
+        columns = {
+            'ts': pd.array(
+                [1700000000_000000, 1700000001_000000, 1700000002_000000],
+                dtype=pd.ArrowDtype(ts_type)),
+            'v': pd.array([1, 2, 3], dtype=pd.ArrowDtype(pa.int64())),
+        }
+        regions = ['us-east', 'us-west', 'us-east']
+        indexes = {
+            'categorical': pd.CategoricalIndex(regions, name='region'),
+            'arrow string': pd.Index(
+                pd.array(regions, dtype=pd.ArrowDtype(pa.string())),
+                name='region'),
+            'object': pd.Index(regions, dtype=object, name='region'),
+            'multi object level': pd.MultiIndex.from_arrays(
+                [pd.Index(regions, dtype=object), [1, 2, 3]],
+                names=['region', 'n']),
+        }
+        cases = [
+            ('categorical', False, 'VARCHAR'),
+            ('categorical', [], 'VARCHAR'),
+            ('categorical', ['region'], 'SYMBOL'),
+            ('arrow string', True, 'SYMBOL'),
+            ('object', True, 'SYMBOL'),
+            ('object', ['region'], 'SYMBOL'),
+            ('multi object level', True, 'SYMBOL'),
+        ]
+        for shape, symbols, expected in cases:
+            index = indexes[shape]
+            with self.subTest(index=shape, symbols=symbols):
+                table = self._table()
+                with qi.QuestDB.from_conf(self._conf()) as client:
+                    client.dataframe(
+                        pd.DataFrame(columns, index=index),
+                        table_name=table, at='ts', symbols=symbols)
+                resp = self.qdb_plain.retry_check_table(table, min_rows=3)
+                col_types = {c['name']: c['type'] for c in resp['columns']}
+                self.assertEqual(col_types['region'], expected)
+
     def test_ipv4_string_coercion_is_unsupported(self):
         """Unlike UUID (where the server parses VARCHAR strings
         into UUIDs), QuestDB does NOT currently support VARCHAR →
@@ -5352,8 +5428,7 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     def test_long256_round_trip(self):
         """``pa.fixed_size_binary(32)`` → LONG256 wire → server
         stores as LONG256 → egress emits FSB(32). Bytes are
-        forwarded verbatim — same opaque-bytes convention as UUID
-        (matches Polars / Rust-direct: see PR #150)."""
+        forwarded verbatim."""
         import pyarrow as pa
         self._require_qwp_ws()
         table = self._table()
@@ -5924,23 +5999,29 @@ class TestEgressFailover(unittest.TestCase):
         self.qdb_plain.retry_check_table(table, min_rows=n_rows)
         return table
 
+    def _hard_bounce(self):
+        # Since QuestDB 10.0 a graceful stop ends a stream still in flight
+        # with QUERY_ERROR(CANCELLED), which is not failed over.
+        self.qdb_plain._proc.kill()
+        self.qdb_plain._proc.wait()
+        self.qdb_plain.stop()
+        self.qdb_plain.start()
+
     def test_materialise_whole_transparent_across_bounce(self):
         """``to_arrow`` / ``to_pandas`` / ``to_polars`` complete with the
         full, in-order result even when the server bounces mid-stream:
         the installed reset callback discards the partial accumulation
         and the query replays from batch-0."""
         n = 200000
-        table = self._seed(n)
         expected = list(range(n))
 
         with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000')) as client:
-            result = client.query(f'SELECT v FROM {table} ORDER BY ts')
+            result = client.query(f'SELECT x - 1 AS v FROM long_sequence({n})')
             # Bounce before the (single-use) materialisation drains the
             # stream: a mid-query failover re-executes and the reset
             # discards anything already buffered.
-            self.qdb_plain.stop()
-            self.qdb_plain.start()
+            self._hard_bounce()
             table_out = result.to_arrow()
         self.assertEqual(table_out.column('v').to_pylist(), expected)
 
@@ -5948,13 +6029,11 @@ class TestEgressFailover(unittest.TestCase):
         """Default ``to_pandas`` (the numpy accumulator we own) is
         likewise transparent across a bounce."""
         n = 200000
-        table = self._seed(n)
         expected = list(range(n))
         with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000')) as client:
-            result = client.query(f'SELECT v FROM {table} ORDER BY ts')
-            self.qdb_plain.stop()
-            self.qdb_plain.start()
+            result = client.query(f'SELECT x - 1 AS v FROM long_sequence({n})')
+            self._hard_bounce()
             df = result.to_pandas()
         self.assertEqual(df['v'].tolist(), expected)
 
@@ -5964,13 +6043,11 @@ class TestEgressFailover(unittest.TestCase):
         except ImportError:
             self.skipTest('polars not installed')
         n = 200000
-        table = self._seed(n)
         expected = list(range(n))
         with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000')) as client:
-            result = client.query(f'SELECT v FROM {table} ORDER BY ts')
-            self.qdb_plain.stop()
-            self.qdb_plain.start()
+            result = client.query(f'SELECT x - 1 AS v FROM long_sequence({n})')
+            self._hard_bounce()
             df = result.to_polars()
         self.assertEqual(df['v'].to_list(), expected)
 
@@ -6012,7 +6089,7 @@ class TestEgressFailover(unittest.TestCase):
                            target='primary',
                            failover_max_duration_ms='60000')) as client:
             with client.query(f'SELECT v FROM {table} ORDER BY ts') as result:
-                df = pl.from_arrow(result)
+                df = pl.DataFrame(result)
         self.assertEqual(df['v'].to_list(), list(range(n)))
 
     def test_iter_arrow_surfaces_failover_would_duplicate(self):
@@ -6022,8 +6099,8 @@ class TestEgressFailover(unittest.TestCase):
         re-reading."""
         # Use a generated result large enough that the server is still
         # producing after the first small batch. A pre-seeded table can
-        # finish and buffer before the graceful fixture bounce breaks the
-        # WebSocket, making the test depend on timing.
+        # finish and buffer before the bounce breaks the WebSocket, making
+        # the test depend on timing.
         n = 100000000
         with qi.QuestDB.from_conf(
                 self._conf(failover_max_duration_ms='60000',
@@ -6033,8 +6110,7 @@ class TestEgressFailover(unittest.TestCase):
             first = next(it)
             self.assertGreater(first.num_rows, 0)
             # First batch delivered; bounce so the next pull fails over.
-            self.qdb_plain.stop()
-            self.qdb_plain.start()
+            self._hard_bounce()
             with self.assertRaises(qi.QuestDBError) as cm:
                 for _ in it:
                     pass
@@ -6052,14 +6128,33 @@ class TestEgressFailover(unittest.TestCase):
                 f'SELECT x - 1 AS v FROM long_sequence({n})').iter_pandas()
             first = next(it)
             self.assertGreater(len(first), 0)
-            self.qdb_plain.stop()
-            self.qdb_plain.start()
+            self._hard_bounce()
             with self.assertRaises(qi.QuestDBError) as cm:
                 for _ in it:
                     pass
             self.assertEqual(
                 cm.exception.code,
                 qi.QuestDBErrorCode.FailoverWouldDuplicate)
+
+    def test_iter_rows_surfaces_failover_would_duplicate(self):
+        """Same contract for ``iter_rows``; a fresh ``iter_rows()`` call
+        afterwards raises rather than looking like an empty result."""
+        n = 100000000
+        with qi.QuestDB.from_conf(
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
+            result = client.query(f'SELECT x - 1 AS v FROM long_sequence({n})')
+            it = result.iter_rows()
+            self.assertEqual(next(it), (0,))
+            self._hard_bounce()
+            with self.assertRaises(qi.QuestDBError) as cm:
+                for _ in it:
+                    pass
+            self.assertEqual(
+                cm.exception.code,
+                qi.QuestDBErrorCode.FailoverWouldDuplicate)
+            with self.assertRaises(qi.QuestDBError):
+                result.iter_rows()
 
 
 class _FakeStatusServer:

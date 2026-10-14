@@ -164,6 +164,75 @@ class TestCapsulePathPyArrow(unittest.TestCase):
         self.assertGreaterEqual(stats['qwp1_frames'], 4)
 
 
+    @unittest.skipIf(
+        pa is None or pd is None
+        or not hasattr(pd.DataFrame, '__arrow_c_stream__'),
+        'needs pyarrow and pandas >= 2.2')
+    def test_pandas_fixed_size_binary_claim_with_non_str_labels(self):
+        # The claim must name the column the way pyarrow exports it. A
+        # claimed UUID goes out in wire order; unclaimed, it would land
+        # verbatim as BINARY.
+        value = bytes(range(16))
+        for label in ('u', 0, b'u'):
+            df = pd.DataFrame({
+                label: pd.Series(
+                    pa.array([value], pa.binary(16)),
+                    dtype=pd.ArrowDtype(pa.binary(16))),
+                'ts': pd.Series(
+                    pa.array([_ts_us(2025, 1, 1)], pa.timestamp('us')),
+                    dtype=pd.ArrowDtype(pa.timestamp('us'))),
+            })
+            with self.subTest(label=label):
+                with QwpAckServer(record_payloads=True) as server:
+                    client = qi.QuestDB.from_conf(_client_conf(server.port))
+                    try:
+                        client.dataframe(df, table_name='u', at='ts')
+                    finally:
+                        client.close()
+                    server.wait_binary_frames_settled()
+                    stats = server.snapshot()
+                self.assertEqual(stats['errors'], [])
+                payload = b''.join(stats['binary_payloads'])
+                self.assertIn(value[::-1], payload)
+                self.assertNotIn(value, payload)
+
+    @unittest.skipIf(
+        pa is None or not hasattr(pa, 'string_view'),
+        'needs pyarrow with string_view')
+    def test_string_view_columns_follow_symbols(self):
+        def ingest(col, symbols):
+            with QwpAckServer(record_payloads=True) as server:
+                client = qi.QuestDB.from_conf(_client_conf(server.port))
+                try:
+                    client.dataframe(
+                        pa.table({'k': col, 'v': [1.0, 2.0, 3.0]}),
+                        table_name='t',
+                        at=qi.ServerTimestamp,
+                        symbols=symbols)
+                finally:
+                    client.close()
+                server.wait_binary_frames_settled()
+                stats = server.snapshot()
+            self.assertEqual(stats['errors'], [])
+            return b''.join(stats['binary_payloads'])
+
+        codes = pa.array([0, 1, 0], pa.int32())
+        cols = {
+            'plain': (pa.array(['a', 'b', 'a'], pa.string()),
+                      pa.array(['a', 'b', 'a'], pa.string_view())),
+            'dictionary': (
+                pa.DictionaryArray.from_arrays(
+                    codes, pa.array(['a', 'b'], pa.string())),
+                pa.DictionaryArray.from_arrays(
+                    codes, pa.array(['a', 'b'], pa.string_view()))),
+        }
+        for shape, (utf8, view) in cols.items():
+            for symbols in (['k'], True, False):
+                with self.subTest(shape=shape, symbols=symbols):
+                    self.assertEqual(
+                        ingest(view, symbols), ingest(utf8, symbols))
+
+
 class TestCapsulePathPolars(unittest.TestCase):
 
     @unittest.skipIf(pl is None, 'polars not installed')
@@ -436,6 +505,24 @@ class TestScalarAt(unittest.TestCase):
             server_bytes = self._ingest_recorded(df, qi.ServerTimestamp)
             self.assertIn(sentinel, scalar_bytes)
             self.assertNotIn(sentinel, server_bytes)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_tz_aware_datetime_object_column_on_wire(self):
+        cells = [
+            datetime.datetime(
+                2021, 1, 1, 12, 0, 0, 123456, tzinfo=datetime.timezone.utc),
+            datetime.datetime(
+                1960, 6, 1, 7, 30, 0, 1,
+                tzinfo=datetime.timezone(datetime.timedelta(hours=-5))),
+            pd.Timestamp('2021-03-04T05:06:07.890123', tz='UTC'),
+        ]
+        utc = [c.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+               for c in cells]
+        obj_df = pd.DataFrame({'ts': pd.Series(cells, dtype=object)})
+        np_df = pd.DataFrame({'ts': pd.Series(utc).astype('datetime64[us]')})
+        self.assertEqual(
+            self._ingest_recorded(obj_df, qi.ServerTimestamp),
+            self._ingest_recorded(np_df, qi.ServerTimestamp))
 
     @unittest.skipIf(pl is None, 'polars not installed')
     def test_pre_epoch_datetime_rejected(self):
@@ -860,6 +947,38 @@ class TestSchemaOverrides(unittest.TestCase):
             qi._debug_dataframe_pyarrow_loaded(),
             'polars + schema_overrides path must not lazy-import pyarrow')
 
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_symbols_list_no_pyarrow(self):
+        if qi._debug_dataframe_pyarrow_loaded():
+            self.skipTest(
+                'an earlier test already lazy-loaded pyarrow inside this '
+                'process; the no-pyarrow assertion only holds when this '
+                'test runs first.')
+        df = pl.DataFrame({
+            'region': pl.Series('region', ['us-east', 'us-west', 'us-east']),
+            'price':  pl.Series('price', [1.0, 2.0, 3.0], dtype=pl.Float64),
+            'ts':     pl.Series('ts', [
+                datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc),
+                datetime.datetime(2025, 1, 2, tzinfo=datetime.timezone.utc),
+                datetime.datetime(2025, 1, 3, tzinfo=datetime.timezone.utc),
+            ], dtype=pl.Datetime('us', time_zone='UTC')),
+        })
+        with QwpAckServer() as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    df,
+                    table_name='polars_symbols',
+                    at='ts',
+                    symbols=['region'])
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertFalse(
+            qi._debug_dataframe_pyarrow_loaded(),
+            'polars + symbols path must not lazy-import pyarrow')
+
     def test_schema_overrides_rejects_decimal_kind(self):
         with self.assertRaisesRegex(ValueError, 'kind'):
             with QwpAckServer() as server:
@@ -960,6 +1079,27 @@ class TestPyArrowRecordBatchDirect(unittest.TestCase):
             stats = server.snapshot()
         self.assertEqual(stats['errors'], [])
         self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+
+class TestPolarsWithoutPyarrow(unittest.TestCase):
+    """Runs the no-pyarrow polars checks in a fresh interpreter, where no
+    earlier test can have loaded pyarrow and turned them into skips."""
+
+    @unittest.skipIf(pl is None, 'polars not installed')
+    def test_polars_paths_do_not_load_pyarrow(self):
+        import subprocess
+        names = [
+            f'test_client_capsule_path.TestSchemaOverrides.{name}'
+            for name in (
+                'test_polars_schema_overrides_ipv4_no_pyarrow',
+                'test_polars_schema_overrides_symbol_no_pyarrow',
+                'test_polars_symbols_list_no_pyarrow')]
+        proc = subprocess.run(
+            [sys.executable, '-m', 'unittest', '-v', *names],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=300)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn('skipped', proc.stderr)
 
 
 class TestSchemaOverridesPandas(unittest.TestCase):
@@ -1196,6 +1336,123 @@ class TestPandasPlannerRouting(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['accepted_connections'], 1)
         self.assertGreaterEqual(stats['qwp1_frames'], 1)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_arrow_backed_pandas_index_is_not_expanded_up_front(self):
+        try:
+            import tracemalloc
+        except ImportError:
+            self.skipTest('needs tracemalloc')
+        import numpy as np
+        import pandas as pd
+
+        def frame(n):
+            return pd.DataFrame(
+                {'v': pd.array(
+                    np.arange(n), dtype=pd.ArrowDtype(pa.int64()))},
+                index=pd.MultiIndex.from_arrays(
+                    [np.arange(n), np.arange(n) % 97], names=['a', 'b']))
+
+        df = frame(50_000)
+        with QwpAckServer() as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                client.dataframe(
+                    frame(10), table_name='multi_index',
+                    at=qi.ServerTimestamp)
+                tracemalloc.start()
+                try:
+                    client.dataframe(
+                        df, table_name='multi_index',
+                        at=qi.ServerTimestamp, max_rows_per_batch=1024)
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+            finally:
+                client.close()
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertLess(peak, 512 * 1024)
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_pandas_batches_are_converted_once(self):
+        import numpy as np
+        import pandas as pd
+        import pyarrow.pandas_compat as pandas_compat
+        n = 10_000
+        v = pd.array(np.arange(n), dtype=pd.ArrowDtype(pa.int64()))
+        labels = pd.Index([f'k{i}' for i in range(n)], dtype=object)
+        parents = {
+            'categorical': pd.DataFrame(
+                {'v': v}, index=pd.CategoricalIndex(labels, name='k')),
+            'object multi': pd.DataFrame(
+                {'v': v}, index=pd.MultiIndex.from_arrays(
+                    [labels, np.arange(n)], names=['k', 'j'])),
+        }
+        counts = {'converted': 0, 'inferred': 0}
+        real_to_arrays = pandas_compat.dataframe_to_arrays
+        real_to_types = pandas_compat.dataframe_to_types
+
+        def to_arrays(*args, **kwargs):
+            counts['converted'] += 1
+            return real_to_arrays(*args, **kwargs)
+
+        def to_types(*args, **kwargs):
+            counts['inferred'] += 1
+            return real_to_types(*args, **kwargs)
+
+        pandas_compat.dataframe_to_arrays = to_arrays
+        pandas_compat.dataframe_to_types = to_types
+        try:
+            with QwpAckServer() as server:
+                client = qi.QuestDB.from_conf(_client_conf(server.port))
+                try:
+                    for shape, parent in parents.items():
+                        for rows, batches in ((64, 1), (3000, 3)):
+                            for symbols in ('auto', False, [], ['k'], True):
+                                with self.subTest(
+                                        index=shape, rows=rows,
+                                        symbols=symbols):
+                                    counts.update(converted=0, inferred=0)
+                                    client.dataframe(
+                                        parent.iloc[:rows],
+                                        table_name='pandas_batches',
+                                        at=qi.ServerTimestamp,
+                                        symbols=symbols,
+                                        max_rows_per_batch=1024)
+                                    self.assertEqual(
+                                        counts,
+                                        {'converted': batches,
+                                         'inferred': 0})
+                finally:
+                    client.close()
+                stats = server.snapshot()
+        finally:
+            pandas_compat.dataframe_to_arrays = real_to_arrays
+            pandas_compat.dataframe_to_types = real_to_types
+        self.assertEqual(stats['errors'], [])
+
+    @unittest.skipIf(
+        pa is None or pd is None
+        or not hasattr(pd.DataFrame, '__arrow_c_stream__'),
+        'needs pyarrow and pandas >= 2.2')
+    def test_arrow_backed_pandas_needs_pyarrow_14(self):
+        from unittest import mock
+
+        class PreStreamTable:
+            pass
+
+        df = pd.DataFrame(
+            {'v': pd.array([1, 2], dtype=pd.ArrowDtype(pa.int64()))})
+        with QwpAckServer() as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with mock.patch.object(pa, 'Table', PreStreamTable):
+                    with self.assertRaisesRegex(ImportError, '14.0.0'):
+                        client.dataframe(
+                            df, table_name='t', at=qi.ServerTimestamp)
+            finally:
+                client.close()
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_mixed_arrow_numpy_symbol_override_uses_manual(self):

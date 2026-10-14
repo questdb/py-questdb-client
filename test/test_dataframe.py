@@ -1298,6 +1298,27 @@ class TestPandasBase:
             self.assertNotEqual(obj_buf, b'')
             self.assertEqual(obj_buf, np_buf)
 
+        def test_tz_aware_datetime_pyobj_column_matches_numpy(self):
+            cells = [
+                dt.datetime(2021, 1, 1, 12, 0, 0, 123456,
+                            tzinfo=dt.timezone.utc),
+                dt.datetime(1960, 6, 1, 7, 30, 0, 1,
+                            tzinfo=dt.timezone(dt.timedelta(hours=-5))),
+                pd.Timestamp('2021-03-04T05:06:07.890123', tz='UTC'),
+            ]
+            utc = [c.astimezone(dt.timezone.utc).replace(tzinfo=None)
+                   for c in cells]
+            obj_df = pd.DataFrame({'ts': pd.Series(cells, dtype=object)})
+            np_df = pd.DataFrame(
+                {'ts': pd.Series(utc).astype('datetime64[us]')})
+            self.assertEqual(
+                _dataframe(
+                    self.version, obj_df, table_name='tbl',
+                    at=qi.ServerTimestamp),
+                _dataframe(
+                    self.version, np_df, table_name='tbl',
+                    at=qi.ServerTimestamp))
+
         def test_datetime_pyobj_column_with_null_matches_numpy(self):
             ts = dt.datetime(2021, 1, 1, 12, 0, 0)
             obj_df = pd.DataFrame({

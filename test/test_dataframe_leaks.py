@@ -161,6 +161,43 @@ class TestCategoricalArrowLeak(unittest.TestCase):
 
 
 @unittest.skipUnless(pd is not None, 'pandas not installed')
+@unittest.skipUnless(pa is not None, 'pyarrow not installed')
+class TestFixedSizeBinaryClaimLeak(unittest.TestCase):
+
+    def test_replaced_schema_is_released(self):
+        rows = 8
+        df = pd.DataFrame({
+            'u': pd.Series(
+                pa.array([bytes(16)] * rows, pa.binary(16)),
+                dtype=pd.ArrowDtype(pa.binary(16))),
+            'l': pd.Series(
+                pa.array([bytes(32)] * rows, pa.binary(32)),
+                dtype=pd.ArrowDtype(pa.binary(32))),
+            'n': np.arange(rows)})
+
+        def plan(symbols):
+            qi._bench_dataframe_plan_and_populate_column_chunks(
+                df, table_name='t', at=qi.ServerTimestamp, symbols=symbols)
+
+        for symbols, error in (('auto', None), (['n'], qi.QuestDBError)):
+            with self.subTest(symbols=symbols):
+                def work():
+                    if error is None:
+                        plan(symbols)
+                    else:
+                        with self.assertRaises(error):
+                            plan(symbols)
+
+                work()
+                gc.collect()
+                before = pa.total_allocated_bytes()
+                for _ in range(100):
+                    work()
+                gc.collect()
+                self.assertEqual(pa.total_allocated_bytes(), before)
+
+
+@unittest.skipUnless(pd is not None, 'pandas not installed')
 @unittest.skipUnless(psutil is not None, 'psutil not installed')
 class TestPyobjColumnarLeak(unittest.TestCase):
     """Guards the calloc'd ``pyobj_built_t`` builders

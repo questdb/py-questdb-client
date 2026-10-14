@@ -33,7 +33,14 @@ from qwp_ws_ack_server import QwpAckServer, TLS_CA
 
 import questdb._client as qi
 
+from test_client_row_egress import TestTimeoutArgument
+
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
+    from test_client_row_egress import (
+        TestRowEgressLive,
+        TestQueryTimeoutLive,
+        TestQueryTimeoutWithoutCapability,
+        TestUuidByteOrder)
     from system_test import (
         TestWithDatabase,
         TestEgressWithDatabase,
@@ -113,6 +120,7 @@ from test_client_capsule_path import (
     TestSchemaOverrides,
     TestPyArrowRecordBatchDirect,
     TestSchemaOverridesPandas,
+    TestPolarsWithoutPyarrow,
     TestBenchFlushArrowBatch,
     TestCapsulePathPolarsMissing,
     TestWriterMixingInOneChunk,
@@ -131,7 +139,8 @@ from test_client_polars_fuzz import (
     TestClientPolarsDataframeFuzz,
     TestClientPolarsDataframeRoundTrip,
 )
-from test_dataframe_leaks import TestCategoricalArrowLeak, TestPyobjColumnarLeak
+from test_dataframe_leaks import (
+    TestCategoricalArrowLeak, TestFixedSizeBinaryClaimLeak, TestPyobjColumnarLeak)
 
 if pd is not None and pyarrow is not None:
     from test_dataframe import TestPandasProtocolVersionV1
@@ -312,6 +321,10 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertIs(
             qi._debug_error_code_to_py(37),
             qi.QuestDBErrorCode.SymbolDictFull)
+        self.assertEqual(qi.QuestDBErrorCode.QueryTimeout.value, 38)
+        self.assertIs(
+            qi._debug_error_code_to_py(38),
+            qi.QuestDBErrorCode.QueryTimeout)
 
     def test_default_max_chunk_rows_matches_core_literal(self):
         # Pinned to the Rust core's DEFAULT_MAX_CHUNK_ROWS. Both sides hardcode
@@ -2119,7 +2132,19 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.Protocol.Http,
             '127.0.0.1',
             9000,
-            auth_timeout=datetime.timedelta(microseconds=500))
+            request_timeout=datetime.timedelta(microseconds=500))
+        sender.close(False)
+
+    def test_sub_microsecond_pandas_timedelta_is_not_truncated_to_zero(self):
+        try:
+            import pandas as pd
+        except ImportError:
+            self.skipTest('needs pandas')
+        sender = qi.Sender(
+            qi.Protocol.Http,
+            '127.0.0.1',
+            9000,
+            request_timeout=pd.Timedelta(500, 'ns'))
         sender.close(False)
 
     def test_from_conf_preserves_escaped_semicolon_in_c_only_qwpws_key(self):
@@ -3993,6 +4018,14 @@ class TestQueryResultFinalizer(unittest.TestCase):
         finally:
             sys.unraisablehook = original_hook
         self.assertEqual(unraisable, [])
+
+
+class TestQueryResultCopy(unittest.TestCase):
+    def test_copy_is_refused(self):
+        import copy
+        result = qi.QueryResult(qi._CursorHandle())
+        with self.assertRaisesRegex(TypeError, 'cannot be copied'):
+            copy.copy(result)
 
 
 class TestBufferConstruction(unittest.TestCase):

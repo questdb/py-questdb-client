@@ -67,11 +67,13 @@ def install_pandas2_and_numpy(pandas_version=None):
     else:
         try_pip_install('pandas>=2,<3')
     try_pip_install('numpy<2')
+    try_pip_install('pyarrow<26')
 
 
 def install_pandas3_and_numpy():
     try_pip_install('pandas>=3,<4')
     try_pip_install('numpy>=2,<3')
+    try_pip_install('pyarrow')
 
 
 def should_use_pandas3(py_version=None):
@@ -100,7 +102,6 @@ def main(args):
         install_default_pandas_and_numpy()
 
     try_pip_install('fastparquet>=2023.10.1')
-    try_pip_install('pyarrow')
     try_pip_install('polars')
     try_pip_install('psutil')
 
