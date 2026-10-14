@@ -174,6 +174,13 @@ Fixed
   a second result over the same cursor: reading from both lost rows, and
   dropping the copy closed the original's stream. It now raises
   ``TypeError``.
+- :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` did not count Arrow
+  ``string_view`` columns, plain or dictionary-encoded, as strings when
+  resolving ``symbols``. Naming one in ``symbols=[...]`` raised
+  ``Bad argument `symbols` ... is not a strings column``, ``symbols=True``
+  stored it as ``VARCHAR`` instead of ``SYMBOL``, and ``symbols=False`` left
+  a dictionary-encoded one as ``SYMBOL``. They now behave like ``string``
+  columns.
 
 5.0.1 (unreleased)
 ------------------

@@ -196,6 +196,42 @@ class TestCapsulePathPyArrow(unittest.TestCase):
                 self.assertIn(value[::-1], payload)
                 self.assertNotIn(value, payload)
 
+    @unittest.skipIf(
+        pa is None or not hasattr(pa, 'string_view'),
+        'needs pyarrow with string_view')
+    def test_string_view_columns_follow_symbols(self):
+        def ingest(col, symbols):
+            with QwpAckServer(record_payloads=True) as server:
+                client = qi.QuestDB.from_conf(_client_conf(server.port))
+                try:
+                    client.dataframe(
+                        pa.table({'k': col, 'v': [1.0, 2.0, 3.0]}),
+                        table_name='t',
+                        at=qi.ServerTimestamp,
+                        symbols=symbols)
+                finally:
+                    client.close()
+                server.wait_binary_frames_settled()
+                stats = server.snapshot()
+            self.assertEqual(stats['errors'], [])
+            return b''.join(stats['binary_payloads'])
+
+        codes = pa.array([0, 1, 0], pa.int32())
+        cols = {
+            'plain': (pa.array(['a', 'b', 'a'], pa.string()),
+                      pa.array(['a', 'b', 'a'], pa.string_view())),
+            'dictionary': (
+                pa.DictionaryArray.from_arrays(
+                    codes, pa.array(['a', 'b'], pa.string())),
+                pa.DictionaryArray.from_arrays(
+                    codes, pa.array(['a', 'b'], pa.string_view()))),
+        }
+        for shape, (utf8, view) in cols.items():
+            for symbols in (['k'], True, False):
+                with self.subTest(shape=shape, symbols=symbols):
+                    self.assertEqual(
+                        ingest(view, symbols), ingest(utf8, symbols))
+
 
 class TestCapsulePathPolars(unittest.TestCase):
 
@@ -1339,48 +1375,84 @@ class TestPandasPlannerRouting(unittest.TestCase):
         self.assertLess(peak, 512 * 1024)
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
-    def test_object_index_typing_scans_only_what_symbols_need(self):
+    def test_pandas_batches_are_converted_once(self):
         import numpy as np
         import pandas as pd
+        import pyarrow.pandas_compat as pandas_compat
         n = 10_000
-        parent = pd.DataFrame(
-            {'v': pd.array(np.arange(n), dtype=pd.ArrowDtype(pa.int64())),
-             'tag': pd.array(
-                 ['a', 'b'] * (n // 2), dtype=pd.ArrowDtype(pa.string()))},
-            index=pd.MultiIndex.from_arrays(
-                [pd.Index([f'k{i}' for i in range(n)], dtype=object),
-                 np.arange(n)],
-                names=['k', 'j']))
-        batch = parent.iloc[:64]
-        real_infer_dtype = pd.api.types.infer_dtype
-        scanned = []
+        v = pd.array(np.arange(n), dtype=pd.ArrowDtype(pa.int64()))
+        labels = pd.Index([f'k{i}' for i in range(n)], dtype=object)
+        parents = {
+            'categorical': pd.DataFrame(
+                {'v': v}, index=pd.CategoricalIndex(labels, name='k')),
+            'object multi': pd.DataFrame(
+                {'v': v}, index=pd.MultiIndex.from_arrays(
+                    [labels, np.arange(n)], names=['k', 'j'])),
+        }
+        counts = {'converted': 0, 'inferred': 0}
+        real_to_arrays = pandas_compat.dataframe_to_arrays
+        real_to_types = pandas_compat.dataframe_to_types
 
-        def recording(value, skipna=True):
-            if skipna:
-                scanned.append(len(value))
-            return real_infer_dtype(value, skipna=skipna)
+        def to_arrays(*args, **kwargs):
+            counts['converted'] += 1
+            return real_to_arrays(*args, **kwargs)
 
-        cases = [
-            ('auto', []), ([], []), (['tag'], []),
-            (['k'], [64]), (True, [64])]
-        pd.api.types.infer_dtype = recording
+        def to_types(*args, **kwargs):
+            counts['inferred'] += 1
+            return real_to_types(*args, **kwargs)
+
+        pandas_compat.dataframe_to_arrays = to_arrays
+        pandas_compat.dataframe_to_types = to_types
         try:
             with QwpAckServer() as server:
                 client = qi.QuestDB.from_conf(_client_conf(server.port))
                 try:
-                    for symbols, expected in cases:
-                        with self.subTest(symbols=symbols):
-                            scanned.clear()
-                            client.dataframe(
-                                batch, table_name='micro_batch',
-                                at=qi.ServerTimestamp, symbols=symbols)
-                            self.assertEqual(scanned, expected)
+                    for shape, parent in parents.items():
+                        for rows, batches in ((64, 1), (3000, 3)):
+                            for symbols in ('auto', False, [], ['k'], True):
+                                with self.subTest(
+                                        index=shape, rows=rows,
+                                        symbols=symbols):
+                                    counts.update(converted=0, inferred=0)
+                                    client.dataframe(
+                                        parent.iloc[:rows],
+                                        table_name='pandas_batches',
+                                        at=qi.ServerTimestamp,
+                                        symbols=symbols,
+                                        max_rows_per_batch=1024)
+                                    self.assertEqual(
+                                        counts,
+                                        {'converted': batches,
+                                         'inferred': 0})
                 finally:
                     client.close()
                 stats = server.snapshot()
         finally:
-            pd.api.types.infer_dtype = real_infer_dtype
+            pandas_compat.dataframe_to_arrays = real_to_arrays
+            pandas_compat.dataframe_to_types = real_to_types
         self.assertEqual(stats['errors'], [])
+
+    @unittest.skipIf(
+        pa is None or pd is None
+        or not hasattr(pd.DataFrame, '__arrow_c_stream__'),
+        'needs pyarrow and pandas >= 2.2')
+    def test_arrow_backed_pandas_needs_pyarrow_14(self):
+        from unittest import mock
+
+        class PreStreamTable:
+            pass
+
+        df = pd.DataFrame(
+            {'v': pd.array([1, 2], dtype=pd.ArrowDtype(pa.int64()))})
+        with QwpAckServer() as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with mock.patch.object(pa, 'Table', PreStreamTable):
+                    with self.assertRaisesRegex(ImportError, '14.0.0'):
+                        client.dataframe(
+                            df, table_name='t', at=qi.ServerTimestamp)
+            finally:
+                client.close()
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
     def test_mixed_arrow_numpy_symbol_override_uses_manual(self):

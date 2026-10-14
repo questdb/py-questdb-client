@@ -5126,75 +5126,29 @@ cdef bint _capsule_polars_dtype_is_string_like(object dtype) except -1:
     return False
 
 
+cdef bint _capsule_pyarrow_type_is_utf8(object pa_type) except -1:
+    cdef object is_string_view = getattr(
+        _PYARROW.types, 'is_string_view', None)
+    return (_PYARROW.types.is_string(pa_type)
+            or _PYARROW.types.is_large_string(pa_type)
+            or (is_string_view is not None and is_string_view(pa_type)))
+
+
 cdef bint _capsule_pyarrow_type_is_string_like(object field_type) except -1:
     """pyarrow: utf8 / large_utf8 / utf8_view, plus Dictionary whose
     value type is one of those."""
     if _PYARROW is None:
         return False
-    if (_PYARROW.types.is_string(field_type)
-            or _PYARROW.types.is_large_string(field_type)):
+    if _capsule_pyarrow_type_is_utf8(field_type):
         return True
-    if _PYARROW.types.is_dictionary(field_type):
-        value_type = field_type.value_type
-        if (_PYARROW.types.is_string(value_type)
-                or _PYARROW.types.is_large_string(value_type)):
-            return True
-    return False
-
-
-cdef object _pandas_export_schema(object df, object string_levels):
-    """``Schema.from_pandas(df)`` without converting the index: types come
-    from a zero-row slice. An object-dtype index level, which pyarrow can
-    only type from its values, stays ``null`` unless `string_levels` (True
-    for every level, or a set of level names) asks ``infer_dtype`` to
-    recognise it as a string level, scanning the smaller of the level's
-    labels and the frame's rows.
-    """
-    cdef object schema = _PYARROW.Schema.from_pandas(df.iloc[:0])
-    cdef object index = df.index
-    cdef bint multi = isinstance(index, _PANDAS.MultiIndex)
-    cdef Py_ssize_t level
-    cdef Py_ssize_t pos
-    cdef object name
-    cdef object field
-    cdef object values
-    if not string_levels:
-        return schema
-    for level, name in enumerate(schema.pandas_metadata['index_columns']):
-        if not isinstance(name, str):
-            continue
-        if string_levels is not True and name not in string_levels:
-            continue
-        pos = schema.get_field_index(name)
-        if pos < 0:
-            continue
-        field = schema.field(pos)
-        if not _PYARROW.types.is_null(field.type):
-            continue
-        values = index
-        if multi:
-            values = index.levels[level]
-            if len(values) > len(index):
-                values = index.get_level_values(level)
-        if _PANDAS.api.types.infer_dtype(values, skipna=True) == 'string':
-            schema = schema.set(pos, field.with_type(_PYARROW.string()))
-    return schema
+    return (_PYARROW.types.is_dictionary(field_type)
+            and _capsule_pyarrow_type_is_utf8(field_type.value_type))
 
 
 cdef object _capsule_schema(object sliceable, object symbols):
-    """Arrow schema of what pyarrow or pandas input exports through
-    ``__arrow_c_stream__`` (for pandas, index levels included), or None
-    when neither resolving `symbols` nor the pandas UUID / LONG256 claims
-    need one."""
-    if _is_pandas_dataframe_object(sliceable):
-        _dataframe_may_import_deps()
-        if _PYARROW is None:
-            _dataframe_require_pyarrow()
-        if isinstance(symbols, (list, tuple)):
-            return _pandas_export_schema(
-                sliceable,
-                {entry for entry in symbols if isinstance(entry, str)})
-        return _pandas_export_schema(sliceable, symbols is True)
+    """Arrow schema of a pyarrow Table / RecordBatch when resolving
+    `symbols` needs one, else None. Pandas input takes its schema from its
+    first exported batch instead."""
     if (symbols is None or symbols == 'auto'
             or _is_polars_dataframe_or_lazy(sliceable)):
         return None
@@ -5259,13 +5213,12 @@ cdef object _capsule_column_is_string_like(
 cdef object _capsule_get_dict_string_column_names(
         object sliceable, object schema):
     """Return names of dict-encoded string-like columns (polars
-    Categorical / Enum or pyarrow Dictionary(*, utf8/large_utf8)).
+    Categorical / Enum or pyarrow Dictionary(*, utf8/large_utf8/utf8_view)).
     Returns None if schema introspection is not available."""
     cdef object out
     cdef object name
     cdef object dtype
     cdef object field
-    cdef object value_type
     cdef object enum_t
     if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
         out = []
@@ -5280,11 +5233,9 @@ cdef object _capsule_get_dict_string_column_names(
         return None
     out = []
     for field in schema:
-        if _PYARROW.types.is_dictionary(field.type):
-            value_type = field.type.value_type
-            if (_PYARROW.types.is_string(value_type)
-                    or _PYARROW.types.is_large_string(value_type)):
-                out.append(field.name)
+        if (_PYARROW.types.is_dictionary(field.type)
+                and _capsule_pyarrow_type_is_utf8(field.type.value_type)):
+            out.append(field.name)
     return out
 
 
@@ -5591,6 +5542,8 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef size_t deferred_since_sync = 0
     cdef bint force_drop_conn = False
     cdef object row_slice = None
+    cdef object first_batch = None
+    cdef object schema
     cdef Py_ssize_t total_rows = 0
     cdef Py_ssize_t offset = 0
     cdef Py_ssize_t chunk_rows
@@ -5666,7 +5619,22 @@ cdef bint _dataframe_client_try_capsule_path(
     if total_rows == 0:
         return True
 
-    schema = _capsule_schema(sliceable, symbols)
+    if _is_pandas_dataframe_object(sliceable):
+        if _PYARROW is None:
+            _dataframe_require_pyarrow()
+        if not hasattr(_PYARROW.Table, '__arrow_c_stream__'):
+            raise ImportError(
+                '`pyarrow` >= 14.0.0 is required for Arrow-backed pandas '
+                f'DataFrames (version {_PYARROW.__version__} is installed). '
+                'Upgrade with `pip install -U pyarrow`.')
+        chunk_rows = max_rows_per_batch
+        if chunk_rows > total_rows:
+            chunk_rows = total_rows
+        first_batch = _PYARROW.Table.from_pandas(
+            _capsule_slice_rows(sliceable, 0, chunk_rows))
+        schema = first_batch.schema
+    else:
+        schema = _capsule_schema(sliceable, symbols)
     symbol_overrides = _resolve_symbols_to_overrides(
         sliceable, schema, symbols)
     if symbol_overrides is None:
@@ -5726,8 +5694,12 @@ cdef bint _dataframe_client_try_capsule_path(
                     chunk_rows = max_rows_per_batch
                     if chunk_rows > total_rows - offset:
                         chunk_rows = total_rows - offset
-                    row_slice = _capsule_slice_rows(
-                        sliceable, offset, chunk_rows)
+                    if first_batch is not None:
+                        row_slice = first_batch
+                        first_batch = None
+                    else:
+                        row_slice = _capsule_slice_rows(
+                            sliceable, offset, chunk_rows)
                     _capsule_consume_stream_with_hint(
                         conn, row_slice, c_table_name, c_ts_column_ptr,
                         at_scalar_set, at_scalar_nanos,
