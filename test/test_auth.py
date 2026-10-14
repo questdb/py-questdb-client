@@ -568,8 +568,8 @@ class NativeOidcTest(unittest.TestCase):
         # flag through to the raised OidcError, exactly as the non-OIDC
         # c_err_to_py path does; otherwise a retry / dead-letter handler keying
         # on QuestDBError.in_doubt could replay a possibly-delivered write. The
-        # native classification does not pair an OIDC view with in_doubt today,
-        # so this constructor plumbing is the reachable regression surface.
+        # Constructor plumbing is separate from the native-backed HTTP retry
+        # regression below, which exercises an OIDC error with in_doubt=True.
         self.assertFalse(OidcError('x').in_doubt)
         self.assertTrue(OidcError('x', in_doubt=True).in_doubt)
         # in_doubt is a QuestDBError-level property, so an ``except
@@ -2283,6 +2283,82 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                 sender.close(flush=False)
         self.assertEqual(len(server.requests('/write', 'POST')), 1)
 
+    def test_unfinished_prompt_logging_failure_preserves_primary_error(self):
+        for interrupted in (True, False):
+            with self.subTest(interrupted=interrupted):
+                primary = KeyboardInterrupt('original sign-in interrupt')
+
+                class BrokenRenderer(Renderer):
+                    def on_waiting(self, seconds_left):
+                        if interrupted:
+                            raise primary
+                        auth.close()
+
+                    def on_failure(self, message):
+                        raise ValueError('renderer diagnostic failed')
+
+                class BrokenHandler(logging.Handler):
+                    def emit(self, record):
+                        raise RuntimeError('logging diagnostic failed')
+
+                with OidcTestServer(
+                        device_token_response=(
+                            400, {'error': 'authorization_pending'}, None),
+                        device_expires_in=20) as server:
+                    auth = make_discovered_auth(server, renderer=BrokenRenderer())
+                    logger = logging.getLogger('questdb')
+                    try:
+                        with mock.patch.object(logger, 'handlers', [BrokenHandler()]), \
+                                mock.patch.object(logger, 'level', logging.ERROR):
+                            expected = KeyboardInterrupt if interrupted else OidcCancelledError
+                            with self.assertRaises(expected) as caught:
+                                auth.sign_in()
+                        if interrupted:
+                            self.assertIs(caught.exception, primary)
+                    finally:
+                        auth.close()
+
+    @unittest.skipUnless(hasattr(signal, 'SIGALRM'), 'requires SIGALRM')
+    def test_unfinished_prompt_reports_fresh_signal_interruptions(self):
+        for interrupt_in_logger in (False, True):
+            with self.subTest(interrupt_in_logger=interrupt_in_logger):
+                previous = signal.getsignal(signal.SIGALRM)
+
+                def deadline(signum, frame):
+                    # A one-shot handler must still be recognized after it
+                    # removes itself; the helper snapshots before user code.
+                    signal.signal(signal.SIGALRM, previous)
+                    raise TimeoutError('fresh diagnostic deadline')
+
+                class BrokenRenderer(Renderer):
+                    def on_waiting(self, seconds_left):
+                        raise KeyboardInterrupt('original sign-in interrupt')
+
+                    def on_failure(self, message):
+                        if not interrupt_in_logger:
+                            signal.raise_signal(signal.SIGALRM)
+                        raise ValueError('renderer diagnostic failed')
+
+                class InterruptingHandler(logging.Handler):
+                    def emit(self, record):
+                        signal.raise_signal(signal.SIGALRM)
+
+                with OidcTestServer(
+                        device_token_response=(
+                            400, {'error': 'authorization_pending'}, None),
+                        device_expires_in=20) as server:
+                    auth = make_discovered_auth(server, renderer=BrokenRenderer())
+                    logger = logging.getLogger('questdb')
+                    signal.signal(signal.SIGALRM, deadline)
+                    try:
+                        with mock.patch.object(logger, 'handlers', [InterruptingHandler()]), \
+                                mock.patch.object(logger, 'level', logging.ERROR):
+                            with self.assertRaisesRegex(TimeoutError, 'fresh diagnostic deadline'):
+                                auth.sign_in()
+                    finally:
+                        signal.signal(signal.SIGALRM, previous)
+                        auth.close()
+
     def test_system_exit_in_renderer_aborts_sign_in(self):
         # The dispatch parks `(KeyboardInterrupt, SystemExit)`, but only the
         # Ctrl-C half was covered: narrowing that tuple to KeyboardInterrupt
@@ -3245,6 +3321,36 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             [request['headers'].get('authorization') for request in writes],
             ['Bearer AT-initial', 'Bearer AT-initial'])
 
+    def test_http_oidc_provider_failure_preserves_native_delivery_uncertainty(self):
+        for statuses, in_doubt in (((401,), False), ((500, 401), True)):
+            with self.subTest(statuses=statuses), OidcTestServer(
+                    write_statuses=statuses,
+                    refresh_token_response=(
+                        503, {'error': 'temporarily_unavailable'},
+                        {'Retry-After': '1'})) as server:
+                auth = make_discovered_auth(server)
+                auth.sign_in()
+                sender = questdb.Sender(
+                    questdb.Protocol.Http, '127.0.0.1', server.port,
+                    oidc_auth=auth, auto_flush=False, retry_timeout=1000)
+                try:
+                    sender.establish()
+                    sender.row('events', columns={'value': 42}, at=questdb.ServerTimestamp)
+                    with self.assertRaises(OidcNetworkError) as caught:
+                        sender.flush()
+                    self.assertIs(caught.exception.code, questdb.QuestDBErrorCode.SocketError)
+                    self.assertEqual(caught.exception.in_doubt, in_doubt)
+                    # Provider retries can end in the native backoff error,
+                    # which has no HTTP status; the typed cause/code/flag must
+                    # survive that path together.
+                    self.assertEqual(len(server.requests('/write', 'POST')), len(statuses))
+                    self.assertTrue(any(
+                        request['form'].get('grant_type') == ['refresh_token']
+                        for request in server.requests('/token', 'POST')))
+                finally:
+                    sender.close(flush=False)
+                    auth.close()
+
     def test_qwp_sender_authenticates_establish_reconnect_and_flush(self):
         with OidcTestServer() as oidc_server:
             auth = make_discovered_auth(oidc_server)
@@ -3920,7 +4026,11 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             auth.sign_in()
             original_connect = mock.Mock()
             engine = types.SimpleNamespace(
-                dialect=types.SimpleNamespace(connect=original_connect))
+                url='postgresql-url',
+                dialect=types.SimpleNamespace(
+                    connect=original_connect,
+                    create_connect_args=mock.Mock(return_value=(
+                        [], {'user': '_sso', 'dbname': 'qdb'}))))
             sqlalchemy = types.ModuleType('sqlalchemy')
             sqlalchemy.create_engine = mock.Mock(return_value=engine)
 
@@ -3939,7 +4049,8 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                     server.url,
                     drivername='postgresql+psycopg')
             # Model the final call made after SQLAlchemy's do_connect hooks.
-            returned.dialect.connect(host='127.0.0.1', port=8812)
+            returned.dialect.connect(
+                host='127.0.0.1', port=8812, user='_sso', dbname='qdb')
             token_requests = server.requests('/token', 'POST')
 
         self.assertIs(returned, engine)
@@ -6247,7 +6358,11 @@ class AdapterTest(unittest.TestCase):
         # sees it. The final guard must reject it without fetching a token.
         original_connect = mock.Mock()
         engine = types.SimpleNamespace(
-            dialect=types.SimpleNamespace(connect=original_connect))
+            url='postgresql-url',
+            dialect=types.SimpleNamespace(
+                connect=original_connect,
+                create_connect_args=mock.Mock(return_value=(
+                    [], {'user': '_sso', 'dbname': 'qdb'}))))
         sqlalchemy = types.ModuleType('sqlalchemy')
         sqlalchemy.create_engine = mock.Mock(return_value=engine)
 
@@ -6292,7 +6407,7 @@ class AdapterTest(unittest.TestCase):
 
         # Only the final, validated dial attaches a token. It also supplies
         # hostaddr='' even when a listener removed it, masking PGHOSTADDR.
-        connect(host='questdb.example.com', port=8812)
+        connect(host='questdb.example.com', port=8812, user='_sso', dbname='qdb')
         params = original_connect.call_args.kwargs
         self.assertEqual(params['password'], 'SECRET-BEARER')
         self.assertEqual(params['hostaddr'], '')
@@ -6326,7 +6441,11 @@ class AdapterTest(unittest.TestCase):
             sqlalchemy.__version__ = version
             sqlalchemy.create_engine = mock.Mock(
                 return_value=types.SimpleNamespace(
-                    dialect=types.SimpleNamespace(connect=mock.Mock())))
+                    url='postgresql-url',
+                    dialect=types.SimpleNamespace(
+                        connect=mock.Mock(),
+                        create_connect_args=mock.Mock(return_value=(
+                            [], {'user': '_sso', 'dbname': 'qdb'})))))
             sqlalchemy_engine = types.ModuleType('sqlalchemy.engine')
             sqlalchemy_engine.URL = mock.Mock()
             modules = {
@@ -6369,7 +6488,11 @@ class AdapterTest(unittest.TestCase):
             connect = mock.Mock()
             connects.append(connect)
             return types.SimpleNamespace(
-                dialect=types.SimpleNamespace(connect=connect))
+                url=args[0],
+                dialect=types.SimpleNamespace(
+                    connect=connect,
+                    create_connect_args=mock.Mock(return_value=(
+                        [], {'user': '_sso', 'database': 'qdb'}))))
 
         sqlalchemy = types.ModuleType('sqlalchemy')
         sqlalchemy.create_engine = mock.Mock(side_effect=make_engine)
@@ -6397,7 +6520,8 @@ class AdapterTest(unittest.TestCase):
             _adapters.sqlalchemy_engine(auth, url, drivername='postgresql')
             returned = _adapters.sqlalchemy_engine(
                 auth, url, drivername='postgresql+pg8000', sslmode=None)
-        returned.dialect.connect(host='questdb.example.com', port=8812)
+        returned.dialect.connect(
+            host='questdb.example.com', port=8812, user='_sso', database='qdb')
         params = connects[-1].call_args.kwargs
         self.assertEqual(params['password'], 'SECRET-BEARER')
         self.assertNotIn('sslmode', params)
@@ -6410,17 +6534,17 @@ ACCESS_TOKEN_WITH_SUB = 'e30.eyJzdWIiOiJhbGljZUBleGFtcGxlLmNvbSJ9.'
 
 
 def _real_pg_driver_stack():
-    """``(sqlalchemy, psycopg)`` if both really import, else ``None``.
-
-    psycopg raises ImportError when it has no usable libpq, as does a missing
-    package, so an importable module is a usable driver.
-    """
+    """An importable SQLAlchemy and psycopg/psycopg2 stack, else ``None``."""
     try:
-        import psycopg
         import sqlalchemy
+        # Require a driver usable by this SQLAlchemy version as well as the
+        # direct adapter's preferred driver (which can differ when both exist).
+        _adapters._pg_module(
+            allow_psycopg3=_adapters._sqlalchemy_has_psycopg3_dialect())
+        driver = _adapters._pg_module()
     except ImportError:
         return None
-    return sqlalchemy, psycopg
+    return sqlalchemy, driver
 
 
 class _TokenSequence:
@@ -6437,9 +6561,9 @@ class _TokenSequence:
 
 @unittest.skipIf(
     _real_pg_driver_stack() is None,
-    'SQLAlchemy and psycopg (with libpq) are not both installed')
+    'SQLAlchemy and a usable psycopg/psycopg2 driver are not both installed')
 class AdapterRealDriverTest(unittest.TestCase):
-    """The PG-wire adapters against a real SQLAlchemy and psycopg.
+    """The PG-wire adapters against real SQLAlchemy and psycopg/psycopg2.
 
     `AdapterTest` drives the adapters through injected stand-in modules and
     calls the ``do_connect`` listener by hand, so neither SQLAlchemy's real
@@ -6453,7 +6577,7 @@ class AdapterRealDriverTest(unittest.TestCase):
     URL = 'http://127.0.0.1:9000'
 
     def _refused(self, connect):
-        import psycopg
+        psycopg = _real_pg_driver_stack()[1]
         import sqlalchemy.exc
         with self.assertRaises(
                 (psycopg.OperationalError,
@@ -6489,7 +6613,7 @@ class AdapterRealDriverTest(unittest.TestCase):
         # plaintext, so this used to send the bearer password to this other
         # listener after it declined TLS. Construct the engine before setting
         # the environment: pooled connections must be protected at connect time.
-        import psycopg
+        psycopg = _real_pg_driver_stack()[1]
         import sqlalchemy.exc
         from sqlalchemy import event
         url = 'http://127.0.0.2:9000'
@@ -6677,6 +6801,39 @@ class AdapterRealDriverTest(unittest.TestCase):
         self.assertEqual(auth.calls, 0)
         self.assertEqual(vetted.logins, [])
         self.assertEqual(other.logins, [])
+
+    def test_sqlalchemy_late_listener_cannot_change_login_or_database(self):
+        from sqlalchemy import event
+        for key, value in (
+                ('user', 'admin'), ('user', None), ('configured_database', 'other'),
+                ('configured_database', None), ('conflicting_database', 'other'),
+                ('USER', 'admin'), ('password', 'foreign-password')):
+            with self.subTest(key=key, value=value), \
+                    pg_capture_server.PgCaptureServer() as pg:
+                auth = _TokenSequence('SECRET-BEARER')
+                engine = sqlalchemy_engine(auth, self.URL, pg_port=pg.port)
+                _, baseline = engine.dialect.create_connect_args(engine.url)
+                database_key = 'dbname' if 'dbname' in baseline else 'database'
+                if key == 'configured_database':
+                    key = database_key
+                elif key == 'conflicting_database':
+                    key = 'database' if database_key == 'dbname' else 'dbname'
+
+                def change_login(dialect, conn_rec, cargs, cparams):
+                    self.assertNotIn('password', cparams)
+                    if value is None:
+                        cparams.pop(key, None)
+                    else:
+                        cparams[key] = value
+
+                event.listen(engine, 'do_connect', change_login)
+                try:
+                    with self.assertRaisesRegex(OidcConfigError, 'adapter-owned login'):
+                        engine.connect()
+                finally:
+                    engine.dispose()
+                self.assertEqual(auth.calls, 0)
+                self.assertEqual(pg.logins, [])
 
     def test_sqlalchemy_late_listener_can_set_nondestination_arguments(self):
         from sqlalchemy import event

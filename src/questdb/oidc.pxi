@@ -805,13 +805,9 @@ cdef object _oidc_err_to_py_unowned(questdb_error* err):
         return errors.OidcError('Unknown native OIDC error.')
     msg_buf = questdb_error_msg(err, &msg_len)
     message = _oidc_text(msg_buf, msg_len) or 'Unknown native OIDC error.'
-    # Carry the native in-doubt flag through the OIDC error path the same way
-    # the non-OIDC c_err_to_py path does (via c_err_to_fields). A token-provider
-    # failure is classified before any write today, so this is False in
-    # practice, but propagating it keeps an OidcError from silently under-
-    # reporting delivery uncertainty should the native classification ever raise
-    # an OIDC error after a partial write -- an except-QuestDBError retry or
-    # dead-letter handler keys on .in_doubt to avoid replaying a landed write.
+    # A provider failure following an HTTP retry-loop 401 can carry delivery
+    # uncertainty from an earlier write. Preserve it just as c_err_to_fields
+    # does: retry/dead-letter handlers must not replay a possibly landed write.
     in_doubt = questdb_error_in_doubt(err)
     # Carry the native classification too. The non-OIDC path does this via
     # c_err_to_fields; the OIDC path used to hardcode AuthError and drop it.
@@ -1198,11 +1194,21 @@ cdef _oidc_report_unfinished_prompt(object renderer, object exc):
         message = 'Sign-in cancelled.'
     else:
         message = str(exc) or 'OIDC sign-in failed.'
+    signal_codes = _oidc_signal_handler_codes()
     try:
         renderer.on_failure(message)
-    except Exception:
-        logging.getLogger('questdb').exception(
-            'OIDC renderer callback failed')
+    except Exception as renderer_exc:
+        if _oidc_raised_in_signal_handler(renderer_exc, signal_codes):
+            raise
+        try:
+            logging.getLogger('questdb').exception(
+                'OIDC renderer callback failed')
+        except Exception as log_exc:
+            # Ordinary diagnostics must not replace the saved sign-in error.
+            # A freshly delivered signal (even one raising Exception rather
+            # than BaseException) remains an interruption, not a logging bug.
+            if _oidc_raised_in_signal_handler(log_exc, signal_codes):
+                raise
 
 
 cdef void _oidc_event_dispatch(

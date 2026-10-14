@@ -455,8 +455,10 @@ normal hostname resolution while overriding the environment variable on every
 physical connection, including connections created after an engine is built.
 A ``do_connect`` listener registered at any point must also leave ``host`` and
 ``port`` in the driver's keyword arguments and supply no positional connection
-arguments; the adapter checks the destination after all listeners have run,
-just before attaching the token at the dialect's connect boundary. A listener
+arguments. It must preserve the adapter-owned login and database as well;
+changes, removals, and conflicting aliases are rejected before token acquisition.
+The adapter checks these arguments after all listeners have run, just before
+attaching the token at the dialect's connect boundary. A listener
 that returns its own DBAPI connection bypasses this boundary and will not
 receive a token from the adapter.
 

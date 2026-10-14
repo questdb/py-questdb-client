@@ -262,9 +262,9 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
         #
         # The two cases also pin the two sites that append the hint. A
         # rejection is asynchronous, so which one sees it is a pure race
-        # unless the scenario forces an ordering: `ack_delay_s` holds the
-        # rejection back until every frame has been handed to the socket, so
-        # it can only surface on the trailing sync, while the oversize single
+        # unless the scenario forces an ordering: the fixture withholds the
+        # rejection until it receives the non-deferred commit frame, so it
+        # can only surface on the trailing sync, while the oversize single
         # row fails locally on the batch send before any sync. Both orderings
         # must hint, and each keeps the `in_doubt` the native error carried:
         # true once frames are in flight (replaying could duplicate a landed
@@ -274,7 +274,7 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
             # delivered late enough to land on the sync.
             ('rejection',
              dict(error_status=0x03, error_message=b'batch too large',
-                  ack_delay_s=0.5),
+                  error_after_commit=True),
              _table(40), 1,
              'Hint: reduce `max_rows_per_batch` (current: 1) and retry.',
              True),
@@ -292,6 +292,8 @@ class TestClientDataframeDirectFailures(unittest.TestCase):
                             client.dataframe(
                                 table, table_name='t_hint', at='ts',
                                 max_rows_per_batch=max_rows)
+                if label == 'rejection':
+                    self.assertEqual(server.snapshot()['binary_frames'], 41)
                 exc = raised.exception
                 message = str(exc)
                 self.assertIn('\n' + hint, message)

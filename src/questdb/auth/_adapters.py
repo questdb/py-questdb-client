@@ -499,9 +499,10 @@ def sqlalchemy_engine(
         ``password``, ``dbname``, ``database``): the adapter always connects
         as ``_sso`` with the token as the password; pass ``database=``.
         SQLAlchemy ``do_connect`` listeners must leave
-        ``host`` and ``port`` in the driver keyword arguments and must not add
-        positional connection arguments: otherwise the adapter refuses to
-        fetch or attach the bearer token. A listener that returns its own
+        ``host`` and ``port`` in the driver keyword arguments, preserve the
+        adapter-owned login and database, and must not add positional connection
+        arguments: otherwise the adapter refuses to fetch or attach the bearer
+        token. A listener that returns its own
         DBAPI connection bypasses the dialect and therefore the adapter's
         token injection.
     :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
@@ -510,7 +511,7 @@ def sqlalchemy_engine(
         ``drivername`` is not a libpq driver while ``sslmode`` is set; if
         ``connect_args`` sets the login or database; or if ``connect_args``
         (or a foreign ``do_connect`` listener) sets a connection destination
-        other than the validated one.
+        other than the validated one; or a listener changes the login/database.
     :raises OidcError: if token acquisition fails while SQLAlchemy opens a
         connection.
     :raises ImportError: if SQLAlchemy or a PostgreSQL driver is unavailable.
@@ -558,11 +559,24 @@ def sqlalchemy_engine(
     # A listener that returns a DBAPI connection skips dialect.connect, but
     # has no access to the token through the connection arguments either.
     original_connect = engine.dialect.connect
+    # Use the dialect's own mapping (e.g. dbname for libpq, database for
+    # pg8000), before any application listeners can change the login.
+    _, url_params = engine.dialect.create_connect_args(engine.url)
+    owned_login = {
+        key: url_params[key] for key in ('user', 'dbname', 'database')
+        if key in url_params}
 
     def _connect_with_token(*cargs, **cparams):
         _require_expected_destination(
             cargs, cparams, resolved_host, pg_port,
             allow_empty_hostaddr=uses_libpq)
+        if (any(cparams.get(key) != value for key, value in owned_login.items())
+                or any(key.strip().lower() in {
+                           'user', 'password', 'dbname', 'database'}
+                       and key not in owned_login for key in cparams)):
+            raise OidcConfigError(
+                'refusing to send the OIDC token: the connection arguments '
+                'changed the adapter-owned login or database.')
         # An sslmode in connect_args (or set by a listener) takes precedence.
         if sslmode is not None:
             cparams.setdefault('sslmode', sslmode)
