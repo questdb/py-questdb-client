@@ -590,10 +590,17 @@ def _debug_oidc_wait_callback_before_gil(double timeout=5):
     if not 0 <= timeout <= 30:
         raise ValueError('timeout must be between 0 and 30 seconds')
     cdef bint paused
-    cdef long long timeout_us = <long long>(timeout * 1000000)
-    with nogil:
-        paused = qdb_oidc_callback_wait_paused_for_test(timeout_us)
-    return bool(paused)
+    cdef double deadline = time.monotonic() + timeout
+    cdef double remaining
+    while True:
+        with nogil:
+            paused = qdb_oidc_callback_try_paused_for_test()
+        if paused:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(remaining, 0.001))
 
 
 def _debug_oidc_resume_callback_before_gil():

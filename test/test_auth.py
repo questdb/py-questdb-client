@@ -1081,6 +1081,16 @@ class NativeOidcTest(unittest.TestCase):
             self.assertEqual(second_renderer.successes, [])
             self.assertEqual(second_renderer.failures, [])
 
+    def test_pre_gil_callback_probe_timeout(self):
+        for timeout in (0, 0.01):
+            with self.subTest(timeout=timeout):
+                self.assertFalse(
+                    _client._debug_oidc_wait_callback_before_gil(timeout))
+        for timeout in (-1, 31, float('nan')):
+            with self.subTest(timeout=timeout):
+                with self.assertRaises(ValueError):
+                    _client._debug_oidc_wait_callback_before_gil(timeout)
+
     def test_exit_hook_drains_event_admitted_before_gil_entry(self):
         self._check_pre_gil_callback_shutdown(diagnostic=False)
 

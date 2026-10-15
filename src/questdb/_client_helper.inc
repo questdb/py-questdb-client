@@ -160,12 +160,13 @@ static void qdb_oidc_callback_before_gil(qdb_oidc_callback_gate* gate)
     }
 }
 
-static int qdb_oidc_callback_wait_paused_for_test(long long timeout_us)
+static int qdb_oidc_callback_try_paused_for_test(void)
 {
     if (qdb_oidc_gate->test_ready == NULL)
         return 0;
-    return PyThread_acquire_lock_timed(
-        qdb_oidc_gate->test_ready, timeout_us, 0) == PY_LOCK_ACQUIRED;
+    // PyPy implements the public nonblocking operation, but not CPython's
+    // timed-lock API. The Python test hook owns the timeout and polling sleep.
+    return PyThread_acquire_lock(qdb_oidc_gate->test_ready, NOWAIT_LOCK);
 }
 
 static void qdb_oidc_callback_resume_for_test(void)

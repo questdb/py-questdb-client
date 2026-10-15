@@ -12,5 +12,5 @@ cdef extern from "_client_helper.inc":
     bint qdb_oidc_callback_reopen_for_test() noexcept
     bint qdb_oidc_callback_pause_next_for_test() noexcept
     void qdb_oidc_callback_before_gil(qdb_oidc_callback_gate*) noexcept nogil
-    bint qdb_oidc_callback_wait_paused_for_test(long long) noexcept nogil
+    bint qdb_oidc_callback_try_paused_for_test() noexcept nogil
     void qdb_oidc_callback_resume_for_test() noexcept
