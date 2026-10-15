@@ -3281,6 +3281,10 @@ cdef void_int _dataframe(
     cdef bint was_serializing_cell = False
     cdef bint was_auto_flush = False
     cdef bint plan_has_content
+    cdef bint defer_signals = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
+    global _OIDC_MAIN_DATAFRAME_DEPTH
+    if defer_signals:
+        _OIDC_MAIN_DATAFRAME_DEPTH += 1
 
     try:
         _dataframe_plan_build(
@@ -3384,6 +3388,8 @@ cdef void_int _dataframe(
             raise
     finally:
         _ensure_has_gil(&gs)  # Note: We need the GIL for cleanup.
+        if defer_signals:
+            _OIDC_MAIN_DATAFRAME_DEPTH -= 1
         plan_has_content = (plan.col_count != 0) and (plan.row_count != 0)
         if plan_has_content:
             line_sender_buffer_clear_marker(ls_buf)

@@ -31,19 +31,26 @@ def _server_info(node):
                    + struct.pack('<H', len(node)) + node)
 
 
-def _result(request_id):
-    batch = bytearray([0x11]) + struct.pack('<q', request_id)
-    batch += _varint(0) + _varint(0) + _varint(3)
-    batch += _varint(1) + _varint(1) + b'v' + bytes([0x05, 0])
-    for value in (1, 2, 3):
-        batch += struct.pack('<q', value)
+def _result(request_id, batches=((1, 2, 3),)):
+    frames = []
+    for sequence, values in enumerate(batches):
+        batch = bytearray([0x11]) + struct.pack('<q', request_id)
+        batch += _varint(sequence) + _varint(0) + _varint(len(values))
+        if sequence == 0:
+            batch += _varint(1) + _varint(1) + b'v' + bytes([0x05])
+        batch += bytes([0])  # no null bitmap
+        for value in values:
+            batch += struct.pack('<q', value)
+        frames.append(_framed(batch, 1))
     end = bytes([0x12]) + struct.pack('<q', request_id) + _varint(0) + _varint(0)
-    return _framed(batch, 1), _framed(end)
+    frames.append(_framed(end))
+    return frames
 
 
 class EgressFailoverServer:
-    def __init__(self, deliver_first_batch=False):
+    def __init__(self, deliver_first_batch=False, batches=((1, 2, 3),)):
         self.deliver_first_batch = deliver_first_batch
+        self.batches = batches
         self.first_batch_sent = threading.Event()
         self.release_first = threading.Event()
         self._stop = threading.Event()
@@ -115,12 +122,12 @@ class EgressFailoverServer:
                     break
             if index == 1:
                 if self.deliver_first_batch:
-                    _write_frame(conn, 0x2, _result(request_id)[0])
+                    _write_frame(conn, 0x2, _result(request_id, self.batches)[0])
                     self.first_batch_sent.set()
                 self.release_first.wait(30)
                 _fin_close(conn)
             else:
-                for frame in _result(request_id):
+                for frame in _result(request_id, self.batches):
                     _write_frame(conn, 0x2, frame)
                 while not self._stop.is_set():
                     frame = _read_frame(conn)

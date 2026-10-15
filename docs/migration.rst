@@ -116,11 +116,12 @@ needs none — it is additive, and an existing listener keeps working.
   the credentials before retrying. See :doc:`auth` for OIDC-specific handling.
 
 * **An abandoned** :class:`~questdb.QueryResult` **now reports its**
-  ``ResourceWarning``. The finalizer previously swallowed it; it is now routed
-  through :func:`sys.unraisablehook`, which is what makes the leak visible.
-  Under warnings-as-errors this becomes a failure — and because it fires
-  whenever garbage collection happens to run, pytest attributes it to whatever
-  test was executing at the time rather than to the one that abandoned the
+  ``ResourceWarning`` **when promoted to an exception**. The finalizer previously
+  swallowed that exception; after releasing the cursor it now lets it reach
+  :func:`sys.unraisablehook`. Otherwise the warning follows the normal warning
+  filters, as before. Under warnings-as-errors this becomes a failure — and
+  because it fires whenever garbage collection happens to run, pytest attributes
+  it to whatever test was executing rather than to the one that abandoned the
   result. Close results deterministically::
 
       with db.query('select * from trades') as result:

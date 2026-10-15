@@ -876,9 +876,12 @@ class NativeOidcTest(unittest.TestCase):
                 signer.start()
                 self.assertTrue(prompt_entered.wait(5))
                 hook.start()
-                hook.join(2)
-                if hook.is_alive():
-                    self.fail('exit hook waited for a parked renderer callback')
+                deadline = time.monotonic() + 5
+                while not _client._debug_oidc_callbacks_shutting_down():
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+                hook.join(0.1)
+                self.assertTrue(hook.is_alive(), 'active renderer was not drained')
                 with self.assertRaises(OidcError) as raised:
                     auth.sign_in()
                 self.assertEqual(
@@ -938,7 +941,7 @@ class NativeOidcTest(unittest.TestCase):
 
     @unittest.skipUnless(
         os.name == 'posix', 'durable file token store requires POSIX')
-    def test_exit_hook_does_not_wait_for_parked_persistence_diagnostic(self):
+    def test_exit_hook_drains_parked_persistence_diagnostic(self):
         self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
         diagnostic_entered = threading.Event()
         release_diagnostic = threading.Event()
@@ -989,23 +992,20 @@ class NativeOidcTest(unittest.TestCase):
                         diagnostic_entered.wait(10),
                         'persistence diagnostic did not reach logging')
 
-                    # Suppression must be published without draining arbitrary
-                    # logging.Handler code already inside the native callback
-                    # gate. The waiting diagnostic detach hangs here until
-                    # release_diagnostic is set.
+                    # Shutdown must keep Python alive until the admitted
+                    # handler returns, with the GIL available for it to do so.
                     hook.start()
-                    hook.join(2)
-                    if hook.is_alive():
-                        release_diagnostic.set()
-                        hook.join(5)
-                        signer.join(5)
-                        self.fail(
-                            'exit hook waited for a parked diagnostic callback')
+                    deadline = time.monotonic() + 5
+                    while not _client._debug_oidc_callbacks_shutting_down():
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                    hook.join(0.1)
+                    self.assertTrue(hook.is_alive(), 'diagnostic was not drained')
                     self.assertFalse(release_diagnostic.is_set())
-                    self.assertTrue(
-                        _client._debug_oidc_callbacks_shutting_down())
 
                     release_diagnostic.set()
+                    hook.join(5)
+                    self.assertFalse(hook.is_alive())
                     signer.join(10)
                     self.assertFalse(signer.is_alive())
                     self.assertEqual(sign_in_errors, [])
@@ -1043,32 +1043,31 @@ class NativeOidcTest(unittest.TestCase):
                     sign_in_errors.append(exc)
 
             signer = threading.Thread(target=sign_in_first, daemon=True)
-            signer.start()
-            self.assertTrue(prompt_entered.wait(5), 'first prompt did not start')
+            hook = None
+            try:
+                signer.start()
+                self.assertTrue(prompt_entered.wait(5), 'first prompt did not start')
 
-            # The hook must publish event suppression and return while arbitrary
-            # renderer code remains parked. Running it in a helper lets a
-            # regression cleanly release the callback instead of hanging the
-            # whole test process forever.
-            hook = threading.Thread(
-                target=_client._oidc_detach_diagnostics_at_exit, daemon=True)
-            hook.start()
-            hook.join(2)
-            if hook.is_alive():
+                # Drain without the registry lock, allowing a constructor that
+                # completes after the snapshot to publish and self-detach.
+                hook = threading.Thread(
+                    target=_client._oidc_detach_diagnostics_at_exit, daemon=True)
+                hook.start()
+                deadline = time.monotonic() + 5
+                while not _client._debug_oidc_callbacks_shutting_down():
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+                hook.join(0.1)
+                self.assertTrue(hook.is_alive(), 'active renderer was not drained')
+                self.assertFalse(release_prompt.is_set())
+                late = make_discovered_auth(
+                    second_server, renderer=second_renderer)
+            finally:
                 release_prompt.set()
-                hook.join(5)
-                signer.join(5)
-                self.fail('exit hook waited for a parked renderer callback')
-            self.assertFalse(release_prompt.is_set())
-            self.assertTrue(_client._debug_oidc_callbacks_shutting_down())
-
-            # A provider completed after the hook's snapshot observes the
-            # shutdown marker and self-detaches before it is exposed.
-            late = make_discovered_auth(
-                second_server, renderer=second_renderer)
-
-            release_prompt.set()
-            signer.join(10)
+                if hook is not None:
+                    hook.join(5)
+                signer.join(10)
+            self.assertFalse(hook.is_alive())
             self.assertFalse(signer.is_alive())
             self.assertEqual(sign_in_errors, [])
 
@@ -1081,6 +1080,77 @@ class NativeOidcTest(unittest.TestCase):
             self.assertEqual(second_renderer.waiting, [])
             self.assertEqual(second_renderer.successes, [])
             self.assertEqual(second_renderer.failures, [])
+
+    def test_exit_hook_drains_event_admitted_before_gil_entry(self):
+        self._check_pre_gil_callback_shutdown(diagnostic=False)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX token store required')
+    def test_exit_hook_drains_diagnostic_admitted_before_gil_entry(self):
+        self._check_pre_gil_callback_shutdown(diagnostic=True)
+
+    def test_exit_hook_drains_callback_removed_from_registry(self):
+        self._check_pre_gil_callback_shutdown(
+            diagnostic=False, remove_from_registry=True)
+
+    def _check_pre_gil_callback_shutdown(self, diagnostic, remove_from_registry=False):
+        self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
+        renderer = RecordingRenderer()
+        errors = []
+        hook = None
+        with tempfile.TemporaryDirectory() as directory, OidcTestServer() as server:
+            store_dir = os.path.join(directory, 'store')
+            os.mkdir(store_dir)
+            auth = make_discovered_auth(
+                server, renderer=renderer,
+                token_store=FileTokenStore.at(store_dir) if diagnostic else None)
+            if diagnostic:
+                shutil.rmtree(store_dir)
+                with open(store_dir, 'w') as sink:
+                    sink.write('not a directory')
+
+            def invoke():
+                try:
+                    auth.token() if diagnostic else auth.sign_in()
+                except BaseException as exc:
+                    errors.append(exc)
+
+            _client._debug_oidc_pause_callback_before_gil()
+            caller = threading.Thread(target=invoke, daemon=True)
+            try:
+                caller.start()
+                self.assertTrue(_client._debug_oidc_wait_callback_before_gil())
+                if remove_from_registry:
+                    # Snapshot-based draining cannot see this active callback.
+                    _client._oidc_provider_collected(
+                        _client._debug_oidc_last_provider_id(), None)
+                # This barrier is entirely native: the callback is admitted
+                # but has not entered Python or acquired the GIL.
+                hook = threading.Thread(
+                    target=_client._oidc_detach_diagnostics_at_exit, daemon=True)
+                hook.start()
+                deadline = time.monotonic() + 5
+                while not _client._debug_oidc_callbacks_shutting_down():
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+                hook.join(0.1)
+                self.assertTrue(hook.is_alive(), 'pre-GIL entrant escaped drain')
+                _client._debug_oidc_resume_callback_before_gil()
+                hook.join(5)
+                caller.join(10)
+                self.assertFalse(hook.is_alive())
+                self.assertFalse(caller.is_alive())
+                self.assertEqual(renderer.prompts, [])
+                if diagnostic:
+                    self.assertEqual(len(errors), 1)
+                    self.assertIsInstance(errors[0], OidcError)
+                else:
+                    self.assertEqual(errors, [])
+            finally:
+                _client._debug_oidc_resume_callback_before_gil()
+                if hook is not None:
+                    hook.join(5)
+                caller.join(10)
+                auth.close()
 
     @unittest.skipUnless(
         os.name == 'posix', 'durable file token store requires POSIX')
@@ -1875,12 +1945,12 @@ class ProviderCycleSafetyTest(unittest.TestCase):
         self.assertIn('ready', out)
 
     def test_real_shutdown_with_renderer_callback_in_flight(self):
-        # A daemon sign-in is parked inside managed renderer code when the main
-        # thread exits. The atexit hook must publish non-waiting detach and let
-        # Py_Finalize complete rather than draining a callback that cannot
-        # return until after shutdown.
+        # A daemon renderer remains active at atexit. A second daemon releases
+        # it only after shutdown starts; the hook must keep Python alive until
+        # the renderer has safely returned through the native callback ABI.
         out = self._run(
-            'import http.server, json, threading\n'
+            'import http.server, json, threading, time\n'
+            'from questdb import _client\n'
             'entered = threading.Event()\n'
             'block = threading.Event()\n'
             'class H(http.server.BaseHTTPRequestHandler):\n'
@@ -1897,7 +1967,9 @@ class ProviderCycleSafetyTest(unittest.TestCase):
             'server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)\n'
             'threading.Thread(target=server.serve_forever, daemon=True).start()\n'
             'class R:\n'
-            '    def on_prompt(self, details): entered.set(); block.wait()\n'
+            '    def on_prompt(self, details):\n'
+            '        entered.set(); block.wait()\n'
+            '        print("callback-finished", flush=True)\n'
             '    def on_waiting(self, seconds): pass\n'
             '    def on_success(self, identity, expires): pass\n'
             '    def on_failure(self, message): pass\n'
@@ -1912,9 +1984,15 @@ class ProviderCycleSafetyTest(unittest.TestCase):
             '    except BaseException: pass\n'
             'threading.Thread(target=run, daemon=True).start()\n'
             'assert entered.wait(20), "renderer callback did not start"\n'
+            'def release_at_shutdown():\n'
+            '    while not _client._debug_oidc_callbacks_shutting_down():\n'
+            '        time.sleep(0.001)\n'
+            '    block.set()\n'
+            'threading.Thread(target=release_at_shutdown, daemon=True).start()\n'
             'print("parked")\n',
             expect_empty_stderr=True)
         self.assertIn('parked', out)
+        self.assertIn('callback-finished', out)
 
     @unittest.skipIf(
         platform.python_implementation() == 'PyPy',
@@ -7483,7 +7561,9 @@ class _IsolatedReentry:
 class OidcDiagnosticReentryTest(_IsolatedReentry, unittest.TestCase):
     """Isolate native callback regressions: a broken guard can crash or hang."""
 
-    def _exercise_cursor_reentry(self, leased, consumer='arrow'):
+    def _exercise_cursor_reentry(
+            self, leased, consumer='arrow', reenter_iterator=False):
+        iterator = None
         credential = [None]
         sabotaged = threading.Event()
         observed = []
@@ -7502,6 +7582,8 @@ class OidcDiagnosticReentryTest(_IsolatedReentry, unittest.TestCase):
                 if 'token store save failed' not in record.getMessage():
                     return
                 actions = []
+                if reenter_iterator:
+                    actions.append(('iterator.next', lambda: next(iterator)))
                 if result is not None:
                     actions.extend([('result.close', result.close),
                                     ('result.cancel', result.cancel)])
@@ -7525,7 +7607,9 @@ class OidcDiagnosticReentryTest(_IsolatedReentry, unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
                 OidcTestServer(initial_expires_in=6,
                                refresh_request_hook=fail_save) as idp, \
-                EgressFailoverServer() as qdb:
+                EgressFailoverServer(batches=(
+                    ((1, 2, 3), (4, 5, 6)) if reenter_iterator
+                    else ((1, 2, 3),))) as qdb:
             auth = make_discovered_auth(
                 idp, token_store=FileTokenStore.at(directory))
             auth.sign_in()
@@ -7559,6 +7643,8 @@ class OidcDiagnosticReentryTest(_IsolatedReentry, unittest.TestCase):
                         result = lease.query('select v from t')
                     else:
                         result = db.query('select v from t')
+                    if consumer == 'iter_pandas':
+                        iterator = result.iter_pandas()
                     logger.addHandler(handler)
                     # Force a token refresh while replaying after the first
                     # connection drops; the save failure emits synchronously
@@ -7568,7 +7654,7 @@ class OidcDiagnosticReentryTest(_IsolatedReentry, unittest.TestCase):
                 if consumer == 'pandas':
                     values = result.to_pandas()['v'].tolist()
                 elif consumer == 'iter_pandas':
-                    values = [value for frame in result.iter_pandas()
+                    values = [value for frame in iterator
                               for value in frame['v'].tolist()]
                 elif consumer == 'stream':
                     import pyarrow as pa
@@ -7580,10 +7666,13 @@ class OidcDiagnosticReentryTest(_IsolatedReentry, unittest.TestCase):
                 elif consumer != 'execute':
                     values = result.to_arrow().column(0).to_pylist()
                 if consumer != 'execute':
-                    self.assertEqual(values, [1, 2, 3])
+                    self.assertEqual(values, (
+                        [1, 2, 3, 4, 5, 6] if reenter_iterator else [1, 2, 3]))
                 self.assertTrue(sabotaged.is_set())
                 expected = ([] if consumer == 'execute' else
                             ['result.close', 'result.cancel'])
+                if reenter_iterator:
+                    expected.insert(0, 'iterator.next')
                 if leased:
                     expected.extend(['lease.close', 'db.close'])
                 self.assertEqual(observed, [
@@ -7646,6 +7735,14 @@ class OidcDiagnosticReentryTest(_IsolatedReentry, unittest.TestCase):
         self._run_isolated('numpy_iterator_close_during_cursor_pull',
                            lambda: self._exercise_cursor_reentry(
                                False, consumer='iter_pandas'), 30)
+
+    def test_numpy_iterator_reentry_preserves_following_batches(self):
+        if pd is None:
+            self.skipTest('pandas required for the numpy cursor')
+        self._run_isolated('numpy_iterator_reentry_preserves_following_batches',
+                           lambda: self._exercise_cursor_reentry(
+                               False, consumer='iter_pandas',
+                               reenter_iterator=True), 30)
 
     def test_arrow_c_stream_close_during_cursor_pull(self):
         try:
@@ -8464,7 +8561,7 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
     def _flush_with_signal(
             self, signum, handler, busy_worker=False,
             inside_logging=False, handler_failure=False,
-            pending_call_failures=0, use_dataframe=False):
+            pending_call_failures=0, use_dataframe=False, bad_second_row=False):
         self._surfaced_after_flush = False
         self._handler_called = threading.Event()
         outer = self
@@ -8555,14 +8652,22 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
                     f'http::addr=127.0.0.1:{server.port};',
                     oidc_auth=auth, **sender_kwargs)
                 sender.establish()
+                if bad_second_row:
+                    # Refresh must happen in row one's auto-flush, before row
+                    # two fails validation in the same dataframe call.
+                    time.sleep(4.4)
                 try:
                     deadline = time.monotonic() + 20
                     while not sabotaged.is_set():
                         self.assertLess(time.monotonic(), deadline)
                         if use_dataframe:
+                            frame = (pd.DataFrame({
+                                'v': [1, 2],
+                                'ts': pd.to_datetime([1, -1], unit='ns'),
+                            }) if bad_second_row else pd.DataFrame({'v': [1]}))
                             sender.dataframe(
-                                pd.DataFrame({'v': [1]}), table_name='t',
-                                at=questdb.ServerTimestamp)
+                                frame, table_name='t',
+                                at='ts' if bad_second_row else questdb.ServerTimestamp)
                         else:
                             sender.row(
                                 't', columns={'v': 1},
@@ -8619,6 +8724,29 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_failed_pending_call_enqueue_during_dataframe_auto_flush(self):
         self._check_failed_pending_call_delivery(use_dataframe=True)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_failed_enqueue_signal_is_not_wrapped_by_later_dataframe_error(self):
+        exception = TimeoutError('deadline during diagnostic')
+        calls = []
+
+        def handler(signum, frame):
+            calls.append(signum)
+            raise exception
+
+        try:
+            with self.assertRaises(TimeoutError) as caught:
+                self._flush_with_signal(
+                    signal.SIGALRM, handler, inside_logging=True,
+                    pending_call_failures=1, use_dataframe=True,
+                    bad_second_row=True)
+            self.assertIs(caught.exception, exception)
+            self.assertEqual(calls, [signal.SIGALRM])
+            self.assertTrue(self._surfaced_after_flush)
+            self.assertEqual(
+                _client._debug_oidc_pending_call_failures_remaining(), 0)
+        finally:
+            _client._debug_oidc_fail_pending_calls(0)
 
     def test_enqueue_failure_preserves_all_saved_exceptions(self):
         class FrozenDeadline(TimeoutError):

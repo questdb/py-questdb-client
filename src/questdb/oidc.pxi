@@ -26,6 +26,9 @@
 # the single owner of token acquisition, refresh, caching, and persistence;
 # Python retains presentation and adapter conveniences only.
 
+if not qdb_oidc_callback_gate_init():
+    raise MemoryError('Could not initialize the OIDC callback shutdown gate')
+
 
 cdef extern from *:
     """
@@ -228,6 +231,9 @@ cdef uint64_t _OIDC_ERROR_FREES = 0
 # logging handler hold back the main thread's interrupt for as long as that
 # handler ran, while the main thread kept executing user code.
 cdef int _OIDC_MAIN_DIAGNOSTIC_DEPTH = 0
+# Row serialization wraps ordinary exceptions as dataframe errors. Deliver saved
+# signals only after leaving that region, at Sender.dataframe's outer boundary.
+cdef int _OIDC_MAIN_DATAFRAME_DEPTH = 0
 # `threading.main_thread()` is the interpreter's main thread whichever thread
 # imports this module. `_oidc_after_fork_in_child` re-reads it in a child forked
 # from another thread, where the forking thread becomes the main thread: a stale
@@ -248,9 +254,12 @@ def _oidc_after_fork_in_child():
     """
     global _OIDC_MAIN_THREAD_IDENT, _OIDC_MAIN_PARKED
     global _OIDC_MAIN_PARK_SCHEDULED, _OIDC_MAIN_DIAGNOSTIC_DEPTH
+    global _OIDC_MAIN_DATAFRAME_DEPTH
     global _OIDC_REGISTRY_LOCK, _OIDC_DIAGNOSTICS_ACTIVE
     global _OIDC_DIAGNOSTICS_DRAINED
     cdef unsigned long current = questdb_thread_ident()
+    if not qdb_oidc_callback_gate_init():
+        raise MemoryError('Could not reset the OIDC callback gate after fork')
     # The registry lock may have been held by a parent thread that disappeared.
     # Keep its entries, but never try to acquire the inherited lock in a child.
     _OIDC_REGISTRY_LOCK = threading.RLock()
@@ -264,6 +273,7 @@ def _oidc_after_fork_in_child():
     _OIDC_MAIN_PARKED = []
     _OIDC_MAIN_PARK_SCHEDULED = False
     _OIDC_MAIN_DIAGNOSTIC_DEPTH = 0
+    _OIDC_MAIN_DATAFRAME_DEPTH = 0
 
 
 # `_client.pyx` includes this file before its own `import os`.
@@ -283,7 +293,7 @@ cdef int _oidc_raise_parked_main(void* unused) noexcept:
     thread, and schedule the next one, if any, for the following boundary."""
     global _OIDC_MAIN_PARK_SCHEDULED
     _OIDC_MAIN_PARK_SCHEDULED = False
-    if _OIDC_MAIN_DIAGNOSTIC_DEPTH > 0:
+    if _OIDC_MAIN_DIAGNOSTIC_DEPTH > 0 or _OIDC_MAIN_DATAFRAME_DEPTH > 0:
         return 0
     if not _OIDC_MAIN_PARKED:
         return 0
@@ -331,6 +341,7 @@ cdef object _oidc_take_unscheduled_main():
     """
     cdef object exc
     if (_OIDC_MAIN_PARK_SCHEDULED or _OIDC_MAIN_DIAGNOSTIC_DEPTH != 0
+            or _OIDC_MAIN_DATAFRAME_DEPTH != 0
             or questdb_thread_ident() != _OIDC_MAIN_THREAD_IDENT
             or not _OIDC_MAIN_PARKED):
         return None
@@ -563,8 +574,30 @@ def _debug_oidc_callbacks_shutting_down():
 def _debug_oidc_reset_callback_shutdown():
     """Internal test hook: undo a manually invoked atexit phase."""
     global _oidc_callbacks_shutting_down
+    if not qdb_oidc_callback_reopen_for_test():
+        raise RuntimeError('OIDC callbacks are still active')
     with _OIDC_REGISTRY_LOCK:
         _oidc_callbacks_shutting_down = False
+
+
+def _debug_oidc_pause_callback_before_gil():
+    """Park the next admitted callback at a native-only pre-GIL barrier."""
+    if not qdb_oidc_callback_pause_next_for_test():
+        raise MemoryError('Could not allocate the callback test barrier')
+
+
+def _debug_oidc_wait_callback_before_gil(double timeout=5):
+    if not 0 <= timeout <= 30:
+        raise ValueError('timeout must be between 0 and 30 seconds')
+    cdef bint paused
+    cdef long long timeout_us = <long long>(timeout * 1000000)
+    with nogil:
+        paused = qdb_oidc_callback_wait_paused_for_test(timeout_us)
+    return bool(paused)
+
+
+def _debug_oidc_resume_callback_before_gil():
+    qdb_oidc_callback_resume_for_test()
 
 
 def _debug_oidc_reset_errors_module():
@@ -606,10 +639,10 @@ cdef void _oidc_detach_handle_callbacks(
         _OidcNativeHandle handle, bint wait_for_events) noexcept:
     """Stop one native auth handle delivering managed-runtime callbacks.
 
-    Both native detaches are idempotent and NULL-tolerant. At interpreter exit
-    suppression must be published without waiting for arbitrary renderer or
-    logging-handler code; construction-time self-detach may use the draining
-    forms because the provider has not yet been exposed.
+    Both native detaches are idempotent and NULL-tolerant. The process-wide
+    callback gate handles interpreter-exit admission and draining, including
+    callbacks from providers no longer present in the registry. Native nowait
+    detach remains necessary for finalizers that may own a logging lock.
     """
     cdef PyThreadState* gs = NULL
     if handle is None or handle.raw == NULL or handle.pid != os.getpid():
@@ -625,72 +658,35 @@ cdef void _oidc_detach_handle_callbacks(
 
 
 def _oidc_detach_diagnostics_at_exit():
-    """Silence every still-registered provider before finalization begins.
+    """Suppress new Python callbacks and drain admitted ones before finalization.
 
-    Both native trampolines can run on non-main threads: diagnostics from an
-    attached transport worker, and renderer events when the application put
-    ``sign_in()`` on a daemon thread. In either case their
-    ``qdb_py_is_finalizing()`` guard is a TOCTOU: finalization can begin between
-    the test and the ``PyGILState_Ensure`` the ``with gil`` dispatch emits. No
-    check placed in a trampoline can close that window.
+    Native nowait detach alone cannot drain a callback already admitted but
+    paused before GIL acquisition. The C-level gate counts that entire interval
+    and every callback body, even for a provider removed from the registry.
+    Close admission first, detach without holding Python locks, then wait with
+    the GIL released while the interpreter is still alive. Callback code must
+    return: abandoning its Python frames can force an unwind through Rust on
+    CPython <=3.13/glibc. A daemon sign-in does not exempt its active renderer.
 
-    ``atexit`` runs while the interpreter is still fully alive, so detaching
-    both managed-runtime callback targets here closes the window rather than
-    merely re-testing it.
-
-    A provider already dropped from the registry cannot be reached from here at
-    all -- its weakref callback has removed both entries -- and is covered
-    instead by ``_OidcNativeHandle.__dealloc__``, which detaches that provider's
-    diagnostics before releasing the handle. Renderer events require a live
-    ``sign_in`` frame, which itself retains the provider, so a collected
-    provider needs no separate event detach. Between the two paths, no
-    still-deliverable managed-runtime callback target survives finalization.
-
-    Both detaches publish exact suppression but deliberately do not wait for
-    callback code already running. Renderer callbacks are arbitrary user code,
-    and a diagnostic callback can itself be parked in an arbitrary user
-    ``logging.Handler``; either may be abandoned as the process exits.
-
-    Detaches rather than closes. Every handle reachable here belongs to a
-    provider the user still holds, which is exactly the set attached to live
-    transports, and ``close()`` is terminal for all of them: a closed provider
-    fails every later token pull with a non-retryable error, so a reconnect
-    during the interpreter's remaining shutdown work terminalizes a QWP
-    publication store and discards frames it had already accepted. That work is
-    real and runs after this hook -- ``atexit`` precedes module clearing, so
-    ``QuestDB.__dealloc__`` -> ``questdb_db_close`` -> the bounded
-    ``close_flush_timeout`` drain happens later. Detaching gives the hook's
-    stated guarantee (no new managed-runtime callback can start) without taking
-    anything else away. It never waits on a renderer or on the acquisition lock
-    behind an in-flight IdP request, so user code and the provider's 30s/120s
-    HTTP timeout are not added to exit latency.
-
-    Marks callback shutdown and snapshots under the registry lock, then
-    detaches outside it: the detach is a native call made with the GIL released,
-    and holding the lock across it would invert against concurrent provider
-    registration. A constructor that finishes after the snapshot checks the
-    marker under the same lock and detaches its own completed native handle
-    before returning, so it cannot escape through that GIL-release window.
-    Iterating the handle dict resurrects nothing -- it holds the handles, while
-    `_OIDC_PROVIDERS` holds only weakrefs to the providers themselves.
+    Providers stay open so transports can finish their bounded close-flush drain
+    during subsequent module teardown. We do not wait for an IdP request that
+    has not entered a Python callback; its later callback is refused by the gate.
     """
     global _oidc_callbacks_shutting_down
+    if _oidc_callback_on_this_thread():
+        raise RuntimeError('Cannot drain OIDC callbacks from inside a callback')
+    qdb_oidc_callback_stop()
     try:
         with _OIDC_REGISTRY_LOCK:
-            # Publish before the snapshot. A constructor can run while native
-            # detach below has released the GIL; after its build it checks this
-            # flag under the same lock and detaches itself if it missed the
-            # snapshot. Holding the registry lock across a native drain would
-            # instead create a lock inversion with provider registration.
             _oidc_callbacks_shutting_down = True
             handles = list(_OIDC_NATIVE_HANDLES.values())
         for handle in handles:
             _oidc_detach_handle_callbacks(handle, False)
-    except BaseException:
-        # An atexit hook that raises prints a traceback and buys nothing: the
-        # process is going away regardless, and every provider this failed to
-        # reach is left exactly where it would have been without the hook.
-        pass
+    finally:
+        # No registry or user logging lock is held here. Drain even if snapshot
+        # allocation/detach was interrupted: admission is already closed.
+        with nogil:
+            qdb_oidc_callback_drain()
 
 
 atexit.register(_oidc_detach_diagnostics_at_exit)
@@ -1605,63 +1601,35 @@ cdef void _oidc_notify_diagnostics_drained() noexcept:
 cdef void _oidc_diagnostic_trampoline(
         void* user_data,
         const questdb_oidc_diagnostic* diagnostic) noexcept nogil:
-    # This dedicated callback, unlike renderer events, may originate on an
-    # attached transport's provider thread. It invokes no user renderer and
-    # drops diagnostics once interpreter finalization has begun.
-    #
-    # Being background-dispatched, it cannot borrow the foreground-only
-    # argument that makes `_oidc_event_trampoline` safe. It is instead the
-    # same shape `_connection_event_trampoline` and `_sender_error_trampoline`
-    # in `_client.pyx` already use for genuinely background dispatch, and it
-    # inherits their residual window: finalization can begin between this
-    # check and the GIL acquisition below, and no check placed here can close
-    # that.
-    #
-    # What closes it is stopping a diagnostic from arriving during
-    # finalization at all, which two places between them do through the
-    # non-waiting native diagnostic detach: `_oidc_detach_diagnostics_at_exit`,
-    # registered with `atexit` over the provider registry, runs while the
-    # interpreter is still whole and detaches every provider still registered;
-    # and `_OidcNativeHandle.__dealloc__` detaches a provider that was already
-    # collected, which the registry can no longer reach but whose abandoned
-    # Rust worker may still be running. The native call publishes exact
-    # suppression without waiting for arbitrary user logging-handler code, so
-    # neither kind of provider leaves a newly deliverable target behind. The
-    # check below remains for an embedder that tears the interpreter down
-    # without running `atexit`.
-    #
-    # `user_data` is only the provider's monotonic integer id, never a Python
-    # pointer. The dispatcher uses it to guard the attached pool's close path
-    # while a warning handler is running, including on a delegated thread.
-    if qdb_py_is_finalizing():
+    cdef qdb_oidc_callback_gate* gate = qdb_oidc_callback_enter()
+    if gate == NULL:
         return
-    _oidc_diagnostic_dispatch(user_data, diagnostic)
+    try:
+        if qdb_py_is_finalizing():
+            return
+        qdb_oidc_callback_before_gil(gate)
+        if not qdb_oidc_callback_stopped(gate):
+            _oidc_diagnostic_dispatch(user_data, diagnostic)
+    finally:
+        qdb_oidc_callback_leave(gate)
 
 
 cdef void _oidc_event_trampoline(
         void* user_data,
         const questdb_oidc_event* event) noexcept nogil:
-    """Enter Python to run the renderer, from whichever thread native uses.
-
-    Unlike the release callback -- which owns nothing and never enters Python
-    (see ``_oidc_user_data_release_trampoline``) -- this one must, because
-    running the renderer *is* its job. That is safe for a reason worth stating,
-    since it is not local to this function:
-
-    Renderer events are emitted only by the device flow, which is reached only
-    through ``sign_in()``; background refresh is silent. The provider is
-    strongly referenced by that frame, but Python does not require callers to
-    keep the sign-in on the main thread: a daemon sign-in can still be alive
-    when interpreter shutdown starts.
-
-    The ``qdb_py_is_finalizing`` check is a final fallback for embedders, not
-    the synchronization: finalization can begin between it and the GIL
-    acquisition. The registered atexit hook closes that window by detaching
-    every live provider's event target while Python is still fully callable.
-    """
-    if qdb_py_is_finalizing():
+    # Admission precedes GIL acquisition; atexit drains this entire frame,
+    # including a daemon sign-in's renderer, before finalization may begin.
+    cdef qdb_oidc_callback_gate* gate = qdb_oidc_callback_enter()
+    if gate == NULL:
         return
-    _oidc_event_dispatch(user_data, event)
+    try:
+        if qdb_py_is_finalizing():
+            return
+        qdb_oidc_callback_before_gil(gate)
+        if not qdb_oidc_callback_stopped(gate):
+            _oidc_event_dispatch(user_data, event)
+    finally:
+        qdb_oidc_callback_leave(gate)
 
 
 cdef void _oidc_user_data_release_trampoline(
@@ -1763,16 +1731,14 @@ cdef class _OidcNativeHandle:
         # collected, so nothing in Python can close it any more -- but a
         # cancelled token-acquisition worker, which Rust starts detached and
         # never joins, can still hold a clone of the same shared state and
-        # reach a token-store write. Its persistence diagnostic would enter
-        # `_oidc_diagnostic_trampoline`, whose `qdb_py_is_finalizing()` test
-        # cannot be atomic with the `with gil` acquisition that follows it: a
-        # shutdown beginning in that window crashes or hangs the interpreter.
-        # `_oidc_detach_diagnostics_at_exit` cannot reach this provider either,
-        # since the weakref callback has already dropped it from the registry.
+        # reach a token-store write. Detach while Python is alive so later
+        # persistence warnings cannot target a collected provider. The atexit
+        # registry snapshot cannot see this handle after the weakref callback
+        # drops it, but the C gate still protects any admitted callback.
         #
-        # Detaching is the half no check placed in the trampoline can perform:
-        # it stops any later callback, so the window is closed rather than
-        # merely re-tested.
+        # Nowait detach suppresses future native admissions, but is not itself
+        # a finalization fence. The process-wide C gate also counts callbacks
+        # from collected providers and drains them in the atexit hook.
         #
         # The non-waiting form, because this runs wherever a collection fired
         # and so cannot know what this thread already holds. The waiting form
@@ -1789,11 +1755,8 @@ cdef class _OidcNativeHandle:
         # blocked acquiring it, and even the bounded drain should let that
         # callback finish rather than spin against it.
         #
-        # Skipped once finalization has begun, where it can no longer achieve
-        # anything: a callback that has not passed the trampoline's
-        # `qdb_py_is_finalizing()` check returns at it, and one that has is
-        # already parked in a `PyGILState_Ensure` that never returns for a
-        # non-main thread afterwards.
+        # Once finalization begins the process-wide gate is closed and drained;
+        # no admitted OIDC callback can still attempt GIL entry.
         _ensure_doesnt_have_gil(&gs)
         if not qdb_py_is_finalizing():
             questdb_oidc_auth_detach_diagnostics_nowait(raw)
@@ -2073,9 +2036,12 @@ cdef class OidcDeviceAuth:
         to ``False``.
 
         ``url`` is the QuestDB server to discover from; ``client_id``,
-        ``scope``, ``audience``, ``issuer``, ``token_endpoint`` and
+        ``scope``, ``audience``, ``token_endpoint`` and
         ``device_authorization_endpoint`` default to ``None``, meaning "take
-        the server's value", and any you pass override it. ``client_id``,
+        the server's value", and any you pass override it. ``issuer`` is an
+        optional, explicit out-of-band trust pin, never inherited from the
+        server; supply it when either endpoint must be discovered from the
+        identity provider. ``client_id``,
         ``scope``, ``audience``, ``issuer``, ``token_endpoint`` and
         ``device_authorization_endpoint`` must be non-empty when provided.
         The remaining parameters — ``insecure``, ``ca_bundle``, ``open_browser``,
@@ -2313,9 +2279,9 @@ cdef class OidcDeviceAuth:
             # Installed only alongside a token store. Every native
             # `warn_persistence` site sits behind a store gate, so a provider
             # without one emits no diagnostic and the handler would be nothing
-            # but added interpreter-shutdown surface -- see the trampoline's
-            # note on the finalization window it inherits. Native's default
-            # stderr handler stays registered in that case and is equally
+            # but added interpreter-shutdown surface. The process-wide gate
+            # synchronizes any callbacks installed here. Native's default
+            # stderr handler stays registered otherwise and is equally
             # unreachable, so nothing escapes the `questdb` logger.
             if token_store is not None:
                 if not questdb_oidc_builder_diagnostic_handler(

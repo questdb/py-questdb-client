@@ -213,10 +213,11 @@ after its sender was closed now raises
 An abandoned ``QueryResult`` reports its ``ResourceWarning``
 ************************************************************
 
-A ``QueryResult`` left to the garbage collector now reports the
-``ResourceWarning`` about its unreleased cursor instead of swallowing it: the
-finalizer routes it through ``sys.unraisablehook``. Suites running with
-warnings-as-errors will see a new failure, and because it is raised whenever
+When warning filters promote an abandoned ``QueryResult``'s ``ResourceWarning``
+to an exception, the finalizer now lets it reach ``sys.unraisablehook`` instead
+of swallowing it, after releasing the cursor. Otherwise the warning continues
+to follow the normal warning filters. Suites running with warnings-as-errors
+will see a new failure, and because it is raised whenever
 collection happens to run, pytest attributes it to the test that was executing
 rather than to the one that abandoned the result. Close results
 deterministically (``with db.query(...) as result:``) or filter
@@ -227,6 +228,11 @@ Features
 
 OIDC Authentication (:mod:`questdb.auth`)
 ************************************************
+
+Interpreter shutdown suppresses new OIDC callbacks and drains every admitted
+renderer or persistence-diagnostic callback before finalization, including
+callbacks on daemon sign-in threads. Callbacks must return promptly; a blocked
+renderer or logging handler can delay process exit.
 
 New :mod:`questdb.auth` module backed by the native QuestDB client. It runs the
 OAuth 2.0 Device Authorization Grant (RFC 8628), including from remote Jupyter

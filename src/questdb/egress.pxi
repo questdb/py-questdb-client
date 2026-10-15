@@ -2380,10 +2380,12 @@ cdef class _NumpyBatchIter:
         cdef qwp_reader_symbol_dict sd
         cdef size_t row_count
         cdef size_t n_cols
-        if (
-                self.done
-                or self.handle is None
-                or not self.handle._is_live()):
+        # A rejected nested call must neither wait on the outer pull's lock
+        # nor enter cleanup that marks this shared iterator done.
+        if self.done or self.handle is None:
+            raise StopIteration
+        self.handle._check_not_driving('iter_numpy')
+        if not self.handle._is_live():
             raise StopIteration
         try:
             with self.handle._lock:

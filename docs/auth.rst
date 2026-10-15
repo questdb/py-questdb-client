@@ -492,11 +492,14 @@ to its ``OidcDeviceAuth`` creates a cycle that cpyext cannot collect. Use a weak
 back-reference or call ``auth.close()`` explicitly (for example via a ``with``
 block) to break the cycle; closing an attached provider is terminal for its
 transports, so plan their lifecycle accordingly. Renderer callbacks must return
-promptly: interpreter shutdown suppresses later callbacks without waiting for
-one already running, so work left unfinished in a renderer is abandoned. Run
-``sign_in()`` on a daemon thread if a callback can block for a long time:
-a non-daemon worker is joined before the shutdown hook runs and would delay
-process exit. For the same reason a ``sign_in()`` started after that hook,
+promptly: interpreter shutdown suppresses new callbacks and waits for every
+already-admitted renderer or persistence-diagnostic callback to return, including
+one paused before acquiring the GIL. This drain is required to avoid entering a
+terminating interpreter through the native callback ABI. A daemon ``sign_in()``
+thread does not exempt its active callback; a blocked renderer or logging handler
+can therefore delay process exit. Arrange for callbacks to finish before exiting,
+and do not make them wait for work that can only run after shutdown. A
+``sign_in()`` started after the shutdown hook,
 from an ``atexit`` handler registered before ``questdb`` was imported, cannot
 show a prompt: it succeeds
 from a cached or silently refreshable credential, and otherwise raises
