@@ -8710,6 +8710,145 @@ class OidcDiagnosticSignalTest(_IsolatedReentry, unittest.TestCase):
             questdb_logger.removeHandler(blocking_handler)
             signal.signal(signum, previous)
 
+    def _assert_planning_interrupt_boundary(
+            self, server, entry_point, bad_frame, interrupt, exception):
+        class InterruptingFrame(pd.DataFrame):
+            def items(self):
+                interrupt()
+                return super().items()
+
+        frame = InterruptingFrame({
+            'v': [1, 2],
+            'ts': pd.to_datetime([1, -1 if bad_frame else 2], unit='ns'),
+        })
+        sender = None
+        if entry_point == 'buffer':
+            target = _client.Buffer(protocol_version=2)
+        else:
+            sender = questdb.Sender.from_conf(
+                f'http::addr=127.0.0.1:{server.port};',
+                auto_flush=False, protocol_version=2)
+            sender.establish()
+            target = sender
+        try:
+            with self.assertRaises(TimeoutError) as caught:
+                if entry_point == 'transaction':
+                    with sender.transaction('dataframe_outer') as transaction:
+                        transaction.dataframe(frame, at='ts')
+                else:
+                    target.dataframe(frame, table_name='dataframe_outer', at='ts')
+            self.assertIs(caught.exception, exception)
+            if entry_point == 'transaction':
+                self.assertEqual(len(sender), 0, 'interrupted transaction must roll back')
+                self.assertFalse(any(
+                    b'dataframe_outer' in request['body']
+                    for request in server.requests('/write', 'POST')))
+            # Raising must happen after both native borrow/busy guards have
+            # been released, and leave no interruption for an unrelated call.
+            target.row('after_interrupt', columns={'v': 3},
+                       at=questdb.ServerTimestamp)
+            _client._debug_oidc_deliver_test_exceptions((), False)
+        finally:
+            if sender is not None:
+                sender.close(flush=False)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_dataframe_planning_interrupt_boundaries(self):
+        def exercise():
+            for entry_point in ('buffer', 'transaction', 'sender'):
+                for fail_initial in (False, True):
+                    for bad_frame in (False, True):
+                        with self.subTest(entry_point=entry_point,
+                                          fail_initial=fail_initial,
+                                          bad_frame=bad_frame), OidcTestServer() as server:
+                            exception = TimeoutError('interrupted dataframe planning')
+
+                            def interrupt():
+                                _client._debug_oidc_deliver_test_exceptions(
+                                    (exception,), fail_initial)
+
+                            try:
+                                self._assert_planning_interrupt_boundary(
+                                    server, entry_point, bad_frame, interrupt, exception)
+                            finally:
+                                _client._debug_oidc_fail_pending_calls(0)
+
+        self._run_isolated('dataframe_planning_interrupt_boundaries', exercise, 45)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_nested_dataframe_signal_boundaries(self):
+        def exercise():
+            for entry_point in ('buffer', 'transaction', 'sender'):
+                for bad_frame in (False, True):
+                    with self.subTest(entry_point=entry_point, bad_frame=bad_frame):
+                        self._nested_dataframe_signal(entry_point, bad_frame)
+
+        self._run_isolated('nested_dataframe_signal_boundaries', exercise, 60)
+
+    def _nested_dataframe_signal(self, entry_point, bad_frame):
+        exception = TimeoutError('signal inside nested refresh diagnostic')
+        calls = []
+        credential = [None]
+        sabotaged = threading.Event()
+
+        def on_alarm(signum, frame):
+            calls.append(signum)
+            raise exception
+
+        def fail_save():
+            if not sabotaged.is_set():
+                if os.path.isfile(credential[0]):
+                    os.remove(credential[0])
+                os.mkdir(credential[0])
+                sabotaged.set()
+
+        class InterruptDiagnostic(logging.Handler):
+            def emit(self, record):
+                if 'token store save failed' in record.getMessage() and not calls:
+                    signal.raise_signal(signal.SIGALRM)
+
+        logger = logging.getLogger('questdb')
+        old_level = logger.level
+        logger.setLevel(logging.WARNING)
+        handler = InterruptDiagnostic()
+        previous = signal.signal(signal.SIGALRM, on_alarm)
+        try:
+            with tempfile.TemporaryDirectory() as directory, \
+                    OidcTestServer(initial_expires_in=2,
+                                   refresh_request_hook=fail_save) as server:
+                auth = make_discovered_auth(
+                    server, token_store=FileTokenStore.at(directory))
+                try:
+                    auth.sign_in()
+                    credential[0] = os.path.join(directory, next(
+                        name for name in os.listdir(directory) if name.endswith('.json')))
+                    sibling = questdb.Sender.from_conf(
+                        f'http::addr=127.0.0.1:{server.port};',
+                        oidc_auth=auth, auto_flush=False, protocol_version=2)
+                    try:
+                        sibling.establish()
+                        time.sleep(2.2)
+                        logger.addHandler(handler)
+
+                        def interrupt():
+                            sibling.row('dataframe_sibling', columns={'v': 1},
+                                        at=questdb.ServerTimestamp)
+                            sibling.flush()
+
+                        self._assert_planning_interrupt_boundary(
+                            server, entry_point, bad_frame, interrupt, exception)
+                        self.assertTrue(sabotaged.is_set())
+                        self.assertEqual(calls, [signal.SIGALRM])
+                        self.assertEqual(auth.token(), 'AT-refreshed')
+                    finally:
+                        sibling.close(flush=False)
+                finally:
+                    auth.close()
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+            signal.signal(signal.SIGALRM, previous)
+
     def _stream_with_failed_pending_call(self, outcome):
         import pyarrow as pa
         import qwp_egress_failover_server as wire

@@ -1204,6 +1204,7 @@ cdef class SenderTransaction:
         finally:
             buffer._end_native_borrow(True)
             self._sender._native_in_flight = False
+            _oidc_raise_unscheduled_main()
         return self
 
     def commit(self):
@@ -2115,6 +2116,7 @@ cdef class Buffer:
                 at)
         finally:
             self._end_native_borrow(True)
+            _oidc_raise_unscheduled_main()
         return self
 
 
