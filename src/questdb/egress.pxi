@@ -918,9 +918,18 @@ cdef void _qs_set_error(_QueryStreamProducer prod, const char* msg, size_t msg_l
 
 cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
     cdef bytes full
+    cdef int status
     try:
-        return _qs_pull_impl(prod)
+        status = _qs_pull_impl(prod)
+        # Native outputs/errors now have cleanup ownership, including on end
+        # and error returns. A failed pending-call enqueue must not leave an
+        # intercepted signal parked until an unrelated client operation.
+        _oidc_raise_unscheduled_main()
+        return status
     except BaseException as e:
+        # A successful native pull may already have cached a batch. Discard it
+        # so a subsequent get_next cannot deliver data after this stream error.
+        prod._free_cached()
         try:
             full = ('arrow batch pull failed: ' + repr(e)).encode('utf-8')
             _qs_set_error(prod, full, <size_t>len(full))

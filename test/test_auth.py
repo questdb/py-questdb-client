@@ -909,35 +909,43 @@ class NativeOidcTest(unittest.TestCase):
         os.name == 'posix', 'durable file token store requires POSIX')
     def test_exit_hook_actually_silences_persistence_diagnostics(self):
         self.addCleanup(_client._debug_oidc_reset_callback_shutdown)
-        # The companion test above proves detaching does not close providers;
-        # this positive half proves the hook reaches the native diagnostic
-        # sink. Reducing _oidc_detach_handle_callbacks to a no-op makes the
-        # deterministic failed save below emit a WARNING and fail this test.
-        class SabotageRenderer(RecordingRenderer):
-            def __init__(self, directory):
-                super().__init__()
-                self.directory = directory
+        # Inject after mutation preflight, independently of renderer events:
+        # the exit hook detaches those as well as the diagnostic sink. First
+        # prove this fault produces a warning, then prove detaching silences it.
+        for detached in (False, True):
+            with self.subTest(detached=detached), \
+                    tempfile.TemporaryDirectory() as parent:
+                directory = os.path.join(parent, 'store')
+                sabotaged = threading.Event()
 
-            def on_prompt(self, challenge):
-                super().on_prompt(challenge)
-                shutil.rmtree(self.directory)
-                with open(self.directory, 'w', encoding='utf-8') as sink:
-                    sink.write('not a directory')
+                def fail_save():
+                    shutil.rmtree(directory)
+                    with open(directory, 'w', encoding='utf-8') as sink:
+                        sink.write('not a directory')
+                    sabotaged.set()
 
-        with tempfile.TemporaryDirectory() as parent:
-            directory = os.path.join(parent, 'store')
-            with OidcTestServer() as server:
-                auth = make_discovered_auth(
-                    server,
-                    token_store=FileTokenStore.at(directory),
-                    renderer=SabotageRenderer(directory))
-                _client._oidc_detach_diagnostics_at_exit()
-                # See test_exit_hook_silences_renderer_events_without_closing_
-                # provider: keep native detached, let sign_in() reach it.
-                _client._debug_oidc_reset_callback_shutdown()
-                with self.assertNoLogs('questdb', level='WARNING'):
-                    auth.sign_in()
-                self.assertEqual(auth.token(), 'AT-initial')
+                with OidcTestServer(
+                        device_token_request_hook=fail_save) as server:
+                    auth = make_discovered_auth(
+                        server, token_store=FileTokenStore.at(directory))
+                    try:
+                        if detached:
+                            _client._oidc_detach_diagnostics_at_exit()
+                            # Reopen admission without reattaching native sinks.
+                            _client._debug_oidc_reset_callback_shutdown()
+                        log_check = (self.assertNoLogs if detached
+                                     else self.assertLogs)
+                        with log_check('questdb', level='WARNING') as logs:
+                            auth.sign_in()
+                        self.assertTrue(sabotaged.is_set())
+                        self.assertTrue(os.path.isfile(directory))
+                        if not detached:
+                            self.assertTrue(any(
+                                'token store save failed' in message
+                                for message in logs.output))
+                        self.assertEqual(auth.token(), 'AT-initial')
+                    finally:
+                        auth.close()
 
     @unittest.skipUnless(
         os.name == 'posix', 'durable file token store requires POSIX')
@@ -8563,7 +8571,7 @@ class OidcSenderReentryTest(unittest.TestCase):
 @unittest.skipIf(
     platform.python_implementation() == 'PyPy',
     'PyPy has no pending-call re-delivery; only Ctrl-C is re-armed there')
-class OidcDiagnosticSignalTest(unittest.TestCase):
+class OidcDiagnosticSignalTest(_IsolatedReentry, unittest.TestCase):
     """A signal handled while a persistence diagnostic runs on the main thread
     inside an attached transport's flush behaves as it would after the flush:
     its exception reaches the caller, and the handler runs once."""
@@ -8701,6 +8709,124 @@ class OidcDiagnosticSignalTest(unittest.TestCase):
                 worker.join(15)
             questdb_logger.removeHandler(blocking_handler)
             signal.signal(signum, previous)
+
+    def _stream_with_failed_pending_call(self, outcome):
+        import pyarrow as pa
+        import qwp_egress_failover_server as wire
+
+        interrupted = TimeoutError('deadline during Arrow stream pull')
+        calls = []
+        sabotaged = threading.Event()
+        credential = [None]
+
+        def on_alarm(signum, frame):
+            calls.append(signum)
+            raise interrupted
+
+        def fail_save():
+            if not sabotaged.is_set():
+                if os.path.isfile(credential[0]):
+                    os.remove(credential[0])
+                os.mkdir(credential[0])
+                sabotaged.set()
+
+        class InterruptDiagnostic(logging.Handler):
+            def emit(self, record):
+                if ('token store save failed' in record.getMessage()
+                        and not calls):
+                    _client._debug_oidc_fail_pending_calls(1)
+                    os.kill(os.getpid(), signal.SIGALRM)
+
+        original_result = wire._result
+
+        def replay_result(request_id, batches):
+            if outcome == 'error':
+                # Valid QUERY_ERROR (ParseError) after the reconnect refresh.
+                message = b'test query error'
+                payload = (b'\x13' + request_id.to_bytes(8, 'little', signed=True)
+                           + b'\x05' + len(message).to_bytes(2, 'little')
+                           + message)
+                return [wire._framed(payload)]
+            return original_result(request_id, batches)
+
+        logger = logging.getLogger('questdb')
+        old_level = logger.level
+        logger.setLevel(logging.WARNING)
+        handler = InterruptDiagnostic()
+        previous = signal.signal(signal.SIGALRM, on_alarm)
+        try:
+            with tempfile.TemporaryDirectory() as directory, \
+                    OidcTestServer(initial_expires_in=6,
+                                   refresh_request_hook=fail_save) as idp, \
+                    EgressFailoverServer(
+                        batches=() if outcome == 'end' else ((1, 2, 3),)) as qdb, \
+                    mock.patch.object(wire, '_result', side_effect=replay_result):
+                auth = make_discovered_auth(
+                    idp, token_store=FileTokenStore.at(directory))
+                self.addCleanup(auth.close)
+                auth.sign_in()
+                signed_at = time.monotonic()
+                credential[0] = os.path.join(directory, next(
+                    name for name in os.listdir(directory)
+                    if name.endswith('.json')))
+                db = questdb.connect(
+                    f'ws::addr=127.0.0.1:{qdb.port};lazy_connect=true;'
+                    'failover_max_attempts=2;failover_max_duration_ms=0;'
+                    'failover_backoff_initial_ms=0;failover_backoff_max_ms=0;',
+                    oidc_auth=auth)
+                result = db.query('select v from t')
+                reader = None
+                try:
+                    time.sleep(max(0, 6.4 - (time.monotonic() - signed_at)))
+                    logger.addHandler(handler)
+                    qdb.release_first.set()
+                    # Arrow has a string-only error ABI: do not unwind a Python
+                    # exception across it, nor silently return a batch or EOF.
+                    with self.assertRaisesRegex(
+                            (pa.ArrowException, OSError),
+                            'deadline during Arrow stream pull'):
+                        reader = pa.RecordBatchReader.from_stream(result)
+                        reader.read_all()
+                    self.assertTrue(sabotaged.is_set())
+                    self.assertEqual(calls, [signal.SIGALRM])
+                    self.assertEqual(
+                        _client._debug_oidc_pending_call_failures_remaining(), 0)
+                    logger.removeHandler(handler)
+                    # The interruption belongs to the failed stream, not this
+                    # unrelated successful acquisition of the refreshed token.
+                    self.assertEqual(auth.token(), 'AT-refreshed')
+                    self.assertEqual(qdb.errors, [])
+                finally:
+                    qdb.release_first.set()
+                    logger.removeHandler(handler)
+                    if reader is not None:
+                        reader.close()
+                    result.close()
+                    db.close()
+                    auth.close()
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+            signal.signal(signal.SIGALRM, previous)
+            _client._debug_oidc_fail_pending_calls(0)
+
+    def _check_stream_pending_call_failure(self, outcome):
+        try:
+            import pyarrow
+        except ImportError:
+            self.skipTest('pyarrow required to consume the Arrow C stream')
+        name = f'stream_pending_call_failure_on_{outcome}'
+        self._run_isolated(
+            name, lambda: self._stream_with_failed_pending_call(outcome), 30)
+
+    def test_stream_pending_call_failure_on_success(self):
+        self._check_stream_pending_call_failure('success')
+
+    def test_stream_pending_call_failure_on_end(self):
+        self._check_stream_pending_call_failure('end')
+
+    def test_stream_pending_call_failure_on_error(self):
+        self._check_stream_pending_call_failure('error')
 
     def _check_failed_pending_call_delivery(self, use_dataframe=False):
         for signum, exception in (

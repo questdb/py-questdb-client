@@ -38,6 +38,7 @@ from mock_server import (Server, HttpServer, SETTINGS_WITHOUT_PROTOCOL_VERSION,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3,SETTINGS_WITH_PROTOCOL_VERSION_V4)
 from qwp_ws_ack_server import QwpAckServer, TLS_CA
 
+import questdb
 import questdb._client as qi
 
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
@@ -1493,26 +1494,32 @@ class TestQwpWebSocketApi(unittest.TestCase):
             with self.assertRaises((TypeError, OverflowError)):
                 qi.QuestDB.from_conf('ws::addr=127.0.0.1:1;lazy_connect=true;', **kwargs)
 
-    def test_from_conf_caps_connection_event_inbox_capacity(self):
-        # Native validates `event_inbox_capacity` only when an event callback
-        # is installed, and one is installed only for a caller who passed
-        # `connection_listener` -- so without the Python-side check the
-        # documented 65536 cap silently did not apply to the no-listener case,
-        # while `error_event_inbox_capacity` (whose callback is unconditional)
-        # was always capped. Assert it holds both ways.
-        for listener in (None, lambda event: None):
-            with self.assertRaises(qi.QuestDBError) as caught:
-                qi.QuestDB.from_conf(
-                    'ws::addr=127.0.0.1:1;lazy_connect=true;',
-                    connection_listener=listener,
-                    connection_event_inbox_capacity=65537)
-            self.assertEqual(
-                caught.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
-        # The cap itself is still accepted.
-        with qi.QuestDB.from_conf(
-                'ws::addr=127.0.0.1:1;lazy_connect=true;',
-                connection_event_inbox_capacity=65536) as client:
-            pass
+    def test_from_conf_caps_callback_inbox_capacities(self):
+        # Both public factories must reject even integers larger than size_t
+        # with the documented InvalidApiCall, not a conversion OverflowError.
+        # The event cap also applies when no listener is installed.
+        conf = 'ws::addr=127.0.0.1:1;lazy_connect=true;'
+        for factory in (qi.QuestDB.from_conf, questdb.connect):
+            for keyword in ('connection_event_inbox_capacity',
+                            'error_event_inbox_capacity'):
+                for listener in (None, lambda event: None):
+                    for capacity in (65537, 2 ** 100, 2 ** 100000):
+                        with self.subTest(factory=factory.__name__,
+                                          keyword=keyword,
+                                          capacity_bits=capacity.bit_length(),
+                                          listener=listener is not None):
+                            with self.assertRaises(qi.QuestDBError) as caught:
+                                factory(conf, connection_listener=listener,
+                                        **{keyword: capacity})
+                            self.assertEqual(
+                                caught.exception.code,
+                                qi.QuestDBErrorCode.InvalidApiCall)
+                            self.assertIn(keyword, str(caught.exception))
+                    # Zero selects the default; the cap itself is accepted.
+                    for capacity in (0, 65536):
+                        with factory(conf, connection_listener=listener,
+                                     **{keyword: capacity}):
+                            pass
 
     def test_sender_caps_connection_event_inbox_capacity(self):
         # The pool path got the documented cap; `Sender` did not. Native only

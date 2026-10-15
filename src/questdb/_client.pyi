@@ -1164,7 +1164,11 @@ class PooledSender:
 
     def await_acked_fsn(self, fsn: int, timeout_millis: int = 0) -> bool:
         """Wait until the ack watermark reaches ``fsn``; ``False`` on
-        no-progress timeout. Only a terminal connection failure raises."""
+        no-progress timeout. Terminal connection failures raise. An OIDC
+        persistence callback can also receive retryable
+        :class:`~questdb.auth.OidcInteractionRequired` when reconnecting depends
+        on its return. The publication stays queued: return from the callback
+        and retry the ACK wait, not the publication."""
 
     def flush_and_keep_and_get_fsn(self) -> Optional[int]:
         """Publish without clearing the buffer; returns the frame's FSN."""

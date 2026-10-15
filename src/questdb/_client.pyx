@@ -7001,28 +7001,21 @@ cdef class QuestDB:
             # Convert to C integers while still holding the GIL: a bad
             # value must raise here, not inside the nogil region below.
             #
-            # Native validates `event_inbox_capacity` only when an event
-            # callback is installed, and one is installed only for a caller who
-            # passed `connection_listener` -- whereas the rejection callback is
-            # unconditional, so its capacity is always checked. That left the
-            # two keyword arguments the docstring, CHANGELOG and migration
-            # guide describe identically behaving differently. Enforce the
-            # documented cap here so it holds either way.
-            #
-            # Only the upper bound: a negative or non-integral value is left to
-            # the `c_event_inbox_capacity` conversion below, which rejects it
-            # exactly as it already does for `error_event_inbox_capacity`.
-            # Intercepting those here too would make the two keywords raise
-            # different types for the same bad input, which is the asymmetry
-            # this check exists to remove.
-            if (isinstance(connection_event_inbox_capacity, int)
-                    and connection_event_inbox_capacity
-                    > QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY):
-                raise QuestDBError(
-                    QuestDBErrorCode.InvalidApiCall,
-                    '"connection_event_inbox_capacity" must be between 0 and '
-                    f'{QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY}, not '
-                    f'{connection_event_inbox_capacity!r}.')
+            # Native checks the event capacity only with a listener installed.
+            # Check both documented caps before size_t conversion as well: even
+            # Python integers too large for size_t must report InvalidApiCall.
+            # Leave negative and non-integral inputs to the existing conversion
+            # below, preserving their exception behavior for both keywords.
+            for capacity_name, capacity in (
+                    ('connection_event_inbox_capacity',
+                     connection_event_inbox_capacity),
+                    ('error_event_inbox_capacity', error_event_inbox_capacity)):
+                if (isinstance(capacity, int)
+                        and capacity > QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY):
+                    raise QuestDBError(
+                        QuestDBErrorCode.InvalidApiCall,
+                        f'"{capacity_name}" must be between 0 and '
+                        f'{QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY}.')
             c_event_inbox_capacity = connection_event_inbox_capacity
             c_error_inbox_capacity = error_event_inbox_capacity
             questdb_db_connect_options_init(
@@ -10004,7 +9997,11 @@ cdef class PooledSender:
 
         Returns ``True`` once ``fsn`` is acknowledged, or ``False`` if the
         no-progress timeout elapsed before ``fsn`` was acknowledged (``0``
-        waits indefinitely). Only a terminal connection failure raises.
+        waits indefinitely). Terminal connection failures raise. A wait from
+        an OIDC persistence callback can also raise retryable
+        :class:`~questdb.auth.OidcInteractionRequired` when reconnecting would
+        depend on that callback returning. The publication remains queued:
+        return from the callback and retry the ACK wait, not the publication.
         """
         cdef line_sender_error* err = NULL
         cdef PyThreadState* gs = NULL
