@@ -462,7 +462,8 @@ def sqlalchemy_engine(
     interactive sign-in.
 
     :param auth: An :class:`OidcDeviceAuth`, e.g. from
-        :meth:`OidcDeviceAuth.from_questdb`.
+        :meth:`OidcDeviceAuth.from_questdb`, or any provider with a
+        ``token()`` method, such as a :class:`RefreshingTokenProvider`.
     :param url: The QuestDB base URL; the PG host is derived from it unless
         ``host=`` is given.
     :param host: Override the PG-wire host (otherwise taken from ``url``).
@@ -612,7 +613,8 @@ def psycopg_connect(
     server.
 
     :param auth: An :class:`OidcDeviceAuth`, e.g. from
-        :meth:`OidcDeviceAuth.from_questdb`.
+        :meth:`OidcDeviceAuth.from_questdb`, or any provider with a
+        ``token()`` method, such as a :class:`RefreshingTokenProvider`.
     :param url: The QuestDB base URL; the PG host is derived from it unless
         ``host=`` is given.
     :param host: Override the PG-wire host (otherwise taken from ``url``).

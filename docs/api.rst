@@ -155,7 +155,32 @@ questdb.auth
 
 .. py:module:: questdb.auth
 
-See the :ref:`oidc_auth` guide for an overview.
+See the :ref:`oidc_auth` and :ref:`refreshing_token_provider` guides for an
+overview.
+
+.. autoclass:: questdb.auth.RefreshingTokenProvider
+   :members:
+   :show-inheritance:
+
+.. autoclass:: questdb.auth.ExpiringToken
+   :members:
+   :show-inheritance:
+
+.. autoexception:: questdb.auth.TokenUnavailableError
+   :members:
+   :show-inheritance:
+
+.. autoclass:: questdb.auth.TokenProviderStatus
+   :members:
+
+.. autoclass:: questdb.auth.FetchFailure
+   :members:
+
+.. autoclass:: questdb.auth.TokenSource
+   :members:
+
+.. autoclass:: questdb.auth.BearerTokenProvider
+   :members:
 
 .. autoclass:: questdb.auth.OidcDeviceAuth
    :members:

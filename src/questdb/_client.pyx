@@ -461,6 +461,11 @@ cdef inline object c_sender_error_view_to_raw(
         view.to_fsn)
 
 
+# Rotating Bearer-token providers. Included here, after the error classes it
+# subclasses at import time.
+include "token_provider.pxi"
+
+
 cdef inline object c_err_to_fields(questdb_error* err):
     """Extract ``QuestDBError`` fields from a C error, which will be freed."""
     if err == NULL:
@@ -506,11 +511,16 @@ cdef inline object c_err_to_py(line_sender_error* err):
     ones an auth failure is behind.
     """
     cdef questdb_oidc_error_view oidc_view
+    cdef object token_exc
     if err != NULL:
         memset(&oidc_view, 0, sizeof(questdb_oidc_error_view))
         oidc_view.struct_size = sizeof(questdb_oidc_error_view)
         if questdb_error_oidc_get_view(err, &oidc_view):
             return _oidc_err_to_py(err)
+        # A token provider's classified failure, wherever it surfaced.
+        token_exc = _tp_err_to_py(err)
+        if token_exc is not None:
+            return token_exc
     cdef object tup = c_err_to_fields(err)
     if tup[0] == QuestDBErrorCode.ServerRejection:
         return QuestDBServerRejectionError(
@@ -6694,6 +6704,8 @@ cdef class QuestDB:
     cdef object _connection_listener
     cdef object _error_handler
     cdef object _oidc_auth
+    # Keeps a bearer_token_provider's Python source alive for the pool.
+    cdef object _bearer_token_provider
     cdef size_t _cb_refs_key
     cdef auto_flush_mode_t _auto_flush_mode
     cdef bint _auto_flush_bytes_dynamic
@@ -6708,6 +6720,7 @@ cdef class QuestDB:
         self._connection_listener = None
         self._error_handler = None
         self._oidc_auth = None
+        self._bearer_token_provider = None
         self._cb_refs_key = 0
         self._auto_flush_mode.enabled = False
         self._auto_flush_mode.interval = -1
@@ -6788,6 +6801,7 @@ cdef class QuestDB:
             str conf_str,
             *,
             oidc_auth=None,
+            bearer_token_provider=None,
             connection_listener=None,
             connection_event_inbox_capacity=0,
             error_handler=None,
@@ -6826,6 +6840,13 @@ cdef class QuestDB:
         Use ``wss::``: over plain ``ws::`` to a non-loopback host the token is
         sent in cleartext. A closed provider raises
         :class:`~questdb.auth.OidcCancelledError`.
+
+        ``bearer_token_provider`` attaches a rotating Bearer-token provider
+        instead: a :class:`questdb.auth.RefreshingTokenProvider` around a token
+        source of your own, a callable returning a token, or an object with
+        ``token()`` and an optional ``on_rejected()`` -- see
+        :ref:`refreshing_token_provider`. It is mutually exclusive with
+        ``oidc_auth``, ``token``, ``username`` and ``password``.
 
         The connection pool is opened eagerly unless configuration selects a
         lazy connection. Dataframe ingestion always uses the direct
@@ -6985,6 +7006,25 @@ cdef class QuestDB:
                         + '. An OIDC provider supplies the credential itself; '
                         'remove the fixed credential, or drop "oidc_auth" to '
                         'keep using it.')
+            if bearer_token_provider is not None:
+                if oidc_auth is not None:
+                    raise QuestDBError(
+                        QuestDBErrorCode.ConfigError,
+                        '"bearer_token_provider" and "oidc_auth" are mutually '
+                        'exclusive: attach one token provider.')
+                conflicting = [
+                    key for key in ('token', 'username', 'password')
+                    if params.get(key) is not None]
+                if conflicting:
+                    raise QuestDBError(
+                        QuestDBErrorCode.ConfigError,
+                        '"bearer_token_provider" is mutually exclusive with '
+                        + ', '.join(f'"{key}"' for key in conflicting)
+                        + '. A token provider supplies the credential itself; '
+                        'remove the fixed credential, or drop '
+                        '"bearer_token_provider" to keep using it.')
+                db._bearer_token_provider = _tp_resolve_bearer_token_provider(
+                    bearer_token_provider)
             str_to_utf8(b, <PyObject*>native_conf_str, &c_conf)
             if connection_listener is not None:
                 # Register as part of pool construction so recovery senders
@@ -7025,6 +7065,9 @@ cdef class QuestDB:
             connect_options.oidc_auth = (
                 (<OidcDeviceAuth>oidc_auth)._raw
                 if oidc_auth is not None else NULL)
+            if db._bearer_token_provider is not None:
+                connect_options.token_provider = _tp_holder_raw(
+                    db._bearer_token_provider)
             connect_options.event_callback = connection_event_cb
             connect_options.event_user_data = connection_listener_data
             connect_options.event_inbox_capacity = c_event_inbox_capacity
@@ -7045,6 +7088,7 @@ cdef class QuestDB:
                 db._connection_listener = None
                 db._error_handler = None
                 db._oidc_auth = None
+                db._bearer_token_provider = None
                 raise c_err_to_py(err)
             db._conf_str = conf_str
             db._cb_refs_key = _retain_callback_refs(
@@ -7693,6 +7737,7 @@ cdef class QuestDB:
                 if closed:
                     self._conf_str = None
                     self._oidc_auth = None
+                    self._bearer_token_provider = None
                 else:
                     self._db = db
                 self._closing = False
@@ -7740,6 +7785,9 @@ cdef class Sender:
     cdef object _error_handler
     cdef object _connection_listener
     cdef object _oidc_auth
+    # A RefreshingTokenProvider or an _ApplicationTokenProvider holder: keeps
+    # the native provider's Python source alive while this sender uses it.
+    cdef object _bearer_token_provider
     cdef auto_flush_mode_t _auto_flush_mode
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
@@ -7764,6 +7812,7 @@ cdef class Sender:
             str password,
             str token,
             object oidc_auth,
+            object bearer_token_provider,
             str token_x,
             str token_y,
             object auth_timeout,
@@ -7996,6 +8045,32 @@ cdef class Sender:
                 raise c_err_to_py(err)
             self._oidc_auth = oidc_auth
 
+        if bearer_token_provider is not None:
+            if oidc_auth is not None:
+                raise QuestDBError(
+                    QuestDBErrorCode.ConfigError,
+                    '"bearer_token_provider" and "oidc_auth" are mutually '
+                    'exclusive: attach one token provider.')
+            _conflicting = [
+                name for name, value in (
+                    ('token', token),
+                    ('username', username),
+                    ('password', password))
+                if value is not None]
+            if _conflicting:
+                raise QuestDBError(
+                    QuestDBErrorCode.ConfigError,
+                    '"bearer_token_provider" is mutually exclusive with '
+                    + ', '.join(f'"{name}"' for name in _conflicting)
+                    + '. A token provider supplies the credential itself; '
+                    'remove the fixed credential, or drop '
+                    '"bearer_token_provider" to keep using it.')
+            _holder = _tp_resolve_bearer_token_provider(bearer_token_provider)
+            if not line_sender_opts_token_provider(
+                    self._opts, _tp_holder_raw(_holder), &err):
+                raise c_err_to_py(err)
+            self._bearer_token_provider = _holder
+
         if token_x is not None:
             str_to_utf8(b, <PyObject*>token_x, &c_token_x)
             if not line_sender_opts_token_x(self._opts, c_token_x, &err):
@@ -8196,6 +8271,7 @@ cdef class Sender:
             str password=None,
             str token=None,
             object oidc_auth=None,
+            object bearer_token_provider=None,
             str token_x=None,
             str token_y=None,
             object auth_timeout=None,  # default: 15000 milliseconds
@@ -8259,6 +8335,7 @@ cdef class Sender:
                 password,
                 token,
                 oidc_auth,
+                bearer_token_provider,
                 token_x,
                 token_y,
                 auth_timeout,
@@ -8296,6 +8373,7 @@ cdef class Sender:
             str password=None,
             str token=None,
             object oidc_auth=None,
+            object bearer_token_provider=None,
             str token_x=None,
             str token_y=None,
             object auth_timeout=None,  # default: 15000 milliseconds
@@ -8340,6 +8418,13 @@ cdef class Sender:
         flush: connect and reconnect load or silently refresh a token but never
         start an interactive device flow. Supported on HTTP(S) and
         QWP/WebSocket; TCP and UDP are rejected.
+
+        ``bearer_token_provider`` attaches a rotating Bearer-token provider
+        instead: a :class:`questdb.auth.RefreshingTokenProvider` around a token
+        source of your own, a callable returning a token, or an object with
+        ``token()`` and an optional ``on_rejected()`` -- see
+        :ref:`refreshing_token_provider`. It is mutually exclusive with
+        ``oidc_auth``, ``token``, ``username`` and ``password``.
         """
 
         cdef line_sender_error* err = NULL
@@ -8351,6 +8436,7 @@ cdef class Sender:
         cdef qdb_pystr_buf* b = qdb_pystr_buf_new()
         try:
             protocol, params = parse_conf_str(b, conf_str)
+            _tp_reject_conf_keys(params)
 
             addr = params.get('addr')
             if addr is None:
@@ -8449,6 +8535,7 @@ cdef class Sender:
                 params.get('password'),
                 params.get('token'),
                 oidc_auth,
+                bearer_token_provider,
                 params.get('token_x'),
                 params.get('token_y'),
                 params.get('auth_timeout'),
@@ -8487,6 +8574,7 @@ cdef class Sender:
             str password=None,
             str token=None,
             object oidc_auth=None,
+            object bearer_token_provider=None,
             str token_x=None,
             str token_y=None,
             object auth_timeout=None,  # default: 15000 milliseconds
@@ -8545,6 +8633,7 @@ cdef class Sender:
             password=password,
             token=token,
             oidc_auth=oidc_auth,
+            bearer_token_provider=bearer_token_provider,
             token_x=token_x,
             token_y=token_y,
             auth_timeout=auth_timeout,
@@ -9449,6 +9538,7 @@ cdef class Sender:
         self._error_handler = None
         self._connection_listener = None
         self._oidc_auth = None
+        self._bearer_token_provider = None
         if self._slot_id != -1:
             qdb_active_senders_track_closed(<uint32_t>self._slot_id)
             self._slot_id = -1

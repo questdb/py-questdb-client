@@ -1204,6 +1204,158 @@ cdef extern from "questdb/oidc.h":
         ) noexcept nogil
 
 
+cdef extern from "questdb/token_provider.h":
+    cdef struct questdb_token_provider:
+        pass
+
+    cdef struct questdb_token_sink:
+        pass
+
+    cdef struct questdb_token:
+        pass
+
+    ctypedef void (*questdb_token_source_fn)(
+        void* user_data,
+        questdb_token_sink* sink) noexcept nogil
+
+    ctypedef void (*questdb_token_get_fn)(
+        void* user_data,
+        questdb_token_sink* sink) noexcept nogil
+
+    ctypedef void (*questdb_token_rejected_fn)(
+        void* user_data,
+        const char* token,
+        size_t token_len,
+        uint16_t http_status) noexcept nogil
+
+    ctypedef void (*questdb_token_release_fn)(void* user_data) noexcept nogil
+
+    cdef struct questdb_refreshing_token_provider_options:
+        size_t struct_size
+        const char* name
+        size_t name_len
+        uint64_t refresh_margin_ms
+        uint64_t min_refresh_interval_ms
+        uint64_t handout_floor_ms
+        uint64_t cold_wait_ms
+        uint64_t backoff_initial_ms
+        uint64_t backoff_max_ms
+        uint64_t retry_after_max_ms
+        uint64_t forced_min_interval_ms
+        uint64_t forced_wait_ms
+
+    cdef struct questdb_token_provider_vtable:
+        size_t struct_size
+        questdb_token_get_fn get_token
+        questdb_token_rejected_fn on_rejected
+        questdb_token_release_fn release
+
+    cdef struct questdb_token_provider_status:
+        size_t struct_size
+        bint closed
+        bint has_last_failure
+        bint last_failure_retryable
+        uint32_t consecutive_failures
+        int64_t token_expires_at_ms
+        int64_t last_success_at_ms
+        int64_t last_failure_retry_after_ms
+        int64_t last_failure_at_ms
+        char* last_failure_msg
+        size_t last_failure_msg_capacity
+        size_t last_failure_msg_len
+
+    cdef struct questdb_token_unavailable_view:
+        size_t struct_size
+        bint retryable
+        int64_t retry_after_ms
+
+    bint questdb_token_sink_set_token(
+        questdb_token_sink* sink,
+        const char* token,
+        size_t token_len,
+        int64_t expires_at_ms,
+        int64_t refresh_at_ms
+        ) noexcept nogil
+
+    bint questdb_token_sink_set_error(
+        questdb_token_sink* sink,
+        bint retryable,
+        int64_t retry_after_ms,
+        const char* msg,
+        size_t msg_len
+        ) noexcept nogil
+
+    void questdb_refreshing_token_provider_options_init(
+        questdb_refreshing_token_provider_options* options,
+        size_t struct_size
+        ) noexcept nogil
+
+    questdb_token_provider* questdb_refreshing_token_provider_new(
+        questdb_token_source_fn source,
+        void* user_data,
+        questdb_token_release_fn release,
+        const questdb_refreshing_token_provider_options* options,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    questdb_token_provider* questdb_token_provider_new(
+        const questdb_token_provider_vtable* vtable,
+        void* user_data,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    questdb_token_provider* questdb_token_provider_clone(
+        const questdb_token_provider* provider
+        ) noexcept nogil
+
+    void questdb_token_provider_free(
+        questdb_token_provider* provider
+        ) noexcept nogil
+
+    void questdb_token_provider_close(
+        const questdb_token_provider* provider
+        ) noexcept nogil
+
+    bint questdb_token_provider_await_ready(
+        const questdb_token_provider* provider,
+        uint64_t timeout_ms
+        ) noexcept nogil
+
+    questdb_token* questdb_token_provider_token(
+        const questdb_token_provider* provider,
+        questdb_error** err_out
+        ) noexcept nogil
+
+    const char* questdb_token_data(const questdb_token* token) noexcept nogil
+
+    size_t questdb_token_len(const questdb_token* token) noexcept nogil
+
+    void questdb_token_free(questdb_token* token) noexcept nogil
+
+    void questdb_token_provider_on_rejected(
+        const questdb_token_provider* provider,
+        const char* token,
+        size_t token_len,
+        uint16_t http_status
+        ) noexcept nogil
+
+    bint questdb_token_provider_get_status(
+        const questdb_token_provider* provider,
+        questdb_token_provider_status* out
+        ) noexcept nogil
+
+    bint questdb_error_token_unavailable_get_view(
+        const questdb_error* error,
+        questdb_token_unavailable_view* out
+        ) noexcept nogil
+
+    bint line_sender_opts_token_provider(
+        line_sender_opts* opts,
+        const questdb_token_provider* provider,
+        questdb_error** err_out
+        ) noexcept nogil
+
+
 cdef extern from "questdb/client.h":
     cdef enum:
         QUESTDB_DB_MAX_CALLBACK_INBOX_CAPACITY
@@ -1217,6 +1369,7 @@ cdef extern from "questdb/client.h":
         line_sender_qwpws_error_cb rejection_callback
         void* rejection_user_data
         size_t rejection_inbox_capacity
+        const questdb_token_provider* token_provider
 
     void questdb_db_connect_options_init(
         questdb_db_connect_options* options,

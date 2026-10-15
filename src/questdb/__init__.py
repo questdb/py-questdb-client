@@ -82,6 +82,7 @@ def connect(
         port: _Union[int, str, None] = None,
         tls: _Optional[bool] = None,
         oidc_auth: _Optional[_OidcDeviceAuth] = None,
+        bearer_token_provider=None,
         connection_listener: _Optional[
             _Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
@@ -120,6 +121,14 @@ def connect(
     reconnects only load or silently refresh tokens and never prompt.
     Use ``wss::``: over plain ``ws::`` to a non-loopback host the token is
     sent in cleartext.
+
+    ``bearer_token_provider`` attaches a rotating Bearer-token provider that
+    every pooled connection shares: a
+    :class:`questdb.auth.RefreshingTokenProvider` around a token source of
+    your own (Azure Identity, an OAuth2 flow, ...), a callable returning a
+    token, or an object with ``token()`` and an optional ``on_rejected()``.
+    It is mutually exclusive with ``oidc_auth`` and with ``username``,
+    ``password`` and ``token``. See :ref:`refreshing_token_provider`.
 
     By default ``connect()`` opens the warm minimums up front and fails
     fast when the server is unreachable or rejects the credentials. Set
@@ -206,6 +215,7 @@ def connect(
         return QuestDB.from_conf(
             conf_str,
             oidc_auth=oidc_auth,
+            bearer_token_provider=bearer_token_provider,
             connection_listener=connection_listener,
             connection_event_inbox_capacity=connection_event_inbox_capacity,
             error_handler=error_handler,

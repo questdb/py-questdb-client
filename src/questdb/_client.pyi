@@ -249,6 +249,118 @@ class UnsupportedDataFrameShapeError(QuestDBError):
     column_failures: tuple
 
 
+class ExpiringToken:
+    """A token and when it expires: the result of one token-source fetch."""
+
+    token: str
+    expires_at: float
+    refresh_at: Optional[float]
+
+    def __init__(
+        self,
+        token: str,
+        expires_at: Union[datetime, float],
+        refresh_at: Optional[Union[datetime, float]] = None,
+    ) -> None: ...
+
+    @classmethod
+    def expires_in(
+        cls,
+        token: str,
+        lifetime: Union[float, timedelta],
+        refresh_at: Optional[Union[datetime, float]] = None,
+    ) -> "ExpiringToken":
+        """A token that expires ``lifetime`` from now."""
+
+
+class TokenUnavailableError(QuestDBError):
+    """A token source or provider could not supply a token."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        retry_after: Optional[Union[float, timedelta]] = None,
+        code: Optional[QuestDBErrorCode] = None,
+    ) -> None: ...
+
+    @property
+    def retryable(self) -> bool:
+        """Whether retrying can succeed."""
+
+    @property
+    def retry_after(self) -> Optional[float]:
+        """The suggested wait before retrying, in seconds, or ``None``."""
+
+
+class FetchFailure:
+    """A failed fetch of a :class:`RefreshingTokenProvider`."""
+
+    retryable: bool
+    retry_after: Optional[float]
+    message: str
+    at: Optional[datetime]
+
+
+class TokenProviderStatus:
+    """A snapshot of a :class:`RefreshingTokenProvider`."""
+
+    closed: bool
+    token_expires_at: Optional[datetime]
+    last_success_at: Optional[datetime]
+    consecutive_failures: int
+    last_failure: Optional[FetchFailure]
+
+
+class RefreshingTokenProvider:
+    """A proactively refreshing token cache in front of a token source."""
+
+    def __init__(
+        self,
+        source: Callable[[], Any],
+        *,
+        name: Optional[str] = None,
+        refresh_margin: Optional[Union[float, timedelta]] = None,
+        min_refresh_interval: Optional[Union[float, timedelta]] = None,
+        handout_floor: Optional[Union[float, timedelta]] = None,
+        cold_wait: Optional[Union[float, timedelta]] = None,
+        backoff_initial: Optional[Union[float, timedelta]] = None,
+        backoff_max: Optional[Union[float, timedelta]] = None,
+        retry_after_max: Optional[Union[float, timedelta]] = None,
+        forced_min_interval: Optional[Union[float, timedelta]] = None,
+        forced_wait: Optional[Union[float, timedelta]] = None,
+    ) -> None: ...
+
+    def token(self) -> str:
+        """A usable token, waiting up to ``cold_wait`` for one."""
+
+    def headers(self) -> Dict[str, str]:
+        """``{"Authorization": "Bearer <token>"}``."""
+
+    def on_rejected(self, token: str, http_status: int = 401) -> None:
+        """A server rejected ``token`` with ``http_status``."""
+
+    def await_ready(self, timeout: Union[float, timedelta] = 30.0) -> bool:
+        """Wait for a usable token."""
+
+    def close(self) -> None:
+        """Stop refreshing and fail every later token request."""
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def closed(self) -> bool: ...
+
+    @property
+    def status(self) -> TokenProviderStatus: ...
+
+    def __enter__(self) -> "RefreshingTokenProvider": ...
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool: ...
+
+
 class ConnectionEventKind(Enum):
     """Connection-state transitions observed by the ingress pool."""
 
@@ -1257,6 +1369,7 @@ class QuestDB:
         conf_str: str,
         *,
         oidc_auth: Optional[OidcDeviceAuth] = None,
+        bearer_token_provider: Optional[Any] = None,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
         error_handler: Optional[Callable[[SenderError], None]] = None,
@@ -1574,6 +1687,7 @@ class Sender:
         password: Optional[str] = None,
         token: Optional[str] = None,
         oidc_auth: Optional[OidcDeviceAuth] = None,
+        bearer_token_provider: Optional[Any] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,
@@ -1609,6 +1723,7 @@ class Sender:
         password: Optional[str] = None,
         token: Optional[str] = None,
         oidc_auth: Optional[OidcDeviceAuth] = None,
+        bearer_token_provider: Optional[Any] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,
@@ -1654,6 +1769,7 @@ class Sender:
         password: Optional[str] = None,
         token: Optional[str] = None,
         oidc_auth: Optional[OidcDeviceAuth] = None,
+        bearer_token_provider: Optional[Any] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,

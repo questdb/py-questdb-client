@@ -56,9 +56,28 @@ current token once at connect time::
 
 Optional deps (``sqlalchemy``/``psycopg``, ``qrcode``, ``IPython``) are imported
 lazily, only when used.
+
+For machine credentials that rotate -- Microsoft Entra ID managed identities
+and service principals, OAuth2 client credentials -- wrap a token source of
+your own in a ``RefreshingTokenProvider``, which caches the token and refreshes
+it in the background, and pass it as ``bearer_token_provider=``::
+
+    from questdb.auth import RefreshingTokenProvider
+
+    tokens = RefreshingTokenProvider(fetch_token)  # any callable you write
+    db = connect("wss::addr=questdb.example.com:9000;",
+                 bearer_token_provider=tokens)
 """
 
-from questdb._client import OidcDeviceAuth
+from questdb._client import (
+    ExpiringToken,
+    FetchFailure,
+    OidcDeviceAuth,
+    RefreshingTokenProvider,
+    TokenProviderStatus,
+    TokenUnavailableError,
+)
+from ._token_provider import BearerTokenProvider, TokenSource
 from ._config import OidcConfig
 from ._render import Renderer, sanitize_display_text
 from ._errors import (
@@ -77,6 +96,9 @@ from ._store import (
 from ._adapters import sqlalchemy_engine, psycopg_connect
 
 __all__ = [
+    'BearerTokenProvider',
+    'ExpiringToken',
+    'FetchFailure',
     'FileTokenStore',
     'OidcCancelledError',
     'OidcConfig',
@@ -87,8 +109,12 @@ __all__ = [
     'OidcInteractionRequired',
     'OidcNetworkError',
     'OidcTimeoutError',
+    'RefreshingTokenProvider',
     'Renderer',
     'TOKEN_STORE_DIR_ENV',
+    'TokenProviderStatus',
+    'TokenSource',
+    'TokenUnavailableError',
     'psycopg_connect',
     'sanitize_display_text',
     'sqlalchemy_engine',

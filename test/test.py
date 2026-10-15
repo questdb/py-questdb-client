@@ -139,6 +139,15 @@ def _first_qwp_table_row_count(payload):
     row_count, _ = _read_qwp_varint(payload, pos)
     return row_count
 
+# Rotating Bearer-token providers. Like the OIDC tests above, they need the
+# compiled extension.
+from test_token_provider import (
+    BearerTokenProviderAttachTest,
+    ExpiringTokenTest,
+    RefreshingTokenProviderTest,
+    TokenUnavailableErrorTest,
+)
+
 from test_client_capsule_path import (
     TestCapsulePathPyArrow,
     TestCapsulePathPolars,

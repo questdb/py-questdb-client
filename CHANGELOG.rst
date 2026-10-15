@@ -226,6 +226,33 @@ deterministically (``with db.query(...) as result:``) or filter
 Features
 ~~~~~~~~
 
+Rotating Bearer tokens (:class:`questdb.auth.RefreshingTokenProvider`)
+**********************************************************************
+
+New ``bearer_token_provider=`` on :func:`questdb.connect`,
+:class:`Sender <questdb.Sender>`, :meth:`Sender.from_conf
+<questdb.Sender.from_conf>` and :meth:`Sender.from_env
+<questdb.Sender.from_env>`, for machine credentials that rotate: Microsoft
+Entra ID managed identities and service principals, OAuth2 client credentials,
+tokens from a secrets vault.
+
+* :class:`questdb.auth.RefreshingTokenProvider` is a native, proactively
+  refreshing cache in front of a token source you write -- for example one
+  that calls Azure Identity, which stays your own dependency. It refreshes at
+  about half each token's lifetime on its own thread, retries failures with
+  backoff, refreshes early when a server rejects the token with HTTP 401, and
+  never shows a token in an error, log line or ``repr``.
+* Any callable returning a token, or an object with ``token()`` and an
+  optional ``on_rejected()``, works as a provider too.
+* :class:`questdb.auth.TokenUnavailableError` classifies a source's failure
+  as retryable or permanent; a connection the caller waits for retries only a
+  retryable one.
+
+Behaviour follows the cross-language dynamic-credential specification shared
+with the Java client. No provider is selected from a configuration string:
+``token_provider`` and the ``azure_*`` keys are rejected. See
+:ref:`refreshing_token_provider`.
+
 OIDC Authentication (:mod:`questdb.auth`)
 ************************************************
 
@@ -485,6 +512,18 @@ opts in by handling the new kind.
 Other changes
 ~~~~~~~~~~~~~
 
+- A token provider's failure while a connection is waited for -- an eager
+  :func:`questdb.connect`, a sender's ``initial_connect_retry=sync`` connect --
+  is retried only when the provider classified it retryable with
+  :class:`~questdb.auth.TokenUnavailableError`; any other failure, an
+  ``oidc_auth`` network error included, fails the connection at once.
+  Background reconnects keep retrying every provider failure.
+- A 401 is retried with a refreshed token only when the server's
+  ``WWW-Authenticate`` challenge allows it: no Bearer ``error``, or
+  ``invalid_token``.
+- The configuration-string keys ``token_provider``, ``azure_resource``,
+  ``azure_client_id`` and ``azure_credential`` are rejected on every protocol.
+  ILP/HTTP and ILP/TCP previously ignored them silently.
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a
