@@ -5,13 +5,14 @@ Migration Guide
 5.0 to 6.0
 ==========
 
-Ten changes need action: the two UUID / fixed-size-binary items below, the
+Eleven changes need action: the two UUID / fixed-size-binary items below, the
 stricter ``schema_overrides`` tuple validation, caps on callback inbox
 capacities and config-string length, the exception a commit raises once its
 sender is closed, the error a query failover that runs out of time raises, a
 warning an abandoned query result now surfaces instead of swallowing,
-``QuestDB.close()`` raising instead of waiting for its own thread's lease, and
-a sender's own callbacks no longer being able to append to it. The new ``ConnectionEventKind.CredentialUnavailable`` event kind
+``QuestDB.close()`` raising instead of waiting for its own thread's lease, a
+sender's own callbacks no longer being able to append to it, and a connected
+sender riding out a rejected credential instead of stopping. The new ``ConnectionEventKind.CredentialUnavailable`` event kind
 needs none — it is additive, and an existing listener keeps working.
 
 * **UUID bytes are canonical RFC 4122.** UUID values are read and written in
@@ -178,6 +179,33 @@ needs none — it is additive, and an existing listener keeps working.
           event = events.get()
           sender.row('conn_events', symbols={'kind': event.kind.tag},
                      at=questdb.ServerTimestamp)
+
+* **A connected sender rides out a rejected credential.** Once a QWP/WebSocket
+  sender has connected, a server that answers its reconnect with HTTP 401 or
+  403 no longer makes it terminal: the sender keeps reconnecting with capped
+  backoff, keeps its unacknowledged rows, and reports each failed attempt as a
+  :attr:`ConnectionEventKind.AuthFailed <questdb.ConnectionEventKind.AuthFailed>`
+  event. 5.0 stopped the sender at the first rejection and raised
+  ``AuthError`` from its next call. Fixed ``token=`` and ``username=`` /
+  ``password=`` credentials are affected too. A connection that is waited for
+  -- a sender's first connection, an eager :func:`questdb.connect` -- still
+  fails at once. Code that relied on the sender stopping must now close it
+  itself, for example when its listener reports ``AuthFailed``, and a listener
+  that tore the pool down on ``AuthFailed`` should expect one event per
+  attempt::
+
+      rejected = threading.Event()
+
+      def on_event(event):
+          if event.kind is questdb.ConnectionEventKind.AuthFailed:
+              rejected.set()   # a listener cannot close its own sender
+
+      sender = Sender.from_conf(conf, connection_listener=on_event)
+      ...
+      if rejected.is_set():   # on the sender's own thread
+          sender.close()
+
+  See :ref:`token_rejections`.
 
 4.x to 5.0
 ==========

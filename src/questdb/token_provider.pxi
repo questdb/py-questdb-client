@@ -855,6 +855,27 @@ cdef object _tp_err_to_py(line_sender_error* err):
     return exc
 
 
+# Whether the cleartext warning below was given. A race between two first
+# attachments can give it twice, which is harmless.
+_tp_cleartext_warned = False
+
+
+def _tp_warn_if_cleartext(protocol):
+    """Warn once per process that a token provider the application attached
+    (``bearer_token_provider=`` or ``oidc_auth=``) is used over a protocol
+    without TLS: every token then crosses the network in cleartext
+    (design/qwp-token-provider-spec.md, section 9). The native core logs the
+    same warning through Rust's ``log`` facade, which Python does not see."""
+    global _tp_cleartext_warned
+    if protocol.tls_enabled or _tp_cleartext_warned:
+        return
+    _tp_cleartext_warned = True
+    logging.getLogger('questdb').warning(
+        'a token provider is used over %s:: (no TLS): bearer tokens cross '
+        'the network in cleartext; use %ss:: in production',
+        protocol.tag, protocol.tag)
+
+
 _TOKEN_PROVIDER_CONF_KEYS = (
     'token_provider', 'azure_resource', 'azure_client_id', 'azure_credential')
 

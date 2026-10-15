@@ -50,8 +50,9 @@ without copying a fixed token into the connection configuration.
    Use ``https::`` or ``wss::``. Over plain ``http::`` or ``ws::`` to a
    non-loopback host, the IdP-issued token is sent as an ``Authorization:
    Bearer`` header in cleartext on every HTTP flush or WebSocket
-   (re)connect, and can be captured in transit. Nothing rejects or warns
-   about that configuration; reserve plaintext for a loopback server.
+   (re)connect, and can be captured in transit. Nothing rejects that
+   configuration -- the client only logs a warning, once per process, on the
+   ``questdb`` logger -- so reserve plaintext for a loopback server.
 
 Token lifecycle
 ===============
@@ -553,7 +554,8 @@ Security notes
   development. ``insecure=True`` applies only to QuestDB discovery transport.
 * Attach the provider to ``https::`` / ``wss::`` transports. Over plaintext
   ``http::`` / ``ws::`` to a non-loopback host the Bearer token travels in
-  cleartext; nothing rejects or warns about that configuration.
+  cleartext; nothing rejects that configuration, and the client only logs a
+  warning, once per process.
 * Identity-provider and QuestDB discovery requests do not use
   ``HTTPS_PROXY``, ``ALL_PROXY`` or their lowercase variants. There is no OIDC
   proxy setting in this release; the IdP and discovery endpoint must be

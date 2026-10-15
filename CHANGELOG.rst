@@ -223,6 +223,33 @@ rather than to the one that abandoned the result. Close results
 deterministically (``with db.query(...) as result:``) or filter
 ``ResourceWarning``.
 
+An established sender rides out a rejected credential
+*****************************************************
+
+Once a QWP/WebSocket sender -- a :class:`Sender <questdb.Sender>` over
+``ws::`` or ``wss::``, or one borrowed from a
+:class:`QuestDB <questdb.QuestDB>` pool -- has connected, a server that
+answers its reconnect with HTTP 401 or 403 no longer stops it. The sender
+keeps reconnecting with capped backoff, keeps its unacknowledged rows, and
+reports each failed attempt as a :attr:`ConnectionEventKind.AuthFailed
+<questdb.ConnectionEventKind.AuthFailed>` event; a wait that times out
+meanwhile names the rejection. In 5.0 the first such rejection made the
+sender terminal, and its next call raised ``AuthError``.
+
+This applies to a fixed ``token=`` or ``username=`` / ``password=`` as well
+as to token providers. While an identity platform or its signing keys are
+unavailable, a server rejects even a valid credential for a while, and
+store-and-forward must not drop a live producer over it. A connection that is
+waited for still fails on the first rejection: a sender's first connection, an
+eager :func:`questdb.connect`, a pool borrow that opens a connection.
+
+To stop on a rejection instead, close the sender from your own code when you
+see ``AuthFailed`` events -- not from inside its connection listener, which
+cannot close its own sender. A store-and-forward slot left by an earlier
+sender (``drain_orphans=on``) whose fixed credential is rejected is now left on
+disk for the next session at once, rather than retried for the rest of this
+one. See :ref:`token_rejections`.
+
 Features
 ~~~~~~~~
 
@@ -247,6 +274,16 @@ tokens from a secrets vault.
 * :class:`questdb.auth.TokenUnavailableError` classifies a source's failure
   as retryable or permanent; a connection the caller waits for retries only a
   retryable one.
+* A store-and-forward slot left by an earlier sender (``drain_orphans=on``)
+  rides out the server rejecting the provider's tokens -- at least 6
+  rejections persisting for ``min(reconnect_max_duration_millis, 5 min)`` --
+  before it is left on disk for the next session.
+* A query whose failover gives up because the provider cannot supply a token
+  raises :class:`~questdb.auth.TokenUnavailableError`, naming the cause,
+  instead of the connection failure that started the failover.
+* A provider used over ``http::`` or ``ws::`` is warned about, once per
+  process, on the ``questdb`` logger: its tokens cross the network in
+  cleartext.
 
 Behaviour follows the cross-language dynamic-credential specification shared
 with the Java client. No provider is selected from a configuration string:
@@ -473,11 +510,11 @@ credential, either before any endpoint was dialled or when replacing a token a
 server rejected with HTTP 401. It has no counterpart before 6.0, because token
 providers did not exist: a listener written against 5.0 cannot have seen it.
 
-``AuthFailed`` keeps the meaning it has always had, now stated explicitly: it
-is unconditionally **terminal**, and means the
-server rejected a credential the client presented, and ``host`` / ``port``
-are always set. A listener that pages, tears down the pool, or exits on it
-needs no further qualification. ``CredentialUnavailable`` sets ``host`` and
+``AuthFailed`` keeps its meaning: the server rejected a credential the client
+presented, and ``host`` / ``port`` are always set. It is terminal before a
+sender's first connection; once connected, a sender keeps reconnecting and
+reports each rejected attempt (see "An established sender rides out a rejected
+credential" above). ``CredentialUnavailable`` sets ``host`` and
 ``port`` to ``None`` when the provider failed before any dial; after a 401
 they name the endpoint that rejected the previous token and ``cause_msg``
 includes the 401. It reports the provider's classification in ``cause_code``,
@@ -502,7 +539,7 @@ A listener that pages on a permanent stop must qualify on ``cause_code``, not
 on the kind alone.
 
 This matches the Java client, whose ``QwpCredentialUnavailableException`` is
-likewise distinct from its terminal ``QwpAuthFailedException``.
+likewise distinct from its ``QwpAuthFailedException``.
 
 This is additive and needs no migration: existing enum ordinals are
 unchanged, the new kind is appended as ``7``, and a 5.0 listener keeps

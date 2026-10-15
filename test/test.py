@@ -143,6 +143,7 @@ def _first_qwp_table_row_count(payload):
 # compiled extension.
 from test_token_provider import (
     BearerTokenProviderAttachTest,
+    CleartextWarningTest,
     ExpiringTokenTest,
     RefreshingTokenProviderTest,
     TokenUnavailableErrorTest,

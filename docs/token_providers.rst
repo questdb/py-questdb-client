@@ -117,6 +117,40 @@ rejected token, asks for a token again, and retries the same endpoint once if
 the token changed -- unless the server's ``WWW-Authenticate`` challenge names
 an error other than ``invalid_token``, which a new token cannot fix.
 
+.. _token_rejections:
+
+When the server keeps rejecting the token
+=========================================
+
+A rejection can persist: while an identity platform or its signing keys are
+unavailable, QuestDB answers HTTP 401 or 403 even to a fresh token. What
+happens then depends on where the client is:
+
+* A connection that is waited for -- a sender's first connection, an eager
+  :func:`questdb.connect` -- fails with ``QuestDBErrorCode.AuthError``, so a
+  wrong credential is seen at once.
+* A QWP/WebSocket sender that has connected keeps reconnecting in the
+  background with capped backoff, keeps its unacknowledged rows, and reports
+  each failed attempt as a :attr:`ConnectionEventKind.AuthFailed
+  <questdb.ConnectionEventKind.AuthFailed>` event; a wait that times out
+  meanwhile names the rejection. The same applies to a fixed ``token=`` or
+  ``username=`` / ``password=``. To give up instead, close the sender from
+  your own code -- not from its connection listener, which cannot close its
+  own sender.
+* A store-and-forward slot left by an earlier sender (``drain_orphans=on``)
+  keeps being retried with the provider's tokens until at least 6 rejections
+  have persisted for ``min(reconnect_max_duration_millis, 5 min)``, or after
+  256. The slot is then left on disk, with the reason in its ``.last_error``,
+  for the next session to drain. With a fixed credential it is left at the
+  first rejection.
+* A query fails. If its failover gives up -- also when the provider cannot
+  supply a token, which raises :class:`~questdb.auth.TokenUnavailableError`
+  -- the pool discards the connection and the next query opens a new one.
+
+Use ``https::`` and ``wss::``: over ``http::`` and ``ws::`` every token
+crosses the network in cleartext. The client logs a warning, once per
+process, on the ``questdb`` logger when a provider is used without TLS.
+
 Recipes
 =======
 

@@ -2459,11 +2459,18 @@ class ConnectionEventKind(TaggedEnum):
     AllEndpointsUnreachable = (
         'all_endpoints_unreachable',
         questdb_connection_event_all_endpoints_unreachable)
-    #: Terminal: the server rejected a credential the client presented.
+    #: The server rejected the credential the client presented: HTTP 401 or
+    #: 403 on the WebSocket upgrade, once per connect attempt.
     #:
     #: :attr:`ConnectionEvent.host` and :attr:`ConnectionEvent.port` are always
-    #: set, and the owning sender/pool operation raises. A listener may page,
-    #: tear down the pool or exit on this without further qualification.
+    #: set. Before a sender's first connection it is terminal, and the owning
+    #: sender/pool operation raises. Once connected, a sender keeps
+    #: reconnecting with capped backoff and keeps its unacknowledged rows,
+    #: reporting each rejected attempt with this event: an identity-platform
+    #: outage makes a server reject a valid credential for a while. To give up
+    #: instead, close the sender from your own code. See
+    #: :ref:`token_rejections`.
+    #:
     #: A 401 followed by failure to obtain a replacement token is instead
     #: :attr:`CredentialUnavailable`, which preserves the rejected endpoint
     #: and retains the provider error's retry/stop classification.
@@ -2497,7 +2504,7 @@ class ConnectionEventKind(TaggedEnum):
     #: ``cause_code``, not on the kind alone.
     #:
     #: Counterpart of the Java client's ``QwpCredentialUnavailableException``,
-    #: which is likewise distinct from its terminal ``QwpAuthFailedException``.
+    #: which is likewise distinct from its ``QwpAuthFailedException``.
     CredentialUnavailable = (
         'credential_unavailable',
         questdb_connection_event_credential_unavailable)
@@ -7025,6 +7032,8 @@ cdef class QuestDB:
                         '"bearer_token_provider" to keep using it.')
                 db._bearer_token_provider = _tp_resolve_bearer_token_provider(
                     bearer_token_provider)
+            if oidc_auth is not None or bearer_token_provider is not None:
+                _tp_warn_if_cleartext(protocol)
             str_to_utf8(b, <PyObject*>native_conf_str, &c_conf)
             if connection_listener is not None:
                 # Register as part of pool construction so recovery senders
@@ -8070,6 +8079,9 @@ cdef class Sender:
                     self._opts, _tp_holder_raw(_holder), &err):
                 raise c_err_to_py(err)
             self._bearer_token_provider = _holder
+
+        if oidc_auth is not None or bearer_token_provider is not None:
+            _tp_warn_if_cleartext(protocol)
 
         if token_x is not None:
             str_to_utf8(b, <PyObject*>token_x, &c_token_x)

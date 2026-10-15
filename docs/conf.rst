@@ -169,8 +169,11 @@ background runner delivers them and reconnects on transient failures,
 walking the ``addr`` server list.
 
 * ``reconnect_max_duration_millis`` - ``int``: Total reconnect/failover
-  budget after a connection loss. Authentication and protocol-version
-  failures are terminal and are not retried.
+  budget after a connection loss. Protocol-version failures are terminal and
+  are not retried. A server that rejects the credential (HTTP 401 or 403)
+  stops a sender only before its first connection; once connected, the sender
+  keeps reconnecting with capped backoff and reports each rejected attempt
+  (see :ref:`token_rejections`).
 
   Default: 300000 (5 minutes).
 

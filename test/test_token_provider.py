@@ -454,5 +454,47 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         self.assertEqual(_client._debug_token_callbacks_size(), baseline)
 
 
+class CleartextWarningTest(unittest.TestCase):
+    """Spec section 9: a provider used without TLS is warned about once per
+    process."""
+
+    def setUp(self):
+        self._warned = _client._tp_cleartext_warned
+        _client._tp_cleartext_warned = False
+
+    def tearDown(self):
+        _client._tp_cleartext_warned = self._warned
+
+    def test_a_provider_without_tls_is_warned_about_once(self):
+        with self.assertLogs('questdb', level='WARNING') as captured:
+            questdb.Sender.from_conf(
+                'ws::addr=127.0.0.1:9000;',
+                bearer_token_provider=lambda: 't').close()
+            questdb.Sender.from_conf(
+                'http::addr=127.0.0.1:9000;',
+                bearer_token_provider=lambda: 't').close()
+            questdb.connect(
+                'ws::addr=127.0.0.1:9000;lazy_connect=true;',
+                bearer_token_provider=lambda: 't').close()
+        self.assertEqual(len(captured.records), 1, captured.output)
+        self.assertIn('over ws:: (no TLS)', captured.output[0])
+        self.assertIn('use wss:: in production', captured.output[0])
+
+    def test_a_pool_without_tls_is_warned_about(self):
+        with self.assertLogs('questdb', level='WARNING') as captured:
+            questdb.connect(
+                'ws::addr=127.0.0.1:9000;lazy_connect=true;',
+                bearer_token_provider=lambda: 't').close()
+        self.assertEqual(len(captured.records), 1, captured.output)
+
+    def test_tls_or_no_provider_is_not_warned_about(self):
+        with self.assertNoLogs('questdb', level='WARNING'):
+            questdb.Sender.from_conf(
+                'wss::addr=127.0.0.1:9000;',
+                bearer_token_provider=lambda: 't').close()
+            questdb.Sender.from_conf('ws::addr=127.0.0.1:9000;').close()
+        self.assertFalse(_client._tp_cleartext_warned)
+
+
 if __name__ == '__main__':
     unittest.main()
