@@ -6975,10 +6975,11 @@ print('OK')
             sender.flush()
             self.assertEqual(len(server.requests), 1)
 
-    def _dataframe_calling(self, sender, hook):
-        """Write a two-row frame through `sender.dataframe()`, calling
-        `hook` once from its plan build: the frame has counted itself
-        in as a row in progress but has not written anything yet."""
+    @staticmethod
+    def _frame_calling(hook):
+        """A two-row frame that calls `hook` once from the plan build of
+        the `dataframe()` writing it: the frame has counted itself in as
+        a row in progress but has not written anything yet."""
 
         class HookFrame(pd.DataFrame):
             armed = False
@@ -6999,13 +7000,18 @@ print('OK')
             'v': [1, 2],
             'ts': pd.to_datetime([0, 1], unit='s')})
         HookFrame.armed = True
+        return frame
+
+    def _dataframe_calling(self, sender, hook):
+        """Write `_frame_calling(hook)` through `sender.dataframe()`."""
+        frame = self._frame_calling(hook)
         sender.dataframe(frame, table_name='t', at='ts')
-        self.assertTrue(HookFrame.fired, 'the plan build never read attrs')
+        self.assertTrue(type(frame).fired, 'the plan build never read attrs')
 
     def _assert_refused_mid_row(self, refused, method):
         self.assertEqual(len(refused), 1)
         self.assertIsNotNone(
-            refused[0], f'{method}() was allowed mid-dataframe')
+            refused[0], f'{method}() was allowed mid-row')
         self.assertIn(
             f"{method}() can't be called while a row is being "
             'written into this buffer',
@@ -7077,13 +7083,75 @@ print('OK')
             self._assert_frame_sent(sender, server)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_rollback_from_inside_its_own_write_is_refused(self):
+        """A rollback called from code that the transaction's own `row()`
+        or `dataframe()` runs while it writes is refused, and the
+        transaction is left as it was. Clearing there would discard what
+        the call is writing, and a frame would go on to write its rows
+        after the clear, outside the transaction. A caught refusal lets
+        the `with` block commit every row; a propagated one rolls the
+        block back."""
+        committed = {
+            'row': [b't v=0i', b't v=1i'],
+            'dataframe': [b't v=0i', b't v=1i', b't v=2i']}
+        for write in ('row', 'dataframe'):
+            for propagate in (False, True):
+                refused = []
+
+                def hook():
+                    try:
+                        txn.rollback()
+                    except qi.QuestDBError as exc:
+                        refused.append(exc)
+                        if propagate:
+                            raise
+                    else:
+                        refused.append(None)
+
+                class HookTz(datetime.tzinfo):
+                    def utcoffset(self, dt):
+                        if not refused:
+                            hook()
+                        return datetime.timedelta(0)
+
+                escaped = None
+                with self.subTest(write=write, propagate=propagate), \
+                        HttpServer() as server, qi.Sender(
+                            qi.Protocol.Http, '127.0.0.1', server.port,
+                            auto_flush=False) as sender:
+                    try:
+                        with sender.transaction('t') as txn:
+                            txn.row(columns={'v': 0}, at=qi.TimestampNanos(1))
+                            if write == 'row':
+                                txn.row(columns={'v': 1}, at=datetime.datetime(
+                                    2025, 1, 1, tzinfo=HookTz()))
+                            else:
+                                txn.dataframe(
+                                    self._frame_calling(hook), at='ts')
+                    except qi.QuestDBError as exc:
+                        escaped = exc
+
+                    self._assert_refused_mid_row(refused, 'rollback')
+                    self.assertEqual(len(sender), 0)
+                    if propagate:
+                        self.assertIs(escaped, refused[0])
+                        self.assertEqual(server.requests, [])
+                    else:
+                        self.assertIsNone(escaped)
+                        # The frame's timestamp unit follows the pandas
+                        # version, so only the rows are compared.
+                        self.assertEqual(len(server.requests), 1)
+                        self.assertEqual(
+                            [line.rsplit(b' ', 1)[0]
+                             for line in server.requests[0].splitlines()],
+                            committed[write])
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_rolling_back_a_transaction_never_entered_keeps_the_frame(self):
-        """A rollback waits for a row in progress to finish before it
-        clears the buffer, which is right for a row the transaction is
-        writing. A transaction that was never entered is writing none,
-        so the row in progress is an ordinary write, and clearing after
-        it would discard every row the frame wrote. That rollback is
-        refused instead."""
+        """A transaction that was never entered owns no rows, so a row in
+        progress while it rolls back is an ordinary write. The rollback
+        is refused, and the frame's rows stay buffered for the next
+        flush."""
         refused = []
         with HttpServer() as server, qi.Sender(
                 qi.Protocol.Http, '127.0.0.1', server.port,
