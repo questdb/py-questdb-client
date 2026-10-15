@@ -7160,7 +7160,9 @@ cdef object _arrow_source_column_names(object frame):
     if _is_pandas_dataframe_object(frame):
         names = frame.columns.tolist()
         # pyarrow's pandas conversion writes each level of an index
-        # other than a RangeIndex as a column named after the level.
+        # other than a RangeIndex as a column. The level's own name is
+        # what the NUL-name check needs; `_pandas_export_dtypes` gives
+        # the same levels the names the export writes them under.
         _dataframe_may_import_deps()
         if not isinstance(frame.index, _PANDAS.RangeIndex):
             names.extend(frame.index.names)
@@ -7178,6 +7180,73 @@ cdef object _arrow_source_column_names(object frame):
                           _PYARROW.RecordBatchReader)):
         return frame.schema.names
     return None
+
+
+cdef object _pandas_export_dtypes(object df, object dtypes):
+    """`dtypes`, the frame's `df.dtypes`, extended with the dtype of each
+    index level the frame's Arrow export writes as a column.
+
+    pyarrow's pandas conversion writes every level of an index other
+    than a RangeIndex as a column. It names the column after the level,
+    converted to a string, unless the level has no name or its name is
+    already taken; then it takes the first free `__index_level_{j}__`,
+    counting from the level's position. A check that judges exported
+    columns by their pandas dtype needs those columns too, or an index
+    level escapes it. None when `dtypes` is None.
+
+    The rule is the one current pyarrow applies. Older pyarrow does not
+    skip a `__index_level_{j}__` that a data column already holds, so the
+    two disagree only on a frame with a data column of that name: the
+    level is then refused under another name, or its claim is not
+    found. `_arrow_source_column_names` lists the same levels under
+    their own names, which is what the NUL-name check reads."""
+    cdef object index
+    cdef object name
+    cdef list taken
+    cdef list names = []
+    cdef list level_dtypes
+    cdef Py_ssize_t i
+    cdef Py_ssize_t j
+    if dtypes is None:
+        return None
+    index = df.index
+    if isinstance(index, _PANDAS.RangeIndex):
+        return dtypes
+    # Each level's dtype, read from the index's metadata rather than
+    # from its materialized values.
+    if isinstance(index, _PANDAS.MultiIndex):
+        level_dtypes = list(index.dtypes)
+    else:
+        level_dtypes = [index.dtype]
+    taken = [_arrow_export_name(label) for label in df.columns]
+    for i, name in enumerate(index.names):
+        # pyarrow compares the level's own name with the converted
+        # names, as here.
+        if name is None or name in taken:
+            j = i
+            while f'__index_level_{j}__' in taken:
+                j += 1
+            name = f'__index_level_{j}__'
+        else:
+            name = _arrow_export_name(name)
+        taken.append(name)
+        names.append(name)
+    return _PANDAS.concat([
+        dtypes, _PANDAS.Series(level_dtypes, index=names, dtype=object)])
+
+
+cdef object _arrow_export_name(object label):
+    """The column name pyarrow's pandas conversion gives `label`.
+
+    `str()` matches pyarrow for every label but a tuple with parts that
+    are not strings. A tuple's name holds parentheses and quotes, which
+    no QuestDB column name may, so such a frame is refused whatever name
+    this returns."""
+    if isinstance(label, str):
+        return label
+    if isinstance(label, bytes):
+        return label.decode('utf-8')
+    return str(label)
 
 
 cdef object _polars_struct_field_with_nul(object dtype):
@@ -8227,6 +8296,7 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef int kind_int
     cdef int arg_int
     cdef object pandas_dtypes = None
+    cdef object export_dtypes
     cdef set binary_names = set()
     cdef list unlabelled = []
     cdef object entry
@@ -8301,12 +8371,15 @@ cdef bint _dataframe_client_try_capsule_path(
         return False
     merged_overrides = _merge_capsule_overrides(
         symbol_overrides, validated_overrides)
+    # The claim lookup and the refusal judge each exported column by its
+    # pandas dtype, and the export includes the frame's index levels.
+    export_dtypes = _pandas_export_dtypes(df, pandas_dtypes)
     roundtrip_overrides = _capsule_roundtrip_overrides(
-        sliceable, pandas_dtypes)
+        sliceable, export_dtypes)
     merged_overrides = _merge_capsule_overrides(
         roundtrip_overrides, merged_overrides)
     _refuse_unlabelled_fsb_pandas_columns(
-        df, pandas_dtypes, merged_overrides)
+        df, export_dtypes, merged_overrides)
     if merged_overrides:
         # A `'binary'` override is a label for this client alone; the
         # native ingest gets the rest.

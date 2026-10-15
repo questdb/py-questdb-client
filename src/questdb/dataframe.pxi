@@ -2333,8 +2333,9 @@ cdef void_int _refuse_unlabelled_fsb_pandas_columns(
     """Refuse a pandas frame's unlabelled 16- or 32-byte column on the
     Arrow capsule path, before any connection is opened.
 
-    `dtypes` is the frame's `df.dtypes`, read once by the caller and
-    shared with the other per-column passes. `overrides` is the merged
+    `dtypes` is the frame's `df.dtypes` plus its exported index levels
+    (`_pandas_export_dtypes`), built once by the caller and shared with
+    the claim lookup. `overrides` is the merged
     list of `(name_bytes, kind, arg)` the capsule path holds:
     `schema_overrides` (`'binary'` included), `symbols` and the frame's
     `df.attrs['questdb']` claims. A column named there is labelled, and

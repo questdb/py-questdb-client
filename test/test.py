@@ -3539,6 +3539,145 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         table_name='blobs', at='ts')['v'],
                     0x17)
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_pandas_index_level_refuses_unlabelled_fixed_size_binary(self):
+        """The Arrow export writes each level of an index other than a
+        RangeIndex as a column, so an unlabelled 16- or 32-byte index
+        level is refused like a data column, under the name the export
+        gives it: the level's own name as a string, or
+        `__index_level_{i}__` when the level has no name or a data column
+        already holds it."""
+        stamps = pd.array(
+            pd.to_datetime(['2025-01-01', '2025-01-02']),
+            dtype=pd.ArrowDtype(pyarrow.timestamp('us')))
+        ints = pd.array([1, 2], dtype=pd.ArrowDtype(pyarrow.int64()))
+        for width in (16, 32):
+            raw = pd.array(
+                [bytes(range(width))] * 2,
+                dtype=pd.ArrowDtype(pyarrow.binary(width)))
+            cases = (
+                ('named', 'k', pd.DataFrame(
+                    {'v': ints, 'ts': stamps},
+                    index=pd.Index(raw, name='k'))),
+                ('unnamed', '__index_level_0__', pd.DataFrame(
+                    {'v': ints, 'ts': stamps}, index=pd.Index(raw))),
+                ('multi', 'k', pd.DataFrame(
+                    {'v': ints, 'ts': stamps},
+                    index=pd.MultiIndex.from_arrays(
+                        [ints, raw], names=['n', 'k']))),
+                ('taken', '__index_level_0__', pd.DataFrame(
+                    {'k': ints, 'ts': stamps},
+                    index=pd.Index(raw, name='k'))),
+                ('int name', '7', pd.DataFrame(
+                    {'v': ints, 'ts': stamps},
+                    index=pd.Index(raw, name=7))),
+                ('bytes name', 'k', pd.DataFrame(
+                    {'v': ints, 'ts': stamps},
+                    index=pd.Index(raw, name=b'k'))),
+            )
+            for case, name, frame in cases:
+                with self.subTest(width=width, case=case):
+                    with QwpAckServer(record_payloads=True) as server:
+                        conf = (
+                            f'ws::addr=127.0.0.1:{server.port};'
+                            'lazy_connect=true;pool_reap=manual;')
+                        with qi.QuestDB.from_conf(conf) as client:
+                            with self.assertRaises(
+                                    qi.QuestDBError) as caught:
+                                client.dataframe(
+                                    frame, table_name='blobs', at='ts')
+                        self.assertEqual(
+                            server.snapshot()['binary_payloads'], [])
+                    self.assertEqual(
+                        caught.exception.code,
+                        qi.QuestDBErrorCode.BadDataFrame)
+                    self.assertIn(
+                        f'its values are {width} bytes',
+                        str(caught.exception))
+                    self.assertIn(
+                        f"schema_overrides={{{name!r}: 'binary'}}",
+                        str(caught.exception))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_label_reaches_an_index_level(self):
+        """Every label the capsule path reads reaches an index level under
+        the name the export gives it: a `df.attrs['questdb']` claim on a
+        column that became the index, a `schema_overrides` entry naming
+        the level, `'binary'` included, and a `pa.uuid()` index."""
+        stamps = pd.array(
+            pd.to_datetime(['2025-01-01', '2025-01-02']),
+            dtype=pd.ArrowDtype(pyarrow.timestamp('us')))
+        ints = pd.array([1, 2], dtype=pd.ArrowDtype(pyarrow.int64()))
+        for width, kind, tag in ((16, 'uuid', 0x0C), (32, 'long256', 0x0D)):
+            with self.subTest(width=width):
+                raw = pd.array(
+                    [bytes(range(width))] * 2,
+                    dtype=pd.ArrowDtype(pyarrow.binary(width)))
+                claimed = pd.DataFrame(
+                    {'k': raw, 'v': ints, 'ts': stamps}).set_index('k')
+                claimed.attrs['questdb'] = {
+                    'version': 1, 'columns': {'k': {'kind': kind}}}
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        claimed, table_name='blobs', at='ts')['k'],
+                    tag)
+                indexed = pd.DataFrame(
+                    {'v': ints, 'ts': stamps},
+                    index=pd.Index(raw, name='k'))
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        indexed, table_name='blobs', at='ts',
+                        schema_overrides={'k': kind})['k'],
+                    tag)
+                self.assertEqual(
+                    self._dataframe_column_types(
+                        indexed, table_name='blobs', at='ts',
+                        schema_overrides={'k': 'binary'})['k'],
+                    0x17)
+        if hasattr(pyarrow, 'uuid'):
+            uuids = pd.array(
+                pyarrow.ExtensionArray.from_storage(
+                    pyarrow.uuid(),
+                    pyarrow.array(
+                        [bytes(range(16))] * 2, pyarrow.binary(16))),
+                dtype=pd.ArrowDtype(pyarrow.uuid()))
+            self.assertEqual(
+                self._dataframe_column_types(
+                    pd.DataFrame(
+                        {'v': ints, 'ts': stamps},
+                        index=pd.Index(uuids, name='k')),
+                    table_name='blobs', at='ts')['k'],
+                0x0C)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_a_claim_a_numpy_index_level_cannot_carry_is_logged(self):
+        """A claim on a NumPy index level is not applied, because the
+        capsule path reads a column's Arrow type from its `ArrowDtype`.
+        The level is still exported, so the claim is reported as one its
+        column cannot carry, and the column goes out as its own type."""
+        stamps = pd.array(
+            pd.to_datetime(['2025-01-01', '2025-01-02']),
+            dtype=pd.ArrowDtype(pyarrow.timestamp('us')))
+        ints = pd.array([1, 2], dtype=pd.ArrowDtype(pyarrow.int64()))
+        frame = pd.DataFrame(
+            {'v': ints, 'ts': stamps},
+            index=pd.Index(
+                np.array([0x01020304, 0x05060708], dtype=np.uint32),
+                name='ip'))
+        frame.attrs['questdb'] = {
+            'version': 1, 'columns': {'ip': {'kind': 'ipv4'}}}
+        with self.assertLogs('questdb', level='WARNING') as caught:
+            types = self._dataframe_column_types(
+                frame, table_name='addrs', at='ts')
+        self.assertEqual(types['ip'], 0x05)
+        self.assertEqual(len(caught.records), 1)
+        message = caught.records[0].getMessage()
+        self.assertIn("column 'ip'", message)
+        self.assertIn("kind 'ipv4'", message)
+
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
     def test_native_arrow_writes_unlabelled_fixed_size_binary_with_a_warning(
             self):
