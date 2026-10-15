@@ -168,16 +168,25 @@ _HEAP_READER = _heap_reader()
 _NO_HEAP_STATS = 'no C heap statistics on this platform or interpreter'
 
 
-def _assert_no_heap_growth(test, work, per_window, windows=6):
+def _assert_no_heap_growth(test, work, per_window, windows=6, leak=16):
     """Fail if the C heap grows in every one of `windows` windows of
-    `per_window` calls to `work`, after one window of warmup.
+    `per_window` calls to `work`, after one window of warmup, by at
+    least half of what a leak of `leak` bytes a call would add.
 
-    A native allocation that is never freed adds at least one block per
-    call -- 16 bytes on macOS, 32 on glibc -- so it grows the heap by
-    more than 8 bytes a call in every window. The smallest window is
-    what is judged, so the occasional step of a few pages -- the
-    allocator taking a new region, glibc's per-thread cache filling --
-    does not read as a leak unless it lands in every window."""
+    `leak` is the smallest per-call leak the test exists to catch. A
+    leak that size adds its full size every call, so it clears the
+    half-size line in every window. The default is one block, the
+    smallest allocation the C allocator hands out -- 16 bytes on macOS,
+    32 on glibc -- which suits a test whose process does nothing else
+    while it measures. A test that also runs a mock server and a network
+    round trip shares the heap with the server's threads and the
+    client's I/O, which move it by a few kilobytes in a typical window,
+    so it passes the size of the allocation it guards instead.
+
+    The smallest window is what is judged, so the occasional step of a
+    few pages -- the allocator taking a new region, glibc's per-thread
+    cache filling -- does not read as a leak unless it lands in every
+    window."""
     read, wrap = _HEAP_READER
     for _ in range(per_window):
         work()
@@ -194,11 +203,13 @@ def _assert_no_heap_growth(test, work, per_window, windows=6):
             growth = (growth + wrap // 2) % wrap - wrap // 2
         growths.append(growth)
         prev = now
+    threshold = per_window * leak // 2
     test.assertLess(
-        min(growths), per_window * 8,
-        f'C heap grew in every window: {growths} bytes over {windows} '
-        f'windows of {per_window} calls; a native allocation is likely '
-        f'never freed.')
+        min(growths), threshold,
+        f'C heap grew by at least {threshold} bytes in every window: '
+        f'{growths} bytes over {windows} windows of {per_window} calls; '
+        f'an allocation of about {leak} bytes or more is likely never '
+        f'freed on each call.')
 
 
 @unittest.skipUnless(pd is not None, 'pandas not installed')
@@ -715,9 +726,19 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
     binary check, which runs after the schema is imported and before
     the first batch is read."""
 
-    # A leaked override array is 24 bytes a column, which the C heap
-    # shows at any column count; a few columns keep each call cheap.
+    # A leaked override array is one `qwp_arrow_override` an entry: a
+    # pointer, a `size_t` and two 32-bit fields, 24 bytes on a 64-bit
+    # build. The C heap shows that at any column count; a few columns
+    # keep each call cheap.
     COLUMNS = 16
+    OVERRIDE_ENTRY_BYTES = 2 * ctypes.sizeof(ctypes.c_void_p) + 8
+
+    # The stream's exported schema is the smallest allocation the
+    # refusals guard: pyarrow 25 puts 160 bytes on the macOS C heap for
+    # each of their two-column schemas, released once the client is done
+    # with it. glibc counts each block's header too, so its figure is no
+    # smaller. Half of that is the line, so a smaller export still shows.
+    SCHEMA_EXPORT_BYTES = 160
 
     @staticmethod
     def _conf(port):
@@ -747,7 +768,12 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
 
                 # Every call waits for a WebSocket ack, which costs about
                 # 40 ms on the Linux CI agents, so the windows are short.
-                _assert_no_heap_growth(self, work, per_window=50)
+                # The override array is the smallest allocation this
+                # guards, and the line it sets clears the few kilobytes a
+                # window the round trip moves the heap by.
+                _assert_no_heap_growth(
+                    self, work, per_window=50,
+                    leak=self.OVERRIDE_ENTRY_BYTES * len(overrides))
 
     def _assert_refusals_leak_nothing(self, frame, code):
         from qwp_ws_ack_server import QwpAckServer
@@ -759,7 +785,9 @@ class TestCapsuleOverridesLeak(unittest.TestCase):
                     self.assertEqual(raised.exception.code, code)
 
                 # Refused before anything is sent, so calls are cheap.
-                _assert_no_heap_growth(self, work, per_window=1000)
+                _assert_no_heap_growth(
+                    self, work, per_window=1000,
+                    leak=self.SCHEMA_EXPORT_BYTES)
             frames = server.wait_binary_frames_settled()
             stats = server.snapshot()
         self.assertEqual(frames, 0)
