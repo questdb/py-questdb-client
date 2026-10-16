@@ -14,6 +14,10 @@ from questdb import _client
 from questdb._client import (
     VERSION,
     Buffer,
+    Char,
+    DateMillis,
+    Geohash,
+    Long256,
     Protocol,
     QuestDBError,
     QuestDBErrorCode,
@@ -32,12 +36,16 @@ IngressErrorCode = QuestDBErrorCode
 
 # ``VERSION``, ``TaggedEnum``, ``QuestDBError`` and ``QuestDBErrorCode`` are
 # importable module attributes (as in 4.x) but are deliberately kept out of
-# ``__all__`` so that ``from questdb.ingress import *`` matches the 4.x
-# star-import surface.
+# ``__all__``. The four QWP row-value wrappers are intentionally added to the
+# otherwise legacy star-import surface.
 __all__ = [
     'Buffer',
+    'Char',
+    'DateMillis',
+    'Geohash',
     'IngressError',
     'IngressErrorCode',
+    'Long256',
     'Protocol',
     'Sender',
     'ServerTimestamp',
