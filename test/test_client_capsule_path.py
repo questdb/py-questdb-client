@@ -1059,6 +1059,7 @@ class TestSchemaOverrides(unittest.TestCase):
         payload = next(
             p for p in stats['binary_payloads']
             if int.from_bytes(p[6:8], 'little') > 0)
+        self.assertIn(b'l\x0d', payload)
         self.assertIn(value, payload)
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')

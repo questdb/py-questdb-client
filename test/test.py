@@ -146,6 +146,8 @@ from test_token_provider import (
     CleartextWarningTest,
     ExpiringTokenTest,
     RefreshingTokenProviderTest,
+    TokenCallbackForkTest,
+    TokenProviderTypingTest,
     TokenUnavailableErrorTest,
 )
 

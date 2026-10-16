@@ -31,11 +31,13 @@
 # `on_rejected()` -- is bridged through the native function table. Either
 # attaches to `Sender` and `questdb.connect` with `bearer_token_provider=`.
 #
-# Native code never holds a Python reference. Each source or provider is kept
-# in `_TOKEN_CALLBACKS` under an integer id, which is the native `user_data`,
-# for as long as its Python wrapper lives; clients keep the wrapper alive the
-# way they keep an `oidc_auth`. The native release callback is deliberately
-# empty: it can run on any thread, after interpreter finalization has begun,
+# Native code never holds a Python reference. `_TOKEN_CALLBACKS` maps native
+# `user_data` ids to weak references to GC-visible handles. Each handle owns
+# its source/provider, and clients retain the handle's wrapper for as long as
+# native clones can call it. The registry must not root ownership cycles such
+# as a bound source method whose owner also owns the provider. Dispatch retains
+# the handle strongly until the callback returns. The native release callback
+# is deliberately empty: it can run on any thread after interpreter finalization,
 # so it must never enter Python (see `_oidc_user_data_release_trampoline`).
 # Every callback goes through the process-wide callback gate that `oidc.pxi`
 # drains before finalization.
@@ -45,6 +47,17 @@ cdef dict _TOKEN_CALLBACKS = {}
 # garbage collection triggered inside a locked section) unregisters itself.
 cdef object _TOKEN_CALLBACKS_LOCK = threading.RLock()
 cdef size_t _token_callback_last_id = 0
+
+
+def _token_after_fork_in_child():
+    # A parent thread may have held this lock when it disappeared. Inherited
+    # providers remain unusable, but even cleanup must not take the old lock.
+    global _TOKEN_CALLBACKS_LOCK
+    _TOKEN_CALLBACKS_LOCK = threading.RLock()
+
+
+if hasattr(os, 'register_at_fork'):
+    os.register_at_fork(after_in_child=_token_after_fork_in_child)
 
 # Longest token-source error message passed to native, which sanitizes and
 # caps it at 256 characters anyway.
@@ -57,7 +70,9 @@ class ExpiringToken:
 
     ``expires_at`` and the optional ``refresh_at`` (the platform's suggested
     refresh time) are timezone-aware :class:`datetime.datetime` objects or
-    epoch seconds. If the platform reports a relative lifetime, such as
+    epoch seconds, within Python's datetime range. Values outside that range
+    are rejected so provider status snapshots always remain readable. If the
+    platform reports a relative lifetime, such as
     OAuth's ``expires_in``, use :meth:`expires_in`, which computes the expiry
     from the local time of receipt.
 
@@ -199,19 +214,29 @@ cdef double _tp_seconds(object value, str name) except? -1.0:
 
 
 cdef double _tp_epoch_seconds(object value, str name) except? -1.0:
+    cdef double seconds
     if isinstance(value, datetime.datetime):
         if value.tzinfo is None:
             raise ValueError(
                 f'"{name}" must be a timezone-aware datetime; a naive one '
                 'is ambiguous')
-        return value.timestamp()
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = value.timestamp()
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
         if value != value or value in (float('inf'), float('-inf')):
             raise ValueError(f'"{name}" must be finite')
-        return float(value)
-    raise TypeError(
-        f'"{name}" must be a datetime or epoch seconds, '
-        f'not {_fqn(type(value))}')
+        seconds = value
+    else:
+        raise TypeError(
+            f'"{name}" must be a datetime or epoch seconds, '
+            f'not {_fqn(type(value))}')
+    # Every accepted expiry must also be representable in status snapshots.
+    # Validate all source shapes, including mutated ExpiringToken instances.
+    try:
+        datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        raise ValueError(
+            f'"{name}" must be representable as a Python datetime') from None
+    return seconds
 
 
 cdef object _tp_format_epoch(double seconds):
@@ -250,8 +275,9 @@ cdef tuple _tp_result_parts(object result):
     cdef object token, expires_at, refresh_at = None
     if isinstance(result, ExpiringToken):
         token = result.token
-        expires_at = result.expires_at
-        refresh_at = result.refresh_at
+        expires_at = _tp_epoch_seconds(result.expires_at, 'expires_at')
+        if result.refresh_at is not None:
+            refresh_at = _tp_epoch_seconds(result.refresh_at, 'refresh_at')
     elif isinstance(result, tuple) and len(result) in (2, 3):
         token = result[0]
         expires_at = _tp_epoch_seconds(result[1], 'expires_at')
@@ -331,10 +357,15 @@ cdef void _tp_sink_unavailable(questdb_token_sink* sink) noexcept nogil:
 cdef void _token_source_dispatch(
         size_t callback_id, questdb_token_sink* sink) noexcept with gil:
     cdef object source
+    cdef _TokenProviderHandle handle
     cdef bytes encoded
     try:
-        with _TOKEN_CALLBACKS_LOCK:
-            source = _TOKEN_CALLBACKS.get(callback_id)
+        handle = _token_callback_get(callback_id)
+        if handle is None:
+            _tp_sink_text_error(
+                sink, True, -1, 'the token source was released')
+            return
+        source = handle._target
         if source is None:
             _tp_sink_text_error(
                 sink, True, -1, 'the token source was released')
@@ -372,10 +403,15 @@ cdef void _token_source_trampoline(
 cdef void _token_get_dispatch(
         size_t callback_id, questdb_token_sink* sink) noexcept with gil:
     cdef object provider
+    cdef _TokenProviderHandle handle
     cdef bytes encoded
     try:
-        with _TOKEN_CALLBACKS_LOCK:
-            provider = _TOKEN_CALLBACKS.get(callback_id)
+        handle = _token_callback_get(callback_id)
+        if handle is None:
+            _tp_sink_text_error(
+                sink, True, -1, 'the token provider was released')
+            return
+        provider = handle._target
         if provider is None:
             _tp_sink_text_error(
                 sink, True, -1, 'the token provider was released')
@@ -419,9 +455,12 @@ cdef void _token_rejected_dispatch(
         size_t token_len,
         uint16_t http_status) noexcept with gil:
     cdef object provider
+    cdef _TokenProviderHandle handle
     try:
-        with _TOKEN_CALLBACKS_LOCK:
-            provider = _TOKEN_CALLBACKS.get(callback_id)
+        handle = _token_callback_get(callback_id)
+        if handle is None:
+            return
+        provider = handle._target
         on_rejected = getattr(provider, 'on_rejected', None)
         if on_rejected is None:
             return
@@ -460,18 +499,31 @@ cdef void _token_release_trampoline(void* user_data) noexcept nogil:
     pass
 
 
-cdef size_t _token_callback_register(object target) except 0:
+cdef size_t _token_callback_register(
+        _TokenProviderHandle handle, object target) except 0:
     global _token_callback_last_id
+    handle._target = target
+    cdef object reference = PyWeakref_NewRef(handle, None)
     with _TOKEN_CALLBACKS_LOCK:
         _token_callback_last_id += 1
-        _TOKEN_CALLBACKS[_token_callback_last_id] = target
+        _TOKEN_CALLBACKS[_token_callback_last_id] = reference
         return _token_callback_last_id
 
 
+cdef _TokenProviderHandle _token_callback_get(size_t callback_id):
+    cdef object reference
+    with _TOKEN_CALLBACKS_LOCK:
+        reference = _TOKEN_CALLBACKS.get(callback_id)
+    return None if reference is None else reference()
+
+
 cdef void _token_callback_unregister(size_t callback_id) noexcept:
+    cdef object removed
     try:
         with _TOKEN_CALLBACKS_LOCK:
-            _TOKEN_CALLBACKS.pop(callback_id, None)
+            removed = _TOKEN_CALLBACKS.pop(callback_id, None)
+        # Drop references outside the lock, even if registry ownership changes.
+        removed = None
     except BaseException:
         pass
 
@@ -481,10 +533,23 @@ def _debug_token_callbacks_size():
         return len(_TOKEN_CALLBACKS)
 
 
+def _debug_token_callbacks_ids():
+    with _TOKEN_CALLBACKS_LOCK:
+        return frozenset(_TOKEN_CALLBACKS)
+
+
+def _debug_token_callbacks_lock():
+    """Internal hook for a deterministic inherited-lock subprocess test."""
+    return _TOKEN_CALLBACKS_LOCK
+
+
+@cython.no_gc_clear
 cdef class _TokenProviderHandle:
     """Owns one native provider handle and its registry entry."""
     cdef questdb_token_provider* _raw
     cdef size_t _callback_id
+    cdef object _target
+    cdef object __weakref__
 
     def __cinit__(self):
         self._raw = NULL
@@ -571,8 +636,11 @@ cdef class RefreshingTokenProvider:
 
     Clients keep the provider alive and never close it: close it, or use it as
     a context manager, once no client needs it. Closing it fails every client
-    that still uses it. A provider is not usable across ``fork()``. Its
-    ``repr`` never shows the token.
+    that still uses it. Providers and clients must not be used across
+    ``fork()``. Use ``spawn``/``exec`` workers and construct providers there,
+    or fork before constructing any providers or clients: a fresh provider
+    alone does not repair a multithreaded parent's inherited native state.
+    Its ``repr`` never shows the token.
     """
     cdef _TokenProviderHandle _handle
     cdef str _name
@@ -648,7 +716,7 @@ cdef class RefreshingTokenProvider:
             else:
                 options.forced_wait_ms = ms
         handle = _TokenProviderHandle()
-        callback_id = _token_callback_register(fetch)
+        callback_id = _token_callback_register(handle, fetch)
         handle._callback_id = callback_id
         with nogil:
             raw = questdb_refreshing_token_provider_new(
@@ -720,7 +788,13 @@ cdef class RefreshingTokenProvider:
     @property
     def closed(self) -> bool:
         """Whether the provider is closed."""
-        return self.status.closed
+        cdef _TokenProviderHandle handle = self._require_handle()
+        cdef questdb_token_provider_status status
+        memset(&status, 0, sizeof(questdb_token_provider_status))
+        status.struct_size = sizeof(questdb_token_provider_status)
+        if not questdb_token_provider_get_status(handle._raw, &status):
+            return True
+        return bool(status.closed)
 
     @property
     def status(self):
@@ -784,7 +858,7 @@ cdef class _ApplicationTokenProvider:
                     f'method, not {_fqn(type(target))}')
             adapter = _CallableTokenProvider(target)
         self._target = target
-        callback_id = _token_callback_register(adapter)
+        callback_id = _token_callback_register(handle, adapter)
         handle._callback_id = callback_id
         vtable.struct_size = sizeof(questdb_token_provider_vtable)
         vtable.get_token = _token_get_trampoline

@@ -25,9 +25,10 @@
 """
 PG-wire connection adapters.
 
-Feed an :class:`OidcDeviceAuth` token into SQLAlchemy / psycopg as the QuestDB
-``_sso`` password. These are thin conveniences over the token; native QuestDB
-senders and pools should attach the provider directly through ``oidc_auth=``.
+Feed a :class:`~questdb.auth.BearerTokenProvider` token into SQLAlchemy / psycopg
+as the QuestDB ``_sso`` password. These are thin conveniences over the token;
+native QuestDB senders and pools should attach the provider directly through
+``bearer_token_provider=`` (or ``oidc_auth=`` for :class:`OidcDeviceAuth`).
 
 Because the credential travels as the PG password, both adapters default to
 authenticated TLS (``sslmode="verify-full"``) unless the host is a numeric
@@ -56,7 +57,7 @@ from ._errors import OidcConfigError
 if TYPE_CHECKING:
     # Annotation-only dependencies. Runtime imports stay lazy/centralized in
     # questdb.auth; postponed annotations preserve these public signatures.
-    from questdb._client import OidcDeviceAuth
+    from ._token_provider import BearerTokenProvider
     import sqlalchemy.engine
 
 _DEFAULT_PG_PORT = 8812
@@ -435,7 +436,7 @@ def _effective_sslmode(host: str, sslmode: Optional[str]) -> Optional[str]:
 
 
 def sqlalchemy_engine(
-        auth: OidcDeviceAuth,
+        auth: BearerTokenProvider,
         url: str,
         *,
         host: Optional[str] = None,
@@ -596,7 +597,7 @@ def sqlalchemy_engine(
 
 
 def psycopg_connect(
-        auth: OidcDeviceAuth,
+        auth: BearerTokenProvider,
         url: str,
         *,
         host: Optional[str] = None,

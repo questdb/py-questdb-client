@@ -499,7 +499,8 @@ cdef inline object c_err_to_py(line_sender_error* err):
 
     Returns an ``OidcError`` (from ``questdb.auth``) when the native error has
     an OIDC failure anywhere in its causal chain -- reachable only on an
-    ``oidc_auth`` transport -- otherwise a plain ``QuestDBError`` subclass.
+    ``oidc_auth`` transport -- or ``TokenUnavailableError`` for a generic
+    provider failure; otherwise a plain ``QuestDBError`` subclass.
 
     Note the native predicate is "caused by", not "is": a transport that
     re-classifies an error keeps the auth payload attached, so a flush or
@@ -531,8 +532,9 @@ cdef inline object c_err_to_py(line_sender_error* err):
 cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     """Build the Python exception for a C error, which will be freed.
 
-    Like ``c_err_to_py`` but formats the message through ``fmt`` -- including
-    on the OIDC branch. ``questdb_error_oidc_get_view`` reports an OIDC failure
+    Like ``c_err_to_py`` but formats the message through ``fmt``, preserving
+    generic provider classification and every OIDC subclass.
+    ``questdb_error_oidc_get_view`` reports an OIDC failure
     anywhere in the error's *causal chain*, not that the error is one: native
     keeps the auth payload attached when a transport re-classifies an error on
     its way out, so a failure whose root cause was a token refresh answers true
@@ -552,24 +554,12 @@ cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
       reaches this with a token failure during an auto-flush, and the
       ``args`` re-frame below runs in production.
     """
-    cdef object oidc_exc
-    cdef questdb_oidc_error_view oidc_view
-    if err != NULL:
-        memset(&oidc_view, 0, sizeof(questdb_oidc_error_view))
-        oidc_view.struct_size = sizeof(questdb_oidc_error_view)
-        if questdb_error_oidc_get_view(err, &oidc_view):
-            oidc_exc = _oidc_err_to_py(err)
-            # Re-frame in place: the class and every typed attribute
-            # (.status / .retry_after / .error / .error_description / .code)
-            # must survive, and ``args`` is what ``Exception.__str__`` reads.
-            oidc_exc.args = (fmt.format(str(oidc_exc)),)
-            return oidc_exc
-    cdef object tup = c_err_to_fields(err)
-    if tup[0] == QuestDBErrorCode.ServerRejection:
-        return QuestDBServerRejectionError(
-            tup[0], fmt.format(tup[1]), tup[2], in_doubt=tup[3])
-    return QuestDBError(
-        tup[0], fmt.format(tup[1]), tup[2], in_doubt=tup[3])
+    # Use the same converter for every path: formatting must not flatten
+    # generic provider failures, OIDC subclasses, or structured rejections.
+    # It consumes err exactly once; args is what Exception.__str__ reads.
+    cdef object exc = c_err_to_py(err)
+    exc.args = (fmt.format(str(exc)),)
+    return exc
 
 
 cdef inline void_int reserve_buffer(
@@ -6522,6 +6512,11 @@ cdef void_int _direct_dataframe_run(
                 else:
                     budget_ms = 0
                     continue
+            # A transport can retain SocketError / FailoverRetry around a
+            # permanent provider failure so background delivery can recover.
+            # Foreground calls must honor the provider's retry classification.
+            if isinstance(exc, TokenUnavailableError) and not exc.retryable:
+                raise exc
             # FailoverRetry = transient flush/sync; SocketError = a
             # re-borrow that has not reached a live primary yet. A *busy*
             # OIDC refusal is transient whatever its code: it clears as soon
@@ -7465,6 +7460,7 @@ cdef class QuestDB:
         try:
             reader_handle = _borrow_reader_from_pool(db)
             reader_handle._oidc_auth = self._oidc_auth
+            reader_handle._bearer_token_provider = self._bearer_token_provider
             cursor_handle = _execute_query(
                 reader_handle, sql, binds, reset_symbol_dict)
         finally:
@@ -7502,6 +7498,7 @@ cdef class QuestDB:
         try:
             reader_handle = _borrow_reader_from_pool(db)
             reader_handle._oidc_auth = self._oidc_auth
+            reader_handle._bearer_token_provider = self._bearer_token_provider
             lease = PooledReader.__new__(PooledReader)
             lease._attach(self, reader_handle, _db_thread_token())
             db_use = False

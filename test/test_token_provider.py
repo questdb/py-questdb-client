@@ -34,9 +34,17 @@ test_token_provider`` after building in place.
 import collections
 import datetime
 import gc
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import textwrap
 import threading
 import time
 import unittest
+import weakref
 
 import questdb
 from questdb import _client
@@ -49,6 +57,17 @@ from questdb.auth import (
 )
 
 from qwp_ws_ack_server import QwpAckServer
+from qwp_egress_failover_server import EgressFailoverServer
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+
+try:
+    import pyarrow as pa
+except ImportError:
+    pa = None
 
 UTC = datetime.timezone.utc
 
@@ -71,6 +90,14 @@ def _await(predicate, timeout=10.0):
         time.sleep(0.005)
 
 
+def _collect_until(predicate):
+    def collected():
+        gc.collect()
+        return predicate()
+
+    _await(collected)
+
+
 class ExpiringTokenTest(unittest.TestCase):
     def test_expiry_forms(self):
         at = datetime.datetime(2030, 1, 1, tzinfo=UTC)
@@ -91,6 +118,14 @@ class ExpiringTokenTest(unittest.TestCase):
             ExpiringToken('t', '2030-01-01')
         with self.assertRaises(ValueError):
             ExpiringToken.expires_in('t', -1)
+
+    def test_expiry_must_fit_a_datetime_snapshot(self):
+        for keyword in ('expires_at', 'refresh_at'):
+            for value in (1e12, -1e12):
+                with self.subTest(keyword=keyword, value=value):
+                    args = {'expires_at': 2e9, keyword: value}
+                    with self.assertRaisesRegex(ValueError, 'Python datetime'):
+                        ExpiringToken('t', **args)
 
     def test_repr_never_shows_the_token(self):
         text = repr(ExpiringToken('SENTINEL-secret', 2e9))
@@ -242,14 +277,79 @@ class RefreshingTokenProviderTest(unittest.TestCase):
         self.assertGreater(len(ticks), 5, 'Python could not run meanwhile')
 
     def test_the_source_is_released_with_the_provider(self):
-        baseline = _client._debug_token_callbacks_size()
+        before = _client._debug_token_callbacks_ids()
         source, _ = _counting_source()
+        watch = weakref.ref(source)
         provider = RefreshingTokenProvider(source)
-        self.assertEqual(_client._debug_token_callbacks_size(), baseline + 1)
+        registered = _client._debug_token_callbacks_ids() - before
+        self.assertEqual(len(registered), 1)
+        del source
+        self.assertIsNotNone(watch())
         provider.close()
         del provider
-        gc.collect()
-        self.assertEqual(_client._debug_token_callbacks_size(), baseline)
+        _collect_until(lambda: watch() is None and not (
+            registered & _client._debug_token_callbacks_ids()))
+
+    def test_owning_source_cycles_are_collected_even_without_close(self):
+        class Credentials:
+            def __init__(self):
+                self.tokens = RefreshingTokenProvider(self.fetch_token)
+
+            def fetch_token(self):
+                return ExpiringToken.expires_in('t', 3600)
+
+        for close in (False, True):
+            with self.subTest(close=close):
+                before = _client._debug_token_callbacks_ids()
+                owner = Credentials()
+                self.assertTrue(owner.tokens.await_ready(10))
+                registered = _client._debug_token_callbacks_ids() - before
+                self.assertEqual(len(registered), 1)
+                if close:
+                    owner.tokens.close()
+                watch = weakref.ref(owner)
+                del owner
+                _collect_until(lambda: watch() is None and not (
+                    registered & _client._debug_token_callbacks_ids()))
+
+    def test_dispatch_keeps_an_owning_source_alive_during_collection(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class Credentials:
+            def __init__(self):
+                self.tokens = RefreshingTokenProvider(self.fetch_token)
+
+            def fetch_token(self):
+                started.set()
+                release.wait(10)
+                return ExpiringToken.expires_in('t', 3600)
+
+        before = _client._debug_token_callbacks_ids()
+        owner = Credentials()
+        watch = weakref.ref(owner)
+        registered = _client._debug_token_callbacks_ids() - before
+        try:
+            self.assertTrue(started.wait(5))
+            del owner
+            gc.collect()
+            self.assertIsNotNone(watch(), 'dispatch must retain its callback owner')
+        finally:
+            release.set()
+        _collect_until(lambda: watch() is None and not (
+            registered & _client._debug_token_callbacks_ids()))
+
+    def test_far_future_source_results_are_classified_not_broken_snapshots(self):
+        token = ExpiringToken('t', 2e9)
+        token.expires_at = 1e12  # Mutated instances are validated at fetch too.
+        for source in (lambda: ('t', 1e12), lambda: token):
+            with self.subTest(source=source):
+                with RefreshingTokenProvider(source, cold_wait=0.02) as provider:
+                    with self.assertRaises(TokenUnavailableError):
+                        provider.token()
+                    self.assertFalse(provider.closed)
+                    self.assertIn('Python datetime', provider.status.last_failure.message)
+                self.assertTrue(provider.closed)
 
     def test_invalid_arguments_are_rejected(self):
         with self.assertRaises(TypeError):
@@ -447,11 +547,199 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         self.assertIn('token_provider', str(caught.exception))
 
     def test_the_holder_lives_with_the_sender(self):
-        baseline = _client._debug_token_callbacks_size()
+        class Provider:
+            def __call__(self):
+                return 'fixed'
+
+        before = _client._debug_token_callbacks_ids()
+        provider = Provider()
+        watch = weakref.ref(provider)
         with QwpAckServer(required_authorization='Bearer fixed') as server:
-            self._send_one_row(server, lambda: 'fixed')
-        gc.collect()
-        self.assertEqual(_client._debug_token_callbacks_size(), baseline)
+            sender = questdb.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};',
+                bearer_token_provider=provider, auto_flush=False)
+            registered = _client._debug_token_callbacks_ids() - before
+            self.assertEqual(len(registered), 1)
+            del provider
+            gc.collect()
+            self.assertIsNotNone(watch())
+            with sender:
+                sender.row('t', columns={'v': 1}, at=questdb.ServerTimestamp)
+                sender.flush()
+            del sender
+        _collect_until(lambda: watch() is None and not (
+            registered & _client._debug_token_callbacks_ids()))
+
+    def test_an_unclosed_provider_client_cycle_is_collected(self):
+        class Owner:
+            def __init__(self):
+                self.client = questdb.connect(
+                    'ws::addr=127.0.0.1:9000;lazy_connect=true;',
+                    bearer_token_provider=self)
+
+            def token(self):
+                return 't'
+
+        before = _client._debug_token_callbacks_ids()
+        owner = Owner()
+        registered = _client._debug_token_callbacks_ids() - before
+        self.assertEqual(len(registered), 1)
+        watch = weakref.ref(owner)
+        del owner
+        _collect_until(lambda: watch() is None and not (
+            registered & _client._debug_token_callbacks_ids()))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_query_retains_provider_through_failover_after_pool_close(self):
+        for refreshing in (False, True):
+            with self.subTest(refreshing=refreshing), EgressFailoverServer() as server:
+                class Provider:
+                    def __call__(self):
+                        if refreshing:
+                            return ExpiringToken.expires_in('valid', 3600)
+                        return 'valid'
+
+                before = _client._debug_token_callbacks_ids()
+                source = Provider()
+                watch = weakref.ref(source)
+                provider = RefreshingTokenProvider(source) if refreshing else source
+                db = questdb.connect(
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                    'reconnect_max_duration_millis=1000;',
+                    bearer_token_provider=provider)
+                result = db.query('select v from t')
+                registered = _client._debug_token_callbacks_ids() - before
+                self.assertEqual(len(registered), 1)
+                del provider, source
+                db.close()
+                del db
+                gc.collect()
+                self.assertIsNotNone(watch())
+                self.assertTrue(registered <= _client._debug_token_callbacks_ids())
+                try:
+                    server.release_first.set()
+                    self.assertEqual(result.to_pandas()['v'].tolist(), [1, 2, 3])
+                    self.assertGreaterEqual(len(server.authorizations), 2)
+                    self.assertTrue(all(
+                        value == 'Bearer valid' for value in server.authorizations))
+                finally:
+                    result.close()
+                del result
+                _collect_until(lambda: watch() is None and not (
+                    registered & _client._debug_token_callbacks_ids()))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_permanent_failure_stops_pandas_dataframe_retries(self):
+        self._assert_permanent_dataframe_failure(pd.DataFrame({'v': [1]}))
+
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_permanent_failure_stops_arrow_dataframe_retries(self):
+        self._assert_permanent_dataframe_failure(pa.table({'v': [1]}))
+
+    def _assert_permanent_dataframe_failure(self, frame):
+        calls = []
+
+        def provider():
+            calls.append(1)
+            raise TokenUnavailableError('identity not assigned', retryable=False)
+
+        with questdb.connect(
+                'ws::addr=127.0.0.1:9000;lazy_connect=true;'
+                'reconnect_max_duration_millis=250;',
+                bearer_token_provider=provider) as db:
+            with self.assertRaises(TokenUnavailableError) as caught:
+                db.dataframe(frame, table_name='t', at=questdb.ServerTimestamp)
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(calls), 1)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_dataframe_auto_flush_preserves_provider_classification(self):
+        def provider():
+            raise TokenUnavailableError(
+                'identity not assigned', retryable=False, retry_after=2.5)
+
+        sender = questdb.Sender(
+            questdb.Protocol.Http, '127.0.0.1', 9000,
+            bearer_token_provider=provider, protocol_version=2,
+            auto_flush_rows=1, auto_flush_bytes=False, auto_flush_interval=False)
+        sender.establish()
+        try:
+            with self.assertRaises(TokenUnavailableError) as caught:
+                sender.dataframe(
+                    pd.DataFrame({'v': [1]}), table_name='t',
+                    at=questdb.ServerTimestamp)
+            self.assertFalse(caught.exception.retryable)
+            self.assertEqual(caught.exception.retry_after, 2.5)
+            self.assertIs(caught.exception.code, questdb.QuestDBErrorCode.SocketError)
+            self.assertIn(' - See https://', str(caught.exception))
+        finally:
+            sender.close(flush=False)
+
+
+@unittest.skipUnless(hasattr(os, 'fork'), 'os.fork required')
+class TokenCallbackForkTest(unittest.TestCase):
+    def test_child_cleanup_does_not_acquire_an_inherited_registry_lock(self):
+        # No native provider/thread creation in the child: only exercise Python
+        # registry cleanup. Native fork+thread continuation is not supported.
+        script = textwrap.dedent('''
+            import os, select, signal, threading, warnings
+            from questdb import _client
+            locked = threading.Event()
+            release = threading.Event()
+            def hold():
+                with _client._debug_token_callbacks_lock():
+                    locked.set()
+                    release.wait(10)
+            thread = threading.Thread(target=hold)
+            thread.start()
+            assert locked.wait(2)
+            r, w = os.pipe()
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', DeprecationWarning)
+                pid = os.fork()
+            if pid == 0:
+                os.close(r)
+                _client._debug_token_callbacks_size()
+                os.write(w, b'1')
+                os._exit(0)
+            os.close(w)
+            ready = select.select([r], [], [], 3)[0]
+            data = os.read(r, 1) if ready else b''
+            os.close(r)
+            release.set()
+            thread.join(2)
+            if not ready:
+                os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
+            assert data == b'1' and status == 0, (data, status)
+        ''')
+        env = os.environ.copy()
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, (
+            os.path.dirname(os.path.dirname(questdb.__file__)),
+            env.get('PYTHONPATH'))))
+        result = subprocess.run(
+            [sys.executable, '-c', script], env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+
+@unittest.skipUnless(importlib.util.find_spec('mypy'), 'optional mypy not installed')
+class TokenProviderTypingTest(unittest.TestCase):
+    def test_supported_sources_snapshots_and_adapters_typecheck(self):
+        root = Path(__file__).resolve().parent.parent
+        env = os.environ.copy()
+        env['MYPYPATH'] = str(root / 'src')
+        with tempfile.TemporaryDirectory() as cache:
+            result = subprocess.run(
+                [sys.executable, '-m', 'mypy', '--no-incremental',
+                 '--cache-dir', cache, '--follow-imports=silent',
+                 # Existing TaggedEnum stub diagnostic, unrelated to this API.
+                 '--disable-error-code=misc',
+                 str(root / 'test' / 'typing_token_providers.py')],
+                cwd=root, env=env, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout)
 
 
 class CleartextWarningTest(unittest.TestCase):

@@ -48,9 +48,9 @@ cdef class _ReaderHandle:
     even if the user's ``QuestDB.close()`` ran after ``query()``
     returned but before the reader closed.
 
-    ``_oidc_auth`` retains a provider while this reader may reconnect, so a
-    result/stream that outlives its QuestDB handle still reports refresh and
-    persistence diagnostics to the Python logger.
+    ``_oidc_auth`` and ``_bearer_token_provider`` retain their Python callback
+    owners while this reader may reconnect, including when a result/stream
+    outlives its QuestDB handle.
 
     ``_must_close`` defaults to ``True``: only the generator's
     clean-drain path (or code that explicitly knows the cursor
@@ -65,11 +65,13 @@ cdef class _ReaderHandle:
     # Keep the Python callback target alive for as long as a reader can
     # silently refresh its native auth clone (including after QuestDB.close).
     cdef object _oidc_auth
+    cdef object _bearer_token_provider
 
     def __cinit__(self):
         self._reader = NULL
         self._must_close = True
         self._oidc_auth = None
+        self._bearer_token_provider = None
 
     cdef _attach(self, qwp_reader* reader):
         self._reader = reader
@@ -85,6 +87,7 @@ cdef class _ReaderHandle:
         _ensure_has_gil(&gs)
         self._reader = NULL
         self._oidc_auth = None
+        self._bearer_token_provider = None
 
     def __dealloc__(self):
         self._close()

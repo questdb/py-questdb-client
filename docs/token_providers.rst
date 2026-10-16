@@ -101,7 +101,12 @@ Clients keep the provider alive while they use it, but never close it. Close
 it, or use it as a context manager, once no client needs it: closing fails
 every client still using it.
 
-A provider is not usable across ``fork()``: create a new one in the child.
+Providers and their clients must not be used across ``fork()``. Start workers
+with ``spawn`` (or ``exec()`` after forking), then construct providers inside
+them. Merely constructing a fresh provider in a child of a multithreaded
+process does not make it safe: native runtimes, locks and isolated-worker
+accounting can still describe vanished parent threads. Pre-fork worker models
+must fork before constructing any providers or clients.
 
 Application providers
 =====================

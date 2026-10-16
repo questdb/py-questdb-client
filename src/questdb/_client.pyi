@@ -67,6 +67,7 @@ from decimal import Decimal
 from .auth._config import OidcConfig
 from .auth._render import Renderer
 from .auth._store import FileTokenStore
+from .auth._token_provider import TokenSource
 
 
 #: One ``schema_overrides`` value: a QuestDB column kind to reclassify a
@@ -302,6 +303,14 @@ class FetchFailure:
     message: str
     at: Optional[datetime]
 
+    def __init__(
+        self,
+        retryable: bool,
+        retry_after: Optional[float],
+        message: str,
+        at: Optional[datetime],
+    ) -> None: ...
+
 
 class TokenProviderStatus:
     """A snapshot of a :class:`RefreshingTokenProvider`."""
@@ -312,13 +321,22 @@ class TokenProviderStatus:
     consecutive_failures: int
     last_failure: Optional[FetchFailure]
 
+    def __init__(
+        self,
+        closed: bool,
+        token_expires_at: Optional[datetime],
+        last_success_at: Optional[datetime],
+        consecutive_failures: int,
+        last_failure: Optional[FetchFailure],
+    ) -> None: ...
+
 
 class RefreshingTokenProvider:
     """A proactively refreshing token cache in front of a token source."""
 
     def __init__(
         self,
-        source: Callable[[], Any],
+        source: Union[TokenSource, Callable[[], Any]],
         *,
         name: Optional[str] = None,
         refresh_margin: Optional[Union[float, timedelta]] = None,
