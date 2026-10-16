@@ -77,7 +77,7 @@ cdef class _ReaderHandle:
     cdef _attach(self, qwp_reader* reader):
         self._reader = reader
 
-    cdef void _close(self) noexcept:
+    cdef void _close(self, bint dealloc=False) noexcept:
         cdef PyThreadState* gs = NULL
         if self._reader == NULL:
             return
@@ -88,12 +88,13 @@ cdef class _ReaderHandle:
         _ensure_has_gil(&gs)
         self._reader = NULL
         self._oidc_auth = None
-        # Also called by __dealloc__; do not recreate a dying PyPy wrapper.
-        if self.__dict__ is not None:
-            self.__dict__['_bearer_token_provider'] = None
+        # Leave dictionary cleanup to Cython/PyPy during __dealloc__: normal
+        # attribute access would recreate the dying PyPy wrapper.
+        if not dealloc:
+            self._bearer_token_provider = None
 
     def __dealloc__(self):
-        self._close()
+        self._close(dealloc=True)
 
 
 @cython.no_gc_clear

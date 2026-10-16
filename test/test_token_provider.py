@@ -570,6 +570,75 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         _collect_until(lambda: watch() is None and not (
             registered & _client._debug_token_callbacks_ids()))
 
+    def test_closing_a_sender_releases_its_provider_while_still_alive(self):
+        class Provider:
+            def __call__(self):
+                return 'fixed'
+
+        class SenderSubclass(questdb.Sender):
+            pass
+
+        # Explicit close must clear the live Python dictionary, including on
+        # PyPy and Python subclasses (which need not share the C dict layout).
+        for sender_type in (questdb.Sender, SenderSubclass):
+            with self.subTest(sender_type=sender_type):
+                before = _client._debug_token_callbacks_ids()
+                provider = Provider()
+                watch = weakref.ref(provider)
+                sender = sender_type(
+                    questdb.Protocol.Ws, '127.0.0.1', 9000,
+                    bearer_token_provider=provider)
+                self.assertIsInstance(sender, sender_type)
+                registered = _client._debug_token_callbacks_ids() - before
+                self.assertEqual(len(registered), 1)
+                del provider
+                gc.collect()
+                self.assertIsNotNone(watch())
+                sender.close(flush=False)
+                sender.close(flush=False)
+                _collect_until(lambda: watch() is None and not (
+                    registered & _client._debug_token_callbacks_ids()))
+
+    def test_sender_finalization_does_not_emit_unraisable_errors(self):
+        # Ordinary attribute access in __dealloc__ tries to resurrect a dying
+        # PyPy cpyext wrapper. The process can exit successfully while printing
+        # an ignored exception, so check stderr as well as the exit status.
+        script = textwrap.dedent('''
+            import gc, sys
+            import questdb
+            from questdb import _client
+            print('__QDB_BEGIN_FINALIZATION__', file=sys.stderr, flush=True)
+            class SenderSubclass(questdb.Sender):
+                pass
+            for sender_type in (questdb.Sender, SenderSubclass):
+                for initialized in (False, True):
+                    for clear_dict in (False, True):
+                        if initialized:
+                            sender = sender_type(
+                                questdb.Protocol.Wss, '127.0.0.1', 9000,
+                                bearer_token_provider=lambda: 'fixed')
+                        else:
+                            sender = sender_type.__new__(sender_type)
+                        if clear_dict:
+                            sender.__dict__.clear()
+                        del sender
+                        for _ in range(20):
+                            gc.collect()
+            assert not _client._debug_token_callbacks_ids()
+        ''')
+        env = os.environ.copy()
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, (
+            os.path.dirname(os.path.dirname(questdb.__file__)),
+            env.get('PYTHONPATH'))))
+        result = subprocess.run(
+            [sys.executable, '-c', script], env=env,
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        _, marker, diagnostics = result.stderr.partition(
+            '__QDB_BEGIN_FINALIZATION__\n')
+        self.assertTrue(marker, result.stderr)
+        self.assertEqual(diagnostics, '')
+
     def test_an_unclosed_provider_client_cycle_is_collected(self):
         # Neither the pool nor the standalone sender may hide this ownership
         # edge in a cpyext field: PyPy would keep the entire cycle alive.
@@ -592,6 +661,30 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                 del owner
                 _collect_until(lambda: watch() is None and not (
                     registered & _client._debug_token_callbacks_ids()))
+
+    def test_closing_a_query_releases_its_provider_while_still_alive(self):
+        class Provider:
+            def __call__(self):
+                return 'valid'
+
+        with EgressFailoverServer() as server:
+            before = _client._debug_token_callbacks_ids()
+            provider = Provider()
+            watch = weakref.ref(provider)
+            db = questdb.connect(
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;',
+                bearer_token_provider=provider)
+            result = db.query('select v from t')
+            registered = _client._debug_token_callbacks_ids() - before
+            self.assertEqual(len(registered), 1)
+            db.close()
+            del provider, db
+            gc.collect()
+            self.assertIsNotNone(watch())
+            result.close()
+            result.close()
+            _collect_until(lambda: watch() is None and not (
+                registered & _client._debug_token_callbacks_ids()))
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_query_retains_provider_through_failover_after_pool_close(self):
@@ -628,7 +721,8 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                         value == 'Bearer valid' for value in server.authorizations))
                 finally:
                     result.close()
-                del result
+                # Closing the reader must release the holder even while the
+                # Python result wrapper remains alive.
                 _collect_until(lambda: watch() is None and not (
                     registered & _client._debug_token_callbacks_ids()))
 

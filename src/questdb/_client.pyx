@@ -9527,7 +9527,7 @@ cdef class Sender:
             raise c_err_to_py(err)
         _oidc_raise_unscheduled_main()
 
-    cdef _close(self):
+    cdef _close(self, bint dealloc=False):
         cdef PyThreadState* gs = NULL
         cdef line_sender* impl = self._impl
         cdef line_sender_opts* opts = self._opts
@@ -9548,11 +9548,11 @@ cdef class Sender:
         self._error_handler = None
         self._connection_listener = None
         self._oidc_auth = None
-        # _close also runs from __dealloc__: attribute assignment to a dying
-        # cpyext object would try to resurrect its PyPy wrapper. Use the
-        # dictionary field directly, without converting self to Python.
-        if self.__dict__ is not None:
-            self.__dict__['_bearer_token_provider'] = None
+        # Normal close must release the holder even if the sender stays alive.
+        # During __dealloc__, attribute access would resurrect a dying PyPy
+        # wrapper; Cython/PyPy clears the instance dictionary after we return.
+        if not dealloc:
+            self._bearer_token_provider = None
         if self._slot_id != -1:
             qdb_active_senders_track_closed(<uint32_t>self._slot_id)
             self._slot_id = -1
@@ -9591,7 +9591,7 @@ cdef class Sender:
         self.close(not exc_type)
 
     def __dealloc__(self):
-        self._close()
+        self._close(dealloc=True)
         free(self._last_flush_ms)
 
 
