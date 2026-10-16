@@ -29,7 +29,9 @@ email = "vlad@questdb.com"
 [project.optional-dependencies]
 publish = ["twine", "wheel"]
 ci = ["cibuildwheel"]
-dataframe = ["pandas>=1.3.5", "pyarrow>=10.0.1"]
+# Keep in sync with `dev_requirements.txt`, `docs/installation.rst` and the
+# `--min-versions` pins in `ci/pip_install_deps.py`.
+dataframe = ["pandas>=2.0.0", "pyarrow>=14.0.1"]
 
 [project.urls]
 Homepage = "https://questdb.com/"

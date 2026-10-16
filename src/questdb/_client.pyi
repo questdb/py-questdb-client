@@ -1232,14 +1232,13 @@ class QuestDB:
         - **pandas** ``pandas.DataFrame`` (NumPy-backed columns route
           through the legacy planner; pyarrow-backed columns route
           through the Arrow C Stream capsule path).
-        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``.
-          ``LazyFrame`` is materialised via
-          ``.collect(engine='streaming')`` (eager ``.collect()`` on
-          polars < 1.0).
+        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``
+          (polars 1.32 or later). ``LazyFrame`` is materialised via
+          ``.collect(engine='streaming')``.
         - **pyarrow** ``pa.Table``, ``pa.RecordBatch``, and
           ``pa.RecordBatchReader``.
         - Any object exposing the Arrow C Data Interface — i.e. with
-          ``__arrow_c_stream__`` (duckdb / cudf / modin / pyarrow-backed
+          ``__arrow_c_stream__`` (duckdb / cudf / pyarrow-backed
           pandas 2.2+) or ``__arrow_c_array__`` (single Arrow array
           exporters, wrapped into a one-batch ``pa.Table``).
 
@@ -1359,6 +1358,8 @@ class QueryResult:
     target is a polars / pandas frame, the dedicated methods avoid the
     re-reconciliation that ``polars.DataFrame(result)`` /
     ``to_arrow().to_pandas()`` pay on SYMBOL-heavy results.
+    ``to_arrow().to_pandas()`` needs pyarrow 23 or later for SYMBOL
+    columns, which use ``uint32`` dictionary indices.
     """
 
     def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
@@ -1369,7 +1370,13 @@ class QueryResult:
         reconciles them."""
 
     def to_arrow(self) -> Any:
-        """Read the full result into a ``pyarrow.Table``. Requires pyarrow."""
+        """Read the full result into a ``pyarrow.Table``. Requires pyarrow.
+
+        SYMBOL columns use ``uint32`` dictionary indices, which
+        ``Table.to_pandas()`` accepts only from pyarrow 23. For a pandas
+        frame, call :meth:`to_pandas` instead. DECIMAL columns with a
+        precision of 18 or less arrive as ``decimal32`` / ``decimal64``,
+        which need pyarrow 19 or later."""
 
     def to_pandas(
         self,

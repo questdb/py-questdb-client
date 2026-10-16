@@ -2,8 +2,8 @@
 #
 # `QueryResult` exposes the Arrow PyCapsule Interface
 # (`__arrow_c_stream__`) directly off the Rust cursor, so polars /
-# duckdb / pandas 3.0 / any Arrow-native consumer can read query
-# results without pyarrow. `to_pandas` / `iter_pandas` default to a
+# duckdb / other Arrow-native consumers can read query results
+# without pyarrow. `to_pandas` / `iter_pandas` default to a
 # pyarrow-free native numpy path; `to_arrow` / `iter_arrow` /
 # `to_polars` / `iter_polars` lazy-import pyarrow.
 
@@ -1726,7 +1726,7 @@ cdef object _FROM_CODES_HAS_VALIDATE = None
 cdef object _symbol_from_codes(object pd, object arr, object dtype):
     # Bounds-check the wire codes against the dict once (a vectorised C-level
     # reduction), then skip pandas' O(rows) Python re-validation. `validate=`
-    # exists since pandas 1.1; older pandas keeps the checked path. `dtype=`
+    # exists since pandas 2.1; older pandas keeps the checked path. `dtype=`
     # reuses one cached category Index across columns and batches (vs
     # `categories=`, which rebuilds it every call).
     cdef Py_ssize_t n_cats = len(dtype.categories)
@@ -2222,6 +2222,9 @@ cdef object _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper):
         kwargs['types_mapper'] = types_mapper
     elif dtype_backend == 'pyarrow':
         import pandas as pd
+        if not hasattr(pd, 'ArrowDtype'):
+            raise ImportError(_pandas_too_old_message(
+                pd, "`dtype_backend='pyarrow'`"))
         kwargs['types_mapper'] = pd.ArrowDtype
     elif dtype_backend == 'numpy_nullable':
         kwargs['types_mapper'] = _numpy_nullable_mapping()
@@ -2283,11 +2286,16 @@ class QueryResult:
     Concurrent operations on one result are unsupported.
 
     ``__arrow_c_stream__`` is native — the cursor's record batches are
-    exposed directly through the Arrow C Data Interface, so polars /
-    duckdb / pandas 3.0 / any Arrow-native consumer can read query
-    results without pyarrow installed. ``to_pandas`` / ``iter_pandas``
-    are also pyarrow-free by default (a native numpy path); they only
-    need pyarrow when ``dtype_backend`` / ``types_mapper`` is passed.
+    exposed directly through the Arrow C Data Interface, so polars
+    (``polars.DataFrame(result)``, polars 1.32 or later), duckdb
+    (``duckdb.from_arrow(result.__arrow_c_stream__())``, duckdb 1.1 or
+    later) and other Arrow-native consumers can read query results
+    without pyarrow installed. Pass duckdb the capsule, not ``result``:
+    duckdb 1.5 requests the stream twice, and a result streams once.
+    duckdb reads when you fetch, so fetch before the result is closed.
+    ``to_pandas`` / ``iter_pandas`` are also pyarrow-free by default (a
+    native numpy path); they only need pyarrow when ``dtype_backend`` /
+    ``types_mapper`` is passed.
     ``to_arrow`` / ``iter_arrow`` / ``to_polars`` / ``iter_polars``
     do require pyarrow.
 
@@ -2298,7 +2306,8 @@ class QueryResult:
     batch uses, which a generic consumer reconciles. So when the target is a
     polars / pandas frame, the dedicated methods avoid the re-reconciliation
     that ``polars.DataFrame(result)`` / ``to_arrow().to_pandas()`` pay on
-    SYMBOL-heavy results.
+    SYMBOL-heavy results. ``to_arrow().to_pandas()`` needs pyarrow 23 or
+    later for SYMBOL columns, which use ``uint32`` dictionary indices.
 
     Example::
 
@@ -2306,6 +2315,8 @@ class QueryResult:
                       [datetime.datetime(2026, 7, 1)]) as result:
             df = polars.DataFrame(result)               # no pyarrow
             # df = result.to_pandas()                   # no pyarrow
+            # rows = duckdb.from_arrow(
+            #     result.__arrow_c_stream__()).fetchall()  # no pyarrow
             # table = pa.table(result)                  # pyarrow required
     """
 
@@ -2356,6 +2367,12 @@ class QueryResult:
     def to_arrow(self):
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow.
 
+        SYMBOL columns use ``uint32`` dictionary indices, which
+        ``Table.to_pandas()`` accepts only from pyarrow 23. For a pandas
+        frame, call :meth:`to_pandas` instead. DECIMAL columns with a
+        precision of 18 or less arrive as ``decimal32`` / ``decimal64``,
+        which need pyarrow 19 or later.
+
         Materialise-whole: a mid-query failover replays the result
         transparently — the partial accumulation we hold is discarded
         from batch-0. The pyarrow-free streaming path
@@ -2394,13 +2411,15 @@ class QueryResult:
         if dtype_backend is None and types_mapper is None:
             return self._to_pandas_numpy()
         import pyarrow as pa
+        # Check the arguments before the result is read: a bad value must
+        # not consume the cursor.
+        kwargs = _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper)
         handle = self._take_cursor_handle()
         schema, batches = _fetch_all_record_batches(handle, pa)
         table = (pa.table({}) if schema is None
                  else _table_shared_symbol_dict(
                      pa.Table.from_batches(batches, schema)))
-        return table.to_pandas(
-            **_resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper))
+        return table.to_pandas(**kwargs)
 
     def to_polars(self):
         """Read the full result into a ``polars.DataFrame``. Requires polars

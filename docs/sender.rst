@@ -255,12 +255,13 @@ performance:
 
 .. code-block:: python
 
+    from decimal import Decimal
     import pandas as pd
     import pyarrow as pa
 
     df = pd.DataFrame({
         'symbol': pd.Categorical(['BTC-USD', 'ETH-USD']),
-        'price': pd.Series([50123.456789, 2615.123456],
+        'price': pd.Series([Decimal('50123.456789'), Decimal('2615.123456')],
                            dtype=pd.ArrowDtype(pa.decimal128(12, 6)))
     })
 
@@ -1136,9 +1137,12 @@ streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
 ``iter_arrow`` (and ``to_pandas`` / ``iter_pandas`` with ``dtype_backend`` or
 ``types_mapper``) require pyarrow; the default ``to_pandas`` / ``iter_pandas``
 are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
-(``__arrow_c_stream__``), so ``polars.DataFrame(result)`` (polars 1.32 or
-later) or ``duckdb.from_arrow(result)`` consume it directly without pyarrow
-installed.
+(``__arrow_c_stream__``), so polars and duckdb read it directly without
+pyarrow installed: ``polars.DataFrame(result)`` (polars 1.32 or later) or
+``duckdb.from_arrow(result.__arrow_c_stream__())`` (duckdb 1.1 or later).
+Pass duckdb the capsule, not ``result``: duckdb 1.5 requests the stream
+twice, and a result streams only once. duckdb reads when you fetch, so
+fetch inside the ``with`` block.
 Each result is consumed once. Fully drain it, use it as a context manager
 (``with db.query(...) as result:``), or call :func:`QueryResult.close <questdb.QueryResult.close>`. A
 partially-consumed result cannot return its connection to the pool — closing
@@ -1159,7 +1163,8 @@ per-batch ``SYMBOL`` dictionary is compacted to the values each batch uses,
 which a generic consumer reconciles. So when the target is a polars / pandas
 frame, the dedicated methods avoid the re-reconciliation that
 ``polars.DataFrame(result)`` / ``to_arrow().to_pandas()`` pay on
-``SYMBOL``-heavy results.
+``SYMBOL``-heavy results. ``to_arrow().to_pandas()`` needs pyarrow 23 or
+later for ``SYMBOL`` columns, which use ``uint32`` dictionary indices.
 
 For several queries in a row, call :meth:`QuestDB.reader <questdb.QuestDB.reader>` to take a
 **reader lease** — the read-side twin of :meth:`QuestDB.sender <questdb.QuestDB.sender>`. The

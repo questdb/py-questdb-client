@@ -36,7 +36,22 @@ Changelog
   use ``polars.from_arrow(result)``, but on Polars 2.0 that call returns a
   struct ``Series``, not a ``DataFrame``. On Polars 1.21 and older, it raises
   an error. On Polars 1.22 to 1.31, it can return wrong ``SYMBOL`` values
-  without an error.
+  without an error. Ingesting polars frames also needs polars 1.32 or later.
+- To read a ``QueryResult`` with duckdb, use
+  ``duckdb.from_arrow(result.__arrow_c_stream__())`` (duckdb 1.1 or later).
+  On duckdb 1.5, ``duckdb.from_arrow(result)`` fails with "QueryResult
+  already consumed", because duckdb requests the stream twice.
+- The ``dataframe`` extra now requires ``pandas>=2.0.0`` and
+  ``pyarrow>=14.0.1``, the oldest versions that CI tests. The old minimums did
+  not work: with pyarrow before 14, pyarrow sources, ``iter_polars()`` and
+  ``pa.table(result)`` failed. With pandas before 1.5, every DataFrame load
+  failed with an ``AttributeError``; it now raises a clear ``ImportError``.
+  Two features need newer versions: pyarrow-backed pandas frames take the
+  Arrow path (and accept ``schema_overrides``) only on pandas 2.2 or later,
+  and reading ``DECIMAL`` columns with a precision of 18 or less through
+  pyarrow needs pyarrow 19 or later. See :doc:`installation`.
+- ``to_pandas(dtype_backend=...)`` now checks its arguments before it reads
+  the result. Before, an invalid value consumed the result.
 
 5.0.0 (2026-07-27)
 ------------------

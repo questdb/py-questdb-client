@@ -808,6 +808,13 @@ cdef bint _dataframe_count_row_path_emissions = False
 cdef uint64_t _dataframe_row_path_emissions = 0
 
 
+cdef str _pandas_too_old_message(object pandas, str what):
+    return (
+        f'`pandas` {pandas.__version__} is too old: {what} needs pandas 2.0 '
+        'or later. See: https://py-questdb-client.readthedocs.io/'
+        'en/latest/installation.html.')
+
+
 cdef object _dataframe_may_import_deps():
     global _NUMPY, _PANDAS, _PANDAS_NA, _PANDAS_NAT, _EPOCH_AWARE_UTC
     global _NUMPY_BOOL
@@ -834,6 +841,12 @@ cdef object _dataframe_may_import_deps():
             'to use the `.dataframe()` method. ' +
             'See: https://py-questdb-client.readthedocs.io/' +
             'en/latest/installation.html.') from ie
+    # pandas < 1.5 has no `ArrowDtype`, which the dtype checks read for
+    # every column. Fail before any global is set, so that a later call
+    # checks again instead of finding a half-initialised state.
+    if not hasattr(pandas, 'ArrowDtype'):
+        raise ImportError(
+            _pandas_too_old_message(pandas, 'the `.dataframe()` method'))
     _NUMPY_BOOL = type(numpy.dtype('bool'))
     _NUMPY_UINT8 = type(numpy.dtype('uint8'))
     _NUMPY_INT8 = type(numpy.dtype('int8'))
@@ -864,8 +877,9 @@ cdef object _dataframe_require_pyarrow():
     except ImportError as ie:
         raise ImportError(
             '`pyarrow` is required for this DataFrame path '
-            '(ArrowDtype columns, pyarrow Table/RecordBatch sources, '
-            'schema_overrides). Install with `pip install pyarrow`.') from ie
+            '(ArrowDtype and Categorical columns, pyarrow Table/RecordBatch '
+            'sources, schema_overrides). Install with '
+            '`pip install pyarrow`.') from ie
     _PYARROW = pyarrow
 
 
