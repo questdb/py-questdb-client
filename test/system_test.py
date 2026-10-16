@@ -2359,10 +2359,64 @@ class TestEgressWithDatabase(unittest.TestCase):
                         f'SELECT lg, vc FROM {table_name} ORDER BY lg DESC'
                         ) as result:
                     df = pl.DataFrame(result)
-            self.assertIsInstance(df, pl.DataFrame)
             self.assertEqual(df.shape, (2, 2))
             self.assertEqual(df['lg'].to_list(), [42, 7])
             self.assertEqual(df['vc'].to_list(), ['hello', 'world'])
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_polars_dataframe_multi_batch_symbol(self):
+        """``polars.DataFrame(result)`` reads every batch of a multi-batch
+        result. Each batch carries its own compact SYMBOL dictionary and the
+        batches hold different symbols, so a consumer that keeps only the
+        first batch, or decodes every batch with the first batch's
+        dictionary, fails here. polars before 1.32 does both."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        import numpy as np
+        n = 10000
+        table_name = 't_egress_polars_sym_' + uuid.uuid4().hex[:8]
+        # A new symbol every 100 rows, so 1000-row batches share no symbol.
+        exp = [None if i % 11 == 0 else f'sym_{i // 100}' for i in range(n)]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, sym SYMBOL, v LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            df = pd.DataFrame({
+                'ts': pd.to_datetime(np.arange(n), unit='s', utc=True),
+                'sym': pd.Series(exp, dtype='string[pyarrow]'),
+                'v': np.arange(n, dtype=np.int64),
+            })
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                client.dataframe(
+                    df, table_name=table_name, at='ts', symbols=['sym'])
+            self.qdb_plain.retry_check_table(table_name, min_rows=n)
+            sql = f'SELECT sym, v FROM {table_name} ORDER BY v'
+            conf = self._conf() + 'max_batch_rows=1000;'
+            with qi.QuestDB.from_conf(conf) as client:
+                batch_syms = [
+                    set(batch.column('sym').to_pylist()) - {None}
+                    for batch in client.query(sql).iter_arrow()]
+                with client.query(sql) as result:
+                    out = pl.DataFrame(result)
+            # The data must span several batches, and a later batch must
+            # hold symbols that the first batch's dictionary lacks.
+            self.assertGreater(len(batch_syms), 1)
+            self.assertTrue(any(s - batch_syms[0] for s in batch_syms[1:]))
+            self.assertEqual(out.shape, (n, 2))
+            self.assertEqual(out['v'].to_list(), list(range(n)))
+            # Report the first wrong rows, not a list diff: unittest's diff
+            # of two long, mostly different lists runs for minutes.
+            got = out['sym'].cast(pl.Utf8).to_list()
+            bad = [i for i in range(n) if got[i] != exp[i]]
+            self.assertEqual(
+                bad[:5], [], f'{len(bad)} of {n} SYMBOL values are wrong')
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -6014,7 +6068,6 @@ class TestEgressFailover(unittest.TestCase):
                            failover_max_duration_ms='60000')) as client:
             with client.query(f'SELECT v FROM {table} ORDER BY ts') as result:
                 df = pl.DataFrame(result)
-        self.assertIsInstance(df, pl.DataFrame)
         self.assertEqual(df['v'].to_list(), list(range(n)))
 
     def test_iter_arrow_surfaces_failover_would_duplicate(self):
