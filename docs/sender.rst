@@ -1136,8 +1136,9 @@ streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
 ``iter_arrow`` (and ``to_pandas`` / ``iter_pandas`` with ``dtype_backend`` or
 ``types_mapper``) require pyarrow; the default ``to_pandas`` / ``iter_pandas``
 are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
-(``__arrow_c_stream__``), so ``polars.DataFrame(result)`` or
-``duckdb.from_arrow(result)`` consume it directly without pyarrow installed.
+(``__arrow_c_stream__``), so ``polars.DataFrame(result)`` (polars 1.3 or
+later) or ``duckdb.from_arrow(result)`` consume it directly without pyarrow
+installed.
 Each result is consumed once. Fully drain it, use it as a context manager
 (``with db.query(...) as result:``), or call :func:`QueryResult.close <questdb.QueryResult.close>`. A
 partially-consumed result cannot return its connection to the pool — closing
