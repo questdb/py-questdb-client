@@ -2358,7 +2358,7 @@ class TestEgressWithDatabase(unittest.TestCase):
                 with client.query(
                         f'SELECT lg, vc FROM {table_name} ORDER BY lg DESC'
                         ) as result:
-                    df = pl.from_arrow(result)
+                    df = pl.DataFrame(result)
             self.assertEqual(df.shape, (2, 2))
             self.assertEqual(df['lg'].to_list(), [42, 7])
             self.assertEqual(df['vc'].to_list(), ['hello', 'world'])
@@ -6012,7 +6012,7 @@ class TestEgressFailover(unittest.TestCase):
                            target='primary',
                            failover_max_duration_ms='60000')) as client:
             with client.query(f'SELECT v FROM {table} ORDER BY ts') as result:
-                df = pl.from_arrow(result)
+                df = pl.DataFrame(result)
         self.assertEqual(df['v'].to_list(), list(range(n)))
 
     def test_iter_arrow_surfaces_failover_would_duplicate(self):
