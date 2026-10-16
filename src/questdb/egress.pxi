@@ -2335,7 +2335,8 @@ class QueryResult:
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
-        (e.g. ``polars.DataFrame``) reconciles them.
+        (e.g. ``polars.DataFrame(result)`` on polars 1.32 or later)
+        reconciles them.
 
         The returned stream may be handed to a consumer worker thread.
         Stream callbacks are serialised by the same cursor lock, but the

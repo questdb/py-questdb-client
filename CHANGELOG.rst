@@ -34,8 +34,9 @@ Changelog
 - To read a ``QueryResult`` into polars without pyarrow, use
   ``polars.DataFrame(result)`` (polars 1.32 or later). The 5.0.0 notes said to
   use ``polars.from_arrow(result)``, but on Polars 2.0 that call returns a
-  struct ``Series``, not a ``DataFrame``. On Polars 1.20 and older, it raises
-  ``TypeError``.
+  struct ``Series``, not a ``DataFrame``. On Polars 1.21 and older, it raises
+  an error. On Polars 1.22 to 1.31, it can return wrong ``SYMBOL`` values
+  without an error.
 
 5.0.0 (2026-07-27)
 ------------------
