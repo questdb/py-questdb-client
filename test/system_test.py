@@ -32,6 +32,15 @@ except ImportError:
     pd = None
     pyarrow = None
 
+# pyarrow-backed pandas frames take the Arrow path only from pandas 2.2,
+# which adds `DataFrame.__arrow_c_stream__`.
+PANDAS_HAS_ARROW_STREAM = (
+    pd is not None and hasattr(pd.DataFrame, '__arrow_c_stream__'))
+# pyarrow reads QuestDB DECIMAL(<=18) columns (decimal32/64) from 19, the
+# version that also adds `pa.decimal64`.
+PYARROW_READS_DECIMAL64 = (
+    pyarrow is not None and hasattr(pyarrow, 'decimal64'))
+
 
 import questdb._client as qi
 
@@ -43,6 +52,21 @@ FIRST_ARRAY_RELEASE = (8, 4, 0)
 FIRST_DECIMAL_RELEASE = (9, 2, 0)
 FIRST_QWP_WS_RELEASE = (9, 4, 3)
 FIRST_QWP_GAP_HALT_RELEASE = (9, 4, 4)
+
+
+def _assert_long_list_equal(test, got, exp, what='values'):
+    """Compare two long lists and report the first wrong rows.
+
+    A plain ``assertEqual`` builds a ``difflib`` diff of both lists. For
+    long, mostly different lists, that diff runs for minutes."""
+    got = list(got)
+    test.assertEqual(
+        len(got), len(exp), f'{what}: got {len(got)} rows, want {len(exp)}')
+    bad = [i for i, (g, e) in enumerate(zip(got, exp)) if g != e]
+    test.assertEqual(
+        [(i, got[i], exp[i]) for i in bad[:5]], [],
+        f'{len(bad)} of {len(exp)} {what} are wrong; first (row, got, want)')
+
 
 def may_install_questdb():
     global QUESTDB_PLAIN_INSTALL_PATH
@@ -2368,6 +2392,50 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def _multi_batch_conf(self):
+        return self._conf() + 'max_batch_rows=1000;'
+
+    def _seed_multi_batch_symbols(self, n=10000):
+        """Create a table with a new SYMBOL value every 100 rows, and
+        return ``(sql, expected_symbols)``. Read through
+        ``_multi_batch_conf()``, no two 1000-row batches share a symbol,
+        so each batch carries its own compact SYMBOL dictionary. The
+        table is dropped at cleanup."""
+        import numpy as np
+        table_name = 't_egress_multi_sym_' + uuid.uuid4().hex[:8]
+
+        def drop():
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+        self.addCleanup(drop)
+        exp = [None if i % 11 == 0 else f'sym_{i // 100}' for i in range(n)]
+        self._exec(
+            f'CREATE TABLE {table_name} '
+            '(ts TIMESTAMP, sym SYMBOL, v LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        df = pd.DataFrame({
+            'ts': pd.to_datetime(np.arange(n), unit='s', utc=True),
+            'sym': pd.Series(exp, dtype='string[pyarrow]'),
+            'v': np.arange(n, dtype=np.int64),
+        })
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            client.dataframe(
+                df, table_name=table_name, at='ts', symbols=['sym'])
+        self.qdb_plain.retry_check_table(table_name, min_rows=n)
+        sql = f'SELECT sym, v FROM {table_name} ORDER BY v'
+        # The data must span several batches, and a later batch must hold
+        # symbols that the first batch's dictionary lacks.
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            batch_syms = [
+                set(batch.column('sym').to_pylist()) - {None}
+                for batch in client.query(sql).iter_arrow()]
+        self.assertGreater(len(batch_syms), 1)
+        self.assertTrue(any(s - batch_syms[0] for s in batch_syms[1:]))
+        return sql, exp
+
     def test_polars_dataframe_multi_batch_symbol(self):
         """``polars.DataFrame(result)`` reads every batch of a multi-batch
         result. Each batch carries its own compact SYMBOL dictionary and the
@@ -2378,50 +2446,91 @@ class TestEgressWithDatabase(unittest.TestCase):
             import polars as pl
         except ImportError:
             self.skipTest('polars not installed')
-        import numpy as np
-        n = 10000
-        table_name = 't_egress_polars_sym_' + uuid.uuid4().hex[:8]
-        # A new symbol every 100 rows, so 1000-row batches share no symbol.
-        exp = [None if i % 11 == 0 else f'sym_{i // 100}' for i in range(n)]
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            with client.query(sql) as result:
+                out = pl.DataFrame(result)
+        self.assertEqual(out.shape, (n, 2))
+        _assert_long_list_equal(
+            self, out['v'].to_list(), list(range(n)), 'v values')
+        _assert_long_list_equal(
+            self, out['sym'].cast(pl.Utf8).to_list(), exp, 'SYMBOL values')
+
+    def test_duckdb_reads_multi_batch_symbol_capsule(self):
+        """The documented duckdb path,
+        ``duckdb.from_arrow(result.__arrow_c_stream__())``, reads every
+        batch and decodes each batch's compact SYMBOL dictionary. It passes
+        the capsule, not ``result``: duckdb 1.5 requests the stream of
+        ``result`` twice, and a result streams only once."""
         try:
-            self._exec(
-                f'CREATE TABLE {table_name} '
-                '(ts TIMESTAMP, sym SYMBOL, v LONG) '
-                'TIMESTAMP(ts) PARTITION BY DAY WAL')
-            df = pd.DataFrame({
-                'ts': pd.to_datetime(np.arange(n), unit='s', utc=True),
-                'sym': pd.Series(exp, dtype='string[pyarrow]'),
-                'v': np.arange(n, dtype=np.int64),
-            })
-            with qi.QuestDB.from_conf(self._conf()) as client:
-                client.dataframe(
-                    df, table_name=table_name, at='ts', symbols=['sym'])
-            self.qdb_plain.retry_check_table(table_name, min_rows=n)
-            sql = f'SELECT sym, v FROM {table_name} ORDER BY v'
-            conf = self._conf() + 'max_batch_rows=1000;'
-            with qi.QuestDB.from_conf(conf) as client:
-                batch_syms = [
-                    set(batch.column('sym').to_pylist()) - {None}
-                    for batch in client.query(sql).iter_arrow()]
-                with client.query(sql) as result:
-                    out = pl.DataFrame(result)
-            # The data must span several batches, and a later batch must
-            # hold symbols that the first batch's dictionary lacks.
-            self.assertGreater(len(batch_syms), 1)
-            self.assertTrue(any(s - batch_syms[0] for s in batch_syms[1:]))
-            self.assertEqual(out.shape, (n, 2))
-            self.assertEqual(out['v'].to_list(), list(range(n)))
-            # Report the first wrong rows, not a list diff: unittest's diff
-            # of two long, mostly different lists runs for minutes.
-            got = out['sym'].cast(pl.Utf8).to_list()
-            bad = [i for i in range(n) if got[i] != exp[i]]
-            self.assertEqual(
-                bad[:5], [], f'{len(bad)} of {n} SYMBOL values are wrong')
-        finally:
-            try:
-                self._exec(f'DROP TABLE IF EXISTS {table_name}')
-            except Exception:
-                pass
+            import duckdb
+        except ImportError:
+            self.skipTest('duckdb not installed')
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            with client.query(sql) as result:
+                # duckdb reads at fetch time, so fetch before the result
+                # is closed.
+                rows = duckdb.from_arrow(
+                    result.__arrow_c_stream__()).order('v').fetchall()
+        _assert_long_list_equal(
+            self, [row[1] for row in rows], list(range(n)), 'v values')
+        _assert_long_list_equal(
+            self, [row[0] for row in rows], exp, 'SYMBOL values')
+
+    _DUCKDB_WITHOUT_PYARROW_SCRIPT = """
+import json
+import sys
+
+
+class _BlockPyarrow:
+    def find_spec(self, name, path=None, target=None):
+        if name == 'pyarrow' or name.startswith('pyarrow.'):
+            raise ImportError('pyarrow blocked for this test')
+
+
+sys.meta_path.insert(0, _BlockPyarrow())
+import duckdb
+import questdb._client as qi
+
+conf, sql = sys.argv[1], sys.argv[2]
+with qi.QuestDB.from_conf(conf) as client:
+    with client.query(sql) as result:
+        rows = duckdb.from_arrow(
+            result.__arrow_c_stream__()).order('v').fetchall()
+pyarrow_imported = any(
+    name == 'pyarrow' or name.startswith('pyarrow.') for name in sys.modules)
+print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
+"""
+
+    def test_duckdb_reads_capsule_without_pyarrow(self):
+        """The docs say that duckdb reads a ``QueryResult`` without
+        pyarrow. Run the duckdb read in a subprocess that blocks the
+        pyarrow import."""
+        import json
+        import subprocess
+        if importlib.util.find_spec('duckdb') is None:
+            self.skipTest('duckdb not installed')
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [str(pathlib.Path(qi.__file__).parent.parent)]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        proc = subprocess.run(
+            [sys.executable, '-c', self._DUCKDB_WITHOUT_PYARROW_SCRIPT,
+             self._multi_batch_conf(), sql],
+            capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertFalse(out['pyarrow_imported'])
+        rows = out['rows']
+        _assert_long_list_equal(
+            self, [row[1] for row in rows], list(range(n)), 'v values')
+        _assert_long_list_equal(
+            self, [row[0] for row in rows], exp, 'SYMBOL values')
 
     def test_to_polars_and_iter_polars_symbol_categorical(self):
         """SYMBOL egresses as a polars ``Categorical`` (codes + dict via the
@@ -2456,15 +2565,21 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertEqual(full.shape, (n, 2))
             self.assertIsInstance(full.schema['sym'], pl.Categorical)
             self.assertGreater(full['sym'].null_count(), 0)
-            self.assertEqual(full['v'].to_list(), list(range(n)))
-            self.assertEqual(full['sym'].cast(pl.Utf8).to_list(), exp)
+            _assert_long_list_equal(
+                self, full['v'].to_list(), list(range(n)), 'v values')
+            _assert_long_list_equal(
+                self, full['sym'].cast(pl.Utf8).to_list(), exp,
+                'SYMBOL values')
             with qi.QuestDB.from_conf(self._conf()) as client:
                 frames = list(client.query(sql).iter_polars())
             self.assertGreater(len(frames), 1)
             stitched = pl.concat(frames, how='vertical')
             self.assertIsInstance(stitched.schema['sym'], pl.Categorical)
-            self.assertEqual(stitched['v'].to_list(), list(range(n)))
-            self.assertEqual(stitched['sym'].cast(pl.Utf8).to_list(), exp)
+            _assert_long_list_equal(
+                self, stitched['v'].to_list(), list(range(n)), 'v values')
+            _assert_long_list_equal(
+                self, stitched['sym'].cast(pl.Utf8).to_list(), exp,
+                'SYMBOL values')
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -4282,11 +4397,13 @@ class TestEgressLeaks(unittest.TestCase):
     def test_query_consumption_routes_do_not_leak(self):
         from test_dataframe_leaks import _assert_no_leak
         import pyarrow as pa
-        # 64 rows span multiple Arrow batches (see the lease tests), so
-        # the partial-drain route genuinely abandons a live cursor.
+        # `max_batch_rows=16` splits the 64 rows into 4 batches, so the
+        # partial-drain route abandons a cursor with batches still unread.
+        # With the server default (16,384 rows), 64 rows are one batch.
         table = self._seed_table(n_rows=64)
         sql = f'SELECT * FROM {table}'
-        with qi.QuestDB.from_conf(self._conf()) as client:
+        with qi.QuestDB.from_conf(
+                self._conf(max_batch_rows=16)) as client:
             def work():
                 client.query(sql).to_arrow()
                 client.query(sql).to_pandas()
@@ -4396,6 +4513,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self._require_qwp_ws()
         if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
             self.skipTest('old server does not support decimal')
+        if not PYARROW_READS_DECIMAL64:
+            self.skipTest('reading DECIMAL(18,2) needs pyarrow 19 or later')
         table = self._table()
         self._create_table(table, 'x LONG, amt DECIMAL(18,2)')
         ts = pa.array(
@@ -4467,6 +4586,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self._require_qwp_ws()
         if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
             self.skipTest('old server does not support decimal')
+        if not PYARROW_READS_DECIMAL64:
+            self.skipTest('reading DECIMAL(18,3) needs pyarrow 19 or later')
         table = self._table()
         self._create_table(table, 'x LONG, amt DECIMAL(18,3)')
         df = pd.DataFrame({
@@ -5313,6 +5434,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     def test_arrow_symbols_false_forces_dict_columns_to_varchar(self):
         import pyarrow as pa
         self._require_qwp_ws()
+        if not PANDAS_HAS_ARROW_STREAM:
+            self.skipTest('the pandas Arrow path needs pandas 2.2 or later')
         table = self._table()
         dict_type = pa.dictionary(pa.int32(), pa.string())
         df = pd.DataFrame({
@@ -5335,6 +5458,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     def test_arrow_partial_symbol_list_demotes_unlisted_dict_to_varchar(self):
         import pyarrow as pa
         self._require_qwp_ws()
+        if not PANDAS_HAS_ARROW_STREAM:
+            self.skipTest('the pandas Arrow path needs pandas 2.2 or later')
         table = self._table()
         dict_type = pa.dictionary(pa.int32(), pa.string())
         df = pd.DataFrame({
@@ -5669,6 +5794,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         store-and-forward spool."""
         if pyarrow is None:
             self.skipTest('pyarrow not installed')
+        if not PANDAS_HAS_ARROW_STREAM:
+            self.skipTest('the pandas Arrow path needs pandas 2.2 or later')
 
         table = self._table('t_sf_conf_df_arrow_')
         sender_id = 'py-df-arrow-' + uuid.uuid4().hex[:8]
@@ -5769,7 +5896,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         with qi.QuestDB.from_conf(conf) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=2000)
-        self.assertEqual(self._read_back_v(table), list(range(2000)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(2000)), 'v values')
 
     def test_dead_then_live_endpoint_arrow_route(self):
         """Same, via the Arrow capsule (pyarrow-backed) route."""
@@ -5785,7 +5913,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         with qi.QuestDB.from_conf(conf) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=2000)
-        self.assertEqual(self._read_back_v(table), list(range(2000)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(2000)), 'v values')
 
     def test_polars_dataframe_round_trip(self):
         """``pl.DataFrame`` (the Arrow capsule route) lands every row;
@@ -5807,7 +5936,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=1500)
-        self.assertEqual(self._read_back_v(table), list(range(1500)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(1500)), 'v values')
 
     def test_mid_stream_bounce_resends_whole_df_numpy(self):
         """Bounce the server mid-call: the transient ``FailoverRetry``
@@ -5828,7 +5958,8 @@ class TestColumnIngressFailover(unittest.TestCase):
             self.qdb_plain.start()
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=20000)
-        self.assertEqual(self._read_back_v(table), list(range(20000)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(20000)), 'v values')
 
     def test_mid_stream_bounce_resends_whole_df_arrow(self):
         """Same bounce, Arrow capsule route."""
@@ -5842,7 +5973,8 @@ class TestColumnIngressFailover(unittest.TestCase):
             self.qdb_plain.start()
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=20000)
-        self.assertEqual(self._read_back_v(table), list(range(20000)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(20000)), 'v values')
 
     def test_bounce_without_dedup_is_at_least_once(self):
         """Mid-stream bounce on a table WITHOUT dedup keys: the whole-df
@@ -5865,8 +5997,9 @@ class TestColumnIngressFailover(unittest.TestCase):
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=20000)
         rows = self._read_back_v(table)
-        self.assertEqual(
-            sorted(set(rows)), list(range(20000)), 'no row may be lost')
+        _assert_long_list_equal(
+            self, sorted(set(rows)), list(range(20000)),
+            'distinct v values (no row may be lost)')
         self.assertLessEqual(
             len(rows), 2 * 20000, 'duplication must stay bounded')
 
@@ -5961,9 +6094,12 @@ class TestEgressFailover(unittest.TestCase):
             pass
 
     def _seed(self, n_rows):
-        """A multi-batch result: enough rows that QuestDB streams more
-        than one record batch, so a mid-stream bounce lands after the
-        first batch is delivered."""
+        """Create a table with ``n_rows`` rows (``v`` = 0..n_rows-1).
+
+        The result is multi-batch only when ``n_rows`` is larger than one
+        server batch (16,384 rows by default). The bounce tests pass
+        200,000 rows, so that a mid-stream bounce lands after the first
+        batch is delivered. The 2,048-row callers get one batch."""
         table = 't_egress_fo_' + uuid.uuid4().hex[:8]
         self.addCleanup(lambda: self._drop_quietly(table))
         self._exec(
@@ -5997,7 +6133,8 @@ class TestEgressFailover(unittest.TestCase):
             self.qdb_plain.stop()
             self.qdb_plain.start()
             table_out = result.to_arrow()
-        self.assertEqual(table_out.column('v').to_pylist(), expected)
+        _assert_long_list_equal(
+            self, table_out.column('v').to_pylist(), expected, 'v values')
 
     def test_to_pandas_numpy_transparent_across_bounce(self):
         """Default ``to_pandas`` (the numpy accumulator we own) is
@@ -6011,7 +6148,7 @@ class TestEgressFailover(unittest.TestCase):
             self.qdb_plain.stop()
             self.qdb_plain.start()
             df = result.to_pandas()
-        self.assertEqual(df['v'].tolist(), expected)
+        _assert_long_list_equal(self, df['v'].tolist(), expected, 'v values')
 
     def test_to_polars_transparent_across_bounce(self):
         try:
@@ -6027,7 +6164,7 @@ class TestEgressFailover(unittest.TestCase):
             self.qdb_plain.stop()
             self.qdb_plain.start()
             df = result.to_polars()
-        self.assertEqual(df['v'].to_list(), expected)
+        _assert_long_list_equal(self, df['v'].to_list(), expected, 'v values')
 
     def test_to_polars_dead_then_live_endpoint(self):
         """Polars materialisation uses the same reader failover walk as
@@ -6047,7 +6184,8 @@ class TestEgressFailover(unittest.TestCase):
                            target='primary',
                            failover_max_duration_ms='60000')) as client:
             df = client.query(f'SELECT v FROM {table} ORDER BY ts').to_polars()
-        self.assertEqual(df['v'].to_list(), list(range(n)))
+        _assert_long_list_equal(
+            self, df['v'].to_list(), list(range(n)), 'v values')
 
     def test_polars_dataframe_dead_then_live_endpoint(self):
         """The pyarrow-free Polars capsule path also borrows through the
@@ -6068,7 +6206,8 @@ class TestEgressFailover(unittest.TestCase):
                            failover_max_duration_ms='60000')) as client:
             with client.query(f'SELECT v FROM {table} ORDER BY ts') as result:
                 df = pl.DataFrame(result)
-        self.assertEqual(df['v'].to_list(), list(range(n)))
+        _assert_long_list_equal(
+            self, df['v'].to_list(), list(range(n)), 'v values')
 
     def test_iter_arrow_surfaces_failover_would_duplicate(self):
         """Streaming ``iter_arrow`` installs no reset: a mid-stream

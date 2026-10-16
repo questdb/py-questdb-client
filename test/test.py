@@ -139,6 +139,7 @@ if pd is not None and pyarrow is not None:
     from test_dataframe import TestPandasProtocolVersionV3
     from test_dataframe import TestNaTScalarDatetime
     from test_dataframe import TestColumnarPlanWithoutPyarrow
+    from test_dataframe import TestPandasTooOld
 elif pd is None:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):

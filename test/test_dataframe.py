@@ -31,7 +31,22 @@ import pyarrow as pa
 # Pandas 3.x defaults tz-aware timestamps to microsecond resolution.
 # Pin to nanoseconds where tests expect nanosecond precision.
 _NS_TZ_DTYPE = pd.DatetimeTZDtype(tz=_TZ, unit='ns')
+# pandas 2.0 ignores the unit of `pd.array(..., dtype=_US_TZ_DTYPE)` and
+# keeps nanoseconds. Build microsecond arrays with
+# `pd.array(..., dtype=_NS_TZ_DTYPE).astype(_US_TZ_DTYPE)` instead.
 _US_TZ_DTYPE = pd.DatetimeTZDtype(tz=_TZ, unit='us')
+
+
+def _string_series_with_chunks(chunks):
+    """A ``string[pyarrow]`` Series that keeps each list in ``chunks`` as
+    its own Arrow chunk, empty chunks included. ``pd.concat`` drops empty
+    chunks on pandas 2.0, and the ``ArrowStringArray`` constructor combines
+    chunks from pandas 2.2, so try both."""
+    ser = pd.concat([pd.Series(c, dtype='string[pyarrow]') for c in chunks])
+    if ser.array.__arrow_array__().num_chunks != len(chunks):
+        ser = pd.Series(pd.arrays.ArrowStringArray(
+            pa.chunked_array(chunks, pa.string())))
+    return ser
 
 try:
     import fastparquet
@@ -809,9 +824,7 @@ class TestPandasBase:
             # A zero-length leading chunk must be stepped over: the
             # values from the following chunk must serialize, not come
             # out as empty strings.
-            ser = pd.concat([
-                pd.Series([], dtype='string[pyarrow]'),
-                pd.Series(['a', 'b'], dtype='string[pyarrow]')])
+            ser = _string_series_with_chunks([[], ['a', 'b']])
             self.assertEqual(ser.array.__arrow_array__().num_chunks, 2)
             df = pd.DataFrame({'x': ser})
             buf = _dataframe(
@@ -820,10 +833,7 @@ class TestPandasBase:
             self.assertNotIn(b'x=""', buf)
 
         def test_arrow_backed_column_empty_mid_frame_chunk(self):
-            ser = pd.concat([
-                pd.Series(['a'], dtype='string[pyarrow]'),
-                pd.Series([], dtype='string[pyarrow]'),
-                pd.Series(['b'], dtype='string[pyarrow]')])
+            ser = _string_series_with_chunks([['a'], [], ['b']])
             self.assertEqual(ser.array.__arrow_array__().num_chunks, 3)
             df = pd.DataFrame({'x': ser})
             buf = _dataframe(
@@ -1484,9 +1494,13 @@ class TestPandasBase:
                     _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
                 return
 
-            arrow_cases = [
-                (pa.decimal32(7, 2), [12345, -6789]),
-                (pa.decimal64(14, 4), [123456789, -987654321]),
+            arrow_cases = []
+            if hasattr(pa, 'decimal32'):  # pyarrow 19 or later
+                arrow_cases += [
+                    (pa.decimal32(7, 2), [12345, -6789]),
+                    (pa.decimal64(14, 4), [123456789, -987654321]),
+                ]
+            arrow_cases += [
                 (pa.decimal128(38, 6), [123456789012345, -987654321012345, None]),
                 (pa.decimal256(76, 10), [1234567890123456789012345, -987654321098765432109876, None]),
             ]
@@ -1970,7 +1984,7 @@ class TestPandasBase:
                     pd.Timestamp(
                         year=2024, month=1, day=1,
                         hour=0, minute=0, second=3, microsecond=111111, tz=_TZ)],
-                    dtype=_US_TZ_DTYPE),
+                    dtype=_NS_TZ_DTYPE).astype(_US_TZ_DTYPE),
                 'b': ['sym1', 'sym2', 'sym3', 'sym4']})
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at=qi.ServerTimestamp)
             e = self.enc_ts_t
@@ -2090,7 +2104,7 @@ class TestPandasBase:
                     pd.Timestamp(
                         year=2024, month=1, day=1,
                         hour=0, minute=0, second=3, microsecond=111111, tz=_TZ)],
-                    dtype=_US_TZ_DTYPE),
+                    dtype=_NS_TZ_DTYPE).astype(_US_TZ_DTYPE),
                 'b': ['sym1', 'sym2', 'sym3', 'sym4']})
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at='a')
             e = self.enc_des_ts_t
@@ -2107,7 +2121,7 @@ class TestPandasBase:
                     pd.Timestamp(
                         year=1900, month=1, day=1,
                         hour=0, minute=0, second=0, microsecond=123456, tz=_TZ)],
-                    dtype=_US_TZ_DTYPE),
+                    dtype=_NS_TZ_DTYPE).astype(_US_TZ_DTYPE),
                 'b': ['sym1']})
             with self.assertRaisesRegex(
                     qi.QuestDBError, "Failed.*'a'.*-220897.* is neg"):
@@ -3129,6 +3143,62 @@ print('OK')
 """
 
     def test_planner_rejects_pyarrow_dependent_columns(self):
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [str(pathlib.Path(qi.__file__).parent.parent)]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        result = subprocess.run(
+            [sys.executable, '-c', self._SCRIPT],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('OK', result.stdout)
+
+
+class TestPandasTooOld(unittest.TestCase):
+    """pandas < 1.5 has no ``ArrowDtype``. The client must raise a clear
+    error, not an ``AttributeError``. A subprocess removes
+    ``pandas.ArrowDtype`` before it imports the client."""
+
+    _SCRIPT = """
+import pandas
+del pandas.ArrowDtype
+import pandas as pd
+import questdb._client as qi
+
+df = pd.DataFrame({
+    'x': [1],
+    'ts': pd.Series([pd.Timestamp('2024-01-01')], dtype='datetime64[ns]'),
+})
+
+
+def expect(exc_type, fn):
+    try:
+        fn()
+    except exc_type as e:
+        msg = str(e)
+        assert 'is too old' in msg and 'pandas 2.0 or later' in msg, repr(e)
+        return e
+    raise AssertionError(f'{fn} did not raise {exc_type.__name__}')
+
+
+# Legacy row path: the ImportError arrives as InvalidApiCall.
+err = expect(qi.QuestDBError, lambda: qi.Buffer(protocol_version=2).dataframe(
+    df, table_name='t', at='ts'))
+assert err.code == qi.QuestDBErrorCode.InvalidApiCall, err.code
+
+# Columnar planner, as used by QuestDB.dataframe. A second call checks again.
+for _ in range(2):
+    expect(ImportError, lambda: qi._debug_dataframe_columnar_plan(
+        df, table_name='t', at='ts'))
+
+# Egress: to_pandas checks its arguments before it takes the cursor.
+result = qi.QueryResult(qi._CursorHandle())
+expect(ImportError, lambda: result.to_pandas(dtype_backend='pyarrow'))
+result.close()
+print('OK')
+"""
+
+    def test_old_pandas_raises_clear_error(self):
         env = dict(os.environ)
         env['PYTHONPATH'] = os.pathsep.join(
             [str(pathlib.Path(qi.__file__).parent.parent)]
