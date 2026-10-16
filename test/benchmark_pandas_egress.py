@@ -13,7 +13,7 @@ Paths (plan s5.3):
                         ``columnar-populate``).
 * ``to-pandas``      -- default numpy materialise (the headline).
 * ``to-polars``      -- Polars output (shares the Arrow path).
-* ``arrow-c-stream`` -- ``__arrow_c_stream__`` -> ``polars.from_arrow`` (no
+* ``arrow-c-stream`` -- ``__arrow_c_stream__`` -> ``polars.DataFrame`` (no
                         pyarrow on the consumer side).
 * ``iter-pandas``    -- lazy per-batch materialise vs ``to-pandas`` full.
 
