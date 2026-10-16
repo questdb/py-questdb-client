@@ -432,6 +432,7 @@ class TestPyobjColumnarLeak(unittest.TestCase):
 
                 self._assert_stable(work, warmup=200, measure=2400)
 
+    @unittest.skipIf(_HEAP_READER is None, _NO_HEAP_STATS)
     def test_pyobj_error_after_a_partial_bitmap_no_leak(self):
         """A column rejected part-way through must free what it had
         already built, bitmap included.
@@ -444,8 +445,14 @@ class TestPyobjColumnarLeak(unittest.TestCase):
         buffer, so the unwind runs with both live. One frame per
         builder that raises: the string arena, the fixed-width integer
         buffer, and the two claimed builders' 16- and 32-byte slots.
+
+        The smallest of those is a 64-byte bitmap, which RSS would not
+        show, so the C heap is measured, one frame at a time: a frame
+        moves the heap by a few kilobytes a window on its own, and five
+        together move it by enough to hide one builder's bitmap. Each
+        frame is refused while it is built, before the lazy connection
+        is ever opened, so no server runs in this process to move it.
         """
-        from qwp_ws_ack_server import QwpAckServer
         n = 512
         bad_at = n - 1
 
@@ -476,26 +483,25 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                     'version': 1, 'columns': {name: {'kind': kind}}}
             frames.append((name, frame))
 
-        with QwpAckServer() as server:
-            conf = (f'ws::addr=127.0.0.1:{server.port};'
-                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
-                    'query_pool_min=0;')
-            with qi.QuestDB.from_conf(conf) as client:
-                def work():
-                    for name, frame in frames:
-                        try:
-                            client.dataframe(
-                                frame, table_name='t', at='ts',
-                                symbols=False)
-                        except qi.QuestDBError as exc:
-                            if repr(name) not in str(exc):
-                                raise AssertionError(
-                                    f'error did not name {name!r}: {exc}')
-                        else:
+        with qi.QuestDB.from_conf(
+                'ws::addr=127.0.0.1:1;lazy_connect=true;'
+                'sender_pool_min=0;query_pool_min=0;'
+                'pool_reap=manual;') as client:
+            for name, frame in frames:
+                def work(name=name, frame=frame):
+                    try:
+                        client.dataframe(
+                            frame, table_name='t', at='ts', symbols=False)
+                    except qi.QuestDBError as exc:
+                        if repr(name) not in str(exc):
                             raise AssertionError(
-                                f'column {name!r} was accepted')
+                                f'error did not name {name!r}: {exc}')
+                    else:
+                        raise AssertionError(
+                            f'column {name!r} was accepted')
 
-                self._assert_stable(work, warmup=150, measure=1200)
+                with self.subTest(column=name):
+                    _assert_no_heap_growth(self, work, per_window=200)
 
     @unittest.skipUnless(pa is not None, 'pyarrow not installed')
     def test_promoted_columnar_path_no_leak(self):

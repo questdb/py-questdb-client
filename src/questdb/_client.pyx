@@ -110,7 +110,8 @@ include "dataframe.pxi"
 include "egress.pxi"
 
 from enum import Enum
-from typing import List, Dict, Union, Any, Optional, Tuple
+from typing import (
+    List, Dict, Union, Any, Optional, SupportsIndex, Tuple)
 from dataclasses import dataclass
 from cpython.bytes cimport (PyBytes_FromStringAndSize,
                             PyBytes_GET_SIZE, PyBytes_AsString, PyBytes_Check)
@@ -1069,7 +1070,7 @@ RowColumnValue = Union[
     Long256, Geohash]
 # What `schema_overrides` accepts: a kind on its own, or a kind and its
 # argument. Only 'geohash' takes one, the precision in bits.
-SchemaOverrides = Dict[str, Union[str, Tuple[str, int]]]
+SchemaOverrides = Dict[str, Union[str, Tuple[str, SupportsIndex]]]
 
 
 cdef class QuestDB
@@ -1126,7 +1127,6 @@ cdef class SenderTransaction:
     """
     cdef Sender _sender
     cdef str _table_name
-    cdef bint _entered
     cdef bint _complete
     cdef bint _committing
 
@@ -1137,7 +1137,6 @@ cdef class SenderTransaction:
                 'Transactions are only supported for ILP/HTTP.')
         self._sender = sender
         self._table_name = table_name
-        self._entered = False
         self._complete = False
         self._committing = False
 
@@ -1175,7 +1174,6 @@ cdef class SenderTransaction:
                     'Sender buffer must be clear when starting a ' +
                     'transaction. You must call `.flush()` before this call.')
         self._sender._in_txn = True
-        self._entered = True
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -1917,10 +1915,10 @@ cdef class Buffer:
     cdef void_int _column_qwp_only(
             self, str name, object value) except -1:
         # The QWP-only cell types and the unsupported-type error live
-        # out of line, and deliberately not `inline`. `_column` is
-        # inlined into the loop in `_row`, so every branch here would
-        # otherwise be code the common bool / int / float / str /
-        # datetime cells have to be laid out around.
+        # out of line, and deliberately not `inline`. `_column` dispatches
+        # every cell of every row, and with these branches out of it the
+        # common bool / int / float / str / datetime cells run through a
+        # short function.
         #
         # Within this function the four wrapper classes come before
         # `uuid.UUID` and the IPV4 test. They are the cheapest checks in
@@ -3046,10 +3044,12 @@ cdef void _scoped_table_free(object capsule) noexcept:
     if table == NULL:
         return
     # A thread's Python state can end while its OS thread lives on: every
-    # call into Python from a native thread gets a fresh one, and module
-    # teardown drops `_THREAD_OWNER_STATE` on the main thread. This runs on
-    # the owning thread in both cases, so the native slot is cleared here
-    # and the next scoped call on that thread builds a new table.
+    # call into Python from a native thread gets a fresh one. That state's
+    # table is freed on its own thread, so the native slot is cleared here
+    # and the next scoped call on that thread builds a new table. Module
+    # teardown drops `_THREAD_OWNER_STATE` on the main thread and frees
+    # every thread's table there, so the slot is cleared only when it holds
+    # the table being freed.
     if <scoped_table_t*>PyThread_tss_get(&_SCOPED_DEPTH_KEY) == table:
         PyThread_tss_set(&_SCOPED_DEPTH_KEY, NULL)
     free(table.slots)
@@ -5903,11 +5903,13 @@ cdef object _dataframe_reinterpret_unsigned_geohash(
     native Arrow importer refuses an unsigned column outright, so these
     columns are given the signed type before either route looks at the
     frame. A GEOHASH value is its bit pattern, so the server receives
-    exactly the bits the unsigned column held. NumPy columns become
-    views and Arrow columns views of each chunk, so no data is copied.
-    The exception is an 8- or 16-bit polars column on polars older
-    than 1.39, which refuses to reinterpret it; such a column is copied
-    by a wrapping cast (see `_polars_reinterpret_unsigned_geohash`).
+    exactly the bits the unsigned column held. Arrow columns become
+    views of each chunk, so no data is copied. A NumPy column of a
+    pandas frame is viewed as signed too, but pandas copies the view
+    into a new block when it is set back into the frame. An 8- or
+    16-bit polars column on polars older than 1.39 refuses to
+    reinterpret, so it is copied by a wrapping cast (see
+    `_polars_reinterpret_unsigned_geohash`).
 
     A column is bound for GEOHASH when `schema_overrides` names it
     ``('geohash', bits)``, or when it carries a GEOHASH claim in
@@ -6587,13 +6589,17 @@ cdef void_int _dataframe_columnar_sync(qwp_direct_sender* conn) except -1:
 cdef bint _dataframe_columnar_force_drop_after_error(
         qwp_direct_sender* conn,
         bint flushed) noexcept:
-    # A failed call must not let its data reach the table. The direct pool's
-    # return path best-effort-commits pipelined frames, so a connection that
-    # saw any flush is dropped (discarding the uncommitted frames) instead of
-    # returned. When no flush succeeded there is nothing pipelined and the
-    # connection can be returned normally: the FFI return path itself closes
-    # (rather than recycles) a conn that latched a terminal transport or
-    # protocol error.
+    # A failed call keeps the frames it pipelined after its last commit out
+    # of the table. Batches up to its last commit -- the first flush on a
+    # fresh connection commits on its own, and so does each checkpoint --
+    # may already be in the table, and the caller hears so through
+    # `in_doubt`. The direct pool's return path best-effort-commits
+    # pipelined frames, so a connection that saw any flush is dropped
+    # (discarding the uncommitted frames) instead of returned. When no
+    # flush succeeded there is nothing pipelined and the connection can be
+    # returned normally: the FFI return path itself closes (rather than
+    # recycles) a conn that recorded a terminal transport or protocol
+    # error.
     if conn == NULL:
         return False
     return flushed
@@ -9764,9 +9770,10 @@ cdef class QuestDB:
         Sentinel-value collisions in the result frame round-trip QuestDB's
         contract: ``INT64_MIN`` in a LONG column, NaN in DOUBLE / FLOAT,
         and the sentinel values for INT / DATE / TIMESTAMP /
-        TIMESTAMP_NS / CHAR / UUID / LONG256 / IPV4 / GEOHASH are all
-        interpreted as NULL by QuestDB and cannot be distinguished from
-        legitimate occurrences of those values.
+        TIMESTAMP_NS / CHAR / UUID / LONG256 / IPV4 are all interpreted
+        as NULL by QuestDB and cannot be distinguished from legitimate
+        occurrences of those values. GEOHASH has no such sentinel, so a
+        NULL GEOHASH stays distinct from every value.
         """
         # Borrow a reader from the same `questdb_db` pool that hosts
         # the ingress writers. The pool amortises TCP+TLS handshake
@@ -12153,9 +12160,10 @@ cdef class PooledSender:
     borrow one lease per thread. Every method holds the lease's lock for
     its whole call, :meth:`dataframe` included, so a call from a second
     thread waits until the running one returns. Code that runs inside a
-    call -- a column value's conversion, or the Arrow stream
-    :meth:`dataframe` reads -- therefore must not wait on another thread
-    that uses the same lease.
+    call -- a column value's conversion, the Arrow stream
+    :meth:`dataframe` reads, or a handler on the ``questdb`` logger,
+    which :meth:`dataframe` logs its warnings to -- therefore must not
+    wait on another thread that uses the same lease.
 
     Close every lease, or use it in a ``with`` block. A lease collected
     without ``close()`` returns its sender to the pool without sending
@@ -12221,12 +12229,15 @@ cdef class PooledSender:
         """Count one of this lease's own calls, on the lease and on the
         handle it was borrowed from. Called with `self._lock` held.
 
-        Every public method of this class counts, whether or not it looks
-        like it runs the caller's Python: the list of methods that do has
-        been wrong once per review round, and a counter that is raised
-        everywhere cannot be short one entry. The returned handle is the
-        one to pass back to `_exit_call_locked`, because the lease drops
-        its own reference when it is released.
+        Every public method that writes, flushes, waits or closes counts,
+        whether or not it looks like it runs the caller's Python: the list
+        of methods that do has been wrong once per review round, and a
+        counter raised on all of them cannot be short one entry. The six
+        that only read state -- `__enter__`, `__len__`, `poll_error()`,
+        `error_events_dropped()`, `published_fsn()` and `acked_fsn()` --
+        run none of the caller's Python and do not count. The returned
+        handle is the one to pass back to `_exit_call_locked`, because the
+        lease drops its own reference when it is released.
 
         The two counts answer different questions. The handle's is
         per-thread and shared by every lease and call on that handle, so

@@ -7788,7 +7788,11 @@ print('OK')
         'long256': 'reads a cdef field of Long256',
         'geohash': 'reads cdef fields of Geohash',
         'qwp_only': 'a dispatch chain of type checks; every branch it '
-                    'picks is itself a _column_* helper',
+                    'picks is itself a _column_* helper. Its isinstance '
+                    'checks against uuid.UUID and the ipaddress classes '
+                    "can run a __class__ of the caller's, but only before "
+                    'this cell has written anything, which is where '
+                    'hostile_uuid and hostile_ipv4 already run theirs',
     }
 
     def test_every_column_helper_that_runs_caller_python_has_a_hostile_cell(self):

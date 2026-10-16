@@ -164,10 +164,12 @@ Breaking changes
 
 - **DECIMAL now requires CPython.** Writing a DECIMAL reinterprets the
   memory of a ``decimal.Decimal`` using the layout CPython's ``_decimal``
-  module gives it, which is undefined behaviour anywhere else. ``row()`` and
-  ``dataframe()`` now raise ``ValueError`` naming the interpreter instead.
-  This affects the PyPy wheels this package publishes: DECIMAL was never
-  safe there, and now says so rather than writing corrupt values.
+  module gives it, which is undefined behaviour anywhere else. ``row()`` now
+  raises ``ValueError`` naming the interpreter instead, and ``dataframe()``
+  raises ``QuestDBError`` (``BadDataFrame``) whose message includes that
+  explanation. Over QWP/WebSocket, ``dataframe()`` converts the column
+  through pyarrow and is unaffected. This affects the PyPy wheels this package publishes: DECIMAL
+  was never safe there, and now says so rather than writing corrupt values.
 
 - **QWP-only column values raise ``QuestDBError`` on ILP senders**, where
   they previously raised ``TypeError``. See the new ``row()`` types below.
@@ -265,7 +267,9 @@ New
   :class:`Long256 <questdb.Long256>` and :class:`Geohash <questdb.Geohash>`
   wrappers. These types need a QWP sender (``udp::``, ``ws::`` or
   ``wss::``) and QuestDB 10 or newer, the first production QWP
-  implementation.
+  implementation. The four wrappers are also exported by the deprecated
+  ``questdb.ingress`` shim, so ``from questdb.ingress import *`` now
+  brings in ``Char``, ``DateMillis``, ``Geohash`` and ``Long256`` too.
 
 - **``schema_overrides`` accepts ``'uuid'`` and ``'long256'``.** Both work on
   fixed-size and variable-length binary columns — which is how polars frames
@@ -509,7 +513,9 @@ Fixed
   therefore waits for the load, then flushes the lease's rows. To ingest
   from several threads, share the ``QuestDB`` handle and borrow one lease
   per thread; code that runs inside a lease's call, such as the Arrow
-  stream a load reads, must not wait on another thread using that lease.
+  stream a load reads or a handler on the ``questdb`` logger, which a
+  load logs its warnings to, must not wait on another thread using that
+  lease.
 
 - **A sender lease garbage-collected without ``close()`` reports the rows
   it discards.** Such a lease returns its connection to the pool without

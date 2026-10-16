@@ -2672,6 +2672,10 @@ class QueryResult:
         nulls it stays plain numpy. ``double``/``float`` stay numpy with
         ``NaN``; ``SYMBOL`` → ``Categorical``; ``TIMESTAMP`` →
         ``datetime64`` (``NaT``); strings/decimal/uuid/binary → ``object``.
+        With no arguments or a ``dtype_backend``, a ``GEOHASH`` column is
+        a signed integer sized by its precision: ``int8`` up to 7 bits,
+        ``int16`` to 15, ``int32`` to 31, ``int64`` to 60, as
+        :meth:`to_arrow` gives it.
         Analysis-safe (aggregations skip ``pd.NA``/``NaN``), and feeds back
         into :meth:`QuestDB.dataframe` for a type round-trip — the column
         kinds are carried in ``df.attrs['questdb']``.
@@ -2790,8 +2794,9 @@ class QueryResult:
         materialised straight into numpy (no pyarrow, sentinel-preserving).
         ``dtype_backend`` / ``types_mapper`` select the pyarrow-backed path
         instead. Either way every batch carries ``df.attrs['questdb']``,
-        and what a custom ``types_mapper`` costs the round trip is the
-        same as it is there.
+        a ``GEOHASH`` column gets the same signed integer type, and what
+        a custom ``types_mapper`` costs the round trip is the same as it
+        is there.
         """
         if dtype_backend is not None and types_mapper is not None:
             raise ValueError(

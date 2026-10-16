@@ -347,6 +347,11 @@ where it is not:
      - ``pa.binary()``, ``pa.large_binary()``, ``pa.binary(n)``
      - ``'binary'`` on a 16- or 32-byte ``pa.binary(n)`` column
 
+A binary column written as ``UUID`` holds each value's ``uuid.UUID.bytes``,
+in RFC 4122 (big-endian) order. One written as ``LONG256`` holds the 256-bit
+value little-endian, least-significant byte first: the bytes of
+``value.to_bytes(32, 'little')``.
+
 ``schema_overrides`` needs a fully Arrow-backed frame: every column an
 ``ArrowDtype``, as ``df.convert_dtypes(dtype_backend='pyarrow')`` makes it.
 A frame with any NumPy, object or masked column refuses the argument.
@@ -851,7 +856,11 @@ a query result are each used by one thread at a time, and may be handed to
 another thread with proper synchronization, provided no two threads call into
 the same one at once. A reader lease stays on the thread that borrowed it. A
 sender lease holds its own lock for the whole of each call, so a second thread
-calling into it waits until the running call returns.
+calling into it waits until the running call returns. Code that runs inside
+a lease's call -- a column value's conversion, the Arrow stream
+``dataframe()`` reads, or a handler on the ``questdb`` logger, which
+``dataframe()`` logs its warnings to -- therefore must not wait on another
+thread that uses the same lease.
 
 The simplest concurrency rule: borrow (or create) one sender per thread. With
 QWP/WebSocket, :meth:`QuestDB.sender <questdb.QuestDB.sender>` makes this

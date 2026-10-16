@@ -1146,9 +1146,10 @@ class PooledSender:
     borrow one lease per thread. Every method holds the lease's lock for
     its whole call, ``dataframe()`` included, so a call from a second
     thread waits until the running one returns. Code that runs inside a
-    call -- a column value's conversion, or the Arrow stream
-    ``dataframe()`` reads -- therefore must not wait on another thread
-    that uses the same lease.
+    call -- a column value's conversion, the Arrow stream
+    ``dataframe()`` reads, or a handler on the ``questdb`` logger,
+    which ``dataframe()`` logs its warnings to -- therefore must not
+    wait on another thread that uses the same lease.
 
     Close every lease, or use it in a ``with`` block. A lease collected
     without ``close()`` returns its sender to the pool without sending
@@ -1450,6 +1451,44 @@ class QuestDB:
           pandas 2.2+) or ``__arrow_c_array__`` (single Arrow array
           exporters, wrapped into a one-batch ``pa.Table``).
 
+        Numbers, strings, symbols, timestamps, decimals and ``float64``
+        arrays land as their Arrow or NumPy type implies. The other column
+        types are stated by the column's type or by a label:
+
+        - **UUID**: ``uuid.UUID`` cells, ``pa.uuid()`` (pyarrow >= 18), or a
+          16-byte binary column with ``schema_overrides={'col': 'uuid'}``.
+          Bytes are RFC 4122 big-endian, as ``uuid.UUID.bytes``.
+        - **LONG256**: a 32-byte binary column labelled through
+          ``schema_overrides``, ``questdb.column_type`` field metadata or a
+          ``df.attrs['questdb']`` claim, or an object column of Python ints
+          under a ``df.attrs['questdb']`` claim. Bytes are little-endian, as
+          ``value.to_bytes(32, 'little')``.
+        - **IPV4**: ``ipaddress.IPv4Address`` cells, or ``'ipv4'`` on a
+          ``uint32`` column.
+        - **CHAR**: ``'char'`` on a ``uint16`` column.
+        - **GEOHASH**: ``('geohash', bits)`` on an integer column, signed or
+          unsigned; values are raw bit patterns, as described above.
+        - **DATE**: ``pa.timestamp('ms')``, ``pa.date32()`` or
+          ``pa.date64()``. NumPy ``datetime64[ms]`` widens to TIMESTAMP
+          unless a ``df.attrs['questdb']`` claim names it DATE.
+        - **BINARY**: ``bytes``, ``bytearray`` or ``memoryview`` cells, and
+          Arrow binary columns other than ``pa.fixed_size_binary(8)``. A 16-
+          or 32-byte column with no label is written as BINARY with a
+          ``questdb`` warning when it comes from native Arrow input, and is
+          refused with ``BadDataFrame`` in a pandas frame;
+          ``schema_overrides={'col': 'binary'}`` labels it as plain bytes.
+
+        ``schema_overrides`` needs a fully Arrow-backed frame: every column
+        an ``ArrowDtype``, as ``df.convert_dtypes(dtype_backend='pyarrow')``
+        makes it. Input that falls back to the NumPy planner raises
+        :class:`UnsupportedDataFrameShapeError`.
+
+        A frame from :meth:`QueryResult.to_pandas` carries its column types
+        in ``df.attrs['questdb']`` and writes back with them. A claim that
+        no longer fits its column is logged through the ``questdb`` logger
+        and dropped. ``help(questdb.QuestDB.dataframe)`` gives the full
+        contract for each type.
+
         ``max_rows_per_batch`` sets the pipelining granularity, not a
         safety limit: any batch exceeding the negotiated per-batch byte
         cap is split regardless of it, and a single row is never bounded
@@ -1677,7 +1716,10 @@ class QueryResult:
     ) -> pd.DataFrame:
         """Read the full result into a ``pandas.DataFrame``. With no arguments
         the result is materialised via numpy (pyarrow-free); passing
-        ``dtype_backend`` or ``types_mapper`` selects the pyarrow path."""
+        ``dtype_backend`` or ``types_mapper`` selects the pyarrow path.
+        With no arguments or a ``dtype_backend``, a ``GEOHASH`` column is
+        a signed integer sized by its precision: ``int8`` up to 7 bits,
+        ``int16`` to 15, ``int32`` to 31, ``int64`` to 60."""
 
     def to_polars(self) -> Any:
         """Read the full result into a ``polars.DataFrame``. Requires polars
@@ -1700,7 +1742,9 @@ class QueryResult:
     ) -> Iterator[pd.DataFrame]:
         """Iterate result batches as ``pandas.DataFrame``. With no arguments
         the batches are materialised via numpy (pyarrow-free); passing
-        ``dtype_backend`` or ``types_mapper`` selects the pyarrow path."""
+        ``dtype_backend`` or ``types_mapper`` selects the pyarrow path.
+        A ``GEOHASH`` column gets the signed integer type
+        :meth:`to_pandas` gives it."""
 
     def cancel(self) -> None:
         """Cancel the query and drain to terminal. The result remains
