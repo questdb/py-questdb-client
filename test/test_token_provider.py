@@ -255,26 +255,26 @@ class RefreshingTokenProviderTest(unittest.TestCase):
         self.assertFalse(provider.await_ready(0.1))
 
     def test_the_gil_is_released_while_waiting(self):
+        # token() waits for a source that only another Python thread releases,
+        # after running for a while. Were the GIL held for the wait, neither
+        # that thread nor the source could run, and token() would fail after
+        # cold_wait. Causal, so a slow or loaded machine only makes it slower.
         gate = threading.Event()
 
         def slow_source():
             gate.wait(10)
             return ExpiringToken.expires_in('slow', 3600)
 
-        ticks = []
+        def run_python_then_release():
+            for _ in range(10):
+                time.sleep(0.005)  # Each wake-up re-acquires the GIL.
+            gate.set()
 
-        def ticker():
-            while not gate.is_set():
-                ticks.append(1)
-                time.sleep(0.005)
-
-        with RefreshingTokenProvider(slow_source) as provider:
-            thread = threading.Thread(target=ticker)
+        with RefreshingTokenProvider(slow_source, cold_wait=10) as provider:
+            thread = threading.Thread(target=run_python_then_release)
             thread.start()
-            threading.Timer(0.2, gate.set).start()
             self.assertEqual(provider.token(), 'slow')
             thread.join()
-        self.assertGreater(len(ticks), 5, 'Python could not run meanwhile')
 
     def test_the_source_is_released_with_the_provider(self):
         before = _client._debug_token_callbacks_ids()
