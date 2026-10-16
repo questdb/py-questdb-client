@@ -948,9 +948,9 @@ class TestNativeHeapLeak(unittest.TestCase):
     free after a few hundred calls; RSS would need hundreds of
     thousands.
 
-    Neither test runs a mock server in this process: `QwpAckServer`
-    keeps an object per connection it accepts, which would grow the
-    heap on its own."""
+    None of these tests runs a mock server in this process:
+    `QwpAckServer` keeps an object per connection it accepts, which
+    would grow the heap on its own."""
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_ws_sender_dataframe_frees_its_options(self):
@@ -997,6 +997,41 @@ class TestNativeHeapLeak(unittest.TestCase):
                     raised.exception.code, qi.QuestDBErrorCode.InvalidName)
 
             _assert_no_heap_growth(self, work, per_window=1000)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_row_route_dataframe_frees_its_string_storage(self):
+        """`dataframe()` on the row-serializing route -- `Buffer`,
+        `SenderTransaction`, and `Sender` over the ILP protocols, which
+        all reach `_dataframe` -- gives each call string storage of its
+        own and frees it in a `finally`. A missed free is about a
+        kilobyte a call. Writing into a `Buffer` needs no connection."""
+        buf = qi.Buffer(protocol_version=2)
+        frame = pd.DataFrame({
+            'v': np.arange(2, dtype=np.int64),
+            'ts': pd.to_datetime([0, 1], unit='s')})
+
+        def work():
+            buf.dataframe(frame, table_name='t', at='ts')
+            buf.clear()
+
+        _assert_no_heap_growth(self, work, per_window=1000)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_refused_row_route_dataframe_frees_its_string_storage(self):
+        """The same storage, on a frame refused while its plan is built:
+        the `at` column it names does not exist."""
+        buf = qi.Buffer(protocol_version=2)
+        frame = pd.DataFrame({
+            'v': np.arange(2, dtype=np.int64),
+            'ts': pd.to_datetime([0, 1], unit='s')})
+
+        def work():
+            with self.assertRaises(qi.QuestDBError) as raised:
+                buf.dataframe(frame, table_name='t', at='missing')
+            self.assertEqual(
+                raised.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+
+        _assert_no_heap_growth(self, work, per_window=1000)
 
 
 if __name__ == '__main__':
