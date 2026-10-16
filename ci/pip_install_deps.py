@@ -11,6 +11,26 @@ arg_parser = argparse.ArgumentParser(
 )
 
 arg_parser.add_argument('--pandas-version')
+arg_parser.add_argument(
+    '--min-versions',
+    action='store_true',
+    help='install the oldest dependency versions that the docs promise')
+arg_parser.add_argument(
+    '--with-duckdb',
+    action='store_true',
+    help='also install duckdb, which only the system tests use')
+
+# The oldest versions that the `dataframe` extra in `pyproject.toml` and
+# `docs/installation.rst` promise. Keep them in sync. NumPy stays on 1.x
+# here; the NumPy floor (1.21) has its own CI jobs.
+MIN_VERSIONS = {
+    'numpy': '1.26.4',
+    'pandas': '2.0.0',
+    'pyarrow': '14.0.1',
+    'polars': '1.32.0',
+    'fastparquet': '2023.10.1',
+}
+MIN_DUCKDB_VERSION = '1.1.0'
 
 
 class UnsupportedDependency(Exception):
@@ -18,12 +38,19 @@ class UnsupportedDependency(Exception):
 
 
 def pip_install(package, version=None):
+    """Install `package` (a requirement string) or a list of requirement
+    strings in one pip call."""
+    if isinstance(package, str):
+        requirements = [
+            package if version is None else f'{package}=={version}']
+    else:
+        requirements = list(package)
     args = [
         sys.executable,
         '-m', 'pip', 'install',
         '--upgrade',
         '--only-binary', ':all:',
-        package if version is None else f'{package}=={version}'
+        *requirements
     ]
     args_s = ' '.join(shlex.quote(arg) for arg in args)
     sys.stderr.write(args_s + '\n')
@@ -92,19 +119,53 @@ def install_default_dataframe_dependencies():
         install_pandas2_dependencies()
 
 
+def install_min_versions(with_duckdb):
+    pins = dict(MIN_VERSIONS)
+    if with_duckdb:
+        pins['duckdb'] = MIN_DUCKDB_VERSION
+    # One pip call, so that the resolver sees every pin together. Use
+    # `pip_install`, not `try_pip_install`: a missing wheel must fail the job.
+    pip_install([f'{name}=={version}' for name, version in pins.items()])
+    pip_install('psutil')
+    return pins
+
+
+def check_versions(pins):
+    import importlib.metadata
+    wrong = []
+    for name, version in pins.items():
+        found = importlib.metadata.version(name)
+        if found != version:
+            wrong.append(f'{name}: want {version}, found {found}')
+    if wrong:
+        sys.stderr.write('Wrong dependency versions:\n  ' +
+                         '\n  '.join(wrong) + '\n')
+        sys.exit(1)
+
+
 def main(args):
+    has_pandas_version = (
+        args.pandas_version is not None and args.pandas_version != '')
+    if args.min_versions and has_pandas_version:
+        arg_parser.error('--min-versions and --pandas-version exclude '
+                         'each other')
     ensure_timezone()
     pip_install('pip')
     pip_install('setuptools')
     pip_install('packaging')
-    if args.pandas_version is not None and args.pandas_version != '':
-        install_pandas2_dependencies(args.pandas_version)
+    if args.min_versions:
+        check_versions(install_min_versions(args.with_duckdb))
     else:
-        install_default_dataframe_dependencies()
+        if has_pandas_version:
+            install_pandas2_dependencies(args.pandas_version)
+        else:
+            install_default_dataframe_dependencies()
 
-    try_pip_install('fastparquet>=2023.10.1')
-    try_pip_install('polars')
-    try_pip_install('psutil')
+        try_pip_install('fastparquet>=2023.10.1')
+        try_pip_install('polars')
+        try_pip_install('psutil')
+        if args.with_duckdb:
+            try_pip_install('duckdb')
 
     on_linux_is_glibc = (
             (not platform.system() == 'Linux') or
