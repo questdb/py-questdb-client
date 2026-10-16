@@ -571,23 +571,27 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
             registered & _client._debug_token_callbacks_ids()))
 
     def test_an_unclosed_provider_client_cycle_is_collected(self):
-        class Owner:
-            def __init__(self):
-                self.client = questdb.connect(
-                    'ws::addr=127.0.0.1:9000;lazy_connect=true;',
-                    bearer_token_provider=self)
+        # Neither the pool nor the standalone sender may hide this ownership
+        # edge in a cpyext field: PyPy would keep the entire cycle alive.
+        for factory in (questdb.connect, questdb.Sender.from_conf):
+            with self.subTest(factory=factory):
+                class Owner:
+                    def __init__(self):
+                        self.client = factory(
+                            'ws::addr=127.0.0.1:9000;lazy_connect=true;',
+                            bearer_token_provider=self)
 
-            def token(self):
-                return 't'
+                    def token(self):
+                        return 't'
 
-        before = _client._debug_token_callbacks_ids()
-        owner = Owner()
-        registered = _client._debug_token_callbacks_ids() - before
-        self.assertEqual(len(registered), 1)
-        watch = weakref.ref(owner)
-        del owner
-        _collect_until(lambda: watch() is None and not (
-            registered & _client._debug_token_callbacks_ids()))
+                before = _client._debug_token_callbacks_ids()
+                owner = Owner()
+                registered = _client._debug_token_callbacks_ids() - before
+                self.assertEqual(len(registered), 1)
+                watch = weakref.ref(owner)
+                del owner
+                _collect_until(lambda: watch() is None and not (
+                    registered & _client._debug_token_callbacks_ids()))
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_query_retains_provider_through_failover_after_pool_close(self):

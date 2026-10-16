@@ -6706,8 +6706,9 @@ cdef class QuestDB:
     cdef object _connection_listener
     cdef object _error_handler
     cdef object _oidc_auth
-    # Keeps a bearer_token_provider's Python source alive for the pool.
-    cdef object _bearer_token_provider
+    # Store _bearer_token_provider in __dict__ so PyPy can collect a
+    # provider that owns this client; cpyext object fields hide that cycle.
+    cdef dict __dict__
     cdef size_t _cb_refs_key
     cdef auto_flush_mode_t _auto_flush_mode
     cdef bint _auto_flush_bytes_dynamic
@@ -7791,9 +7792,9 @@ cdef class Sender:
     cdef object _error_handler
     cdef object _connection_listener
     cdef object _oidc_auth
-    # A RefreshingTokenProvider or an _ApplicationTokenProvider holder: keeps
-    # the native provider's Python source alive while this sender uses it.
-    cdef object _bearer_token_provider
+    # The bearer holder lives in __dict__, not an opaque cpyext field, so
+    # PyPy can also collect a provider that owns this sender.
+    cdef dict __dict__
     cdef auto_flush_mode_t _auto_flush_mode
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
@@ -9547,7 +9548,11 @@ cdef class Sender:
         self._error_handler = None
         self._connection_listener = None
         self._oidc_auth = None
-        self._bearer_token_provider = None
+        # _close also runs from __dealloc__: attribute assignment to a dying
+        # cpyext object would try to resurrect its PyPy wrapper. Use the
+        # dictionary field directly, without converting self to Python.
+        if self.__dict__ is not None:
+            self.__dict__['_bearer_token_provider'] = None
         if self._slot_id != -1:
             qdb_active_senders_track_closed(<uint32_t>self._slot_id)
             self._slot_id = -1

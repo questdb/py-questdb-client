@@ -548,12 +548,15 @@ cdef class _TokenProviderHandle:
     """Owns one native provider handle and its registry entry."""
     cdef questdb_token_provider* _raw
     cdef size_t _callback_id
-    cdef object _target
+    # PyPy cannot trace ownership cycles through arbitrary cpyext fields.
+    # Keep _target in the instance dictionary, which both collectors see.
+    cdef dict __dict__
     cdef object __weakref__
 
     def __cinit__(self):
         self._raw = NULL
         self._callback_id = 0
+        self._target = None
 
     def __dealloc__(self):
         cdef questdb_token_provider* raw = self._raw
@@ -642,8 +645,13 @@ cdef class RefreshingTokenProvider:
     alone does not repair a multithreaded parent's inherited native state.
     Its ``repr`` never shows the token.
     """
-    cdef _TokenProviderHandle _handle
+    # _handle must be visible to PyPy's collector too: sources may own this
+    # provider, so a cpyext-only reference here would still root that cycle.
+    cdef dict __dict__
     cdef str _name
+
+    def __cinit__(self):
+        self._handle = None
 
     def __init__(
             self,
@@ -840,8 +848,10 @@ cdef class _ApplicationTokenProvider:
     """Bridges a Python provider -- a callable returning a token, or an object
     with ``token()`` and an optional ``on_rejected()`` -- to the native
     function table."""
-    cdef _TokenProviderHandle _handle
-    cdef object _target
+    cdef dict __dict__
+
+    def __cinit__(self):
+        self._handle = None
 
     def __init__(self, target):
         cdef questdb_token_provider_vtable vtable
@@ -857,7 +867,6 @@ cdef class _ApplicationTokenProvider:
                     'a callable returning a token, or an object with a token() '
                     f'method, not {_fqn(type(target))}')
             adapter = _CallableTokenProvider(target)
-        self._target = target
         callback_id = _token_callback_register(handle, adapter)
         handle._callback_id = callback_id
         vtable.struct_size = sizeof(questdb_token_provider_vtable)

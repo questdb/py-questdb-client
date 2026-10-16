@@ -65,7 +65,8 @@ cdef class _ReaderHandle:
     # Keep the Python callback target alive for as long as a reader can
     # silently refresh its native auth clone (including after QuestDB.close).
     cdef object _oidc_auth
-    cdef object _bearer_token_provider
+    # Match the pool/sender holder's GC-visible ownership on PyPy.
+    cdef dict __dict__
 
     def __cinit__(self):
         self._reader = NULL
@@ -87,7 +88,9 @@ cdef class _ReaderHandle:
         _ensure_has_gil(&gs)
         self._reader = NULL
         self._oidc_auth = None
-        self._bearer_token_provider = None
+        # Also called by __dealloc__; do not recreate a dying PyPy wrapper.
+        if self.__dict__ is not None:
+            self.__dict__['_bearer_token_provider'] = None
 
     def __dealloc__(self):
         self._close()
