@@ -118,6 +118,11 @@ from test_client_capsule_path import (
     TestWriterMixingInOneChunk,
     TestPandasPlannerRouting,
 )
+from test_qwp_uuid import TestQwpUuid, TestQwpUuidLive
+from test_qwp_batch_splitting import (
+    TestQwpBatchSplitting,
+    TestQwpBatchSplittingLive,
+)
 from test_client_dataframe_failures import (
     TestClientDataframeArgValidation,
     TestClientDataframeDirectFailures,

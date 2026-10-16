@@ -7,6 +7,22 @@ Changelog
 5.0.1 (unreleased)
 ------------------
 
+- QWP DataFrame ingestion now splits oversized batches down to individual
+  rows. Previously, a batch of eight or fewer rows could fail even when each
+  row fit the server's limit. A row that exceeds the limit still fails; check
+  ``err.in_doubt`` before retrying a failed load, since a prefix may already
+  have been committed.
+- Fixed object-dtype pandas Boolean columns writing ``True`` as ``False``
+  over QWP, including Boolean values in mixed integer/Boolean columns.
+- UUID ingestion, query parameters, and query results now use standard
+  RFC-4122 bytes (``uuid.UUID.bytes``) at the native API boundary. Arrow UUID
+  values no longer need manual byte reversal. Unmarked Arrow fixed-size
+  binary columns now map to BINARY regardless of width. To ingest UUID or
+  LONG256 bytes, use the ``arrow.uuid`` extension (UUID only),
+  ``questdb.column_type`` field metadata, or the new ``'uuid'`` / ``'long256'``
+  ``schema_overrides``. LONG256 bytes remain little-endian. Code that manually
+  reversed UUID bytes for 5.0.0 must stop doing so.
+
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a
