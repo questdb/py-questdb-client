@@ -1,0 +1,2 @@
+# False positive: EXPIRED_ACCESS_TOKEN is an unsigned test JWT with an expired exp claim.
+af9168f94fc554ba300b0dd3f01f9b48d17b8604:test/test_auth.py:generic-api-key:99

@@ -459,6 +459,54 @@ When using the TCP protocol errors are *not* sent back from the server and
 must be searched for in the logs. See the :ref:`troubleshooting-flushing`
 section for more details.
 
+.. note::
+
+   **OIDC auth failures surface as a typed exception from calls that fetch
+   a token.** When a transport is configured with an
+   :class:`~questdb.auth.OidcDeviceAuth` provider (via ``oidc_auth=``), a
+   call that must obtain a token itself and cannot raises an
+   :class:`~questdb.auth.OidcError` (for example
+   :class:`~questdb.auth.OidcInteractionRequired` when explicit sign-in has
+   lapsed). Those calls are an ILP/HTTP ``flush()`` (HTTP fetches a token on
+   every flush), an eager :func:`questdb.connect` or ``establish()``, and the
+   foreground connects of ``dataframe()`` and ``query()``. ``OidcError``
+   **is** a subclass of :class:`QuestDBError <questdb.QuestDBError>`, so an
+   existing ``except QuestDBError`` retry or dead-letter handler keeps
+   catching auth failures; catch ``OidcError`` (or a typed subclass)
+   *before* ``QuestDBError`` to handle auth failures specifically.
+
+   A QWP/WebSocket sender's ``row()`` and ``flush()`` do **not** raise it:
+   they only queue frames locally, and the background reconnect that needs
+   the token keeps retrying instead. It reports each failed attempt as a
+   ``ConnectionEventKind.CredentialUnavailable`` event (register a
+   ``connection_listener`` to see it). An ACK wait does not fail early
+   because of the missing token: with a non-zero ``timeout_millis``, a pooled
+   sender's ``wait()`` raises once it expires -- with
+   :class:`~questdb.auth.OidcInteractionRequired`, whose ``code`` is
+   ``QuestDBErrorCode.FailoverRetry`` and whose message names the failing
+   reconnect -- and ``await_acked_fsn()`` returns ``False``. Use an explicit
+   ``wait(..., timeout_millis=...)`` when a bound is required:
+   ``flush(wait=True)`` can wait indefinitely when its current buffer is empty
+   but rows published by an earlier call remain unacknowledged. With the
+   default ``timeout_millis=0``, ``wait()`` and ``await_acked_fsn()`` wait
+   until the rows are acknowledged, which needs a successful sign-in on
+   another thread; pass a timeout when the credential may be missing. The
+   queued rows are sent once :meth:`OidcDeviceAuth.sign_in
+   <questdb.auth.OidcDeviceAuth.sign_in>` succeeds.
+
+   Its ``code`` reports the failing call's native error category, not a
+   recovery instruction: an HTTP flush with no usable credential raises
+   :class:`~questdb.auth.OidcInteractionRequired` with ``code`` set to
+   ``SocketError``, yet retrying cannot succeed until someone signs in. Catch
+   ``OidcInteractionRequired`` before any retry logic keyed on ``code``, and
+   use its ``acquisition_busy`` flag to tell a transient wait for another
+   thread (retry) from a missing credential (sign in). See :ref:`oidc_auth`.
+
+   A flush or connect that needs a fresh token resolves it before its first
+   request, and that can take up to the provider's ``timeout`` -- or six times
+   it while another thread's refresh is running -- regardless of
+   ``request_timeout`` and ``retry_timeout``. See :ref:`auth-token-wait`.
+
 .. _sender_transaction:
 
 HTTP Transactions
@@ -1136,8 +1184,11 @@ streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
 ``iter_arrow`` (and ``to_pandas`` / ``iter_pandas`` with ``dtype_backend`` or
 ``types_mapper``) require pyarrow; the default ``to_pandas`` / ``iter_pandas``
 are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
-(``__arrow_c_stream__``), so ``polars.from_arrow(result)`` or
+(``__arrow_c_stream__``), so ``polars.DataFrame(result)`` or
 ``duckdb.from_arrow(result)`` consume it directly without pyarrow installed.
+On polars 2.0 and later, ``polars.from_arrow(result)`` returns a ``Series`` of
+structs for such a stream rather than a ``DataFrame``; use the
+``polars.DataFrame`` constructor.
 Each result is consumed once. Fully drain it, use it as a context manager
 (``with db.query(...) as result:``), or call :func:`QueryResult.close <questdb.QueryResult.close>`. A
 partially-consumed result cannot return its connection to the pool — closing
@@ -1157,7 +1208,7 @@ concurrent consumption, cancellation, and close are unsupported.
 per-batch ``SYMBOL`` dictionary is compacted to the values each batch uses,
 which a generic consumer reconciles. So when the target is a polars / pandas
 frame, the dedicated methods avoid the re-reconciliation that
-``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
+``polars.DataFrame(result)`` / ``to_arrow().to_pandas()`` pay on
 ``SYMBOL``-heavy results.
 
 For several queries in a row, call :meth:`QuestDB.reader <questdb.QuestDB.reader>` to take a
