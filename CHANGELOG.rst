@@ -32,7 +32,7 @@ Changelog
   raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.ConfigError`` during startup.
 - To read a ``QueryResult`` into polars without pyarrow, use
-  ``polars.DataFrame(result)`` (polars 1.3 or later). The 5.0.0 notes said to
+  ``polars.DataFrame(result)`` (polars 1.32 or later). The 5.0.0 notes said to
   use ``polars.from_arrow(result)``, but on Polars 2.0 that call returns a
   struct ``Series``, not a ``DataFrame``. On Polars 1.20 and older, it raises
   ``TypeError``.

@@ -21,7 +21,7 @@ Install it to ingest a **pandas** DataFrame, or to use the
 results. polars, pyarrow, duckdb and any other Arrow-native source need
 no extra — they go through the Arrow PyCapsule Interface; just install
 the source library as usual. Reading query results with
-``polars.DataFrame(result)`` needs polars 1.3 or later.
+``polars.DataFrame(result)`` needs polars 1.32 or later.
 
 Without it, you may still ingest data row-by-row through
 ``Sender.row()``, and read query results through the

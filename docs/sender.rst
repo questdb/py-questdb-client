@@ -1136,7 +1136,7 @@ streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
 ``iter_arrow`` (and ``to_pandas`` / ``iter_pandas`` with ``dtype_backend`` or
 ``types_mapper``) require pyarrow; the default ``to_pandas`` / ``iter_pandas``
 are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
-(``__arrow_c_stream__``), so ``polars.DataFrame(result)`` (polars 1.3 or
+(``__arrow_c_stream__``), so ``polars.DataFrame(result)`` (polars 1.32 or
 later) or ``duckdb.from_arrow(result)`` consume it directly without pyarrow
 installed.
 Each result is consumed once. Fully drain it, use it as a context manager
