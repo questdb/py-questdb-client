@@ -139,6 +139,7 @@ if pd is not None and pyarrow is not None:
     from test_dataframe import TestPandasProtocolVersionV3
     from test_dataframe import TestNaTScalarDatetime
     from test_dataframe import TestColumnarPlanWithoutPyarrow
+    from test_dataframe import TestPandasTooOld
 elif pd is None:
     class TestNoPandas(unittest.TestCase):
         def test_no_pandas(self):
@@ -3993,6 +3994,87 @@ class TestQueryResultFinalizer(unittest.TestCase):
         finally:
             sys.unraisablehook = original_hook
         self.assertEqual(unraisable, [])
+
+
+class TestQueryResultReuseErrors(unittest.TestCase):
+    """A second read names the first reader, and a read after ``close()``
+    says that the result is closed. A dead cursor is enough: the
+    single-use check runs before any server I/O."""
+
+    def _assert_invalid(self, cm, text):
+        self.assertEqual(
+            cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+        self.assertIn(text, str(cm.exception))
+
+    def test_second_read_names_first_reader(self):
+        result = qi.QueryResult(qi._CursorHandle())
+        result.__arrow_c_stream__()
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.to_pandas()
+        self._assert_invalid(
+            cm, 'already read by __arrow_c_stream__(). A result can be '
+                'read only once.')
+        result.close()
+        # After a read, close() keeps the more useful text.
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.iter_pandas()
+        self._assert_invalid(cm, 'already read by __arrow_c_stream__()')
+
+    def test_read_after_close_says_closed(self):
+        result = qi.QueryResult(qi._CursorHandle())
+        result.close()
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.to_pandas()
+        self._assert_invalid(cm, 'QueryResult is closed.')
+
+
+class TestDependencyFloors(unittest.TestCase):
+    """The floors of the ``pyproject.toml`` extras and of
+    ``dev_requirements.txt`` are the versions that the ``linux-min-deps``
+    CI job installs (``ci/pip_install_deps.py``), so that pip enforces only
+    tested minimums."""
+
+    ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+    def _ci_pins(self):
+        import importlib.util
+        path = self.ROOT / 'ci' / 'pip_install_deps.py'
+        spec = importlib.util.spec_from_file_location('pip_install_deps', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        pins = dict(module.MIN_VERSIONS)
+        pins['duckdb'] = module.MIN_DUCKDB_VERSION
+        return pins
+
+    @staticmethod
+    def _floors(text):
+        import re
+        return dict(re.findall(r'"?([A-Za-z0-9_.-]+)>=([0-9][^",\s]*)', text))
+
+    def test_extras_floors_match_ci_pins(self):
+        import re
+        pins = self._ci_pins()
+        text = (self.ROOT / 'pyproject.toml').read_text(encoding='utf-8')
+        # Python 3.10 has no `tomllib`: read the extras with a regex.
+        section = text.split('[project.optional-dependencies]', 1)[1]
+        section = section.split('\n[', 1)[0]
+        extras = dict(re.findall(r'^(\w+)\s*=\s*\[(.*?)\]', section, re.M))
+        for extra in ('dataframe', 'polars', 'duckdb'):
+            floors = self._floors(extras[extra])
+            self.assertTrue(floors, extra)
+            for package, floor in floors.items():
+                with self.subTest(extra=extra, package=package):
+                    self.assertEqual(floor, pins[package])
+
+    def test_dev_requirements_floors_match_ci_pins(self):
+        pins = self._ci_pins()
+        text = (self.ROOT / 'dev_requirements.txt').read_text(encoding='utf-8')
+        floors = self._floors(text)
+        # Separate CI jobs test the numpy floor (1.21); the minimum-versions
+        # job uses numpy 1.26.4.
+        for package in ('pandas', 'pyarrow', 'fastparquet'):
+            with self.subTest(package=package):
+                self.assertEqual(floors[package], pins[package])
 
 
 class TestBufferConstruction(unittest.TestCase):

@@ -5579,10 +5579,12 @@ cdef bint _dataframe_client_try_capsule_path(
     if table_name_col is not None:
         return False
 
-    # LazyFrame: prefer the streaming engine (polars 1.0+) for lower
-    # peak memory. `LazyFrame.collect_batches()` would stream natively
-    # but upstream marks it unstable and "much slower than native sinks",
-    # so we materialize and slice downstream.
+    # LazyFrame: prefer the streaming engine for lower peak memory. Every
+    # supported polars (1.32+) accepts `engine='streaming'`; the TypeError
+    # fallback keeps eager collect for a `collect` without that keyword.
+    # `LazyFrame.collect_batches()` would stream natively but upstream
+    # marks it unstable and "much slower than native sinks", so we
+    # materialize and slice downstream.
     if _is_polars_dataframe_or_lazy(df) and isinstance(
             df, _POLARS_LAZYFRAME_T):
         try:
@@ -5880,7 +5882,7 @@ cdef void_int _direct_dataframe_run(
                 raise UnsupportedDataFrameShapeError(
                     'schema_overrides requires the Arrow columnar path: '
                     'fully Arrow-backed input (pyarrow / polars, or pandas '
-                    'where every column uses ArrowDtype) without '
+                    '2.2+ where every column uses ArrowDtype) without '
                     '`table_name_col`. This input falls back to the NumPy '
                     'planner, which does not apply schema_overrides; '
                     'convert the frame, e.g. '
@@ -6340,14 +6342,13 @@ cdef class QuestDB:
         - **pandas** ``pandas.DataFrame``. NumPy-backed columns route
           through the legacy planner; pyarrow-backed columns route
           through the Arrow C Stream capsule path below.
-        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``.
-          ``LazyFrame`` is materialised via
-          ``.collect(engine='streaming')`` (eager ``.collect()`` on
-          polars < 1.0).
+        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``
+          (polars 1.32 or later). ``LazyFrame`` is materialised via
+          ``.collect(engine='streaming')``.
         - **pyarrow** ``pa.Table``, ``pa.RecordBatch``, and
           ``pa.RecordBatchReader``.
         - Any object exposing the Arrow C Data Interface — i.e. with
-          ``__arrow_c_stream__`` (duckdb / cudf / modin / pyarrow-backed
+          ``__arrow_c_stream__`` (duckdb / cudf / pyarrow-backed
           pandas 2.2+) or ``__arrow_c_array__`` (single Arrow array
           exporters, wrapped into a one-batch ``pa.Table``).
 
@@ -6398,7 +6399,7 @@ cdef class QuestDB:
           The *designated* timestamp column (``at=``) must be non-null
           and at or after the epoch.
         - **Decimal**: Arrow-backed ``pa.decimal{32,64,128,256}`` columns
-          (``pa.decimal32``/``pa.decimal64`` require pyarrow >= 18), or
+          (``pa.decimal32``/``pa.decimal64`` require pyarrow >= 19), or
           object-dtype columns of ``decimal.Decimal`` (re-exported through
           Arrow; the decimal width and scale are inferred from the values).
         - **Array**: Arrow ``pa.list_`` / ``pa.large_list`` /
@@ -6425,8 +6426,9 @@ cdef class QuestDB:
         ``'symbol'``, ``'ipv4'``, ``'char'``, or ``'geohash'`` (e.g.
         ``{'venue': 'symbol', 'src_ip': 'ipv4'}``). Unknown column names are
         rejected. It requires the Arrow columnar path (fully Arrow-backed
-        input without ``table_name_col``); on input that falls back to the
-        NumPy planner it raises :class:`UnsupportedDataFrameShapeError`.
+        input without ``table_name_col``; pandas input needs pandas 2.2 or
+        later); on input that falls back to the NumPy planner it raises
+        :class:`UnsupportedDataFrameShapeError`.
         ``max_rows_per_batch`` sets the pipelining granularity, not a
         safety limit: any batch exceeding the negotiated per-batch byte
         cap is split regardless of it, and a single row is never bounded

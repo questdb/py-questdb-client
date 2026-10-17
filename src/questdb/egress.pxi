@@ -2,8 +2,8 @@
 #
 # `QueryResult` exposes the Arrow PyCapsule Interface
 # (`__arrow_c_stream__`) directly off the Rust cursor, so polars /
-# duckdb / pandas 3.0 / any Arrow-native consumer can read query
-# results without pyarrow. `to_pandas` / `iter_pandas` default to a
+# duckdb / other Arrow-native consumers can read query results
+# without pyarrow. `to_pandas` / `iter_pandas` default to a
 # pyarrow-free native numpy path; `to_arrow` / `iter_arrow` /
 # `to_polars` / `iter_polars` lazy-import pyarrow.
 
@@ -742,6 +742,10 @@ cdef class _QueryStreamProducer:
     cdef bint exhausted
     cdef bint delivered
     cdef char* last_error
+    # The exception behind `last_error`, if there is one, so that a
+    # Python-level caller (`QueryResult.__arrow_c_schema__`) can raise it
+    # with its type and code.
+    cdef object last_exc
     cdef int seen_seq
 
     def __cinit__(self):
@@ -751,6 +755,7 @@ cdef class _QueryStreamProducer:
         self.exhausted = False
         self.delivered = False
         self.last_error = NULL
+        self.last_exc = None
         self.seen_seq = 0
         memset(&self.cached_schema, 0, sizeof(ArrowSchema))
         memset(&self.cached_array, 0, sizeof(ArrowArray))
@@ -772,7 +777,10 @@ cdef class _QueryStreamProducer:
             self.last_error = NULL
 
 
-cdef void _qs_set_error(_QueryStreamProducer prod, const char* msg, size_t msg_len) noexcept:
+cdef void _qs_set_error(
+        _QueryStreamProducer prod, const char* msg, size_t msg_len,
+        object exc=None) noexcept:
+    prod.last_exc = exc
     if prod.last_error != NULL:
         free(prod.last_error)
         prod.last_error = NULL
@@ -790,7 +798,7 @@ cdef int _qs_pull(_QueryStreamProducer prod) noexcept with gil:
     except BaseException as e:
         try:
             full = ('arrow batch pull failed: ' + repr(e)).encode('utf-8')
-            _qs_set_error(prod, full, <size_t>len(full))
+            _qs_set_error(prod, full, <size_t>len(full), e)
         except:
             _qs_set_error(prod, b'arrow batch pull failed', 23)
         prod.exhausted = True
@@ -803,11 +811,8 @@ cdef int _qs_pull_impl(_QueryStreamProducer prod):
     cdef ArrowSchema local_schema
     cdef questdb_error* err = NULL
     cdef qwp_reader_arrow_batch_result result
-    cdef const char* err_msg = NULL
-    cdef size_t err_len = 0
-    cdef questdb_error_code code
-    cdef object py_msg
     cdef bytes full
+    cdef object exc
     cdef int current_seq
     if prod.exhausted:
         # A prior error left a diagnostic pinned; keep surfacing it rather
@@ -843,11 +848,12 @@ cdef int _qs_pull_impl(_QueryStreamProducer prod):
                 if local_schema.release != NULL:
                     local_schema.release(&local_schema)
                 try:
-                    full = (
-                        '[' + QuestDBErrorCode.FailoverWouldDuplicate.name + '] '
+                    exc = QuestDBError(
+                        QuestDBErrorCode.FailoverWouldDuplicate,
                         'mid-query failover would duplicate already-delivered '
-                        'batches; re-issue the query').encode('utf-8')
-                    _qs_set_error(prod, full, <size_t>len(full))
+                        'batches; re-issue the query')
+                    full = _qs_error_text(exc)
+                    _qs_set_error(prod, full, <size_t>len(full), exc)
                 except:
                     fallback = (
                         b'[FailoverWouldDuplicate] mid-query failover would '
@@ -872,26 +878,20 @@ cdef int _qs_pull_impl(_QueryStreamProducer prod):
         return 0
     if result == qwp_reader_arrow_batch_end:
         prod.exhausted = True
-        _mark_reader_drained(prod.cursor_handle)
+        try:
+            _mark_reader_drained(prod.cursor_handle)
+        finally:
+            # Free the cursor now, not at stream release: a pending
+            # `__arrow_c_schema__` producer of a non-SELECT must not keep
+            # a `PooledReader` lease busy.
+            prod.cursor_handle._free()
         return 0
     if err != NULL:
-        code = questdb_error_get_code(err)
-        err_msg = questdb_error_msg(err, &err_len)
-        try:
-            if err_msg != NULL:
-                py_msg = PyUnicode_FromStringAndSize(err_msg, <Py_ssize_t>err_len)
-            else:
-                py_msg = 'arrow batch fetch failed'
-            full = (
-                '[' + _reader_err_code_to_py(code).name + '] ' + py_msg
-            ).encode('utf-8')
-            _qs_set_error(prod, full, <size_t>len(full))
-        except:
-            if err_msg != NULL:
-                _qs_set_error(prod, err_msg, err_len)
-            else:
-                _qs_set_error(prod, b'arrow batch fetch failed', 24)
-        questdb_error_free(err)
+        # `_reader_err_to_py` frees `err`, also when it raises.
+        exc = _reader_err_to_py(err)
+        err = NULL
+        full = _qs_error_text(exc)
+        _qs_set_error(prod, full, <size_t>len(full), exc)
     else:
         _qs_set_error(
             prod,
@@ -900,18 +900,33 @@ cdef int _qs_pull_impl(_QueryStreamProducer prod):
     return -1
 
 
+cdef bytes _qs_error_text(object exc):
+    # The C text of a stream error: "[CodeName] message".
+    return ('[' + exc.code.name + '] ' + str(exc)).encode('utf-8')
+
+
+cdef int _qs_ensure_schema(_QueryStreamProducer prod) noexcept with gil:
+    # Pull the first batch if there is no schema yet. A result without a
+    # batch (a non-SELECT) gets an empty struct schema.
+    if not prod.has_cached_schema:
+        if _qs_pull(prod) != 0:
+            return 5  # EIO
+    if not prod.has_cached_schema:
+        if _qs_install_empty_struct_schema(prod) != 0:
+            return 12  # ENOMEM
+    return 0
+
+
 cdef int _qs_get_schema(ArrowArrayStream* stream, ArrowSchema* out) noexcept with gil:
     cdef _QueryStreamProducer prod
+    cdef int rc
     if stream == NULL or stream.private_data == NULL:
         return 22  # EINVAL
     prod = <_QueryStreamProducer>stream.private_data
     try:
-        if not prod.has_cached_schema:
-            if _qs_pull(prod) != 0:
-                return 5  # EIO
-        if not prod.has_cached_schema:
-            if _qs_install_empty_struct_schema(prod) != 0:
-                return 12  # ENOMEM
+        rc = _qs_ensure_schema(prod)
+        if rc != 0:
+            return rc
         if _arrow_schema_deep_clone(&prod.cached_schema, out) != 0:
             _qs_set_error(prod, b'failed to clone ArrowSchema', 27)
             return 12  # ENOMEM
@@ -999,12 +1014,19 @@ cdef void _qs_capsule_destructor(object capsule) noexcept:
     free(stream)
 
 
-cdef object _make_query_stream_capsule(_CursorHandle handle):
-    cdef _QueryStreamProducer prod
-    cdef ArrowArrayStream* stream
-    prod = _QueryStreamProducer()
+cdef _QueryStreamProducer _new_query_stream_producer(_CursorHandle handle):
+    cdef _QueryStreamProducer prod = _QueryStreamProducer()
     prod.cursor_handle = handle
     prod.seen_seq = handle._reset_sequence()
+    return prod
+
+
+cdef object _make_query_stream_capsule(_CursorHandle handle):
+    return _query_stream_capsule(_new_query_stream_producer(handle))
+
+
+cdef object _query_stream_capsule(_QueryStreamProducer prod):
+    cdef ArrowArrayStream* stream
     stream = <ArrowArrayStream*>calloc(1, sizeof(ArrowArrayStream))
     if stream == NULL:
         raise MemoryError()
@@ -1020,6 +1042,62 @@ cdef object _make_query_stream_capsule(_CursorHandle handle):
     except:
         Py_DECREF(prod)
         free(stream)
+        raise
+
+
+cdef class _ArrowSchemaBox:
+    """Owns one deep clone of a result's ArrowSchema. Each
+    ``QueryResult.__arrow_c_schema__`` call exports a new clone of it, so
+    the call also works after the stream was handed to a consumer."""
+    cdef ArrowSchema schema
+    cdef bint has_schema
+
+    def __cinit__(self):
+        memset(&self.schema, 0, sizeof(ArrowSchema))
+        self.has_schema = False
+
+    def __dealloc__(self):
+        if self.has_schema and self.schema.release != NULL:
+            self.schema.release(&self.schema)
+        self.has_schema = False
+
+
+cdef _ArrowSchemaBox _arrow_schema_box(const ArrowSchema* src):
+    cdef _ArrowSchemaBox box = _ArrowSchemaBox()
+    if _arrow_schema_deep_clone(src, &box.schema) != 0:
+        raise MemoryError()
+    box.has_schema = True
+    return box
+
+
+cdef void _arrow_schema_capsule_destructor(object capsule) noexcept:
+    cdef ArrowSchema* schema
+    if not PyCapsule_IsValid(capsule, b'arrow_schema'):
+        return
+    schema = <ArrowSchema*>PyCapsule_GetPointer(capsule, b'arrow_schema')
+    if schema == NULL:
+        return
+    # A consumer that imported the schema has moved it and cleared
+    # `release`.
+    if schema.release != NULL:
+        schema.release(schema)
+    free(schema)
+
+
+cdef object _arrow_schema_capsule(_ArrowSchemaBox box):
+    cdef ArrowSchema* schema = <ArrowSchema*>malloc(sizeof(ArrowSchema))
+    if schema == NULL:
+        raise MemoryError()
+    # On failure, the clone releases what it allocated.
+    if _arrow_schema_deep_clone(&box.schema, schema) != 0:
+        free(schema)
+        raise MemoryError()
+    try:
+        return PyCapsule_New(
+            <void*>schema, b'arrow_schema', _arrow_schema_capsule_destructor)
+    except:
+        schema.release(schema)
+        free(schema)
         raise
 
 
@@ -1726,7 +1804,7 @@ cdef object _FROM_CODES_HAS_VALIDATE = None
 cdef object _symbol_from_codes(object pd, object arr, object dtype):
     # Bounds-check the wire codes against the dict once (a vectorised C-level
     # reduction), then skip pandas' O(rows) Python re-validation. `validate=`
-    # exists since pandas 1.1; older pandas keeps the checked path. `dtype=`
+    # exists since pandas 2.1; older pandas keeps the checked path. `dtype=`
     # reuses one cached category Index across columns and batches (vs
     # `categories=`, which rebuilds it every call).
     cdef Py_ssize_t n_cats = len(dtype.categories)
@@ -2054,6 +2132,36 @@ cdef object _polars_dataframe_hybrid(
     return pl.DataFrame(cols)
 
 
+# The number of `to_polars` / `iter_polars` frames that fell back from the
+# `Categories` path to `pl.from_arrow` in this process.
+cdef Py_ssize_t _POLARS_HYBRID_FALLBACKS = 0
+
+
+cdef object _polars_hybrid_fallback(object table, object pl, object exc):
+    # polars marks the `Categories` API as unstable, so a new release can
+    # break the hybrid path. `pl.from_arrow` gives the same values, only
+    # slower, so fall back, but do not hide the failure.
+    global _POLARS_HYBRID_FALLBACKS
+    _POLARS_HYBRID_FALLBACKS += 1
+    # cdef frames and this module's def entry points are invisible to the
+    # warnings stack walker, so level 1 is already the user's call.
+    warnings.warn(
+        'The polars Categorical fast path failed '
+        f'({type(exc).__name__}: {exc}); the frame was built with '
+        '`polars.from_arrow` instead, which is slower. Please report this '
+        'at https://github.com/questdb/py-questdb-client/issues.',
+        RuntimeWarning,
+        stacklevel=1)
+    return pl.from_arrow(table)
+
+
+def _debug_polars_hybrid_fallbacks():
+    """Internal: the number of `to_polars` / `iter_polars` frames that fell
+    back from the polars `Categories` path in this process. Intended for
+    tests that verify the fast path stayed in use."""
+    return _POLARS_HYBRID_FALLBACKS
+
+
 cdef class _PolarsBatchIter:
     """Streaming `polars.DataFrame` per result batch. Holds the per-symbol
     `Categories` registries so every batch's Categoricals share one identity
@@ -2082,8 +2190,8 @@ cdef class _PolarsBatchIter:
         try:
             return _polars_dataframe_hybrid(
                 table, self.pl, self.pa, self.registries)
-        except Exception:
-            return self.pl.from_arrow(table)
+        except Exception as exc:
+            return _polars_hybrid_fallback(table, self.pl, exc)
 
 
 cdef class _NumpyBatchIter:
@@ -2222,6 +2330,9 @@ cdef object _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper):
         kwargs['types_mapper'] = types_mapper
     elif dtype_backend == 'pyarrow':
         import pandas as pd
+        if not hasattr(pd, 'ArrowDtype'):
+            raise ImportError(_pandas_too_old_message(
+                pd, "`dtype_backend='pyarrow'`"))
         kwargs['types_mapper'] = pd.ArrowDtype
     elif dtype_backend == 'numpy_nullable':
         kwargs['types_mapper'] = _numpy_nullable_mapping()
@@ -2262,6 +2373,15 @@ cdef bint _cursor_handle_is_live(_CursorHandle h):
     return h is not None and h._is_live()
 
 
+cdef str _query_result_reuse_message(object consumed_by):
+    # `consumed_by` is None when the result was closed before any read.
+    if consumed_by is None:
+        return 'QueryResult is closed. Run the query again to read the result.'
+    return (
+        f'QueryResult was already read by {consumed_by}. A result can be '
+        'read only once. Run the query again to read the result again.')
+
+
 class QueryResult:
     """Result of ``QuestDB.query(sql)``.
 
@@ -2283,11 +2403,15 @@ class QueryResult:
     Concurrent operations on one result are unsupported.
 
     ``__arrow_c_stream__`` is native — the cursor's record batches are
-    exposed directly through the Arrow C Data Interface, so polars /
-    duckdb / pandas 3.0 / any Arrow-native consumer can read query
-    results without pyarrow installed. ``to_pandas`` / ``iter_pandas``
-    are also pyarrow-free by default (a native numpy path); they only
-    need pyarrow when ``dtype_backend`` / ``types_mapper`` is passed.
+    exposed directly through the Arrow C Data Interface, so polars
+    (``polars.DataFrame(result)``, polars 1.32 or later), duckdb
+    (``duckdb.from_arrow(result)``, duckdb 1.1 or later) and other
+    Arrow-native consumers can read query results without pyarrow
+    installed. duckdb reads when you fetch, so fetch before the result is
+    closed.
+    ``to_pandas`` / ``iter_pandas`` are also pyarrow-free by default (a
+    native numpy path); they only need pyarrow when ``dtype_backend`` /
+    ``types_mapper`` is passed.
     ``to_arrow`` / ``iter_arrow`` / ``to_polars`` / ``iter_polars``
     do require pyarrow.
 
@@ -2297,15 +2421,17 @@ class QueryResult:
     form whose per-batch SYMBOL dictionary is compacted to the values each
     batch uses, which a generic consumer reconciles. So when the target is a
     polars / pandas frame, the dedicated methods avoid the re-reconciliation
-    that ``polars.from_arrow(result)`` / ``to_arrow().to_pandas()`` pay on
-    SYMBOL-heavy results.
+    that ``polars.DataFrame(result)`` / ``to_arrow().to_pandas()`` pay on
+    SYMBOL-heavy results. ``to_arrow().to_pandas()`` needs pyarrow 23 or
+    later for SYMBOL columns, which use ``uint32`` dictionary indices.
 
     Example::
 
         with db.query('SELECT * FROM trades WHERE ts > $1',
                       [datetime.datetime(2026, 7, 1)]) as result:
-            df = polars.from_arrow(result)              # no pyarrow
+            df = polars.DataFrame(result)               # no pyarrow
             # df = result.to_pandas()                   # no pyarrow
+            # rows = duckdb.from_arrow(result).fetchall()  # no pyarrow
             # table = pa.table(result)                  # pyarrow required
     """
 
@@ -2313,57 +2439,134 @@ class QueryResult:
         self._cursor_handle = cursor_handle
         self._cancel_handle = cursor_handle
         self._consumed = False
+        # The method that read the result, for the reuse error.
+        self._consumed_by = None
+        # Set by `__arrow_c_schema__`: the stream producer that holds the
+        # cursor and the first batch until `__arrow_c_stream__` takes it.
+        self._schema_producer = None
+        # A saved copy of the schema for later `__arrow_c_schema__` calls.
+        self._schema_box = None
 
-    def _take_cursor_handle(self):
+    def _take_cursor_handle(self, str what):
         if self._consumed:
+            if self._schema_producer is not None:
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    'QueryResult was opened as an Arrow stream by '
+                    '__arrow_c_schema__(). Read it through the stream, for '
+                    'example with pa.table(result) or '
+                    'duckdb.from_arrow(result).')
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
-                'QueryResult already consumed')
+                _query_result_reuse_message(self._consumed_by))
         if self._cursor_handle is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
-                'QueryResult cursor was closed')
+                _query_result_reuse_message(None))
         self._consumed = True
+        self._consumed_by = what
         handle = self._cursor_handle
         self._cursor_handle = None
         return handle
 
     def _drain(self):
-        _drain_cursor(self._take_cursor_handle())
+        _drain_cursor(self._take_cursor_handle('execute()'))
+
+    def __arrow_c_schema__(self):
+        """Arrow schema PyCapsule protocol (no pyarrow needed).
+
+        It reads the first batch to get the schema, and keeps that batch
+        for ``__arrow_c_stream__``. duckdb 1.5 calls it, so that
+        ``duckdb.from_arrow(result)`` opens the stream only once. After
+        this call, read the result only through ``__arrow_c_stream__``:
+        the other readers raise ``InvalidApiCall``. Later calls return the
+        same schema, also after the stream was taken.
+        """
+        cdef _QueryStreamProducer prod
+        cdef _CursorHandle handle
+        cdef object exc
+        if self._schema_box is not None:
+            return _arrow_schema_capsule(self._schema_box)
+        handle = self._take_cursor_handle('__arrow_c_schema__()')
+        prod = _new_query_stream_producer(handle)
+        self._schema_producer = prod
+        if _qs_ensure_schema(prod) != 0:
+            # Release the connection now, and raise the error with its own
+            # type and code (as `to_arrow()` would).
+            exc = prod.last_exc
+            prod.last_exc = None
+            if exc is None:
+                exc = QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    'failed to read the result schema: ' + (
+                        (<bytes>prod.last_error).decode('utf-8', 'replace')
+                        if prod.last_error != NULL else 'out of memory'))
+            self._schema_producer = None
+            prod._free_cached()
+            handle._free()
+            raise exc
+        self._schema_box = _arrow_schema_box(&prod.cached_schema)
+        return _arrow_schema_capsule(self._schema_box)
 
     def __arrow_c_stream__(self, requested_schema=None):
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
-        (e.g. ``polars.from_arrow``) reconciles them.
+        (e.g. ``polars.DataFrame(result)`` on polars 1.32 or later)
+        reconciles them.
+
+        ``requested_schema`` is ignored, as the PyCapsule interface
+        allows: the stream always has the result's own schema, and the
+        consumer casts it if necessary (``pa.table(result, schema=...)``
+        does).
+
+        The stream does not replay a result: after a batch has been
+        delivered, a failover ends the stream with an error. The consumer
+        raises its own exception type, and the message contains
+        ``[FailoverWouldDuplicate]``; re-issue the query. polars raises a
+        ``ComputeError``, but polars before 1.37.1 raises a
+        ``PanicException``, which ``except Exception`` does not catch.
 
         The returned stream may be handed to a consumer worker thread.
         Stream callbacks are serialised by the same cursor lock, but the
         Arrow C stream itself must still be consumed by only one thread at
         a time; concurrent ``get_next`` / ``release`` calls are unsupported.
         """
-        if requested_schema is not None:
-            raise NotImplementedError(
-                'requested_schema is not supported; consume the stream '
-                'and project on the consumer side.')
+        cdef _QueryStreamProducer prod = self._schema_producer
         # Streaming: hand batches out incrementally. A post-delivery
         # failover bumps the cursor's _reset_seq; the capsule producer
         # surfaces FailoverWouldDuplicate rather than feeding the
         # replayed batch-0 as a duplicate (see _qs_pull).
-        return _make_query_stream_capsule(self._take_cursor_handle())
+        if prod is not None:
+            # `__arrow_c_schema__` already pulled the first batch: hand
+            # out that producer. Clear the field only when the capsule
+            # exists, so that close() still reaches the cursor on failure.
+            capsule = _query_stream_capsule(prod)
+            self._schema_producer = None
+            self._consumed_by = '__arrow_c_stream__()'
+            return capsule
+        return _make_query_stream_capsule(
+            self._take_cursor_handle('__arrow_c_stream__()'))
 
     def to_arrow(self):
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow.
 
+        SYMBOL columns use ``uint32`` dictionary indices, which
+        ``Table.to_pandas()`` accepts only from pyarrow 23. For a pandas
+        frame, call :meth:`to_pandas` instead. DECIMAL columns with a
+        precision of 18 or less arrive as ``decimal32`` / ``decimal64``,
+        which need pyarrow 19 or later.
+
         Materialise-whole: a mid-query failover replays the result
         transparently — the partial accumulation we hold is discarded
-        from batch-0. The pyarrow-free streaming path
-        (``__arrow_c_stream__`` consumed by ``polars.from_arrow(result)``
-        / ``pa.table(result)``) instead surfaces ``FailoverWouldDuplicate``
-        on a post-delivery failover.
+        from batch-0. The streaming path (``__arrow_c_stream__``, as
+        consumed by ``polars.DataFrame(result)`` or ``pa.table(result)``)
+        does not replay: on a post-delivery failover, the consumer raises
+        its own error, and the message contains
+        ``[FailoverWouldDuplicate]``.
         """
         import pyarrow as pa
-        handle = self._take_cursor_handle()
+        handle = self._take_cursor_handle('to_arrow()')
         schema, batches = _fetch_all_record_batches(handle, pa, True)
         if schema is None:
             return pa.table({})
@@ -2393,13 +2596,15 @@ class QueryResult:
         if dtype_backend is None and types_mapper is None:
             return self._to_pandas_numpy()
         import pyarrow as pa
-        handle = self._take_cursor_handle()
+        # Check the arguments before the result is read: a bad value must
+        # not consume the cursor.
+        kwargs = _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper)
+        handle = self._take_cursor_handle('to_pandas()')
         schema, batches = _fetch_all_record_batches(handle, pa)
         table = (pa.table({}) if schema is None
                  else _table_shared_symbol_dict(
                      pa.Table.from_batches(batches, schema)))
-        return table.to_pandas(
-            **_resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper))
+        return table.to_pandas(**kwargs)
 
     def to_polars(self):
         """Read the full result into a ``polars.DataFrame``. Requires polars
@@ -2412,14 +2617,17 @@ class QueryResult:
         registry — the wire code is its own physical categorical code, so
         there is no per-row ``Dictionary -> Categorical`` remap. Falls back to
         ``polars.from_arrow`` when polars' (unstable) ``Categories`` API is
-        unavailable.
+        unavailable. If that path fails, it also falls back and issues a
+        ``RuntimeWarning``: the values stay correct, but the read is slower.
 
         Materialise-whole: a mid-query failover replays the result
         transparently. This accumulates batches in-library (via pyarrow)
-        so the partial result can be discarded on failover; for the
-        pyarrow-free streaming path consume ``__arrow_c_stream__``
-        directly (``polars.from_arrow(result)``), which surfaces
-        ``FailoverWouldDuplicate`` on a post-delivery failover.
+        so the partial result can be discarded on failover. The
+        pyarrow-free ``polars.DataFrame(result)`` streams through
+        ``__arrow_c_stream__`` and does not replay: on a post-delivery
+        failover, polars raises its own error, and the message contains
+        ``[FailoverWouldDuplicate]``. polars before 1.37.1 raises a
+        ``PanicException``, which ``except Exception`` does not catch.
         """
         try:
             import polars as pl
@@ -2433,7 +2641,7 @@ class QueryResult:
             raise ImportError(
                 '`pyarrow` is required for `to_polars()`. '
                 'Install with `pip install pyarrow`.') from ie
-        handle = self._take_cursor_handle()
+        handle = self._take_cursor_handle('to_polars()')
         schema, batches = _fetch_all_record_batches(handle, pa)
         if schema is None:
             return pl.from_arrow(pa.table({}))
@@ -2442,11 +2650,12 @@ class QueryResult:
             return pl.from_arrow(table)
         try:
             return _polars_dataframe_hybrid(table, pl, pa, {})
-        except Exception:
-            return pl.from_arrow(table)
+        except Exception as exc:
+            return _polars_hybrid_fallback(table, pl, exc)
 
     def _to_pandas_numpy(self):
-        return _numpy_frame_from_cursor(self._take_cursor_handle())
+        return _numpy_frame_from_cursor(
+            self._take_cursor_handle('to_pandas()'))
 
     def iter_arrow(self):
         """Iterate result batches as ``pyarrow.RecordBatch``.
@@ -2458,7 +2667,8 @@ class QueryResult:
         garbage-collection cycle; call :meth:`close` (or use the context-
         manager) for deterministic release.
         """
-        reader = _build_record_batch_reader(self._take_cursor_handle(), True)
+        reader = _build_record_batch_reader(
+            self._take_cursor_handle('iter_arrow()'), True)
         for batch in reader:
             yield batch
 
@@ -2474,13 +2684,14 @@ class QueryResult:
             raise ValueError(
                 'pass at most one of dtype_backend, types_mapper')
         if dtype_backend is None and types_mapper is None:
-            return _NumpyBatchIter(self._take_cursor_handle())
+            return _NumpyBatchIter(self._take_cursor_handle('iter_pandas()'))
         return self._iter_pandas_arrow(dtype_backend, types_mapper)
 
     def _iter_pandas_arrow(self, dtype_backend, types_mapper):
         import pyarrow as pa
         kwargs = _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper)
-        reader = _build_record_batch_reader(self._take_cursor_handle())
+        reader = _build_record_batch_reader(
+            self._take_cursor_handle('iter_pandas()'))
         for batch in reader:
             table = _table_shared_symbol_dict(pa.Table.from_batches([batch]))
             yield table.to_pandas(**kwargs)
@@ -2510,7 +2721,8 @@ class QueryResult:
             raise ImportError(
                 '`pyarrow` is required for `iter_polars()`. '
                 'Install with `pip install pyarrow`.') from ie
-        return _PolarsBatchIter(self._take_cursor_handle(), pl, pa)
+        return _PolarsBatchIter(
+            self._take_cursor_handle('iter_polars()'), pl, pa)
 
     def cancel(self):
         """Cancel the query and drain to terminal.
@@ -2525,6 +2737,10 @@ class QueryResult:
         cdef bint reusable
         cdef qwp_reader_cursor* cursor
         cdef object exc = None
+        # A pending `__arrow_c_schema__` producer holds the first batch. A
+        # stream after the cancel would give that batch and then a clean
+        # end: a truncated result without an error. Drop it.
+        self._drop_schema_producer()
         if handle is None:
             return
         with handle._lock:
@@ -2563,11 +2779,19 @@ class QueryResult:
         invalid.
         """
         cdef _CursorHandle handle = self._cancel_handle
+        self._drop_schema_producer()
         self._cursor_handle = None
         self._cancel_handle = None
         self._consumed = True
         if handle is not None:
             handle._free()
+
+    def _drop_schema_producer(self):
+        cdef _QueryStreamProducer prod = self._schema_producer
+        if prod is not None:
+            # Nothing outside this result has the producer yet.
+            self._schema_producer = None
+            prod._free_cached()
 
     def __enter__(self):
         return self
@@ -2578,8 +2802,16 @@ class QueryResult:
 
     def __del__(self):
         cdef _CursorHandle handle
+        cdef _QueryStreamProducer prod
         try:
             handle = self._cursor_handle
+            if handle is None:
+                # After `__arrow_c_schema__`, a pending producer holds the
+                # cursor. Do not use `_cancel_handle` here: a stream given
+                # to a consumer owns its cursor.
+                prod = self._schema_producer
+                if prod is not None:
+                    handle = prod.cursor_handle
             if not _cursor_handle_is_live(handle):
                 return
             if handle._abandonment_needs_warning():

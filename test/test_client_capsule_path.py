@@ -34,6 +34,11 @@ try:
 except ImportError:
     pd = None
 
+# pyarrow-backed pandas frames take the Arrow path only from pandas 2.2,
+# which adds `DataFrame.__arrow_c_stream__`.
+PANDAS_HAS_ARROW_STREAM = (
+    pd is not None and hasattr(pd.DataFrame, '__arrow_c_stream__'))
+
 
 def _client_conf(port):
     return (
@@ -965,6 +970,9 @@ class TestPyArrowRecordBatchDirect(unittest.TestCase):
 class TestSchemaOverridesPandas(unittest.TestCase):
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
+    @unittest.skipIf(
+        not PANDAS_HAS_ARROW_STREAM,
+        'the pandas Arrow path needs pandas 2.2 or later')
     def test_arrow_backed_pandas_with_schema_overrides_ipv4(self):
         import pandas as pd
         df = pd.DataFrame({

@@ -660,8 +660,14 @@ class TestClientPolarsDataframeRoundTrip(unittest.TestCase):
                 df_in = df.select(cols).sort('id')
                 sql = (f"SELECT {','.join(cols)} FROM {table_name} "
                        f"ORDER BY id")
+                fallbacks = qi._debug_polars_hybrid_fallbacks()
                 with qi.QuestDB.from_conf(self.conf) as client:
                     df_out = client.query(sql).to_polars().sort('id')
+                # A fallback gives the same values, so only the counter
+                # shows that the Categories path failed.
+                if qi._debug_polars_hybrid_fallbacks() != fallbacks:
+                    raise AssertionError(
+                        'to_polars() fell back to polars.from_arrow')
 
                 mismatch = None
                 for c in sorted(cols):

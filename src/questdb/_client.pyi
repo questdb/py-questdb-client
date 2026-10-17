@@ -1232,14 +1232,13 @@ class QuestDB:
         - **pandas** ``pandas.DataFrame`` (NumPy-backed columns route
           through the legacy planner; pyarrow-backed columns route
           through the Arrow C Stream capsule path).
-        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``.
-          ``LazyFrame`` is materialised via
-          ``.collect(engine='streaming')`` (eager ``.collect()`` on
-          polars < 1.0).
+        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``
+          (polars 1.32 or later). ``LazyFrame`` is materialised via
+          ``.collect(engine='streaming')``.
         - **pyarrow** ``pa.Table``, ``pa.RecordBatch``, and
           ``pa.RecordBatchReader``.
         - Any object exposing the Arrow C Data Interface — i.e. with
-          ``__arrow_c_stream__`` (duckdb / cudf / modin / pyarrow-backed
+          ``__arrow_c_stream__`` (duckdb / cudf / pyarrow-backed
           pandas 2.2+) or ``__arrow_c_array__`` (single Arrow array
           exporters, wrapped into a one-batch ``pa.Table``).
 
@@ -1357,18 +1356,43 @@ class QueryResult:
     :meth:`to_arrow` / :meth:`iter_arrow` / :meth:`__arrow_c_stream__` give a
     generic compact-dictionary Arrow form a consumer reconciles. When the
     target is a polars / pandas frame, the dedicated methods avoid the
-    re-reconciliation that ``polars.from_arrow(result)`` /
+    re-reconciliation that ``polars.DataFrame(result)`` /
     ``to_arrow().to_pandas()`` pay on SYMBOL-heavy results.
+    ``to_arrow().to_pandas()`` needs pyarrow 23 or later for SYMBOL
+    columns, which use ``uint32`` dictionary indices.
     """
+
+    def __arrow_c_schema__(self) -> Any:
+        """Arrow schema PyCapsule protocol (no pyarrow needed). It reads the
+        first batch to get the schema, and keeps that batch for
+        ``__arrow_c_stream__``. After this call, read the result only through
+        the stream; the other readers raise ``InvalidApiCall``."""
 
     def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
-        (e.g. ``polars.from_arrow``) reconciles them."""
+        (e.g. ``polars.DataFrame(result)`` on polars 1.32 or later)
+        reconciles them.
+
+        ``requested_schema`` is ignored: the stream always has the result's
+        own schema, and the consumer casts it if necessary.
+
+        The stream does not replay a result: after a batch has been
+        delivered, a failover ends the stream with an error. The consumer
+        raises its own exception type, and the message contains
+        ``[FailoverWouldDuplicate]``; re-issue the query. polars before
+        1.37.1 raises a ``PanicException``, which ``except Exception`` does
+        not catch."""
 
     def to_arrow(self) -> Any:
-        """Read the full result into a ``pyarrow.Table``. Requires pyarrow."""
+        """Read the full result into a ``pyarrow.Table``. Requires pyarrow.
+
+        SYMBOL columns use ``uint32`` dictionary indices, which
+        ``Table.to_pandas()`` accepts only from pyarrow 23. For a pandas
+        frame, call :meth:`to_pandas` instead. DECIMAL columns with a
+        precision of 18 or less arrive as ``decimal32`` / ``decimal64``,
+        which need pyarrow 19 or later."""
 
     def to_pandas(
         self,

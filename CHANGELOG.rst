@@ -31,6 +31,47 @@ Changelog
   ``in_flight_window``, remove it. These options are no longer supported and now
   raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.ConfigError`` during startup.
+- To read a ``QueryResult`` into polars without pyarrow, use
+  ``polars.DataFrame(result)`` (polars 1.32 or later). The 5.0.0 notes said to
+  use ``polars.from_arrow(result)``, but on Polars 2.0 that call returns a
+  struct ``Series``, not a ``DataFrame``. On Polars 1.21 and older, it raises
+  an error. On Polars 1.22 to 1.31, it can return wrong ``SYMBOL`` values
+  without an error. Ingesting polars frames also needs polars 1.32 or later.
+- ``duckdb.from_arrow(result)`` now works on duckdb 1.5. Before, it failed
+  with "QueryResult already consumed", because duckdb 1.5 requested the
+  stream more than once. ``QueryResult`` now has ``__arrow_c_schema__``,
+  which duckdb uses for the schema. It reads the first batch, so after it,
+  read the result only through the Arrow stream.
+- The ``dataframe`` extra now requires ``pandas>=2.0.0`` and
+  ``pyarrow>=14.0.1``, the oldest versions that CI tests. The old minimums did
+  not work: with pyarrow before 14, pyarrow sources, ``iter_polars()`` and
+  ``pa.table(result)`` failed. With pandas before 1.5, every DataFrame load
+  failed with an ``AttributeError``; it now raises a clear ``ImportError``.
+  Two features need newer versions: pyarrow-backed pandas frames take the
+  Arrow path (and accept ``schema_overrides``) only on pandas 2.2 or later,
+  and reading ``DECIMAL`` columns with a precision of 18 or less through
+  pyarrow needs pyarrow 19 or later. See :doc:`installation`.
+- ``to_pandas(dtype_backend=...)`` now checks its arguments before it reads
+  the result. Before, an invalid value consumed the result.
+- New ``polars`` and ``duckdb`` extras install the oldest tested versions or
+  newer: ``pip install questdb[polars]`` installs ``polars>=1.32.0`` and
+  ``pyarrow>=14.0.1`` (``to_polars()`` and ``iter_polars()`` need pyarrow), and
+  ``pip install questdb[duckdb]`` installs ``duckdb>=1.1.0``.
+- A second read of a ``QueryResult`` now names the method that read it first,
+  for example "QueryResult was already read by to_pandas()". A read after
+  ``close()`` now says that the result is closed.
+- ``QueryResult.__arrow_c_stream__`` now ignores ``requested_schema``, as the
+  Arrow PyCapsule interface allows, so ``pa.table(result, schema=...)`` works
+  and pyarrow casts the result. Before, any ``requested_schema`` raised
+  ``NotImplementedError``.
+- If the polars ``Categorical`` fast path of ``to_polars()`` or
+  ``iter_polars()`` fails, the client now issues a ``RuntimeWarning``. It still
+  builds the frame with ``polars.from_arrow``, but it no longer hides the
+  failure.
+- The docs said that a failover during a ``__arrow_c_stream__`` read raises
+  ``FailoverWouldDuplicate``. The consumer raises its own exception type, and
+  only the message contains ``[FailoverWouldDuplicate]``. polars before 1.37.1
+  raises a ``PanicException``, which ``except Exception`` does not catch.
 
 5.0.0 (2026-07-27)
 ------------------
