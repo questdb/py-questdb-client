@@ -2295,6 +2295,15 @@ cdef bint _cursor_handle_is_live(_CursorHandle h):
     return h is not None and h._is_live()
 
 
+cdef str _query_result_reuse_message(object consumed_by):
+    # `consumed_by` is None when the result was closed before any read.
+    if consumed_by is None:
+        return 'QueryResult is closed. Run the query again to read the result.'
+    return (
+        f'QueryResult was already read by {consumed_by}. A result can be '
+        'read only once. Run the query again to read the result again.')
+
+
 class QueryResult:
     """Result of ``QuestDB.query(sql)``.
 
@@ -2354,23 +2363,26 @@ class QueryResult:
         self._cursor_handle = cursor_handle
         self._cancel_handle = cursor_handle
         self._consumed = False
+        # The method that read the result, for the reuse error.
+        self._consumed_by = None
 
-    def _take_cursor_handle(self):
+    def _take_cursor_handle(self, str what):
         if self._consumed:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
-                'QueryResult already consumed')
+                _query_result_reuse_message(self._consumed_by))
         if self._cursor_handle is None:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
-                'QueryResult cursor was closed')
+                _query_result_reuse_message(None))
         self._consumed = True
+        self._consumed_by = what
         handle = self._cursor_handle
         self._cursor_handle = None
         return handle
 
     def _drain(self):
-        _drain_cursor(self._take_cursor_handle())
+        _drain_cursor(self._take_cursor_handle('execute()'))
 
     def __arrow_c_stream__(self, requested_schema=None):
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
@@ -2400,7 +2412,8 @@ class QueryResult:
         # failover bumps the cursor's _reset_seq; the capsule producer
         # surfaces FailoverWouldDuplicate rather than feeding the
         # replayed batch-0 as a duplicate (see _qs_pull).
-        return _make_query_stream_capsule(self._take_cursor_handle())
+        return _make_query_stream_capsule(
+            self._take_cursor_handle('__arrow_c_stream__()'))
 
     def to_arrow(self):
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow.
@@ -2420,7 +2433,7 @@ class QueryResult:
         ``[FailoverWouldDuplicate]``.
         """
         import pyarrow as pa
-        handle = self._take_cursor_handle()
+        handle = self._take_cursor_handle('to_arrow()')
         schema, batches = _fetch_all_record_batches(handle, pa, True)
         if schema is None:
             return pa.table({})
@@ -2453,7 +2466,7 @@ class QueryResult:
         # Check the arguments before the result is read: a bad value must
         # not consume the cursor.
         kwargs = _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper)
-        handle = self._take_cursor_handle()
+        handle = self._take_cursor_handle('to_pandas()')
         schema, batches = _fetch_all_record_batches(handle, pa)
         table = (pa.table({}) if schema is None
                  else _table_shared_symbol_dict(
@@ -2495,7 +2508,7 @@ class QueryResult:
             raise ImportError(
                 '`pyarrow` is required for `to_polars()`. '
                 'Install with `pip install pyarrow`.') from ie
-        handle = self._take_cursor_handle()
+        handle = self._take_cursor_handle('to_polars()')
         schema, batches = _fetch_all_record_batches(handle, pa)
         if schema is None:
             return pl.from_arrow(pa.table({}))
@@ -2508,7 +2521,8 @@ class QueryResult:
             return _polars_hybrid_fallback(table, pl, exc)
 
     def _to_pandas_numpy(self):
-        return _numpy_frame_from_cursor(self._take_cursor_handle())
+        return _numpy_frame_from_cursor(
+            self._take_cursor_handle('to_pandas()'))
 
     def iter_arrow(self):
         """Iterate result batches as ``pyarrow.RecordBatch``.
@@ -2520,7 +2534,8 @@ class QueryResult:
         garbage-collection cycle; call :meth:`close` (or use the context-
         manager) for deterministic release.
         """
-        reader = _build_record_batch_reader(self._take_cursor_handle(), True)
+        reader = _build_record_batch_reader(
+            self._take_cursor_handle('iter_arrow()'), True)
         for batch in reader:
             yield batch
 
@@ -2536,13 +2551,14 @@ class QueryResult:
             raise ValueError(
                 'pass at most one of dtype_backend, types_mapper')
         if dtype_backend is None and types_mapper is None:
-            return _NumpyBatchIter(self._take_cursor_handle())
+            return _NumpyBatchIter(self._take_cursor_handle('iter_pandas()'))
         return self._iter_pandas_arrow(dtype_backend, types_mapper)
 
     def _iter_pandas_arrow(self, dtype_backend, types_mapper):
         import pyarrow as pa
         kwargs = _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper)
-        reader = _build_record_batch_reader(self._take_cursor_handle())
+        reader = _build_record_batch_reader(
+            self._take_cursor_handle('iter_pandas()'))
         for batch in reader:
             table = _table_shared_symbol_dict(pa.Table.from_batches([batch]))
             yield table.to_pandas(**kwargs)
@@ -2572,7 +2588,8 @@ class QueryResult:
             raise ImportError(
                 '`pyarrow` is required for `iter_polars()`. '
                 'Install with `pip install pyarrow`.') from ie
-        return _PolarsBatchIter(self._take_cursor_handle(), pl, pa)
+        return _PolarsBatchIter(
+            self._take_cursor_handle('iter_polars()'), pl, pa)
 
     def cancel(self):
         """Cancel the query and drain to terminal.

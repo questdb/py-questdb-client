@@ -52,6 +52,9 @@ Changelog
   pyarrow needs pyarrow 19 or later. See :doc:`installation`.
 - ``to_pandas(dtype_backend=...)`` now checks its arguments before it reads
   the result. Before, an invalid value consumed the result.
+- A second read of a ``QueryResult`` now names the method that read it first,
+  for example "QueryResult was already read by to_pandas()". A read after
+  ``close()`` now says that the result is closed.
 - ``QueryResult.__arrow_c_stream__`` now ignores ``requested_schema``, as the
   Arrow PyCapsule interface allows, so ``pa.table(result, schema=...)`` works
   and pyarrow casts the result. Before, any ``requested_schema`` raised

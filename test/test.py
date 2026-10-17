@@ -3996,6 +3996,38 @@ class TestQueryResultFinalizer(unittest.TestCase):
         self.assertEqual(unraisable, [])
 
 
+class TestQueryResultReuseErrors(unittest.TestCase):
+    """A second read names the first reader, and a read after ``close()``
+    says that the result is closed. A dead cursor is enough: the
+    single-use check runs before any server I/O."""
+
+    def _assert_invalid(self, cm, text):
+        self.assertEqual(
+            cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+        self.assertIn(text, str(cm.exception))
+
+    def test_second_read_names_first_reader(self):
+        result = qi.QueryResult(qi._CursorHandle())
+        result.__arrow_c_stream__()
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.to_pandas()
+        self._assert_invalid(
+            cm, 'already read by __arrow_c_stream__(). A result can be '
+                'read only once.')
+        result.close()
+        # After a read, close() keeps the more useful text.
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.iter_pandas()
+        self._assert_invalid(cm, 'already read by __arrow_c_stream__()')
+
+    def test_read_after_close_says_closed(self):
+        result = qi.QueryResult(qi._CursorHandle())
+        result.close()
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.to_pandas()
+        self._assert_invalid(cm, 'QueryResult is closed.')
+
+
 class TestBufferConstruction(unittest.TestCase):
     def test_ilp_construction(self):
         with mock.patch.object(warnings, 'warn') as warn:
