@@ -37,10 +37,11 @@ Changelog
   struct ``Series``, not a ``DataFrame``. On Polars 1.21 and older, it raises
   an error. On Polars 1.22 to 1.31, it can return wrong ``SYMBOL`` values
   without an error. Ingesting polars frames also needs polars 1.32 or later.
-- To read a ``QueryResult`` with duckdb, use
-  ``duckdb.from_arrow(result.__arrow_c_stream__())`` (duckdb 1.1 or later).
-  On duckdb 1.5, ``duckdb.from_arrow(result)`` fails with "QueryResult
-  already consumed", because duckdb requests the stream twice.
+- ``duckdb.from_arrow(result)`` now works on duckdb 1.5. Before, it failed
+  with "QueryResult already consumed", because duckdb 1.5 requested the
+  stream more than once. ``QueryResult`` now has ``__arrow_c_schema__``,
+  which duckdb uses for the schema. It reads the first batch, so after it,
+  read the result only through the Arrow stream.
 - The ``dataframe`` extra now requires ``pandas>=2.0.0`` and
   ``pyarrow>=14.0.1``, the oldest versions that CI tests. The old minimums did
   not work: with pyarrow before 14, pyarrow sources, ``iter_polars()`` and

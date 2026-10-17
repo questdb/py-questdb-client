@@ -1362,6 +1362,12 @@ class QueryResult:
     columns, which use ``uint32`` dictionary indices.
     """
 
+    def __arrow_c_schema__(self) -> Any:
+        """Arrow schema PyCapsule protocol (no pyarrow needed). It reads the
+        first batch to get the schema, and keeps that batch for
+        ``__arrow_c_stream__``. After this call, read the result only through
+        the stream; the other readers raise ``InvalidApiCall``."""
+
     def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
         columns arrive compact — each batch's dictionary holds only the values

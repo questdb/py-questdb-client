@@ -2457,28 +2457,34 @@ class TestEgressWithDatabase(unittest.TestCase):
         _assert_long_list_equal(
             self, out['sym'].cast(pl.Utf8).to_list(), exp, 'SYMBOL values')
 
-    def test_duckdb_reads_multi_batch_symbol_capsule(self):
-        """The documented duckdb path,
-        ``duckdb.from_arrow(result.__arrow_c_stream__())``, reads every
-        batch and decodes each batch's compact SYMBOL dictionary. It passes
-        the capsule, not ``result``: duckdb 1.5 requests the stream of
-        ``result`` twice, and a result streams only once."""
+    def test_duckdb_reads_multi_batch_symbol(self):
+        """``duckdb.from_arrow(result)`` and
+        ``duckdb.from_arrow(result.__arrow_c_stream__())`` read every
+        batch and decode each batch's compact SYMBOL dictionary. duckdb
+        1.5 reads the schema of ``result`` through ``__arrow_c_schema__``,
+        so it opens the single-use stream only once."""
         try:
             import duckdb
         except ImportError:
             self.skipTest('duckdb not installed')
         sql, exp = self._seed_multi_batch_symbols()
         n = len(exp)
-        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
-            with client.query(sql) as result:
-                # duckdb reads at fetch time, so fetch before the result
-                # is closed.
-                rows = duckdb.from_arrow(
-                    result.__arrow_c_stream__()).order('v').fetchall()
-        _assert_long_list_equal(
-            self, [row[1] for row in rows], list(range(n)), 'v values')
-        _assert_long_list_equal(
-            self, [row[0] for row in rows], exp, 'SYMBOL values')
+        for form in ('object', 'capsule'):
+            with self.subTest(form=form):
+                with qi.QuestDB.from_conf(
+                        self._multi_batch_conf()) as client:
+                    with client.query(sql) as result:
+                        source = (result if form == 'object'
+                                  else result.__arrow_c_stream__())
+                        # duckdb reads at fetch time, so fetch before
+                        # the result is closed.
+                        rows = duckdb.from_arrow(
+                            source).order('v').fetchall()
+                _assert_long_list_equal(
+                    self, [row[1] for row in rows], list(range(n)),
+                    'v values')
+                _assert_long_list_equal(
+                    self, [row[0] for row in rows], exp, 'SYMBOL values')
 
     _DUCKDB_WITHOUT_PYARROW_SCRIPT = """
 import json
@@ -2495,20 +2501,20 @@ sys.meta_path.insert(0, _BlockPyarrow())
 import duckdb
 import questdb._client as qi
 
-conf, sql = sys.argv[1], sys.argv[2]
+conf, sql, form = sys.argv[1], sys.argv[2], sys.argv[3]
 with qi.QuestDB.from_conf(conf) as client:
     with client.query(sql) as result:
-        rows = duckdb.from_arrow(
-            result.__arrow_c_stream__()).order('v').fetchall()
+        source = result if form == 'object' else result.__arrow_c_stream__()
+        rows = duckdb.from_arrow(source).order('v').fetchall()
 pyarrow_imported = any(
     name == 'pyarrow' or name.startswith('pyarrow.') for name in sys.modules)
 print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
 """
 
-    def test_duckdb_reads_capsule_without_pyarrow(self):
+    def test_duckdb_reads_without_pyarrow(self):
         """The docs say that duckdb reads a ``QueryResult`` without
-        pyarrow. Run the duckdb read in a subprocess that blocks the
-        pyarrow import."""
+        pyarrow. Run the duckdb read, with ``result`` and with the
+        capsule, in a subprocess that blocks the pyarrow import."""
         import json
         import subprocess
         if importlib.util.find_spec('duckdb') is None:
@@ -2519,18 +2525,22 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
         env['PYTHONPATH'] = os.pathsep.join(
             [str(pathlib.Path(qi.__file__).parent.parent)]
             + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
-        proc = subprocess.run(
-            [sys.executable, '-c', self._DUCKDB_WITHOUT_PYARROW_SCRIPT,
-             self._multi_batch_conf(), sql],
-            capture_output=True, text=True, env=env, timeout=120)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        out = json.loads(proc.stdout.strip().splitlines()[-1])
-        self.assertFalse(out['pyarrow_imported'])
-        rows = out['rows']
-        _assert_long_list_equal(
-            self, [row[1] for row in rows], list(range(n)), 'v values')
-        _assert_long_list_equal(
-            self, [row[0] for row in rows], exp, 'SYMBOL values')
+        for form in ('object', 'capsule'):
+            with self.subTest(form=form):
+                proc = subprocess.run(
+                    [sys.executable, '-c',
+                     self._DUCKDB_WITHOUT_PYARROW_SCRIPT,
+                     self._multi_batch_conf(), sql, form],
+                    capture_output=True, text=True, env=env, timeout=120)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                out = json.loads(proc.stdout.strip().splitlines()[-1])
+                self.assertFalse(out['pyarrow_imported'])
+                rows = out['rows']
+                _assert_long_list_equal(
+                    self, [row[1] for row in rows], list(range(n)),
+                    'v values')
+                _assert_long_list_equal(
+                    self, [row[0] for row in rows], exp, 'SYMBOL values')
 
     def test_to_polars_and_iter_polars_symbol_categorical(self):
         """SYMBOL egresses as a polars ``Categorical`` (codes + dict via the
@@ -4400,6 +4410,184 @@ class TestEgressPool(unittest.TestCase):
                 f'pool did not retain any idle reader; '
                 f'in_use={in_use}, idle={idle}')
 
+    # ------------------------------------------------------------------
+    # QueryResult.__arrow_c_schema__: it pulls the first batch and keeps
+    # it, with the cursor, for __arrow_c_stream__.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _schema_of(result):
+        import pyarrow as pa
+        return pa.Schema._import_from_c_capsule(result.__arrow_c_schema__())
+
+    def _require_pyarrow(self):
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+
+    def test_arrow_schema_then_stream_reads_every_row(self):
+        """The schema call keeps the first batch: the stream gives every
+        row once. Later schema calls work, also after the stream was
+        taken, and the reader goes back to the pool."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT x FROM {table} ORDER BY x'
+        # 16-row batches, so that the result has 4 batches.
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            with client.query(sql) as result:
+                schema = self._schema_of(result)
+                self.assertEqual(schema.names, ['x'])
+                self.assertEqual(self._schema_of(result), schema)
+                out = pa.table(result)
+                self.assertEqual(out.schema, schema)
+                self.assertEqual(
+                    out.column('x').to_pylist(), list(range(64)))
+                self.assertEqual(self._schema_of(result), schema)
+                with self.assertRaises(qi.QuestDBError) as cm:
+                    result.__arrow_c_stream__()
+                self.assertIn(
+                    'already read by __arrow_c_stream__()',
+                    str(cm.exception))
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_arrow_schema_blocks_other_readers(self):
+        """After the schema call, the first batch lives in the Arrow
+        producer, so the other readers raise. The stream still works."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with client.query(f'SELECT x FROM {table} ORDER BY x') as result:
+                result.__arrow_c_schema__()
+                readers = {
+                    'to_arrow': result.to_arrow,
+                    'to_pandas': result.to_pandas,
+                    'to_pandas(pyarrow)': lambda: result.to_pandas(
+                        dtype_backend='pyarrow'),
+                    'iter_arrow': lambda: next(result.iter_arrow()),
+                    'iter_pandas': result.iter_pandas,
+                    'iter_pandas(pyarrow)': lambda: next(result.iter_pandas(
+                        dtype_backend='pyarrow')),
+                }
+                for name, read in readers.items():
+                    with self.subTest(reader=name):
+                        with self.assertRaises(qi.QuestDBError) as cm:
+                            read()
+                        self.assertEqual(
+                            cm.exception.code,
+                            qi.QuestDBErrorCode.InvalidApiCall)
+                        self.assertIn(
+                            'opened as an Arrow stream by '
+                            '__arrow_c_schema__()', str(cm.exception))
+                self.assertEqual(pa.table(result).num_rows, 64)
+
+    def test_arrow_schema_then_close_or_cancel_releases_reader(self):
+        """``close()`` and ``cancel()`` drop the buffered first batch: a
+        later stream raises instead of giving a truncated result."""
+        self._require_pyarrow()
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT x FROM {table} ORDER BY x'
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            result = client.query(sql)
+            result.__arrow_c_schema__()
+            self.assertEqual(qi._debug_egress_pool_stats(client)[0], 1)
+            result.close()
+            # The cursor was not at its end, so the reader is dropped.
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 0))
+            with self.assertRaises(qi.QuestDBError):
+                result.__arrow_c_stream__()
+
+            result = client.query(sql)
+            result.__arrow_c_schema__()
+            result.cancel()
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_stream__()
+            self.assertEqual(
+                cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+            result.close()
+            # cancel() drained the cursor, so close() recycles the reader.
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_arrow_schema_query_error_raises_reader_error(self):
+        """A query error in the first pull raises the same exception
+        type and code as ``to_arrow()``, and releases the reader."""
+        self._require_pyarrow()
+        sql = 'SELECT * FROM t_egress_no_such_' + uuid.uuid4().hex[:8]
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.QuestDBError) as ref:
+                client.query(sql).to_arrow()
+            result = client.query(sql)
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_schema__()
+            self.assertIs(type(cm.exception), type(ref.exception))
+            self.assertEqual(cm.exception.code, ref.exception.code)
+            self.assertEqual(str(cm.exception), str(ref.exception))
+            self.assertEqual(qi._debug_egress_pool_stats(client)[0], 0)
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_schema__()
+            self.assertIn(
+                'already read by __arrow_c_schema__()', str(cm.exception))
+
+    def test_arrow_schema_of_empty_results_frees_lease(self):
+        """A non-SELECT has no batch: the schema is an empty struct. A
+        ``SELECT ... WHERE false`` has a zero-row batch with the columns.
+        A lease can run its next query without reading the stream."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with client.reader() as lease:
+                result = lease.query(
+                    f'CREATE TABLE IF NOT EXISTS {table} '
+                    '(ts TIMESTAMP, x LONG) '
+                    'TIMESTAMP(ts) PARTITION BY DAY WAL')
+                self.assertEqual(len(self._schema_of(result)), 0)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [3])
+                self.assertEqual(pa.table(result).num_rows, 0)
+
+                result = lease.query(f'SELECT x FROM {table} WHERE false')
+                self.assertEqual(self._schema_of(result).names, ['x'])
+                self.assertEqual(pa.table(result).num_rows, 0)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [3])
+
+    def test_arrow_schema_abandoned_result_warns(self):
+        """A result with only a schema call is not read: dropping it
+        warns and releases the reader. After a full stream read, there
+        is no warning."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        import warnings
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT x FROM {table} ORDER BY x'
+
+        def resource_warnings(caught):
+            return [w for w in caught
+                    if issubclass(w.category, ResourceWarning)]
+
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            result = client.query(sql)
+            result.__arrow_c_schema__()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                del result
+            self.assertEqual(len(resource_warnings(caught)), 1, caught)
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 0))
+
+            result = client.query(sql)
+            result.__arrow_c_schema__()
+            self.assertEqual(pa.table(result).num_rows, 64)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                del result
+            self.assertEqual(resource_warnings(caught), [])
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
 
 class TestEgressLeaks(unittest.TestCase):
     """RSS-plateau leak checks for the query/egress path.
@@ -4477,6 +4665,14 @@ class TestEgressLeaks(unittest.TestCase):
                 next(result.iter_arrow())
                 result.close()
                 client.query(sql).close()
+                # The schema call buffers a batch and keeps a schema copy.
+                result = client.query(sql)
+                result.__arrow_c_schema__()
+                result.close()
+                result = client.query(sql)
+                result.__arrow_c_schema__()
+                result.__arrow_c_schema__()
+                pa.table(result)
 
             _assert_no_leak(self, work, warmup=40, measure=240)
 
@@ -6322,6 +6518,39 @@ class TestEgressFailover(unittest.TestCase):
                         result.__arrow_c_stream__())
                 first = reader.read_next_batch()
                 self.assertGreater(first.num_rows, 0)
+                self.qdb_plain.stop()
+                self.qdb_plain.start()
+                with self.assertRaisesRegex(
+                        Exception, r'\[FailoverWouldDuplicate\]'):
+                    for _ in reader:
+                        pass
+                # Release the stream, so that the client can close.
+                reader.close()
+                del reader
+
+    def test_arrow_schema_then_failover_names_failover_would_duplicate(
+            self):
+        """``__arrow_c_schema__`` buffers the first batch, and the stream
+        delivers it. A failover after that batch still ends the stream
+        with ``[FailoverWouldDuplicate]``, not with duplicate rows."""
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        n = 100000000
+        with qi.QuestDB.from_conf(
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
+            with client.query(
+                    f'SELECT x - 1 AS v FROM long_sequence({n})') as result:
+                schema = pa.Schema._import_from_c_capsule(
+                    result.__arrow_c_schema__())
+                self.assertEqual(schema.names, ['v'])
+                reader = pa.RecordBatchReader._import_from_c_capsule(
+                    result.__arrow_c_stream__())
+                first = reader.read_next_batch()
+                self.assertGreater(first.num_rows, 0)
+                self.assertEqual(first.column(0)[0].as_py(), 0)
                 self.qdb_plain.stop()
                 self.qdb_plain.start()
                 with self.assertRaisesRegex(

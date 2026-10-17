@@ -28,8 +28,7 @@ The client is tested with these minimum versions:
   readers also need pyarrow 14.0.1 when you ingest them.
 * polars 1.32, to ingest polars frames and to read query results with
   ``polars.DataFrame(result)``.
-* duckdb 1.1, to read query results with
-  ``duckdb.from_arrow(result.__arrow_c_stream__())``.
+* duckdb 1.1, to read query results with ``duckdb.from_arrow(result)``.
 
 Two features need newer versions:
 
