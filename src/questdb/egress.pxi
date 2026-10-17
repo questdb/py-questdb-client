@@ -2349,15 +2349,16 @@ class QueryResult:
         (e.g. ``polars.DataFrame(result)`` on polars 1.32 or later)
         reconciles them.
 
+        ``requested_schema`` is ignored, as the PyCapsule interface
+        allows: the stream always has the result's own schema, and the
+        consumer casts it if necessary (``pa.table(result, schema=...)``
+        does).
+
         The returned stream may be handed to a consumer worker thread.
         Stream callbacks are serialised by the same cursor lock, but the
         Arrow C stream itself must still be consumed by only one thread at
         a time; concurrent ``get_next`` / ``release`` calls are unsupported.
         """
-        if requested_schema is not None:
-            raise NotImplementedError(
-                'requested_schema is not supported; consume the stream '
-                'and project on the consumer side.')
         # Streaming: hand batches out incrementally. A post-delivery
         # failover bumps the cursor's _reset_seq; the capsule producer
         # surfaces FailoverWouldDuplicate rather than feeding the

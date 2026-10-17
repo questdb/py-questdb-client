@@ -52,6 +52,10 @@ Changelog
   pyarrow needs pyarrow 19 or later. See :doc:`installation`.
 - ``to_pandas(dtype_backend=...)`` now checks its arguments before it reads
   the result. Before, an invalid value consumed the result.
+- ``QueryResult.__arrow_c_stream__`` now ignores ``requested_schema``, as the
+  Arrow PyCapsule interface allows, so ``pa.table(result, schema=...)`` works
+  and pyarrow casts the result. Before, any ``requested_schema`` raised
+  ``NotImplementedError``.
 
 5.0.0 (2026-07-27)
 ------------------

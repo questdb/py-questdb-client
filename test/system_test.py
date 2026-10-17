@@ -2600,8 +2600,8 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
     def test_query_result_single_use(self):
         """A ``QueryResult`` is single-use: a second materialisation, or
         any materialisation after ``close()``, raises ``InvalidApiCall``.
-        Also pins the ``__arrow_c_stream__`` ``requested_schema``
-        rejection."""
+        Also checks that ``__arrow_c_stream__`` ignores
+        ``requested_schema``, so that pyarrow casts the result."""
         table_name = 't_egress_single_' + uuid.uuid4().hex[:8]
         try:
             self._make_table(table_name, 1)
@@ -2619,10 +2619,24 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
                 with self.assertRaises(qi.QuestDBError):
                     closed.to_pandas()
 
+                # The spec lets a producer ignore `requested_schema`.
+                # Ignoring it still takes the stream.
                 stream = client.query(sql)
-                with self.assertRaises(NotImplementedError):
-                    stream.__arrow_c_stream__(requested_schema=object())
+                stream.__arrow_c_stream__(requested_schema=object())
+                with self.assertRaises(qi.QuestDBError) as cm:
+                    stream.__arrow_c_stream__()
+                self.assertEqual(
+                    cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
                 stream.close()
+
+                # pyarrow passes `schema` as `requested_schema`, gets the
+                # native schema back and casts it.
+                import pyarrow as pa
+                cast = pa.table(
+                    client.query(sql),
+                    schema=pa.schema([('lg', pa.float64())]))
+                self.assertEqual(cast.schema.field('lg').type, pa.float64())
+                self.assertEqual(cast.column('lg').to_pylist(), [0.0])
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
