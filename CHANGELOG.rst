@@ -56,6 +56,10 @@ Changelog
   Arrow PyCapsule interface allows, so ``pa.table(result, schema=...)`` works
   and pyarrow casts the result. Before, any ``requested_schema`` raised
   ``NotImplementedError``.
+- If the polars ``Categorical`` fast path of ``to_polars()`` or
+  ``iter_polars()`` fails, the client now issues a ``RuntimeWarning``. It still
+  builds the frame with ``polars.from_arrow``, but it no longer hides the
+  failure.
 
 5.0.0 (2026-07-27)
 ------------------

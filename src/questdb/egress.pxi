@@ -2054,6 +2054,36 @@ cdef object _polars_dataframe_hybrid(
     return pl.DataFrame(cols)
 
 
+# The number of `to_polars` / `iter_polars` frames that fell back from the
+# `Categories` path to `pl.from_arrow` in this process.
+cdef Py_ssize_t _POLARS_HYBRID_FALLBACKS = 0
+
+
+cdef object _polars_hybrid_fallback(object table, object pl, object exc):
+    # polars marks the `Categories` API as unstable, so a new release can
+    # break the hybrid path. `pl.from_arrow` gives the same values, only
+    # slower, so fall back, but do not hide the failure.
+    global _POLARS_HYBRID_FALLBACKS
+    _POLARS_HYBRID_FALLBACKS += 1
+    # cdef frames and this module's def entry points are invisible to the
+    # warnings stack walker, so level 1 is already the user's call.
+    warnings.warn(
+        'The polars Categorical fast path failed '
+        f'({type(exc).__name__}: {exc}); the frame was built with '
+        '`polars.from_arrow` instead, which is slower. Please report this '
+        'at https://github.com/questdb/py-questdb-client/issues.',
+        RuntimeWarning,
+        stacklevel=1)
+    return pl.from_arrow(table)
+
+
+def _debug_polars_hybrid_fallbacks():
+    """Internal: the number of `to_polars` / `iter_polars` frames that fell
+    back from the polars `Categories` path in this process. Intended for
+    tests that verify the fast path stayed in use."""
+    return _POLARS_HYBRID_FALLBACKS
+
+
 cdef class _PolarsBatchIter:
     """Streaming `polars.DataFrame` per result batch. Holds the per-symbol
     `Categories` registries so every batch's Categoricals share one identity
@@ -2082,8 +2112,8 @@ cdef class _PolarsBatchIter:
         try:
             return _polars_dataframe_hybrid(
                 table, self.pl, self.pa, self.registries)
-        except Exception:
-            return self.pl.from_arrow(table)
+        except Exception as exc:
+            return _polars_hybrid_fallback(table, self.pl, exc)
 
 
 cdef class _NumpyBatchIter:
@@ -2433,7 +2463,8 @@ class QueryResult:
         registry — the wire code is its own physical categorical code, so
         there is no per-row ``Dictionary -> Categorical`` remap. Falls back to
         ``polars.from_arrow`` when polars' (unstable) ``Categories`` API is
-        unavailable.
+        unavailable. If that path fails, it also falls back and issues a
+        ``RuntimeWarning``: the values stay correct, but the read is slower.
 
         Materialise-whole: a mid-query failover replays the result
         transparently. This accumulates batches in-library (via pyarrow)
@@ -2463,8 +2494,8 @@ class QueryResult:
             return pl.from_arrow(table)
         try:
             return _polars_dataframe_hybrid(table, pl, pa, {})
-        except Exception:
-            return pl.from_arrow(table)
+        except Exception as exc:
+            return _polars_hybrid_fallback(table, pl, exc)
 
     def _to_pandas_numpy(self):
         return _numpy_frame_from_cursor(self._take_cursor_handle())

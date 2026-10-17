@@ -2560,6 +2560,7 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
                     df, table_name=table_name, at='ts', symbols=['sym'])
             self.qdb_plain.retry_check_table(table_name, min_rows=n)
             sql = f'SELECT sym, v FROM {table_name} ORDER BY v'
+            fallbacks = qi._debug_polars_hybrid_fallbacks()
             with qi.QuestDB.from_conf(self._conf()) as client:
                 full = client.query(sql).to_polars()
             self.assertEqual(full.shape, (n, 2))
@@ -2580,11 +2581,58 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
             _assert_long_list_equal(
                 self, stitched['sym'].cast(pl.Utf8).to_list(), exp,
                 'SYMBOL values')
+            # Both reads must use the Categories path. A fallback gives
+            # the same values, so only the counter shows it.
+            self.assertEqual(
+                qi._debug_polars_hybrid_fallbacks(), fallbacks,
+                'to_polars() / iter_polars() fell back to '
+                'polars.from_arrow')
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
             except Exception:
                 pass
+
+    def test_to_polars_and_iter_polars_fallback_warns(self):
+        """If the polars ``Categories`` path fails, ``to_polars`` and
+        ``iter_polars`` build each frame with ``polars.from_arrow``. The
+        values stay correct, and each fallback issues a
+        ``RuntimeWarning``."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        from unittest import mock
+
+        def broken_random(*args, **kwargs):
+            raise RuntimeError('broken Categories')
+
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        # Only the fast path calls `Categories.random`. Do not replace
+        # `pl.Categories`: `pl.from_arrow` uses it too.
+        with mock.patch.object(pl.Categories, 'random', broken_random):
+            fallbacks = qi._debug_polars_hybrid_fallbacks()
+            with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+                with self.assertWarnsRegex(
+                        RuntimeWarning, 'broken Categories'):
+                    full = client.query(sql).to_polars()
+            self.assertEqual(
+                qi._debug_polars_hybrid_fallbacks(), fallbacks + 1)
+            with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+                with self.assertWarnsRegex(
+                        RuntimeWarning, 'broken Categories'):
+                    frames = list(client.query(sql).iter_polars())
+            self.assertGreater(len(frames), 1)
+            self.assertEqual(
+                qi._debug_polars_hybrid_fallbacks(),
+                fallbacks + 1 + len(frames))
+        for out in (full, pl.concat(frames, how='vertical')):
+            _assert_long_list_equal(
+                self, out['v'].to_list(), list(range(n)), 'v values')
+            _assert_long_list_equal(
+                self, out['sym'].cast(pl.Utf8).to_list(), exp,
+                'SYMBOL values')
 
     def _make_table(self, table_name, rows):
         self._exec(
