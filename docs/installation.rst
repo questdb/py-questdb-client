@@ -12,15 +12,21 @@ platforms and architectures. Its only required run-time dependency is
 Optional Dependencies
 ---------------------
 
-The ``dataframe`` extra bundles ``pandas`` and ``pyarrow``:
+Each extra installs the oldest versions that the client is tested with, or
+newer:
 
-* ``dataframe`` → ``pandas>=2.0.0`` and ``pyarrow>=14.0.1``
+* ``dataframe`` → ``pandas>=2.0.0`` and ``pyarrow>=14.0.1``. Install it to
+  ingest a **pandas** DataFrame, or to use the ``to_pandas`` / ``to_arrow`` /
+  ``iter_*`` helpers on ``QuestDB.query()`` results.
+* ``polars`` → ``polars>=1.32.0`` and ``pyarrow>=14.0.1``. Install it to
+  ingest polars frames and to use ``to_polars`` / ``iter_polars``.
+* ``duckdb`` → ``duckdb>=1.1.0``. Install it to read query results with
+  duckdb.
 
-Install it to ingest a **pandas** DataFrame, or to use the
-``to_pandas`` / ``to_arrow`` / ``iter_*`` helpers on ``QuestDB.query()``
-results. polars, pyarrow, duckdb and any other Arrow-native source need
-no extra — they go through the Arrow PyCapsule Interface; just install
-the source library as usual.
+The extras are optional. polars, pyarrow, duckdb and any other Arrow-native
+library go through the Arrow PyCapsule Interface, so you can also install the
+library as usual. For example, ``polars.DataFrame(result)`` and polars ingest
+need no pyarrow.
 
 The client is tested with these minimum versions:
 
@@ -58,6 +64,11 @@ DataFrame ingest (pandas + pyarrow)::
 
     python3 -m pip install -U questdb[dataframe]
 
+polars or duckdb::
+
+    python3 -m pip install -U questdb[polars]
+    python3 -m pip install -U questdb[duckdb]
+
 Row-only::
 
     python3 -m pip install -U questdb
@@ -68,6 +79,8 @@ Poetry
 Equivalents for poetry::
 
     poetry add questdb[dataframe]
+    poetry add questdb[polars]
+    poetry add questdb[duckdb]
     poetry add questdb
 
 
