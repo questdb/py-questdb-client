@@ -1370,7 +1370,14 @@ class QueryResult:
         reconciles them.
 
         ``requested_schema`` is ignored: the stream always has the result's
-        own schema, and the consumer casts it if necessary."""
+        own schema, and the consumer casts it if necessary.
+
+        The stream does not replay a result: after a batch has been
+        delivered, a failover ends the stream with an error. The consumer
+        raises its own exception type, and the message contains
+        ``[FailoverWouldDuplicate]``; re-issue the query. polars before
+        1.37.1 raises a ``PanicException``, which ``except Exception`` does
+        not catch."""
 
     def to_arrow(self) -> Any:
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow.

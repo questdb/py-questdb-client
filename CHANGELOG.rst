@@ -60,6 +60,10 @@ Changelog
   ``iter_polars()`` fails, the client now issues a ``RuntimeWarning``. It still
   builds the frame with ``polars.from_arrow``, but it no longer hides the
   failure.
+- The docs said that a failover during a ``__arrow_c_stream__`` read raises
+  ``FailoverWouldDuplicate``. The consumer raises its own exception type, and
+  only the message contains ``[FailoverWouldDuplicate]``. polars before 1.37.1
+  raises a ``PanicException``, which ``except Exception`` does not catch.
 
 5.0.0 (2026-07-27)
 ------------------

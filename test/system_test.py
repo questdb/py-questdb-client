@@ -6298,6 +6298,40 @@ class TestEgressFailover(unittest.TestCase):
                 cm.exception.code,
                 qi.QuestDBErrorCode.FailoverWouldDuplicate)
 
+    def test_arrow_stream_failover_error_names_failover_would_duplicate(
+            self):
+        """A ``__arrow_c_stream__`` consumer raises its own exception
+        type, not ``QuestDBError``. A failover after the first batch must
+        still end the stream with an error whose message contains
+        ``[FailoverWouldDuplicate]``."""
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        n = 100000000
+        with qi.QuestDB.from_conf(
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
+            with client.query(
+                    f'SELECT x - 1 AS v FROM long_sequence({n})') as result:
+                # `from_stream` exists since pyarrow 15.
+                if hasattr(pa.RecordBatchReader, 'from_stream'):
+                    reader = pa.RecordBatchReader.from_stream(result)
+                else:
+                    reader = pa.RecordBatchReader._import_from_c_capsule(
+                        result.__arrow_c_stream__())
+                first = reader.read_next_batch()
+                self.assertGreater(first.num_rows, 0)
+                self.qdb_plain.stop()
+                self.qdb_plain.start()
+                with self.assertRaisesRegex(
+                        Exception, r'\[FailoverWouldDuplicate\]'):
+                    for _ in reader:
+                        pass
+                # Release the stream, so that the client can close.
+                reader.close()
+                del reader
+
     def test_iter_pandas_surfaces_failover_would_duplicate(self):
         """Same contract for the numpy streaming ``iter_pandas``."""
         n = 100000000

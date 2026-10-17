@@ -2384,6 +2384,13 @@ class QueryResult:
         consumer casts it if necessary (``pa.table(result, schema=...)``
         does).
 
+        The stream does not replay a result: after a batch has been
+        delivered, a failover ends the stream with an error. The consumer
+        raises its own exception type, and the message contains
+        ``[FailoverWouldDuplicate]``; re-issue the query. polars raises a
+        ``ComputeError``, but polars before 1.37.1 raises a
+        ``PanicException``, which ``except Exception`` does not catch.
+
         The returned stream may be handed to a consumer worker thread.
         Stream callbacks are serialised by the same cursor lock, but the
         Arrow C stream itself must still be consumed by only one thread at
@@ -2406,10 +2413,11 @@ class QueryResult:
 
         Materialise-whole: a mid-query failover replays the result
         transparently — the partial accumulation we hold is discarded
-        from batch-0. The pyarrow-free streaming path
-        (``__arrow_c_stream__`` consumed by ``polars.DataFrame(result)``
-        / ``pa.table(result)``) instead surfaces ``FailoverWouldDuplicate``
-        on a post-delivery failover.
+        from batch-0. The streaming path (``__arrow_c_stream__``, as
+        consumed by ``polars.DataFrame(result)`` or ``pa.table(result)``)
+        does not replay: on a post-delivery failover, the consumer raises
+        its own error, and the message contains
+        ``[FailoverWouldDuplicate]``.
         """
         import pyarrow as pa
         handle = self._take_cursor_handle()
@@ -2468,10 +2476,12 @@ class QueryResult:
 
         Materialise-whole: a mid-query failover replays the result
         transparently. This accumulates batches in-library (via pyarrow)
-        so the partial result can be discarded on failover; for the
-        pyarrow-free streaming path consume ``__arrow_c_stream__``
-        directly (``polars.DataFrame(result)``), which surfaces
-        ``FailoverWouldDuplicate`` on a post-delivery failover.
+        so the partial result can be discarded on failover. The
+        pyarrow-free ``polars.DataFrame(result)`` streams through
+        ``__arrow_c_stream__`` and does not replay: on a post-delivery
+        failover, polars raises its own error, and the message contains
+        ``[FailoverWouldDuplicate]``. polars before 1.37.1 raises a
+        ``PanicException``, which ``except Exception`` does not catch.
         """
         try:
             import polars as pl

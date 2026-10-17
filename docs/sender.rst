@@ -1142,7 +1142,11 @@ pyarrow installed: ``polars.DataFrame(result)`` (polars 1.32 or later) or
 ``duckdb.from_arrow(result.__arrow_c_stream__())`` (duckdb 1.1 or later).
 Pass duckdb the capsule, not ``result``: duckdb 1.5 requests the stream
 twice, and a result streams only once. duckdb reads when you fetch, so
-fetch inside the ``with`` block.
+fetch inside the ``with`` block. These reads stream the result and do not
+replay it: if a failover occurs after the first batch, the consumer raises its
+own exception type, and the message contains ``[FailoverWouldDuplicate]``.
+Re-issue the query. polars before 1.37.1 raises a ``PanicException``, which
+``except Exception`` does not catch.
 Each result is consumed once. Fully drain it, use it as a context manager
 (``with db.query(...) as result:``), or call :func:`QueryResult.close <questdb.QueryResult.close>`. A
 partially-consumed result cannot return its connection to the pool — closing
