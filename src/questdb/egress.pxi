@@ -157,6 +157,14 @@ cdef class _CursorHandle:
 
     cdef void _free(self) noexcept:
         cdef PyThreadState* gs = NULL
+        cdef PyObject* exc_type = NULL
+        cdef PyObject* exc_value = NULL
+        cdef PyObject* exc_tb = NULL
+        # A stream release can run while its caller unwinds an exception
+        # (pyarrow drops its reader, Cython drops a capsule local). Set
+        # that exception aside: `with self._lock` fails while one is
+        # pending, which would leave the lock held and lose the exception.
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb)
         with self._lock:
             if self._cursor != NULL:
                 _ensure_doesnt_have_gil(&gs)
@@ -167,6 +175,7 @@ cdef class _CursorHandle:
                 if self._owns_reader:
                     self._reader_ref._close()
                 self._reader_ref = None
+        PyErr_Restore(exc_type, exc_value, exc_tb)
 
     def __dealloc__(self):
         self._free()

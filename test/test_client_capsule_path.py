@@ -214,6 +214,29 @@ class TestCapsulePathPolars(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
 
 
+class TestQueryResultSource(unittest.TestCase):
+
+    def test_failing_query_result_stream_raises(self):
+        """A ``QueryResult`` whose stream fails is released while the
+        ingest error is pending. The release must keep that error, and
+        must not leave the cursor lock held. A dead cursor fails in
+        ``get_schema``, so no server is needed for the source."""
+        import threading
+        result = qi.QueryResult(qi._CursorHandle())
+        with QwpAckServer() as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, 'get_schema failed: cursor is closed'):
+                    client.dataframe(result, table_name='t', at='ts')
+            finally:
+                client.close()
+        closer = threading.Thread(target=result.close, daemon=True)
+        closer.start()
+        closer.join(10)
+        self.assertFalse(closer.is_alive(), 'close() blocked on the lock')
+
+
 class TestServerTimestampAt(unittest.TestCase):
     """`at=ServerTimestamp` on the Arrow batch route: the frame carries no
     designated timestamp column and the server stamps each row on arrival

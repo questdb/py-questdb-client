@@ -6623,6 +6623,34 @@ class TestEgressFailover(unittest.TestCase):
                 reader.close()
                 del reader
 
+    def test_pa_table_failover_keeps_error_and_releases_lock(self):
+        """``pa.table(result)`` drops its reader while the stream error is
+        pending, so the stream is released during the unwind. The user
+        must still get the ``[FailoverWouldDuplicate]`` error, and the
+        release must not leave the cursor lock held for other threads."""
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        import threading
+        n = 100000000
+        with qi.QuestDB.from_conf(
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
+            result = client.query(f'SELECT x - 1 AS v FROM long_sequence({n})')
+            # The schema call buffers batch 0, so the failover is hit
+            # after the stream delivered it.
+            pa.schema(result)
+            self.qdb_plain.stop()
+            self.qdb_plain.start()
+            with self.assertRaisesRegex(
+                    Exception, r'\[FailoverWouldDuplicate\]'):
+                pa.table(result)
+            closer = threading.Thread(target=result.close, daemon=True)
+            closer.start()
+            closer.join(10)
+            self.assertFalse(closer.is_alive(), 'close() blocked on the lock')
+
     def test_iter_pandas_surfaces_failover_would_duplicate(self):
         """Same contract for the numpy streaming ``iter_pandas``."""
         n = 100000000

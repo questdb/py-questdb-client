@@ -104,6 +104,7 @@ def _first_qwp_table_row_count(payload):
 from test_client_capsule_path import (
     TestCapsulePathPyArrow,
     TestCapsulePathPolars,
+    TestQueryResultSource,
     TestServerTimestampAt,
     TestScalarAt,
     TestNdarrayArrayColumns,

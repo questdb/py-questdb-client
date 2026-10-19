@@ -80,6 +80,7 @@ from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
 from cpython.pycapsule cimport (PyCapsule_GetPointer, PyCapsule_IsValid,
                                 PyCapsule_New)
 from cpython.ref cimport Py_INCREF, Py_DECREF
+from cpython.exc cimport PyErr_Fetch, PyErr_Restore
 
 from .line_sender cimport *
 from .rpyutils cimport *
@@ -144,11 +145,11 @@ VERSION = '5.0.0'
 WARN_HIGH_RECONNECTS = True
 
 
-cdef bint _has_gil(PyThreadState** gs):
+cdef bint _has_gil(PyThreadState** gs) noexcept:
     return gs[0] == NULL
 
 
-cdef bint _ensure_doesnt_have_gil(PyThreadState** gs):
+cdef bint _ensure_doesnt_have_gil(PyThreadState** gs) noexcept:
     """Returns True if previously had the GIL, False otherwise."""
     if _has_gil(gs):
         gs[0] = PyEval_SaveThread()
@@ -156,7 +157,7 @@ cdef bint _ensure_doesnt_have_gil(PyThreadState** gs):
     return False
 
 
-cdef void _ensure_has_gil(PyThreadState** gs):
+cdef void _ensure_has_gil(PyThreadState** gs) noexcept:
     if not _has_gil(gs):
         PyEval_RestoreThread(gs[0])
         gs[0] = NULL
