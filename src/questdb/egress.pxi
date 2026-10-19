@@ -2809,6 +2809,7 @@ class QueryResult:
         # stream after the cancel would give that batch and then a clean
         # end: a truncated result without an error. Drop it.
         self._drop_schema_producer()
+        self._schema_box = None
         if handle is None:
             return
         with handle._lock:
@@ -2878,11 +2879,16 @@ class QueryResult:
             handle = self._cursor_handle
             if handle is None:
                 # After `__arrow_c_schema__`, a pending producer holds the
-                # cursor. Do not use `_cancel_handle` here: a stream given
-                # to a consumer owns its cursor.
+                # cursor. Do not use `_cancel_handle` for a read result: a
+                # stream given to a consumer owns its cursor.
                 prod = self._schema_producer
                 if prod is not None:
                     handle = prod.cursor_handle
+                elif self._consumed_by is None:
+                    # cancel() dropped the pending producer, so only this
+                    # result holds the cursor. (After close() or a failed
+                    # schema read, the handle is gone or freed.)
+                    handle = self._cancel_handle
             if not _cursor_handle_is_live(handle):
                 return
             if handle._abandonment_needs_warning():

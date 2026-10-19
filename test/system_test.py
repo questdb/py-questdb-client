@@ -4625,9 +4625,31 @@ class TestEgressPool(unittest.TestCase):
             self.assertEqual(
                 cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
             self.assertIn('QueryResult is closed', str(cm.exception))
+            # cancel() also drops the saved schema, so a schema read and a
+            # stream read agree.
+            with self.assertRaises(qi.QuestDBError):
+                result.__arrow_c_schema__()
             result.close()
             # cancel() drained the cursor, so close() recycles the reader.
             self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_arrow_schema_cancel_then_gc_frees_lease(self):
+        """After ``__arrow_c_schema__()`` and ``cancel()``, dropping the
+        result without ``close()`` still frees the cursor, so the lease
+        can run its next query."""
+        self._require_pyarrow()
+        import gc
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            with client.reader() as lease:
+                result = lease.query(f'SELECT x FROM {table} ORDER BY x')
+                result.__arrow_c_schema__()
+                result.cancel()
+                del result
+                gc.collect()
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [64])
 
     def test_arrow_schema_query_error_raises_reader_error(self):
         """A query error in the first pull raises the same exception
