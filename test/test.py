@@ -4072,10 +4072,19 @@ class TestDependencyFloors(unittest.TestCase):
         pins['duckdb'] = module.MIN_DUCKDB_VERSION
         return pins
 
-    @staticmethod
-    def _floors(text):
-        import re
-        return dict(re.findall(r'"?([A-Za-z0-9_.-]+)>=([0-9][^",\s]*)', text))
+    def _specifiers(self, specs):
+        """Map each requirement's name to its ``(operator, version)``
+        pairs, parsed the way pip parses them."""
+        try:
+            from packaging.requirements import Requirement
+        except ImportError:
+            self.skipTest('packaging not installed')
+        out = {}
+        for spec in specs:
+            req = Requirement(spec)
+            out[req.name.lower()] = sorted(
+                (s.operator, s.version) for s in req.specifier)
+        return out
 
     def test_extras_floors_match_ci_pins(self):
         import re
@@ -4086,21 +4095,25 @@ class TestDependencyFloors(unittest.TestCase):
         section = section.split('\n[', 1)[0]
         extras = dict(re.findall(r'^(\w+)\s*=\s*\[(.*?)\]', section, re.M))
         for extra in ('dataframe', 'polars', 'duckdb'):
-            floors = self._floors(extras[extra])
-            self.assertTrue(floors, extra)
-            for package, floor in floors.items():
+            specs = self._specifiers(re.findall(r'"([^"]+)"', extras[extra]))
+            self.assertTrue(specs, extra)
+            # Every requirement of the extra is exactly a tested floor.
+            for package, ops in specs.items():
                 with self.subTest(extra=extra, package=package):
-                    self.assertEqual(floor, pins[package])
+                    self.assertEqual(ops, [('>=', pins[package])])
 
     def test_dev_requirements_floors_match_ci_pins(self):
         pins = self._ci_pins()
-        text = (self.ROOT / 'dev_requirements.txt').read_text(encoding='utf-8')
-        floors = self._floors(text)
+        lines = (self.ROOT / 'dev_requirements.txt').read_text(
+            encoding='utf-8').splitlines()
+        specs = self._specifiers(
+            line for line in map(str.strip, lines)
+            if line and not line.startswith('#'))
         # Separate CI jobs test the numpy floor (1.21); the minimum-versions
         # job uses numpy 1.26.4.
         for package in ('pandas', 'pyarrow', 'fastparquet'):
             with self.subTest(package=package):
-                self.assertEqual(floors[package], pins[package])
+                self.assertEqual(specs[package], [('>=', pins[package])])
 
 
 class TestBufferConstruction(unittest.TestCase):

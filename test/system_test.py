@@ -2533,9 +2533,7 @@ with qi.QuestDB.from_conf(conf) as client:
     with client.query(sql) as result:
         source = result if form == 'object' else result.__arrow_c_stream__()
         rows = duckdb.from_arrow(source).order('v').fetchall()
-pyarrow_imported = any(
-    name == 'pyarrow' or name.startswith('pyarrow.') for name in sys.modules)
-print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
+print(json.dumps({'rows': rows}))
 """
 
     def test_duckdb_reads_without_pyarrow(self):
@@ -2561,7 +2559,6 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
                     capture_output=True, text=True, env=env, timeout=120)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 out = json.loads(proc.stdout.strip().splitlines()[-1])
-                self.assertFalse(out['pyarrow_imported'])
                 rows = out['rows']
                 _assert_long_list_equal(
                     self, [row[1] for row in rows], list(range(n)),

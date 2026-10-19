@@ -3205,7 +3205,7 @@ print('OK')
             + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
         result = subprocess.run(
             [sys.executable, '-c', self._SCRIPT],
-            capture_output=True, text=True, env=env)
+            capture_output=True, text=True, env=env, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('OK', result.stdout)
 
