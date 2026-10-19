@@ -5097,10 +5097,8 @@ class TestSuiteWiring(unittest.TestCase):
     """Guard: every aggregated test case must actually be collected.
 
     ``unittest.main()`` collects from this module's namespace, so a test class
-    that exists but is not imported here never runs anywhere.
-    ``test_auth.OidcReviewFixTest`` sat in exactly that state: three regression
-    tests that passed when run directly and were absent from every CI leg,
-    which is silent -- nothing fails, the count just does not include them.
+    that exists but is not imported here never runs anywhere. That is silent
+    -- nothing fails, the count just does not include them.
     """
 
     # Modules whose cases this file imports unconditionally. `test_dataframe`

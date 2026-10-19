@@ -361,9 +361,8 @@ stages:
               # Replacing the `*win_amd64*` wildcard with an explicit list had
               # dropped it silently -- cibuildwheel >= 3.0 builds `t` targets by
               # default, so the wildcard had been matching it -- removing the
-              # matrix's free-threaded Windows coverage in the same change that
-              # added code whose thread-safety assumes the GIL. There is no
-              # `cp313t` for Windows on any arch, so 3.14 is the first.
+              # matrix's free-threaded Windows coverage. There is no `cp313t`
+              # for Windows on any arch, so 3.14 is the first.
               CIBW_BUILD: "cp310-win_amd64 cp311-win_amd64 cp312-win_amd64 cp313-win_amd64 cp314-win_amd64 cp314t-win_amd64"
               CIBW_ENVIRONMENT: "MSSdk=1 DISTUTILS_USE_SDK=1 SETUP_DO_GIT_SUBMODULE_INIT=1"
               CIBW_BUILD_VERBOSITY: "3"

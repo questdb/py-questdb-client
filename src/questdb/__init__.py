@@ -241,7 +241,9 @@ def connect(
         # The native parser reports a keyword/string conflict as a
         # duplicate key at a position in the merged string the caller
         # never wrote; rephrase it like Sender.from_conf does. Restrict the
-        # text match to parser-classified configuration errors.
+        # text match to parser-classified configuration errors: any other
+        # error's message may carry text from elsewhere (a server response,
+        # say) that merely resembles the parser's diagnostic.
         if e.code == QuestDBErrorCode.ConfigError:
             msg = str(e)
             for key in params:

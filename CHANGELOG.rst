@@ -181,9 +181,9 @@ the sender's own callback they raise :class:`QuestDBError <questdb.QuestDBError>
 with ``code`` set to ``QuestDBErrorCode.InvalidApiCall``, even while the sender
 is idle. Before, ``row()`` from a listener succeeded, so a 5.0 listener that
 records its events through its own sender now logs
-``connection event listener failed`` and drops those rows. Separately, the read-only ``max_name_len``,
-``protocol_version``, ``connection_events_dropped`` and
-``connection_events_delivered`` now raise the same error, from any thread,
+``connection event listener failed`` and drops those rows. Separately, the
+read-only ``max_name_len``, ``protocol_version``, ``connection_events_dropped``
+and ``connection_events_delivered`` now raise the same error, from any thread,
 while the sender is inside a native call such as ``flush()``. Write listener
 events to a different sender or queue them for the owning thread, and read the
 counters when the sender is not flushing.
@@ -286,8 +286,6 @@ tokens from a secrets vault.
   displaced-owner captures as acquisition fences, and displaced refresh actions
   cannot clear or restore a successor's state. Concurrent writers in other
   clients must implement the same capture-fence rule.
-* Cursor close, cancel and recursive pulls reject same-thread reentry while
-  NumPy decoding holds borrowed native batch data.
 * :class:`questdb.auth.TokenUnavailableError` classifies a source's failure
   as retryable or permanent; a connection the caller waits for retries only a
   retryable one.
@@ -578,6 +576,26 @@ Other changes
 - The configuration-string keys ``token_provider``, ``azure_resource``,
   ``azure_client_id`` and ``azure_credential`` are rejected on every protocol.
   ILP/HTTP and ILP/TCP previously ignored them silently.
+- Wheels are now also published for free-threaded CPython 3.14 on Windows
+  (``cp314t-win32`` and ``cp314t-win_amd64``). On every free-threaded build the
+  extension re-enables the GIL; see :doc:`installation`.
+- A :meth:`QuestDB.close <questdb.QuestDB.close>` that waits for a ``close()``
+  already running on another thread now closes the pool itself if that other
+  close gives up (interrupted by ``Ctrl-C``, or bounded inside an OIDC
+  callback) instead of returning with the pool still open.
+- Finalizers and garbage collection no longer block on, or free, a query
+  cursor that another operation is using: an abandoned ``QueryResult``,
+  ``PooledReader``, Arrow stream or batch iterator is reclaimed without
+  waiting, and cursor ``close()`` / ``cancel()`` / pulls reject same-thread
+  re-entry while a native read is in progress.
+- A connection event whose kind this build does not recognise is dropped,
+  with one warning on the ``questdb`` logger, instead of being delivered to
+  the listener as ``Connected``.
+- DataFrame errors that gain a remediation hint (a batch too large for the
+  server) or a note (a partially consumed input stream) keep their exception
+  class, ``in_doubt`` and ``sender_error`` instead of being rebuilt as a plain
+  :class:`QuestDBError <questdb.QuestDBError>`. The batch-too-large hint is
+  also added when the rejection surfaces at the trailing sync.
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a
@@ -607,10 +625,6 @@ Other changes
   directly. Previously, setting any of them made every flush fail with a
   misleading ``Connection refused`` without contacting anything, because the
   proxy was read but never dialled. HTTP proxies remain unsupported.
-- A :meth:`QuestDB.close <questdb.QuestDB.close>` that waits for a ``close()``
-  already running on another thread now closes the pool itself if that other
-  close gives up -- interrupted by ``Ctrl-C``, or bounded inside an OIDC
-  callback -- instead of returning with the pool still open.
 
 5.0.0 (2026-07-27)
 ------------------

@@ -30,19 +30,19 @@
 # declares `Py_MOD_GIL_USED`, so importing it on a free-threaded interpreter
 # re-enables the GIL -- and that is what currently makes parts of this
 # extension safe, notably the OIDC provider's `_renderer`, `_closed` and
-# `_interrupt` slots and the `_WARNED_UNKNOWN_CONNECTION_EVENT`
-# read/modify/write latch, which native callback threads reach without
-# free-threading synchronization. `_OIDC_ERRORS_MOD` is another Python-object
-# read/modify/write cache and likewise relies on the enabled GIL. The paired
-# OIDC registry dictionaries are independently protected by
-# `_OIDC_REGISTRY_LOCK`. Native OIDC raw pointers are published monotonically
-# under the GIL; GIL-released reads are safe only because each caller retains a
-# strong reference to the owning handle/provider until the native call returns.
-# The `cp314t` wheels in the CI matrix are
-# therefore usable but gain no free-threading benefit, and running them under
-# `PYTHON_GIL=0` is unsupported. Making the extension genuinely
-# free-threading safe is a separate piece of work; until then this comment is
-# the record of the decision.
+# `_interrupt` slots, the `_WARNED_UNKNOWN_CONNECTION_EVENT`
+# read/modify/write latch and the `_ACTIVE_DISPATCH_CALLBACKS` counter, which
+# native callback threads reach without free-threading synchronization.
+# `_OIDC_ERRORS_MOD` is another Python-object read/modify/write cache and
+# likewise relies on the enabled GIL. The paired OIDC registry dictionaries
+# are independently protected by `_OIDC_REGISTRY_LOCK`. Native OIDC raw
+# pointers are published monotonically under the GIL; GIL-released reads
+# are safe only because each caller retains a strong reference to the
+# owning handle/provider until the native call returns. The
+# `cp314t` wheels in the CI matrix are therefore usable but gain no
+# free-threading benefit, and running them under `PYTHON_GIL=0` is
+# unsupported. Making the extension genuinely free-threading safe is a separate
+# piece of work; until then this comment is the record of the decision.
 
 """
 API for fast data ingestion into and querying from QuestDB.
@@ -6549,18 +6549,20 @@ cdef void_int _direct_dataframe_run(
             if nonreplayable_consumed:
                 # Re-raise the original exception with an appended note rather
                 # than rebuilding it as a bare QuestDBError. Rebuilding dropped
-                # the class: an OIDC token failure reaching here is an
-                # OidcNetworkError / OidcDeviceFlowError / OidcTimeoutError
-                # (each carries a retryable code by design, so it clears both
-                # the terminal-OIDC gate above and the code check below), and
-                # flattening it stopped `except OidcError` from matching and
-                # discarded .status / .retry_after / .error /
-                # .error_description -- the very attributes c_err_to_py
-                # promises are catchable. `args` is what Exception.__str__
-                # reads, and every field lives on the instance, so mutating it
-                # preserves code, in_doubt and sender_error for free. The
-                # f-string is evaluated before the assignment, so it still
-                # interpolates the original message.
+                # the class -- a QuestDBServerRejectionError stopped matching
+                # its own `except` -- and every field only the subclass
+                # carries. `args` is what Exception.__str__ reads, and every
+                # field lives on the instance, so mutating it preserves code,
+                # in_doubt and sender_error for free. The f-string is evaluated
+                # before the assignment, so it still interpolates the original
+                # message.
+                # An OIDC token failure reaching here is an OidcNetworkError /
+                # OidcDeviceFlowError / OidcTimeoutError (each carries a
+                # retryable code by design, so it clears both the terminal-OIDC
+                # gate above and the code check below); rebuilding it stopped
+                # `except OidcError` from matching and discarded .status /
+                # .retry_after / .error / .error_description -- the very
+                # attributes c_err_to_py promises are catchable.
                 exc.args = (
                     f'{exc} The input stream was already partially '
                     f'consumed and cannot be replayed; retry with a '
@@ -7626,22 +7628,21 @@ cdef class QuestDB:
         thread affinity and stays attributed to the thread that borrowed it,
         so close the pool from another thread while it is open. When called
         from inside one of this handle's own ``error_handler`` /
-        ``connection_listener``
-        callbacks, it does not wait for a concurrent ``close()`` on
-        another thread to finish; the in-flight callback completes after
-        that close returns. A persistence-warning handler for this pool's
-        OIDC provider may not close the pool: called from the handler it
-        raises ``QuestDBError(InvalidApiCall)`` instead of waiting for the
-        worker delivering the warning or its sender leases. A close on any
-        other thread waits for such a handler to return; it gives up with the
-        same error after two seconds, which is how a close the handler
-        delegated to another thread and waits for is released. Called from
-        any other OIDC callback -- a renderer callback, or a
-        persistence-warning handler of another provider -- it waits at most
-        two seconds for leases other threads hold, or for a concurrent
-        ``close()`` on another thread, and then raises the same error: such
-        a lease may be blocked on a token the provider cannot supply until
-        the callback returns.
+        ``connection_listener`` callbacks, it does not wait for a concurrent
+        ``close()`` on another thread to finish; the in-flight callback
+        completes after that close returns.
+        A persistence-warning handler for this pool's OIDC provider may not
+        close the pool: called from the handler it raises
+        ``QuestDBError(InvalidApiCall)`` instead of waiting for the worker
+        delivering the warning or its sender leases. A close on any other
+        thread waits for such a handler to return; it gives up with the same
+        error after two seconds, which is how a close the handler delegated to
+        another thread and waits for is released. Called from any other OIDC
+        callback -- a renderer callback, or a persistence-warning handler of
+        another provider -- it waits at most two seconds for leases other
+        threads hold, or for a concurrent ``close()`` on another thread, and
+        then raises the same error: such a lease may be blocked on a token the
+        provider cannot supply until the callback returns.
         """
         cdef questdb_db* db = NULL
         cdef PyThreadState* gs = NULL
@@ -7809,9 +7810,10 @@ cdef class Sender:
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
     cdef bint _in_txn
-    # Set while a GIL-released native call borrows this sender/buffer. An OIDC
-    # diagnostic can reacquire the GIL on that very thread and run arbitrary
-    # logging or signal handlers before the native call returns.
+    # Set while a GIL-released native call borrows this sender/buffer: another
+    # thread must not free the sender or mutate its buffer before the call
+    # returns. An OIDC diagnostic can also reacquire the GIL on that very
+    # thread and run arbitrary logging or signal handlers before then.
     cdef bint _native_in_flight
     cdef int64_t _slot_id
     # A clone of the fully-configured opts for QWP/WebSocket senders, retained
@@ -8277,6 +8279,7 @@ cdef class Sender:
         self._last_flush_ms = NULL
         self._init_buf_size = 0
         self._in_txn = False
+        self._native_in_flight = False
         self._slot_id = -1
         self._qwp_ws_opts = NULL
 
@@ -8816,8 +8819,10 @@ cdef class Sender:
                 QuestDBErrorCode.InvalidApiCall,
                 'establish() can\'t be called after close().')
 
-        # Build can pull an OIDC token and enter a Python diagnostic callback
-        # while native still borrows the options.
+        # We disable the GIL when calling `line_sender_build` since for HTTP
+        # it can make HTTP requests to auto-detect the protocol version.
+        # Native borrows the options until it returns, and build can pull an
+        # OIDC token and enter a Python diagnostic callback meanwhile.
         self._native_in_flight = True
         _ensure_doesnt_have_gil(&gs)
         self._impl = line_sender_build(self._opts, &err)
@@ -9159,12 +9164,14 @@ cdef class Sender:
             return
         active_buf = buffer if buffer is not None else self._buffer
 
-        # Publish the guard before releasing the GIL: OIDC diagnostics can
-        # re-enter Python on this thread while native still holds &mut Sender
-        # and a borrowed pointer to c_buf. A logging/signal handler must not
-        # free the sender or mutate its buffer before the call returns.
+        # Publish the guard before releasing the GIL: while native holds
+        # `&mut Sender` and a borrowed pointer to `c_buf`, another thread must
+        # not free the sender or mutate its buffer. OIDC diagnostics can also
+        # re-enter Python on this thread meanwhile, and a logging or signal
+        # handler there must not do either.
         self._native_in_flight = True
         active_buf._begin_native_borrow(exclusive)
+        # We might be blocking on IO, so temporarily release the GIL.
         _ensure_doesnt_have_gil(&gs)
         if transactional:
             ok = line_sender_flush_and_keep_with_flags(
@@ -9664,6 +9671,9 @@ cdef class PooledSender:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f"{method}() can't be called: Sender is closed.")
+        # A sender lease belongs to the thread that last used it, so a
+        # `QuestDB.close()` on the borrowing thread can wait for a worker it
+        # handed the lease to.
         current = _db_thread_token()
         if current is not self._owner_thread_token:
             self._handle._transfer_db_use(self._owner_thread_token, current)
@@ -10397,9 +10407,9 @@ cdef class PooledReader:
         returned to the pool, any other is dropped and the pool refills
         on demand.
         """
-        # A native query may synchronously invoke Python diagnostics with
-        # the GIL held. Reject re-entry before waiting for another thread's
-        # lease lock, and check again under the lock in _release_locked().
+        # Reject re-entry from a cursor operation on this thread before
+        # waiting for another thread's lease lock, and check again under the
+        # lock in _release_locked().
         if self._query_in_flight:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,

@@ -136,7 +136,8 @@ cdef class _CursorHandle:
     cdef bint _owns_reader
     cdef object _lock
     cdef int _reset_seq
-    # The RLock does not prevent same-thread diagnostic callback re-entry.
+    # The RLock does not prevent same-thread re-entry, e.g. from a finalizer
+    # or callback that runs on this thread mid-operation.
     cdef bint _native_in_flight
 
     def __cinit__(self):
@@ -196,8 +197,8 @@ cdef class _CursorHandle:
             self._native_in_flight = False
 
     cdef void _free(self) noexcept:
-        # A finalizer cannot raise; the native caller retains the handle and
-        # will release it after returning from its diagnostic callback.
+        # A finalizer cannot raise; the operation in flight retains the handle
+        # and releases it once it returns.
         if self._native_in_flight or self._lock._is_owned():
             return
         with self._lock:
@@ -2574,8 +2575,9 @@ class QueryResult:
     synchronisation hand-off (for example, ``Thread.start`` / ``join`` or a
     thread-safe queue), and access it from only one thread at a time.
     Concurrent operations on one result are unsupported. Calling ``close``
-    or ``cancel`` from a synchronous diagnostic callback while the cursor is
-    being read raises ``InvalidApiCall`` instead of releasing an in-use cursor.
+    or ``cancel`` from code that runs on the reading thread while the cursor
+    is being read (a finalizer, say) raises ``InvalidApiCall`` instead of
+    releasing an in-use cursor.
 
     ``__arrow_c_stream__`` is native — the cursor's record batches are
     exposed directly through the Arrow C Data Interface, so polars /
@@ -2879,9 +2881,9 @@ class QueryResult:
         """
         cdef _CursorHandle handle = self._cancel_handle
         if handle is not None:
-            # A native next_batch/next_arrow_batch still borrows this cursor
-            # when a synchronous OIDC diagnostic calls back into Python.
-            # Reject re-entry before detaching the only public references.
+            # A native next_batch/next_arrow_batch may still borrow this cursor
+            # when Python code runs on this thread mid-operation (a finalizer,
+            # say). Reject re-entry before detaching the only public references.
             handle._check_not_driving('close', check_lock=True)
             with handle._lock:
                 handle._check_not_driving('close')

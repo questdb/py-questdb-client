@@ -7,13 +7,14 @@ Migration Guide
 
 Eleven changes need action: the two UUID / fixed-size-binary items below, the
 stricter ``schema_overrides`` tuple validation, caps on callback inbox
-capacities and config-string length, the exception a commit raises once its
-sender is closed, the error a query failover that runs out of time raises, a
-warning an abandoned query result now surfaces instead of swallowing,
-``QuestDB.close()`` raising instead of waiting for its own thread's lease, a
-sender's own callbacks no longer being able to append to it, and a connected
-sender riding out a rejected credential instead of stopping. The new ``ConnectionEventKind.CredentialUnavailable`` event kind
-needs none — it is additive, and an existing listener keeps working.
+capacities and config-string length, the error a query failover that runs out
+of time raises, ``QuestDB.close()`` raising instead of waiting for its own
+thread's lease, a sender's own callbacks no longer being able to append to it,
+the exception a commit raises once its sender is closed, a warning an abandoned
+query result now surfaces instead of swallowing, and a connected sender riding
+out a rejected credential instead of stopping. The new
+``ConnectionEventKind.CredentialUnavailable`` event kind needs none — it is
+additive, and an existing listener keeps working.
 
 * **UUID bytes are canonical RFC 4122.** UUID values are read and written in
   canonical big-endian order at every API boundary; the client byte-swaps to
@@ -98,11 +99,6 @@ needs none — it is additive, and an existing listener keeps working.
   for a longer string. Remove accidentally duplicated or attacker-controlled
   content from any string above that bound.
 
-* :meth:`SenderTransaction.commit <questdb.SenderTransaction.commit>` **after
-  the owning sender was closed now raises** ``QuestDBError(InvalidApiCall)``
-  instead of an internal ``TypeError``. A commit whose flush fails leaves the
-  sender's buffer empty and the transaction completed, exactly as in 5.0.
-
 * **A query failover that runs out of time raises what it found.** When
   ``failover_max_duration_ms`` expires while reconnect attempts remain and the
   last round was rejected on role, at the WebSocket upgrade or at TLS, the
@@ -115,20 +111,6 @@ needs none — it is additive, and an existing listener keeps working.
   matching-role endpoint after ``RoleMismatch``. A late HTTP 401/403 is a
   credential rejection (``AuthError``), not a transient socket failure; fix
   the credentials before retrying. See :doc:`auth` for OIDC-specific handling.
-
-* **An abandoned** :class:`~questdb.QueryResult` **now reports its**
-  ``ResourceWarning`` **when promoted to an exception**. The finalizer previously
-  swallowed that exception; after releasing the cursor it now lets it reach
-  :func:`sys.unraisablehook`. Otherwise the warning follows the normal warning
-  filters, as before. Under warnings-as-errors this becomes a failure — and
-  because it fires whenever garbage collection happens to run, pytest attributes
-  it to whatever test was executing rather than to the one that abandoned the
-  result. Close results deterministically::
-
-      with db.query('select * from trades') as result:
-          ...
-
-  or filter :class:`ResourceWarning` if a suite runs with ``-W error``.
 
 * :meth:`QuestDB.close <questdb.QuestDB.close>` **raises instead of waiting
   for a lease held by the calling thread.** It raises
@@ -179,6 +161,25 @@ needs none — it is additive, and an existing listener keeps working.
           event = events.get()
           sender.row('conn_events', symbols={'kind': event.kind.tag},
                      at=questdb.ServerTimestamp)
+
+* :meth:`SenderTransaction.commit <questdb.SenderTransaction.commit>` **after
+  the owning sender was closed now raises** ``QuestDBError(InvalidApiCall)``
+  instead of an internal ``TypeError``. A commit whose flush fails leaves the
+  sender's buffer empty and the transaction completed, exactly as in 5.0.
+
+* **An abandoned** :class:`~questdb.QueryResult` **now reports its**
+  ``ResourceWarning`` **when promoted to an exception**. The finalizer previously
+  swallowed that exception; after releasing the cursor it now lets it reach
+  :func:`sys.unraisablehook`. Otherwise the warning follows the normal warning
+  filters, as before. Under warnings-as-errors this becomes a failure — and
+  because it fires whenever garbage collection happens to run, pytest attributes
+  it to whatever test was executing rather than to the one that abandoned the
+  result. Close results deterministically::
+
+      with db.query('select * from trades') as result:
+          ...
+
+  or filter :class:`ResourceWarning` if a suite runs with ``-W error``.
 
 * **A connected sender rides out a rejected credential.** Once a QWP/WebSocket
   sender has connected, a server that answers its reconnect with HTTP 401 or
