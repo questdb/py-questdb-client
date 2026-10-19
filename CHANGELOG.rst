@@ -35,8 +35,10 @@ Changelog
   ``polars.DataFrame(result)`` (polars 1.32 or later). The 5.0.0 notes said to
   use ``polars.from_arrow(result)``, but on Polars 2.0 that call returns a
   struct ``Series``, not a ``DataFrame``. On Polars 1.21 and older, it raises
-  an error. On Polars 1.22 to 1.31, it can return wrong ``SYMBOL`` values
-  without an error. Ingesting polars frames also needs polars 1.32 or later.
+  an error. On Polars 1.22 to 1.31, it returned wrong ``SYMBOL`` values
+  without an error, so a polars before 1.32 that reads the stream now gets
+  ``InvalidApiCall``; use ``to_polars()`` there. Ingesting polars frames also
+  needs polars 1.32 or later.
 - ``duckdb.from_arrow(result)`` now works on duckdb 1.5. Before, it failed
   with "QueryResult already consumed", because duckdb 1.5 requested the
   stream more than once. ``QueryResult`` now has ``__arrow_c_schema__``,

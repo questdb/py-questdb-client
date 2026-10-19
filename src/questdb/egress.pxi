@@ -2399,6 +2399,22 @@ cdef bint _cursor_handle_is_live(_CursorHandle h):
     return h is not None and h._is_live()
 
 
+cdef bint _called_by_old_polars():
+    # polars before 1.32 decodes every batch of a stream with the first
+    # batch's dictionary, so SYMBOL values come out wrong without an error.
+    # polars calls `__arrow_c_stream__` from its own Python code
+    # (`pycapsule_to_frame`, `Series.__init__`); pyarrow and duckdb call it
+    # from the user's code.
+    if not sys._getframe(0).f_globals.get('__name__', '').startswith(
+            'polars.'):
+        return False
+    try:
+        major, minor = sys.modules['polars'].__version__.split('.')[:2]
+        return (int(major), int(minor)) < (1, 32)
+    except Exception:
+        return False
+
+
 cdef str _query_result_reuse_message(object consumed_by):
     # `consumed_by` is None when the result was closed before any read.
     if consumed_by is None:
@@ -2551,7 +2567,8 @@ class QueryResult:
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
         (e.g. ``polars.DataFrame(result)`` on polars 1.32 or later)
-        reconciles them.
+        reconciles them. Older polars misreads such a stream, so polars
+        before 1.32 gets ``InvalidApiCall`` and the result stays unread.
 
         ``requested_schema`` is ignored, as the PyCapsule interface
         allows: the stream always has the result's own schema.
@@ -2577,6 +2594,11 @@ class QueryResult:
         a time; concurrent ``get_next`` / ``release`` calls are unsupported.
         """
         cdef _QueryStreamProducer prod = self._schema_producer
+        if _called_by_old_polars():
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'polars before 1.32 reads SYMBOL columns of a query result '
+                'stream wrongly. Upgrade polars, or call result.to_polars().')
         # Streaming: hand batches out incrementally. A post-delivery
         # failover bumps the cursor's _reset_seq; the capsule producer
         # surfaces FailoverWouldDuplicate rather than feeding the

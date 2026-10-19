@@ -59,6 +59,11 @@ try:
 except ImportError:
     pyarrow = None
 
+try:
+    import polars
+except ImportError:
+    polars = None
+
 
 def _read_qwp_varint(payload, pos):
     value = 0
@@ -4041,6 +4046,17 @@ class TestQueryResultReuseErrors(unittest.TestCase):
         with self.assertRaises(qi.QuestDBError) as cm:
             result.__arrow_c_stream__()
         self._assert_invalid(cm, 'already read by __arrow_c_stream__()')
+
+    @unittest.skipIf(polars is None, 'polars not installed')
+    def test_old_polars_stream_read_is_rejected(self):
+        # polars before 1.32 decodes every batch with the first batch's
+        # dictionary. The check runs before the result is taken.
+        result = qi.QueryResult(qi._CursorHandle())
+        with mock.patch.object(polars, '__version__', '1.31.0'):
+            with self.assertRaises(qi.QuestDBError) as cm:
+                polars.DataFrame(result)
+        self._assert_invalid(cm, 'polars before 1.32')
+        result.__arrow_c_stream__()
 
     def test_failed_schema_read_closes_result(self):
         result = qi.QueryResult(qi._CursorHandle())

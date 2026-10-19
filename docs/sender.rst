@@ -1138,7 +1138,8 @@ streamed batch-by-batch with ``iter_arrow`` / ``iter_pandas``. ``to_arrow`` /
 ``types_mapper``) require pyarrow; the default ``to_pandas`` / ``iter_pandas``
 are pyarrow-free. It also implements the Arrow C stream PyCapsule protocol
 (``__arrow_c_stream__``), so polars and duckdb read it directly without
-pyarrow installed: ``polars.DataFrame(result)`` (polars 1.32 or later) or
+pyarrow installed: ``polars.DataFrame(result)`` (polars 1.32 or later; older
+polars raises ``InvalidApiCall``) or
 ``duckdb.from_arrow(result)`` (duckdb 1.2 or later). duckdb reads when you
 fetch, so fetch inside the ``with`` block. These reads stream the result and
 do not replay it: if a failover occurs after the first batch, the consumer

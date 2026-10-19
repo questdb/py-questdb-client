@@ -1378,7 +1378,8 @@ class QueryResult:
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
         (e.g. ``polars.DataFrame(result)`` on polars 1.32 or later)
-        reconciles them.
+        reconciles them. Older polars misreads such a stream, so polars
+        before 1.32 gets ``InvalidApiCall`` and the result stays unread.
 
         ``requested_schema`` is ignored: the stream always has the result's
         own schema. ``pa.table(result, schema=...)`` and

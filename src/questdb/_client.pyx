@@ -106,6 +106,7 @@ from cpython.bytes cimport (PyBytes_FromStringAndSize,
 
 import datetime
 import os
+import sys
 import threading
 import time
 import uuid
