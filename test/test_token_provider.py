@@ -287,8 +287,9 @@ class RefreshingTokenProviderTest(unittest.TestCase):
 
     def test_real_shutdown_after_draining_a_native_source(self):
         script = textwrap.dedent('''
-            import threading
+            import sys, threading
             from questdb.auth import RefreshingTokenProvider, ExpiringToken
+            print('__QDB_BEGIN_FINALIZATION__', file=sys.stderr, flush=True)
             entered = threading.Event()
             release = threading.Event()
             def source():
@@ -306,11 +307,23 @@ class RefreshingTokenProviderTest(unittest.TestCase):
             release.set()
             provider.close(wait=True, timeout=5)
         ''')
+        # In-place CI builds add src to sys.path only in the parent. Resolve
+        # the same package in the child, whether built in place or wheel-installed.
+        env = os.environ.copy()
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, (
+            os.path.dirname(os.path.dirname(questdb.__file__)),
+            env.get('PYTHONPATH'))))
         result = subprocess.run(
-            [sys.executable, '-c', script], capture_output=True,
+            [sys.executable, '-c', script], env=env, capture_output=True,
             text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stderr, '')
+        # Import-time PyPy/Cython warnings are unrelated to source draining or
+        # shutdown. Keep checking every diagnostic after the imports, including
+        # unraisable exceptions emitted during interpreter finalization.
+        _, marker, diagnostics = result.stderr.partition(
+            '__QDB_BEGIN_FINALIZATION__\n')
+        self.assertTrue(marker, result.stderr)
+        self.assertEqual(diagnostics, '')
 
     def test_close_ends_every_holder(self):
         source, _ = _counting_source()

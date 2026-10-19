@@ -462,9 +462,19 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(qi._debug_try_reclaim_cursor_handle(handle), 0)
 
     def test_cursor_operations_reject_same_thread_decode_reentry(self):
+        self._assert_cursor_decode_reentry_rejected()
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_numpy_cursor_iteration_rejects_same_thread_decode_reentry(self):
+        self._assert_cursor_decode_reentry_rejected(include_numpy=True)
+
+    def _assert_cursor_decode_reentry_rejected(self, *, include_numpy=False):
         handle = qi._debug_new_cursor_handle()
         result = qi._debug_new_cursor_finalizer_owner('query_result', handle)
-        iterator = qi._debug_new_cursor_finalizer_owner('numpy', handle)
+        operations = [result.close, result.cancel]
+        if include_numpy:
+            iterator = qi._debug_new_cursor_finalizer_owner('numpy', handle)
+            operations.append(lambda: next(iterator))
         tested = []
         case = self
 
@@ -473,7 +483,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 pass
 
             def wait(self):
-                for operation in (result.close, result.cancel, lambda: next(iterator)):
+                for operation in operations:
                     with case.assertRaises(qi.QuestDBError) as caught:
                         operation()
                     case.assertIs(caught.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
@@ -481,7 +491,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 case.assertIs(result._cursor_handle, handle)
 
         qi._debug_hold_cursor_handle_lock(handle, DuringDecode(), DuringDecode())
-        self.assertEqual(len(tested), 3)
+        self.assertEqual(tested, operations)
         result.close()
 
     @unittest.skipUnless(
