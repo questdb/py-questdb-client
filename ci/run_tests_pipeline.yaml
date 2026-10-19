@@ -1,5 +1,12 @@
 trigger: none
 
+variables:
+  # Supplies GIT_GITHUB_TOKEN, which templates/clone_questdb.yaml hands to gh so
+  # its questdb clone and submodule fetch do not go out to github.com
+  # anonymously -- see that file. Only the vsQuestDbMaster leg uses it; the
+  # other jobs run no git of their own.
+  - group: github-public-read
+
 stages:
   - stage: BuildAndTest
     displayName: "Building and testing"
@@ -78,6 +85,10 @@ stages:
               echo "##vso[task.prependpath]$JDK_HOME/bin"
             displayName: "Resolve JDK 25"
             condition: eq(variables.vsQuestDbMaster, true)
+          # jdkVersionOption tops out at 21 and crashes the task on JDK 25
+          # ("Cannot read properties of null (reading 'major')"), so point the
+          # task at the JDK resolved above instead of naming a version.
+          # $(CLIENT_PROFILE) is set by templates/clone_questdb.yaml.
           - task: Maven@3
             displayName: "Compile QuestDB master"
             inputs:
@@ -95,6 +106,20 @@ stages:
             env:
               JAVA_HOME: $(JAVA_HOME)
               QDB_REPO_PATH: "./questdb"
+              # QuestDB master runs as the io.questdb JPMS module and needs these
+              # JDK 25 access flags (mirrors questdb.sh). The test fixture launches
+              # questdb.jar directly rather than via questdb.sh, so feed them to the
+              # java launcher through JDK_JAVA_OPTIONS. The fixture already passes
+              # --add-exports itself; repeating it here is harmless and keeps the
+              # set matching questdb.sh.
+              JDK_JAVA_OPTIONS: >-
+                --sun-misc-unsafe-memory-access=allow
+                --enable-native-access=io.questdb
+                --add-opens=java.base/java.lang=io.questdb
+                --add-opens=java.base/java.lang.reflect=io.questdb
+                --add-opens=java.base/java.nio=io.questdb
+                --add-opens=java.base/java.time.zone=io.questdb
+                --add-exports=java.base/jdk.internal.vm=io.questdb
             condition: eq(variables.vsQuestDbMaster, true)
       - job: TestsAgainstVariousNumpyVersion1x
         pool:

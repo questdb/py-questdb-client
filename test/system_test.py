@@ -4,6 +4,7 @@ import sys
 sys.dont_write_bytecode = True
 import os
 import datetime
+import json
 import importlib.util
 import random
 import shutil
@@ -14,14 +15,18 @@ import time
 import unittest
 import uuid
 import pathlib
+import urllib.error
+import urllib.parse
+import urllib.request
 import numpy as np
 import decimal
 
 import patch_path
 PROJ_ROOT = patch_path.PROJ_ROOT
 sys.path.append(str(PROJ_ROOT / 'c-questdb-client' / 'system_test'))
-from fixture import \
-    QuestDbFixture, install_questdb, install_questdb_from_repo, CA_PATH, AUTH
+from fixture import (
+    QuestDbFixture, QueryError, install_questdb, install_questdb_from_repo,
+    CA_PATH, AUTH)
 
 
 try:
@@ -60,7 +65,21 @@ def may_install_questdb():
             '/questdb-' +
             QUESTDB_VERSION +
             '-no-jre-bin.tar.gz')
-        install_path = install_questdb(QUESTDB_VERSION, url)
+        # DNS/GitHub can be briefly unavailable on CI runners. A failed
+        # setUpClass is still reported as an error even if a later class
+        # successfully downloads the same release, so retry the fetch here.
+        # Never retry an HTTP response (e.g. a missing release asset).
+        for attempt in range(4):
+            try:
+                install_path = install_questdb(QUESTDB_VERSION, url)
+                break
+            except urllib.error.URLError as exc:
+                if isinstance(exc, urllib.error.HTTPError) or attempt == 3:
+                    raise
+                delay = 2 ** attempt
+                print(f'QuestDB download failed: {exc}; '
+                      f'retrying in {delay}s.', file=sys.stderr)
+                time.sleep(delay)
 
     QUESTDB_PLAIN_INSTALL_PATH = PROJ_ROOT / 'build' / 'questdb' / 'plain'
     shutil.copytree(
@@ -2333,7 +2352,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
-    def test_polars_from_arrow_consumes_capsule(self):
+    def test_polars_dataframe_consumes_capsule(self):
         """``QuestDB.query`` exposes ``__arrow_c_stream__`` directly off
         the Rust cursor, so polars can consume it without pyarrow being
         the import-time mediator. Pins that contract: the polars frame
@@ -2358,7 +2377,10 @@ class TestEgressWithDatabase(unittest.TestCase):
                 with client.query(
                         f'SELECT lg, vc FROM {table_name} ORDER BY lg DESC'
                         ) as result:
-                    df = pl.from_arrow(result)
+                    # The DataFrame constructor, not `pl.from_arrow`: on
+                    # polars >= 2.0 that returns a Series of structs for a
+                    # bare Arrow C stream.
+                    df = pl.DataFrame(result)
             self.assertEqual(df.shape, (2, 2))
             self.assertEqual(df['lg'].to_list(), [42, 7])
             self.assertEqual(df['vc'].to_list(), ['hello', 'world'])
@@ -3568,6 +3590,48 @@ class TestEgressPool(unittest.TestCase):
             after = client.query(
                 f'SELECT count() FROM {table}').to_arrow()
             self.assertEqual(after.column(0).to_pylist(), [64])
+
+    def test_abandoned_result_releases_under_warnings_as_errors(self):
+        """`-W error` must not stop the finalizer releasing the reader.
+
+        `QueryResult.__del__` used to warn first and reclaim second, both
+        inside one `except Exception: pass`. Under `warnings.simplefilter
+        ('error')` -- or `python -W error`, or pytest's `filterwarnings =
+        error` -- the `ResourceWarning` was raised as an exception, swallowed
+        by that handler, and `close()` never ran: the deterministic release
+        silently degraded to `_CursorHandle.__dealloc__`, and the pooled
+        connection stayed checked out until then. Reclaiming before warning is
+        what makes that structurally impossible, and nothing pinned it.
+        """
+        import gc
+        import warnings
+        table = self._seed_table(n_rows=8)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            result = client.query(f'SELECT x FROM {table} ORDER BY x')
+            in_use, _ = qi._debug_egress_pool_stats(client)
+            self.assertEqual(in_use, 1)
+            unraisable = []
+            original_hook = sys.unraisablehook
+            sys.unraisablehook = lambda args: unraisable.append(args)
+            try:
+                with warnings.catch_warnings():
+                    # The condition the finalizer is being tested under.
+                    warnings.simplefilter('error')
+                    del result
+                    gc.collect()
+            finally:
+                sys.unraisablehook = original_hook
+            in_use, _ = qi._debug_egress_pool_stats(client)
+            self.assertEqual(
+                in_use, 0,
+                'the reader must be released even when the ResourceWarning '
+                'is raised as an error')
+            # The warning still surfaces -- as an unraisable, since it is
+            # raised inside __del__ -- rather than being lost entirely.
+            self.assertTrue(
+                any(issubclass(u.exc_type, ResourceWarning)
+                    for u in unraisable),
+                f'expected the ResourceWarning to surface; got {unraisable!r}')
 
     def test_gc_abandoned_result_warns_and_releases(self):
         """A never-consumed ``QueryResult`` abandoned inside a
@@ -5897,7 +5961,24 @@ class TestEgressFailover(unittest.TestCase):
         return conf
 
     def _exec(self, sql):
-        return self.qdb_plain.http_sql_query(sql)
+        # The shared fixture's 5s HTTP timeout is too short for a CREATE TABLE
+        # directly after a Windows server bounce: /ping is ready before the
+        # SQL worker catches up. Use a longer timeout for this test's table
+        # setup; do not blindly replay non-idempotent DDL on a socket timeout.
+        url = (f'http://{self.qdb_plain.host}:'
+               f'{self.qdb_plain.http_server_port}/exec?' +
+               urllib.parse.urlencode({'query': sql}))
+        request = urllib.request.Request(
+            url, headers=self.qdb_plain.http_headers(), method='GET')
+        try:
+            response = urllib.request.urlopen(request, timeout=30)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            data = json.loads(response.read())
+        if 'error' in data:
+            raise QueryError(data['error'])
+        return data
 
     def _drop_quietly(self, table):
         try:
@@ -5994,7 +6075,7 @@ class TestEgressFailover(unittest.TestCase):
             df = client.query(f'SELECT v FROM {table} ORDER BY ts').to_polars()
         self.assertEqual(df['v'].to_list(), list(range(n)))
 
-    def test_polars_from_arrow_dead_then_live_endpoint(self):
+    def test_polars_dataframe_dead_then_live_endpoint(self):
         """The pyarrow-free Polars capsule path also borrows through the
         same multi-endpoint reader pool before Polars starts consuming
         the Arrow stream."""
@@ -6012,7 +6093,7 @@ class TestEgressFailover(unittest.TestCase):
                            target='primary',
                            failover_max_duration_ms='60000')) as client:
             with client.query(f'SELECT v FROM {table} ORDER BY ts') as result:
-                df = pl.from_arrow(result)
+                df = pl.DataFrame(result)
         self.assertEqual(df['v'].to_list(), list(range(n)))
 
     def test_iter_arrow_surfaces_failover_would_duplicate(self):

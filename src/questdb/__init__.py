@@ -202,13 +202,17 @@ def connect(
     except QuestDBError as e:
         # The native parser reports a keyword/string conflict as a
         # duplicate key at a position in the merged string the caller
-        # never wrote; rephrase it like Sender.from_conf does.
-        msg = str(e)
-        for key in params:
-            if f'duplicate key "{key}"' in msg:
-                raise ValueError(
-                    f'"{key}" is already present in the conf_str '
-                    'and cannot be overridden.') from None
+        # never wrote; rephrase it like Sender.from_conf does. Restrict the
+        # text match to parser-classified configuration errors: any other
+        # error's message may carry text from elsewhere (a server response,
+        # say) that merely resembles the parser's diagnostic.
+        if e.code == QuestDBErrorCode.ConfigError:
+            msg = str(e)
+            for key in params:
+                if f'duplicate key "{key}"' in msg:
+                    raise ValueError(
+                        f'"{key}" is already present in the conf_str '
+                        'and cannot be overridden.') from None
         raise
 
 
