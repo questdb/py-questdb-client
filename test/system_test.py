@@ -4633,6 +4633,25 @@ class TestEgressPool(unittest.TestCase):
             # cancel() drained the cursor, so close() recycles the reader.
             self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
 
+    def test_drained_stream_frees_lease_before_release(self):
+        """A stream releases its connection when the consumer reads the
+        last batch, not when it releases the stream: the lease can run
+        its next query while the reader is still alive."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            with client.reader() as lease:
+                reader = pa.RecordBatchReader._import_from_c_capsule(
+                    lease.query(
+                        f'SELECT x FROM {table} ORDER BY x'
+                    ).__arrow_c_stream__())
+                self.assertEqual(reader.read_all().num_rows, 64)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [64])
+                reader.close()
+
     def test_arrow_schema_cancel_then_gc_frees_lease(self):
         """After ``__arrow_c_schema__()`` and ``cancel()``, dropping the
         result without ``close()`` still frees the cursor, so the lease
@@ -4796,9 +4815,27 @@ class TestEgressLeaks(unittest.TestCase):
         # With the server default (16,384 rows), 64 rows are one batch.
         table = self._seed_table(n_rows=64)
         sql = f'SELECT * FROM {table}'
+        # 200 columns with long names: a leaked schema copy, schema box or
+        # buffered first batch costs tens of KB, above what the harness
+        # can see per call.
+        wide_sql = 'SELECT ' + ', '.join(
+            f'x AS {"wide_column_name_" * 3}{i}' for i in range(200)
+        ) + ' FROM long_sequence(16)'
+        bad_sql = 'SELECT * FROM t_egress_no_such_' + uuid.uuid4().hex[:8]
         with qi.QuestDB.from_conf(
                 self._conf(max_batch_rows=16)) as client:
             def work():
+                for _ in range(4):
+                    result = client.query(wide_sql)
+                    for _ in range(25):
+                        result.__arrow_c_schema__()
+                        pa.schema(result)
+                    result.close()
+                # A failed schema read keeps the error until it raises it.
+                try:
+                    client.query(bad_sql).__arrow_c_schema__()
+                except qi.QuestDBError:
+                    pass
                 client.query(sql).to_arrow()
                 client.query(sql).to_pandas()
                 result = client.query(sql)

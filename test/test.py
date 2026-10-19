@@ -4028,6 +4028,31 @@ class TestQueryResultReuseErrors(unittest.TestCase):
             result.to_pandas()
         self._assert_invalid(cm, 'QueryResult is closed.')
 
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_bad_dtype_backend_does_not_consume(self):
+        result = qi.QueryResult(qi._CursorHandle())
+        with self.assertRaises(ValueError):
+            result.to_pandas(dtype_backend='bogus')
+        result.__arrow_c_stream__()
+
+    def test_stream_ignores_requested_schema(self):
+        result = qi.QueryResult(qi._CursorHandle())
+        result.__arrow_c_stream__(requested_schema=object())
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.__arrow_c_stream__()
+        self._assert_invalid(cm, 'already read by __arrow_c_stream__()')
+
+    def test_failed_schema_read_closes_result(self):
+        result = qi.QueryResult(qi._CursorHandle())
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.__arrow_c_schema__()
+        self._assert_invalid(cm, 'failed to read the result schema')
+        for read in (result.__arrow_c_schema__, result.__arrow_c_stream__,
+                     result.to_pandas):
+            with self.assertRaises(qi.QuestDBError) as cm:
+                read()
+            self._assert_invalid(cm, 'QueryResult is closed.')
+
 
 class TestDependencyFloors(unittest.TestCase):
     """The floors of the ``pyproject.toml`` extras and of
