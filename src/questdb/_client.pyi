@@ -1405,7 +1405,7 @@ class QueryResult:
         ``Table.to_pandas()`` accepts only from pyarrow 23. For a pandas
         frame, call :meth:`to_pandas` instead. DECIMAL columns with a
         precision of 18 or less arrive as ``decimal32`` / ``decimal64``,
-        which need pyarrow 19 or later."""
+        which need pyarrow 20 or later."""
 
     def to_pandas(
         self,

@@ -61,7 +61,7 @@ Changelog
   Two features need newer versions: pyarrow-backed pandas frames take the
   Arrow path (and accept ``schema_overrides``) only on pandas 2.2 or later,
   and reading ``DECIMAL`` columns with a precision of 18 or less through
-  pyarrow needs pyarrow 19 or later. See :doc:`installation`.
+  pyarrow needs pyarrow 20 or later. See :doc:`installation`.
 - ``to_pandas(dtype_backend=...)`` now checks its arguments before it reads
   the result. Before, an invalid value consumed the result.
 - New ``polars`` and ``duckdb`` extras install the oldest tested versions or

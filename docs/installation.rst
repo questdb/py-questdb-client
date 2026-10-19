@@ -48,8 +48,9 @@ Two features need newer versions:
   18 or less through pyarrow (``to_arrow``, ``iter_arrow``, ``to_polars``,
   ``iter_polars``, ``pa.table(result)``, or ``to_pandas`` /
   ``iter_pandas`` with ``dtype_backend`` or ``types_mapper``), you need
-  pyarrow 19 or later. Older pyarrow cannot read the ``decimal32`` and
-  ``decimal64`` Arrow types that QuestDB sends for them.
+  pyarrow 20 or later. pyarrow before 19 cannot read the ``decimal32``
+  and ``decimal64`` Arrow types that QuestDB sends for them, and
+  pyarrow 19 cannot convert them to pandas.
 
 pyarrow 26 and later needs NumPy 2 but does not declare it. If you keep
 NumPy 1.x, also install ``pyarrow<26``.
