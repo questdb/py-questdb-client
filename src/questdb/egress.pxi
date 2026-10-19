@@ -10,16 +10,6 @@
 cimport numpy as cnp
 
 
-cdef inline object _reader_err_code_to_py(questdb_error_code code):
-    # The error model is unified: `questdb_error_code` is an alias of
-    # `line_sender_error_code`, so reader errors decode through the single
-    # shared map. Every reader category now has its own `QuestDBErrorCode`
-    # member (handshake, protocol, invalid bind, schema drift, the
-    # server-side errors, ...) instead of the former `ServerFlushError`
-    # bucket.
-    return c_err_code_to_py(code)
-
-
 cdef inline object _reader_err_to_py(questdb_error* err):
     """Construct a ``QuestDBError`` from a ``questdb_error*`` and free it."""
     return c_err_to_py(err)
@@ -1028,10 +1018,6 @@ cdef _QueryStreamProducer _new_query_stream_producer(_CursorHandle handle):
     prod.cursor_handle = handle
     prod.seen_seq = handle._reset_sequence()
     return prod
-
-
-cdef object _make_query_stream_capsule(_CursorHandle handle):
-    return _query_stream_capsule(_new_query_stream_producer(handle))
 
 
 cdef object _query_stream_capsule(_QueryStreamProducer prod):
@@ -2141,17 +2127,10 @@ cdef object _polars_dataframe_hybrid(
     return pl.DataFrame(cols)
 
 
-# The number of `to_polars` / `iter_polars` frames that fell back from the
-# `Categories` path to `pl.from_arrow` in this process.
-cdef Py_ssize_t _POLARS_HYBRID_FALLBACKS = 0
-
-
 cdef object _polars_hybrid_fallback(object table, object pl, object exc):
     # polars marks the `Categories` API as unstable, so a new release can
     # break the hybrid path. `pl.from_arrow` gives the same values, only
     # slower, so fall back, but do not hide the failure.
-    global _POLARS_HYBRID_FALLBACKS
-    _POLARS_HYBRID_FALLBACKS += 1
     # cdef frames and this module's def entry points are invisible to the
     # warnings stack walker, so level 1 is already the user's call.
     warnings.warn(
@@ -2191,13 +2170,6 @@ cdef object _polars_frame_with_registry_cats(
         # `pl.concat` with the earlier frames fails. Stop casting.
         registries.clear()
     return frame
-
-
-def _debug_polars_hybrid_fallbacks():
-    """Internal: the number of `to_polars` / `iter_polars` frames that fell
-    back from the polars `Categories` path in this process. Intended for
-    tests that verify the fast path stayed in use."""
-    return _POLARS_HYBRID_FALLBACKS
 
 
 cdef class _PolarsBatchIter:
@@ -2542,18 +2514,23 @@ class QueryResult:
         """
         cdef _QueryStreamProducer prod
         cdef _CursorHandle handle
+        cdef _ArrowSchemaBox box = self._schema_box
         cdef object exc
-        if self._schema_box is not None:
-            return _arrow_schema_capsule(self._schema_box)
+        cdef int rc
+        if box is not None:
+            return _arrow_schema_capsule(box)
         handle = self._take_cursor_handle('__arrow_c_schema__()')
         prod = _new_query_stream_producer(handle)
         self._schema_producer = prod
-        if _qs_ensure_schema(prod) != 0:
+        rc = _qs_ensure_schema(prod)
+        if rc != 0:
             # Release the connection now, and raise the error with its own
             # type and code (as `to_arrow()` would).
             exc = prod.last_exc
             prod.last_exc = None
-            if exc is None:
+            if exc is None and rc == 12:  # ENOMEM
+                exc = MemoryError()
+            elif exc is None:
                 exc = QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
                     'failed to read the result schema: ' + (
@@ -2565,8 +2542,9 @@ class QueryResult:
             prod._free_cached()
             handle._free()
             raise exc
-        self._schema_box = _arrow_schema_box(&prod.cached_schema)
-        return _arrow_schema_capsule(self._schema_box)
+        box = _arrow_schema_box(&prod.cached_schema)
+        self._schema_box = box
+        return _arrow_schema_capsule(box)
 
     def __arrow_c_stream__(self, requested_schema=None):
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
@@ -2611,8 +2589,8 @@ class QueryResult:
             self._schema_producer = None
             self._consumed_by = '__arrow_c_stream__()'
             return capsule
-        return _make_query_stream_capsule(
-            self._take_cursor_handle('__arrow_c_stream__()'))
+        return _query_stream_capsule(_new_query_stream_producer(
+            self._take_cursor_handle('__arrow_c_stream__()')))
 
     def to_arrow(self):
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow.

@@ -5580,18 +5580,13 @@ cdef bint _dataframe_client_try_capsule_path(
     if table_name_col is not None:
         return False
 
-    # LazyFrame: prefer the streaming engine for lower peak memory. Every
-    # supported polars (1.32+) accepts `engine='streaming'`; the TypeError
-    # fallback keeps eager collect for a `collect` without that keyword.
-    # `LazyFrame.collect_batches()` would stream natively but upstream
-    # marks it unstable and "much slower than native sinks", so we
-    # materialize and slice downstream.
+    # LazyFrame: use the streaming engine (polars 1.32+) for lower peak
+    # memory. `LazyFrame.collect_batches()` would stream natively but
+    # upstream marks it unstable and "much slower than native sinks", so
+    # we materialize and slice downstream.
     if _is_polars_dataframe_or_lazy(df) and isinstance(
             df, _POLARS_LAZYFRAME_T):
-        try:
-            sliceable = df.collect(engine='streaming')
-        except TypeError:
-            sliceable = df.collect()
+        sliceable = df.collect(engine='streaming')
     elif hasattr(df, '__arrow_c_stream__'):
         sliceable = df
     elif hasattr(df, '__arrow_c_array__'):

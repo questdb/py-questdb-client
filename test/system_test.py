@@ -3,6 +3,7 @@
 import sys
 sys.dont_write_bytecode = True
 import os
+import contextlib
 import datetime
 import importlib.util
 import random
@@ -13,6 +14,7 @@ import threading
 import time
 import unittest
 import uuid
+import warnings
 import pathlib
 import numpy as np
 import decimal
@@ -52,6 +54,22 @@ FIRST_ARRAY_RELEASE = (8, 4, 0)
 FIRST_DECIMAL_RELEASE = (9, 2, 0)
 FIRST_QWP_WS_RELEASE = (9, 4, 3)
 FIRST_QWP_GAP_HALT_RELEASE = (9, 4, 4)
+
+
+_POLARS_FALLBACK_WARNING = 'The polars Categorical fast path failed'
+
+
+@contextlib.contextmanager
+def _polars_fallback_warnings():
+    """Record the polars fast-path fallback warnings issued in the block."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        fallbacks = []
+        yield fallbacks
+    fallbacks.extend(
+        w for w in caught
+        if issubclass(w.category, RuntimeWarning)
+        and str(w.message).startswith(_POLARS_FALLBACK_WARNING))
 
 
 def _assert_long_list_equal(test, got, exp, what='values'):
@@ -2579,9 +2597,12 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
                     df, table_name=table_name, at='ts', symbols=['sym'])
             self.qdb_plain.retry_check_table(table_name, min_rows=n)
             sql = f'SELECT sym, v FROM {table_name} ORDER BY v'
-            fallbacks = qi._debug_polars_hybrid_fallbacks()
+            # Both reads must use the Categories path. A fallback gives
+            # the same values, so only its warning shows it.
             with qi.QuestDB.from_conf(self._conf()) as client:
-                full = client.query(sql).to_polars()
+                with _polars_fallback_warnings() as caught:
+                    full = client.query(sql).to_polars()
+            self.assertEqual(caught, [])
             self.assertEqual(full.shape, (n, 2))
             self.assertIsInstance(full.schema['sym'], pl.Categorical)
             self.assertGreater(full['sym'].null_count(), 0)
@@ -2591,7 +2612,9 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
                 self, full['sym'].cast(pl.Utf8).to_list(), exp,
                 'SYMBOL values')
             with qi.QuestDB.from_conf(self._conf()) as client:
-                frames = list(client.query(sql).iter_polars())
+                with _polars_fallback_warnings() as caught:
+                    frames = list(client.query(sql).iter_polars())
+            self.assertEqual(caught, [])
             self.assertGreater(len(frames), 1)
             stitched = pl.concat(frames, how='vertical')
             self.assertIsInstance(stitched.schema['sym'], pl.Categorical)
@@ -2600,12 +2623,6 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
             _assert_long_list_equal(
                 self, stitched['sym'].cast(pl.Utf8).to_list(), exp,
                 'SYMBOL values')
-            # Both reads must use the Categories path. A fallback gives
-            # the same values, so only the counter shows it.
-            self.assertEqual(
-                qi._debug_polars_hybrid_fallbacks(), fallbacks,
-                'to_polars() / iter_polars() fell back to '
-                'polars.from_arrow')
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -2631,21 +2648,17 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
         # Only the fast path calls `Categories.random`. Do not replace
         # `pl.Categories`: `pl.from_arrow` uses it too.
         with mock.patch.object(pl.Categories, 'random', broken_random):
-            fallbacks = qi._debug_polars_hybrid_fallbacks()
             with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
-                with self.assertWarnsRegex(
-                        RuntimeWarning, 'broken Categories'):
+                with _polars_fallback_warnings() as caught:
                     full = client.query(sql).to_polars()
-            self.assertEqual(
-                qi._debug_polars_hybrid_fallbacks(), fallbacks + 1)
+            self.assertEqual(len(caught), 1)
+            self.assertIn('broken Categories', str(caught[0].message))
             with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
-                with self.assertWarnsRegex(
-                        RuntimeWarning, 'broken Categories'):
+                with _polars_fallback_warnings() as caught:
                     frames = list(client.query(sql).iter_polars())
             self.assertGreater(len(frames), 1)
-            # The iterator falls back once and keeps the fallback.
-            self.assertEqual(
-                qi._debug_polars_hybrid_fallbacks(), fallbacks + 2)
+            # The iterator warns once and keeps the fallback.
+            self.assertEqual(len(caught), 1)
         for out in (full, pl.concat(frames, how='vertical')):
             _assert_long_list_equal(
                 self, out['v'].to_list(), list(range(n)), 'v values')
@@ -2657,7 +2670,7 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
         """If the ``Categories`` path fails after ``iter_polars`` yielded
         frames, the remaining frames come from ``polars.from_arrow``, cast
         to the same ``Categories``, so ``polars.concat`` still stitches.
-        One warning, one counted fallback."""
+        One warning."""
         try:
             import polars as pl
         except ImportError:
@@ -2679,7 +2692,6 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
 
         sql, exp = self._seed_multi_batch_symbols()
         n = len(exp)
-        fallbacks = qi._debug_polars_hybrid_fallbacks()
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(
                 pl.Series, 'cast', fail_when_armed(pl.Series.cast)))
@@ -2691,11 +2703,11 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
                 frames = client.query(sql).iter_polars()
                 first = next(frames)
                 armed[0] = True
-                with self.assertWarnsRegex(
-                        RuntimeWarning, 'broken Categories'):
+                with _polars_fallback_warnings() as caught:
                     rest = list(frames)
         self.assertGreater(len(rest), 0)
-        self.assertEqual(qi._debug_polars_hybrid_fallbacks(), fallbacks + 1)
+        self.assertEqual(len(caught), 1)
+        self.assertIn('broken Categories', str(caught[0].message))
         for frame in rest:
             self.assertEqual(frame.schema['sym'], first.schema['sym'])
         out = pl.concat([first] + rest, how='vertical')
