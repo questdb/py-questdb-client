@@ -4,7 +4,7 @@
 Changelog
 =========
 
-5.0.1 (unreleased)
+5.1.0 (unreleased)
 ------------------
 
 - Applications may now create a ``QueryResult`` on one thread and process it on
