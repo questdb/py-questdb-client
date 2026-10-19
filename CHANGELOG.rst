@@ -40,8 +40,8 @@ Changelog
 - ``duckdb.from_arrow(result)`` now works on duckdb 1.5. Before, it failed
   with "QueryResult already consumed", because duckdb 1.5 requested the
   stream more than once. ``QueryResult`` now has ``__arrow_c_schema__``,
-  which duckdb uses for the schema. ``pa.schema(result)`` and
-  ``polars.Schema(result)`` call it too. It reads the first batch, so after
+  which duckdb 1.5 uses for the schema. ``pa.schema(result)`` calls it
+  too. It reads the first batch, so after
   it, read the result only through the Arrow stream (``pa.table(result)``,
   ``polars.DataFrame(result)``, duckdb). ``to_pandas()``, ``to_polars()``
   and the other readers then raise ``InvalidApiCall``; run the query again
@@ -55,7 +55,7 @@ Changelog
   ``pyarrow>=14.0.1``, the oldest versions that CI tests. The old minimums did
   not work: with pyarrow before 14, pyarrow sources, ``iter_polars()`` and
   ``pa.table(result)`` failed. With pandas before 1.5, every DataFrame load
-  failed with an ``AttributeError``; it now raises a clear ``ImportError``.
+  failed with an ``AttributeError``; it now raises a clear error.
   Two features need newer versions: pyarrow-backed pandas frames take the
   Arrow path (and accept ``schema_overrides``) only on pandas 2.2 or later,
   and reading ``DECIMAL`` columns with a precision of 18 or less through
@@ -72,9 +72,9 @@ Changelog
 - ``QueryResult.__arrow_c_stream__`` now ignores ``requested_schema``, as the
   Arrow PyCapsule interface allows. ``pa.table(result, schema=...)`` and
   ``polars.DataFrame(result, schema=...)`` cast the result;
-  ``pa.RecordBatchReader.from_stream(result, schema=...)`` returns the
-  result's own schema. Before, any ``requested_schema`` raised
-  ``NotImplementedError``.
+  ``pa.RecordBatchReader.from_stream(result, schema=...)`` (pyarrow 15 or
+  later) returns the result's own schema. Before, any ``requested_schema``
+  raised ``NotImplementedError``.
 - If the polars ``Categorical`` fast path of ``to_polars()`` or
   ``iter_polars()`` fails, the client now issues a ``RuntimeWarning``. It still
   builds the frame with ``polars.from_arrow``, but it no longer hides the

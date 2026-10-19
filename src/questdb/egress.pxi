@@ -2507,8 +2507,8 @@ class QueryResult:
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
                     'QueryResult.__arrow_c_schema__() read the first batch '
-                    '(pa.schema(result), polars.Schema(result) and duckdb '
-                    'call it). Read the result through the Arrow stream, '
+                    '(pa.schema(result) and duckdb 1.5 call it). Read the '
+                    'result through the Arrow stream, '
                     'for example with pa.table(result) or '
                     'polars.DataFrame(result), or run the query again.')
             raise QuestDBError(
@@ -2533,7 +2533,7 @@ class QueryResult:
         It reads the first batch to get the schema, and keeps that batch
         for ``__arrow_c_stream__``. duckdb 1.5 calls it, so that
         ``duckdb.from_arrow(result)`` opens the stream only once.
-        ``pa.schema(result)`` and ``polars.Schema(result)`` call it too.
+        ``pa.schema(result)`` calls it too.
         After this call, read the result only through ``__arrow_c_stream__``
         (``pa.table(result)``, ``polars.DataFrame(result)``, duckdb): the
         other readers raise ``InvalidApiCall`` on their first read. When
@@ -2579,8 +2579,8 @@ class QueryResult:
         allows: the stream always has the result's own schema.
         ``pa.table(result, schema=...)`` and
         ``polars.DataFrame(result, schema=...)`` cast the result;
-        ``pa.RecordBatchReader.from_stream(result, schema=...)`` returns
-        the result's own schema.
+        ``pa.RecordBatchReader.from_stream(result, schema=...)`` (pyarrow
+        15 or later) returns the result's own schema.
 
         The stream releases the result's connection when the consumer
         reads the last batch, not when it releases the stream. A reader

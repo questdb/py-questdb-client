@@ -810,8 +810,10 @@ cdef uint64_t _dataframe_row_path_emissions = 0
 
 cdef str _pandas_too_old_message(object pandas, str what):
     return (
-        f'`pandas` {pandas.__version__} is too old: {what} needs pandas 2.0 '
-        'or later. See: https://py-questdb-client.readthedocs.io/'
+        f'`pandas` {pandas.__version__} is too old: {what} needs '
+        '`pandas.ArrowDtype` (pandas 1.5 or later), and the client is '
+        'tested with pandas 2.0 or later. See: '
+        'https://py-questdb-client.readthedocs.io/'
         'en/latest/installation.html.')
 
 

@@ -1147,8 +1147,9 @@ raises its own exception type, and the message contains
 a ``PanicException``, which ``except Exception`` does not catch. A stream
 read releases the connection when the consumer reads the last batch, not
 when it releases the stream.
-The result also implements ``__arrow_c_schema__``, which duckdb,
-``pa.schema(result)`` and ``polars.Schema(result)`` call. It reads the first
+
+The result also implements ``__arrow_c_schema__``, which duckdb 1.5 and
+``pa.schema(result)`` call. It reads the first
 batch, so after any of these calls, read the result only through the stream
 (``pa.table(result)``, ``polars.DataFrame(result)``, duckdb); ``to_pandas()``
 and the other readers raise ``InvalidApiCall``, and you must run the query

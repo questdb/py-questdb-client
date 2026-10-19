@@ -1365,8 +1365,8 @@ class QueryResult:
     def __arrow_c_schema__(self) -> Any:
         """Arrow schema PyCapsule protocol (no pyarrow needed). It reads the
         first batch to get the schema, and keeps that batch for
-        ``__arrow_c_stream__``. duckdb, ``pa.schema(result)`` and
-        ``polars.Schema(result)`` call it. After this call, read the result
+        ``__arrow_c_stream__``. duckdb 1.5 and ``pa.schema(result)`` call
+        it. After this call, read the result
         only through the stream (``pa.table(result)``,
         ``polars.DataFrame(result)``, duckdb); the other readers raise
         ``InvalidApiCall`` on their first read. When the schema was read
@@ -1383,8 +1383,8 @@ class QueryResult:
         ``requested_schema`` is ignored: the stream always has the result's
         own schema. ``pa.table(result, schema=...)`` and
         ``polars.DataFrame(result, schema=...)`` cast the result;
-        ``pa.RecordBatchReader.from_stream(result, schema=...)`` returns the
-        result's own schema.
+        ``pa.RecordBatchReader.from_stream(result, schema=...)`` (pyarrow 15
+        or later) returns the result's own schema.
 
         The stream releases the result's connection when the consumer reads
         the last batch, not when it releases the stream. A reader lease can
@@ -1418,7 +1418,9 @@ class QueryResult:
 
     def to_polars(self) -> Any:
         """Read the full result into a ``polars.DataFrame``. Requires polars
-        and pyarrow."""
+        and pyarrow. If the polars ``Categorical`` fast path fails, it issues
+        a ``RuntimeWarning`` and builds the frame with ``polars.from_arrow``:
+        the values stay correct, but the read is slower."""
 
     def iter_arrow(self) -> Iterator[Any]:
         """Iterate result batches as ``pyarrow.RecordBatch``."""
@@ -1427,7 +1429,9 @@ class QueryResult:
         """Iterate result batches as ``polars.DataFrame`` (streaming /
         low-peak-memory). Batches share one ``Categories`` identity so
         ``polars.concat`` over them stitches cleanly. Requires polars and
-        pyarrow."""
+        pyarrow. If the ``Categorical`` fast path fails, it issues one
+        ``RuntimeWarning`` and builds the remaining frames with
+        ``polars.from_arrow``."""
 
     def iter_pandas(
         self,
