@@ -1,9 +1,89 @@
-===================
-5.0 Migration Guide
-===================
+================
+Migration Guide
+================
+
+5.0 to 6.0
+==========
+
+Four changes need action: ``QuestDB.close()`` raising instead of waiting for
+its own thread's lease, a sender's own callbacks no longer being able to
+append to it, the exception a commit raises once its sender is closed, and a
+warning an abandoned query result now surfaces instead of swallowing.
+
+* :meth:`QuestDB.close <questdb.QuestDB.close>` **raises instead of waiting
+  for a lease held by the calling thread.** It raises
+  ``QuestDBError(InvalidApiCall)`` while the calling thread owns an active pool
+  operation or a lease attributed to it; 5.0 waited, which never ended for a
+  same-thread lease. A sender lease handed to a worker stays attributed to the
+  borrowing thread until the worker first uses it, so a ``close()`` there that
+  5.0 would have waited through now raises. A reader lease (``db.reader()``)
+  stays attributed to the borrowing thread however it is used, so close the
+  pool from another thread while one is open. For a sender lease, have the
+  worker use the lease and signal that before closing, or close from a thread
+  that never held it::
+
+      sender = db.sender()
+      used = threading.Event()
+
+      def work():
+          with sender:
+              used.set()
+              sender.row('trades', columns={'price': 1.0},
+                         at=questdb.ServerTimestamp)
+
+      threading.Thread(target=work).start()
+      used.wait()
+      db.close()  # waits for the worker to return the lease
+
+* **A sender's own callbacks can no longer append to it.** Called from the
+  sender's own ``connection_listener`` or ``error_handler``, ``row()``,
+  ``dataframe()``, ``new_buffer()``, ``establish()``, ``transaction()`` and the
+  :class:`~questdb.SenderTransaction` operations raise
+  ``QuestDBError(InvalidApiCall)``, as ``flush()`` and ``close()`` already did,
+  even while the sender is idle. 5.0 accepted ``row()`` there. The read-only
+  ``max_name_len``, ``protocol_version``, ``connection_events_dropped`` and
+  ``connection_events_delivered`` also raise, from any thread, while the sender
+  is inside a native call such as ``flush()``. So do ``len()``, ``bytes()``,
+  truthiness, ``capacity()``, ``reserve()``, ``clear()`` and ``row()`` on a
+  :class:`~questdb.ingress.Buffer` that a native call is modifying (the internal buffer
+  during ``flush()``, an explicit one during ``flush(buffer)``, or any one
+  during ``dataframe()``, ``SenderTransaction.dataframe()`` included); a
+  ``flush(buffer, clear=False)`` only reads the buffer, so
+  concurrent reads and other ``clear=False`` flushes of it still work. Hand
+  listener events to another sender or to the owning thread instead::
+
+      events = queue.SimpleQueue()
+      sender = Sender.from_conf(conf, connection_listener=events.put)
+      ...
+      while not events.empty():  # on the sender's own thread
+          event = events.get()
+          sender.row('conn_events', symbols={'kind': event.kind.tag},
+                     at=questdb.ServerTimestamp)
+
+* :meth:`SenderTransaction.commit <questdb.SenderTransaction.commit>` **after
+  the owning sender was closed now raises** ``QuestDBError(InvalidApiCall)``
+  instead of an internal ``TypeError``. A commit whose flush fails leaves the
+  sender's buffer empty and the transaction completed, exactly as in 5.0.
+
+* **An abandoned** :class:`~questdb.QueryResult` **now reports its**
+  ``ResourceWarning`` **when promoted to an exception**. The finalizer previously
+  swallowed that exception; after releasing the cursor it now lets it reach
+  :func:`sys.unraisablehook`. Otherwise the warning follows the normal warning
+  filters, as before. Under warnings-as-errors this becomes a failure — and
+  because it fires whenever garbage collection happens to run, pytest attributes
+  it to whatever test was executing rather than to the one that abandoned the
+  result. Close results deterministically::
+
+      with db.query('select * from trades') as result:
+          ...
+
+  or filter :class:`ResourceWarning` if a suite runs with ``-W error``.
+
+4.x to 5.0
+==========
 
 Connect once, then stream, load, or query
-=========================================
+-----------------------------------------
 
 The QWP/WebSocket API has one connection-owning root, the :class:`QuestDB
 <questdb.QuestDB>` handle returned by :func:`questdb.connect`:
@@ -56,7 +136,7 @@ rejections are never silent. To ingest concurrently, borrow one sender per
 thread.
 
 DataFrame bulk loads over QWP/WebSocket
-=======================================
+---------------------------------------
 
 Over ``ws::`` / ``wss::``, DataFrame bulk loads use the direct columnar
 path — a database operation, not stream serialization. The recommended
@@ -113,7 +193,7 @@ fully supported (over UDP it serializes row by row into fire-and-forget
 datagrams, with the same delivery caveats as ``row()``).
 
 Update imports from questdb.ingress
-===================================
+-----------------------------------
 
 The 4.x ``questdb.ingress`` module is now a deprecated compatibility shim.
 It keeps ILP/HTTP and ILP/TCP code running — including ``IngressError`` /
@@ -134,7 +214,7 @@ by senders. Where 4.x code built buffers on worker threads and flushed them
 through one sender, borrow one pooled sender per thread instead.
 
 Behavioural changes to watch for
-================================
+--------------------------------
 
 * **Removed QWP flight-window keys.** ``max_in_flight`` and
   ``in_flight_window`` are no longer accepted. Remove them from ws/wss

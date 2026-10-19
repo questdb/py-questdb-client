@@ -22,6 +22,7 @@ class QwpAckServer:
                  close_plan=None, max_batch_size=0,
                  defer_aware_acks=False, record_payloads=False,
                  error_status=None, error_message=b"mock rejection",
+                 error_after_commit=False,
                  tls=False):
         """
         `close_plan`: iterable consumed one value per accepted connection;
@@ -44,6 +45,11 @@ class QwpAckServer:
         schema-mismatch), every binary frame is answered with an error
         response carrying that status instead of an OK ack.
 
+        `error_after_commit`: with `error_status`, withhold errors until an
+        explicit zero-table, non-deferred commit frame is received. The first
+        data frame can also be non-deferred; it must not trigger the error.
+        This establishes trailing-sync ordering without a speed guess.
+
         `tls`: when True, wrap every accepted connection in TLS using the
         self-signed certificate under ``test/certs`` (SAN: 127.0.0.1,
         localhost). Handshake failures are counted in
@@ -57,6 +63,7 @@ class QwpAckServer:
         self.record_payloads = record_payloads
         self.error_status = error_status
         self.error_message = error_message
+        self.error_after_commit = error_after_commit
         self._tls_context = None
         if tls:
             self._tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -259,8 +266,9 @@ class QwpAckServer:
                 seq = next_seq
                 next_seq += 1
                 if self.error_status is not None:
-                    _write_qwp_error(
-                        conn, seq, self.error_status, self.error_message)
+                    if not self.error_after_commit or _is_qwp_commit_frame(payload):
+                        _write_qwp_error(
+                            conn, seq, self.error_status, self.error_message)
                 elif not (self.defer_aware_acks
                           and _is_deferred_qwp_frame(payload)):
                     # Cumulative: one OK for `seq` also completes every
@@ -396,6 +404,13 @@ def _is_deferred_qwp_frame(payload):
     return (len(payload) > 5
             and payload.startswith(b"QWP1")
             and payload[5] & QWP_FLAG_DEFER_COMMIT != 0)
+
+
+def _is_qwp_commit_frame(payload):
+    return (len(payload) >= 12
+            and payload.startswith(b"QWP1")
+            and not _is_deferred_qwp_frame(payload)
+            and payload[6:8] == b"\x00\x00")
 
 
 def _write_qwp_ok(conn, wire_seq):

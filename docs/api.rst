@@ -145,3 +145,4 @@ The deprecated 4.x compatibility shim. New code imports from ``questdb``.
 .. autoclass:: questdb.ingress.Buffer
    :members:
    :undoc-members:
+   :show-inheritance:

@@ -4,9 +4,111 @@
 Changelog
 =========
 
-5.0.1 (unreleased)
+6.0.0 (unreleased)
 ------------------
 
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+``QuestDB.close()`` no longer waits for a lease held by its own thread
+**********************************************************************
+
+:meth:`QuestDB.close <questdb.QuestDB.close>` used to wait for every
+outstanding lease. When the calling thread itself held one, that wait could
+never end. It now raises :class:`QuestDBError <questdb.QuestDBError>` with
+``code`` set to ``QuestDBErrorCode.InvalidApiCall`` instead of waiting while
+the calling thread owns an active pool operation or a lease attributed to it.
+A sender lease is attributed to the thread that last used it; a reader lease
+always to the thread that borrowed it.
+
+This also affects a sender lease taken on one thread and handed to a worker:
+the lease belongs to the borrowing thread until the worker first uses it. A
+``close()`` on the borrowing thread before that first use now raises where 5.0
+waited for the worker to return the lease. Have the worker use the lease (for
+example, enter its context) and signal that before closing the pool, or close
+the pool from a thread that never held the lease. A reader lease does not
+move with use, so 5.0 code that borrowed a reader on one thread, used it on a
+worker and closed the pool on the borrowing thread must close from another
+thread instead; reader leases were always documented as thread-affine. A
+``close()`` on another thread still waits for outstanding leases.
+
+A sender's own callbacks can no longer drive that sender
+********************************************************
+
+A :class:`Sender <questdb.Sender>`'s own ``connection_listener`` or
+``error_handler`` could already not call ``flush()`` or ``close()`` on it. The
+same now applies to ``row()``, ``dataframe()``, ``new_buffer()``,
+``establish()``, ``transaction()`` and every
+:class:`SenderTransaction <questdb.SenderTransaction>` operation: called from
+the sender's own callback they raise :class:`QuestDBError <questdb.QuestDBError>`
+with ``code`` set to ``QuestDBErrorCode.InvalidApiCall``, even while the sender
+is idle. Before, ``row()`` from a listener succeeded, so a 5.0 listener that
+records its events through its own sender now logs
+``connection event listener failed`` and drops those rows. Separately, the
+read-only ``max_name_len``, ``protocol_version``, ``connection_events_dropped``
+and ``connection_events_delivered`` now raise the same error, from any thread,
+while the sender is inside a native call such as ``flush()``. Write listener
+events to a different sender or queue them for the owning thread, and read the
+counters when the sender is not flushing.
+
+Likewise, a :class:`Buffer <questdb.ingress.Buffer>` that a native call is modifying --
+the sender's internal buffer during ``flush()``, an explicit buffer during
+``flush(buffer)`` (``clear=True``) or ``flush_and_get_fsn(buffer)``, or any
+buffer during ``dataframe()`` (``SenderTransaction.dataframe()`` included) --
+now raises that error from ``len()``,
+``bytes()``, truthiness (``if buffer:`` / ``if sender:``), ``capacity()``,
+``reserve()``, ``clear()`` and ``row()``, from any thread, instead of reading or
+modifying memory the native call is using. A ``flush(buffer, clear=False)`` or
+``flush_and_keep_and_get_fsn(buffer)`` only reads the buffer, so other threads
+may keep reading it and flushing it with ``clear=False`` to other senders;
+only modifying it raises.
+
+``SenderTransaction.commit()`` after its sender was closed
+**********************************************************
+
+Calling :meth:`SenderTransaction.commit <questdb.SenderTransaction.commit>`
+after its sender was closed now raises
+:class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+``QuestDBErrorCode.InvalidApiCall`` instead of leaking an internal
+``TypeError``. Code that caught ``TypeError`` there must catch
+``QuestDBError`` instead.
+
+An abandoned ``QueryResult`` reports its ``ResourceWarning``
+************************************************************
+
+When warning filters promote an abandoned ``QueryResult``'s ``ResourceWarning``
+to an exception, the finalizer now lets it reach ``sys.unraisablehook`` instead
+of swallowing it, after releasing the cursor. Otherwise the warning continues
+to follow the normal warning filters. Suites running with warnings-as-errors
+will see a new failure, and because it is raised whenever
+collection happens to run, pytest attributes it to the test that was executing
+rather than to the one that abandoned the result. Close results
+deterministically (``with db.query(...) as result:``) or filter
+``ResourceWarning``.
+
+Other changes
+~~~~~~~~~~~~~
+
+- Wheels are now also published for free-threaded CPython 3.14 on Windows
+  (``cp314t-win32`` and ``cp314t-win_amd64``). On every free-threaded build the
+  extension re-enables the GIL; see :doc:`installation`.
+- A :meth:`QuestDB.close <questdb.QuestDB.close>` that waits for a ``close()``
+  already running on another thread now closes the pool itself if that other
+  close gives up (interrupted by ``Ctrl-C``, say) instead of returning with
+  the pool still open.
+- Finalizers and garbage collection no longer block on, or free, a query
+  cursor that another operation is using: an abandoned ``QueryResult``,
+  ``PooledReader``, Arrow stream or batch iterator is reclaimed without
+  waiting, and cursor ``close()`` / ``cancel()`` / pulls reject same-thread
+  re-entry while a native read is in progress.
+- A connection event whose kind this build does not recognise is dropped,
+  with one warning on the ``questdb`` logger, instead of being delivered to
+  the listener as ``Connected``.
+- DataFrame errors that gain a remediation hint (a batch too large for the
+  server) or a note (a partially consumed input stream) keep their exception
+  class, ``in_doubt`` and ``sender_error`` instead of being rebuilt as a plain
+  :class:`QuestDBError <questdb.QuestDBError>`. The batch-too-large hint is
+  also added when the rejection surfaces at the trailing sync.
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a

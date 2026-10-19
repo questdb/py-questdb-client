@@ -31,6 +31,18 @@ cdef extern from "stdbool.h":
     ctypedef unsigned char cbool "bool"
 
 cdef extern from "questdb/ingress/line_sender.h":
+    # Public `#define`s rather than enum members; declaring them as anonymous
+    # constants makes Cython emit the header tokens themselves, so Python's
+    # public enum cannot silently drift from the pinned native ABI.
+    cdef enum:
+        questdb_connection_event_connected
+        questdb_connection_event_disconnected
+        questdb_connection_event_reconnected
+        questdb_connection_event_failed_over
+        questdb_connection_event_endpoint_attempt_failed
+        questdb_connection_event_all_endpoints_unreachable
+        questdb_connection_event_auth_failed
+
     cdef struct line_sender_error:
         pass
 
@@ -840,9 +852,9 @@ cdef extern from "questdb/ingress/qwp_sender.h":
         size_t previous_host_len
         const char* previous_port
         size_t previous_port_len
-        bint has_attempt
+        cbool has_attempt
         uint64_t attempt_number
-        bint has_cause
+        cbool has_cause
         line_sender_error_code cause_code
         const char* cause_msg
         size_t cause_msg_len
@@ -1071,15 +1083,15 @@ cdef extern from "questdb/ingress/qwp_sender.h":
         qwp_numpy_f64_ndarray = 31
         qwp_numpy_datetime64_m = 32
         qwp_numpy_datetime64_h = 33
-        column_sender_numpy_datetime64_D = 34
-        column_sender_numpy_datetime64_M = 35
-        column_sender_numpy_datetime64_Y = 36
-        column_sender_numpy_datetime64_W = 37
+        qwp_numpy_datetime64_D = 34
+        qwp_numpy_datetime64_M = 35
+        qwp_numpy_datetime64_Y = 36
+        qwp_numpy_datetime64_W = 37
         qwp_numpy_timedelta64_m = 38
         qwp_numpy_timedelta64_h = 39
-        column_sender_numpy_timedelta64_D = 40
-        column_sender_numpy_timedelta64_M = 41
-        column_sender_numpy_timedelta64_Y = 42
+        qwp_numpy_timedelta64_D = 40
+        qwp_numpy_timedelta64_M = 41
+        qwp_numpy_timedelta64_Y = 42
 
     cdef struct qwp_numpy_extras:
         int8_t decimal_scale
@@ -1237,11 +1249,11 @@ cdef extern from "questdb/egress/qwp_reader.h":
         pass
 
     cdef enum qwp_reader_server_role:
-        qwp_reader_server_role_standalone = 0
-        qwp_reader_server_role_primary = 1
-        qwp_reader_server_role_replica = 2
-        qwp_reader_server_role_primary_catchup = 3
-        qwp_reader_server_role_other = 0xFF
+        qwp_reader_server_role_standalone
+        qwp_reader_server_role_primary
+        qwp_reader_server_role_replica
+        qwp_reader_server_role_primary_catchup
+        qwp_reader_server_role_other
 
     cdef enum qwp_reader_arrow_batch_result:
         qwp_reader_arrow_batch_ok = 0

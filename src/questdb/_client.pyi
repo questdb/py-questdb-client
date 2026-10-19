@@ -53,7 +53,7 @@ __all__ = [
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -106,6 +106,15 @@ class QuestDBErrorCode(Enum):
 class QuestDBError(Exception):
     """An error whilst using the QuestDB client."""
 
+    def __init__(
+        self,
+        code: QuestDBErrorCode,
+        msg: str,
+        sender_error: Optional["SenderError"] = None,
+        *,
+        in_doubt: bool = False,
+    ) -> None: ...
+
     @property
     def code(self) -> QuestDBErrorCode:
         """Return the error code."""
@@ -140,6 +149,12 @@ class UnsupportedDataFrameShapeError(QuestDBError):
     """
     A DataFrame shape is not supported by the optimized columnar client path.
     """
+
+    def __init__(
+        self,
+        msg: str,
+        column_failures: Optional[Iterable[Dict[str, Any]]] = None,
+    ) -> None: ...
 
     column_failures: tuple
 
@@ -1332,7 +1347,11 @@ class QuestDB:
         """
         Close the client and its connection pool.
 
-        Idempotent. When called from inside one of this handle's own
+        Idempotent. Raises ``QuestDBError(InvalidApiCall)`` instead of
+        waiting while the calling thread owns an active pool operation or a
+        lease attributed to it: a sender lease belongs to the thread that last
+        used it, a reader lease always to the thread that borrowed it.
+        When called from inside one of this handle's own
         ``error_handler`` / ``connection_listener`` callbacks, it does
         not wait for a concurrent ``close()`` on another thread to
         finish; the in-flight callback completes after that close
@@ -1357,7 +1376,7 @@ class QueryResult:
     :meth:`to_arrow` / :meth:`iter_arrow` / :meth:`__arrow_c_stream__` give a
     generic compact-dictionary Arrow form a consumer reconciles. When the
     target is a polars / pandas frame, the dedicated methods avoid the
-    re-reconciliation that ``polars.from_arrow(result)`` /
+    re-reconciliation that ``polars.DataFrame(result)`` /
     ``to_arrow().to_pandas()`` pay on SYMBOL-heavy results.
     """
 
@@ -1365,7 +1384,7 @@ class QueryResult:
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
-        (e.g. ``polars.from_arrow``) reconciles them."""
+        (e.g. ``polars.DataFrame(result)``) reconciles them."""
 
     def to_arrow(self) -> Any:
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow."""
@@ -1806,6 +1825,9 @@ class Sender:
     def await_acked_fsn(self, fsn: int, timeout_millis: int = 0) -> bool:
         """
         Wait until the QWP/WebSocket completion watermark reaches ``fsn``.
+
+        Returns ``False`` if the no-progress timeout elapses first;
+        ``timeout_millis=0`` waits indefinitely.
         """
 
     def drive_once(self) -> bool:
