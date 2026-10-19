@@ -85,6 +85,10 @@ Changelog
   ``FailoverWouldDuplicate``. The consumer raises its own exception type, and
   only the message contains ``[FailoverWouldDuplicate]``. polars before 1.37.1
   raises a ``PanicException``, which ``except Exception`` does not catch.
+- When an Arrow stream read of a ``QueryResult`` fails, the consumer now
+  raises the stream's error. Before, ``pa.table(result)`` raised
+  ``SystemError`` instead, a later ``close()`` from another thread could
+  hang, and ``QuestDB.dataframe(result)`` could crash the process.
 
 5.0.0 (2026-07-27)
 ------------------
