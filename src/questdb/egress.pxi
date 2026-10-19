@@ -2176,15 +2176,21 @@ cdef object _polars_frame_with_registry_cats(
     cdef list exprs = []
     cdef Py_ssize_t i
     cdef _PolarsSymbolRegistry reg
-    for i in range(len(types)):
-        if pa.types.is_dictionary(types[i]):
-            reg = registries.get(i) or registries.get(-1)
-            if reg is not None:
-                exprs.append(
-                    pl.col(names[i]).cast(pl.Categorical(reg.cats)))
-    if not exprs:
-        return frame
-    return frame.with_columns(exprs)
+    try:
+        for i in range(len(types)):
+            if pa.types.is_dictionary(types[i]):
+                reg = registries.get(i) or registries.get(-1)
+                if reg is not None:
+                    exprs.append(
+                        pl.col(names[i]).cast(pl.Categorical(reg.cats)))
+        if exprs:
+            frame = frame.with_columns(exprs)
+    except Exception:
+        # The cast uses the `Categories` API that the fallback works
+        # around, so it can fail the same way. Keep the values: only
+        # `pl.concat` with the earlier frames fails. Stop casting.
+        registries.clear()
+    return frame
 
 
 def _debug_polars_hybrid_fallbacks():
@@ -2203,6 +2209,7 @@ cdef class _PolarsBatchIter:
     cdef object pa
     cdef dict registries
     cdef bint use_hybrid
+    cdef bint hybrid_yielded
 
     def __cinit__(self, _CursorHandle handle, object pl, object pa):
         self.reader = _build_record_batch_reader(handle)
@@ -2210,6 +2217,7 @@ cdef class _PolarsBatchIter:
         self.pa = pa
         self.registries = {}
         self.use_hybrid = getattr(pl, 'Categories', None) is not None
+        self.hybrid_yielded = False
 
     def __iter__(self):
         return self
@@ -2219,14 +2227,21 @@ cdef class _PolarsBatchIter:
         table = self.pa.Table.from_batches([batch])
         if self.use_hybrid:
             try:
-                return _polars_dataframe_hybrid(
+                frame = _polars_dataframe_hybrid(
                     table, self.pl, self.pa, self.registries)
             except Exception as exc:
                 # One warning per iterator: the remaining batches take the
                 # fallback too, cast to the registries' `Categories`, so
                 # every yielded frame has the same dtypes.
                 self.use_hybrid = False
+                if not self.hybrid_yielded:
+                    # No yielded frame uses the registries: plain frames
+                    # stitch, and the cast would only cost a string remap.
+                    self.registries.clear()
                 frame = _polars_hybrid_fallback(table, self.pl, exc)
+            else:
+                self.hybrid_yielded = True
+                return frame
         else:
             frame = self.pl.from_arrow(table)
         return _polars_frame_with_registry_cats(

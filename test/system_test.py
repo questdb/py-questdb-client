@@ -2704,6 +2704,57 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
         _assert_long_list_equal(
             self, out['sym'].cast(pl.Utf8).to_list(), exp, 'SYMBOL values')
 
+    def test_iter_polars_fallback_survives_broken_categorical(self):
+        """The fallback casts to the registries' ``Categories`` with
+        ``pl.Categorical(cats)``. If that constructor itself breaks, the
+        fallback must still give every frame with the right values, from
+        the first batch and from the middle of the stream."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        import warnings
+        orig = pl.Categorical
+        armed = [False]
+
+        class BrokenCategorical(orig):
+            # Break only the client's own `Categories`: `pl.from_arrow`
+            # builds its Categoricals through this class too.
+            def __init__(self, *args, **kwargs):
+                cats = args[0] if args else kwargs.get('categories')
+                if (armed[0] and isinstance(cats, pl.Categories)
+                        and cats.namespace() == 'questdb_symbol'):
+                    raise RuntimeError('broken Categorical')
+                super().__init__(*args, **kwargs)
+
+        self.addCleanup(setattr, pl, 'Categorical', orig)
+        pl.Categorical = BrokenCategorical
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        for mid_stream in (False, True):
+            with self.subTest(mid_stream=mid_stream):
+                armed[0] = not mid_stream
+                with qi.QuestDB.from_conf(
+                        self._multi_batch_conf()) as client:
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter('always')
+                        frames = client.query(sql).iter_polars()
+                        out = [next(frames)]
+                        armed[0] = True
+                        out.extend(frames)
+                self.assertGreater(len(out), 1)
+                self.assertEqual(
+                    len([w for w in caught
+                         if issubclass(w.category, RuntimeWarning)]), 1)
+                _assert_long_list_equal(
+                    self, [v for f in out for v in f['v'].to_list()],
+                    list(range(n)), 'v values')
+                _assert_long_list_equal(
+                    self,
+                    [s for f in out
+                     for s in f['sym'].cast(pl.Utf8).to_list()],
+                    exp, 'SYMBOL values')
+
     def _make_table(self, table_name, rows):
         self._exec(
             f'CREATE TABLE {table_name} '
