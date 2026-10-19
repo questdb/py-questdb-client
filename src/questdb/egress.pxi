@@ -2891,7 +2891,11 @@ class QueryResult:
                     handle = self._cancel_handle
             if not _cursor_handle_is_live(handle):
                 return
-            if handle._abandonment_needs_warning():
+            # Close before warning: under `-W error` the warning raises,
+            # and the cursor must still be released.
+            warn = handle._abandonment_needs_warning()
+            self.close()
+            if warn:
                 warnings.warn(
                     'QueryResult was neither drained nor closed; its '
                     'pooled connection is being released by the garbage '
@@ -2899,6 +2903,5 @@ class QueryResult:
                     '`close()`.',
                     ResourceWarning,
                     stacklevel=2)
-            self.close()
         except Exception:
             pass
