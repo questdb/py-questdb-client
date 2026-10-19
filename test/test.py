@@ -461,6 +461,29 @@ class TestQwpWebSocketApi(unittest.TestCase):
         # Once the holder is gone, the same reclaim proceeds.
         self.assertEqual(qi._debug_try_reclaim_cursor_handle(handle), 0)
 
+    def test_cursor_operations_reject_same_thread_decode_reentry(self):
+        handle = qi._debug_new_cursor_handle()
+        result = qi._debug_new_cursor_finalizer_owner('query_result', handle)
+        iterator = qi._debug_new_cursor_finalizer_owner('numpy', handle)
+        tested = []
+        case = self
+
+        class DuringDecode:
+            def set(self):
+                pass
+
+            def wait(self):
+                for operation in (result.close, result.cancel, lambda: next(iterator)):
+                    with case.assertRaises(qi.QuestDBError) as caught:
+                        operation()
+                    case.assertIs(caught.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+                    tested.append(operation)
+                case.assertIs(result._cursor_handle, handle)
+
+        qi._debug_hold_cursor_handle_lock(handle, DuringDecode(), DuringDecode())
+        self.assertEqual(len(tested), 3)
+        result.close()
+
     @unittest.skipUnless(
         hasattr(sys, 'getrefcount'), 'requires refcounting finalizers')
     @unittest.skipIf(pd is None, 'pandas not installed')

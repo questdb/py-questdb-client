@@ -1,6 +1,6 @@
 """Static regression fixture; checked by TokenProviderTypingTest."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from questdb.auth import (
     ExpiringToken,
@@ -32,5 +32,7 @@ def check_provider_api(
     TokenProviderStatus(False, None, None, 1, failure)
     sqlalchemy_engine(provider, 'http://localhost:9000')
     psycopg_connect(provider, 'http://localhost:9000')
+    provider.close(wait=True, timeout=5.0)
+    provider.close(wait=True, timeout=timedelta(seconds=5))
     sqlalchemy_engine(oidc, 'http://localhost:9000')
     psycopg_connect(oidc, 'http://localhost:9000')

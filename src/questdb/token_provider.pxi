@@ -42,7 +42,16 @@
 # Every callback goes through the process-wide callback gate that `oidc.pxi`
 # drains before finalization.
 
+import weakref
+from functools import partial as _token_partial
+from types import MethodType as _TokenBoundMethod
+
 cdef dict _TOKEN_CALLBACKS = {}
+# Weak values do not root provider/client ownership cycles. Use identity keys:
+# application providers need not be hashable or comparable. Publish a prebuilt
+# weakref with dict.setdefault so GC/reentrant construction cannot replace an
+# already-published holder.
+cdef dict _APPLICATION_TOKEN_PROVIDERS = {}
 # Reentrant: a wrapper collected while this thread holds the lock (a
 # garbage collection triggered inside a locked section) unregisters itself.
 cdef object _TOKEN_CALLBACKS_LOCK = threading.RLock()
@@ -52,8 +61,9 @@ cdef size_t _token_callback_last_id = 0
 def _token_after_fork_in_child():
     # A parent thread may have held this lock when it disappeared. Inherited
     # providers remain unusable, but even cleanup must not take the old lock.
-    global _TOKEN_CALLBACKS_LOCK
+    global _TOKEN_CALLBACKS_LOCK, _APPLICATION_TOKEN_PROVIDERS
     _TOKEN_CALLBACKS_LOCK = threading.RLock()
+    _APPLICATION_TOKEN_PROVIDERS = {}
 
 
 if hasattr(os, 'register_at_fork'):
@@ -323,22 +333,26 @@ cdef void _tp_sink_text_error(
 
 
 cdef void _tp_sink_exception(
-        questdb_token_sink* sink, object exc, bint provider) noexcept:
-    """Report ``exc`` through ``sink``. A ``BaseException`` that is not an
-    ``Exception`` -- ``KeyboardInterrupt``, say -- raised on the main thread is
-    an interruption, not a provider failure: park it for the main thread."""
+        questdb_token_sink* sink, object exc, object signal_codes) noexcept:
+    """Report provider failures; preserve main-thread interruptions separately.
+
+    Snapshot handler codes before invoking user code: a signal handler can
+    unregister itself before raising any Exception subclass.
+    """
     cdef int64_t retry_after_ms = -1
     try:
-        if isinstance(exc, TokenUnavailableError):
-            if exc.retry_after is not None:
-                retry_after_ms = <int64_t>(exc.retry_after * 1000.0)
-            _tp_sink_text_error(sink, exc.retryable, retry_after_ms, str(exc))
-            return
-        if not isinstance(exc, Exception) and _tp_on_main_thread():
+        if _tp_on_main_thread() and (
+                not isinstance(exc, Exception)
+                or _oidc_raised_in_signal_handler(exc, signal_codes)):
             _oidc_park_main(exc)
             _oidc_schedule_parked_main()
             _tp_sink_text_error(
                 sink, True, -1, 'the token callback was interrupted')
+            return
+        if isinstance(exc, TokenUnavailableError):
+            if exc.retry_after is not None:
+                retry_after_ms = <int64_t>(exc.retry_after * 1000.0)
+            _tp_sink_text_error(sink, exc.retryable, retry_after_ms, str(exc))
             return
         _tp_sink_text_error(
             sink, True, -1, f'{type(exc).__qualname__}: {exc}')
@@ -359,17 +373,28 @@ cdef void _token_source_dispatch(
     cdef object source
     cdef _TokenProviderHandle handle
     cdef bytes encoded
+    cdef object result = None
+    cdef object token = None
+    cdef bint entered = False
     try:
         handle = _token_callback_get(callback_id)
         if handle is None:
             _tp_sink_text_error(
                 sink, True, -1, 'the token source was released')
             return
+        if handle._source_closed:
+            _tp_sink_text_error(sink, False, -1, 'the token provider is closed')
+            return
         source = handle._target
         if source is None:
             _tp_sink_text_error(
                 sink, True, -1, 'the token source was released')
             return
+        # Native serializes source calls. Close sets _source_closed under
+        # the GIL before native close, so late calls cannot start user code.
+        handle._source_done.clear()
+        handle._source_thread = questdb_thread_ident()
+        entered = True
         result = source()
         token, expires_ms, refresh_ms = _tp_result_parts(result)
         encoded = token.encode('utf-8')
@@ -378,7 +403,16 @@ cdef void _token_source_dispatch(
             _tp_sink_text_error(
                 sink, True, -1, 'the token source returned an unusable token')
     except BaseException as exc:
-        _tp_sink_exception(sink, exc, False)
+        _tp_sink_exception(sink, exc, ())
+    finally:
+        if entered:
+            # Drop user result/source locals before signalling the drain: their
+            # destructors can run Python too.
+            result = None
+            token = None
+            source = None
+            handle._source_thread = 0
+            handle._source_done.set()
 
 
 cdef void _token_source_trampoline(
@@ -402,10 +436,24 @@ cdef void _token_source_trampoline(
 
 cdef void _token_get_dispatch(
         size_t callback_id, questdb_token_sink* sink) noexcept with gil:
+    global _OIDC_MAIN_TOKEN_DEPTH
     cdef object provider
     cdef _TokenProviderHandle handle
     cdef bytes encoded
+    cdef object signal_codes = ()
+    cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
+    if on_main:
+        _OIDC_MAIN_TOKEN_DEPTH += 1
     try:
+        try:
+            PyErr_CheckSignals()
+            if CYTHON_COMPILING_IN_PYPY:
+                _oidc_signal_tick()
+        except BaseException as exc:
+            if on_main:
+                # Use the native-return fallback on PyPy too. Re-arming SIGINT
+                # here would deliver it into the next token retry again.
+                _oidc_park_main(exc)
         handle = _token_callback_get(callback_id)
         if handle is None:
             _tp_sink_text_error(
@@ -416,6 +464,7 @@ cdef void _token_get_dispatch(
             _tp_sink_text_error(
                 sink, True, -1, 'the token provider was released')
             return
+        signal_codes = _oidc_signal_handler_codes() if on_main else ()
         token = provider.token()
         if not isinstance(token, str):
             raise TypeError(
@@ -427,7 +476,12 @@ cdef void _token_get_dispatch(
             _tp_sink_text_error(
                 sink, True, -1, 'the token provider returned an unusable token')
     except BaseException as exc:
-        _tp_sink_exception(sink, exc, True)
+        _tp_sink_exception(sink, exc, signal_codes)
+    finally:
+        if on_main:
+            _OIDC_MAIN_TOKEN_DEPTH -= 1
+            if _OIDC_MAIN_TOKEN_DEPTH == 0:
+                _oidc_schedule_parked_main()
 
 
 cdef void _token_get_trampoline(
@@ -454,9 +508,21 @@ cdef void _token_rejected_dispatch(
         const char* token,
         size_t token_len,
         uint16_t http_status) noexcept with gil:
+    global _OIDC_MAIN_TOKEN_DEPTH
     cdef object provider
     cdef _TokenProviderHandle handle
+    cdef object signal_codes = ()
+    cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
+    if on_main:
+        _OIDC_MAIN_TOKEN_DEPTH += 1
     try:
+        try:
+            PyErr_CheckSignals()
+            if CYTHON_COMPILING_IN_PYPY:
+                _oidc_signal_tick()
+        except BaseException as exc:
+            if on_main:
+                _oidc_park_main(exc)
         handle = _token_callback_get(callback_id)
         if handle is None:
             return
@@ -464,14 +530,22 @@ cdef void _token_rejected_dispatch(
         on_rejected = getattr(provider, 'on_rejected', None)
         if on_rejected is None:
             return
+        signal_codes = _oidc_signal_handler_codes() if on_main else ()
         on_rejected(
             PyUnicode_FromStringAndSize(token, <Py_ssize_t>token_len),
             http_status)
     except BaseException as exc:
-        if not isinstance(exc, Exception) and _tp_on_main_thread():
+        if _tp_on_main_thread() and (
+                not isinstance(exc, Exception)
+                or _oidc_raised_in_signal_handler(exc, signal_codes)):
             _oidc_park_main(exc)
             _oidc_schedule_parked_main()
         # Otherwise ignored: the client pulls a token next either way.
+    finally:
+        if on_main:
+            _OIDC_MAIN_TOKEN_DEPTH -= 1
+            if _OIDC_MAIN_TOKEN_DEPTH == 0:
+                _oidc_schedule_parked_main()
 
 
 cdef void _token_rejected_trampoline(
@@ -552,11 +626,18 @@ cdef class _TokenProviderHandle:
     # Keep _target in the instance dictionary, which both collectors see.
     cdef dict __dict__
     cdef object __weakref__
+    cdef bint _source_closed
+    cdef unsigned long _source_thread
+    cdef object _source_done
 
     def __cinit__(self):
         self._raw = NULL
         self._callback_id = 0
         self._target = None
+        self._source_closed = False
+        self._source_thread = 0
+        self._source_done = threading.Event()
+        self._source_done.set()
 
     def __dealloc__(self):
         cdef questdb_token_provider* raw = self._raw
@@ -779,14 +860,29 @@ cdef class RefreshingTokenProvider:
             ready = questdb_token_provider_await_ready(handle._raw, timeout_ms)
         return ready
 
-    def close(self):
-        """Stop refreshing and fail every later token request, including
-        those of clients still using the provider. Idempotent."""
+    def close(self, *, bint wait=False, timeout=30.0):
+        """Stop refreshing and fail every later token request. Idempotent.
+
+        An already-running source cannot be forcibly cancelled. With
+        ``wait=True``, wait up to ``timeout`` seconds (or a ``timedelta``) for
+        it to return, raising ``TimeoutError`` if it has not. Source I/O must
+        have its own deadline: interpreter shutdown must drain callbacks even
+        after close, and cannot safely abandon a stuck Python source.
+        """
+        cdef double seconds = _tp_seconds(timeout, 'timeout')
         cdef _TokenProviderHandle handle = self._handle
         if handle is None or handle._raw == NULL:
             return
+        handle._source_closed = True
         with nogil:
             questdb_token_provider_close(handle._raw)
+        if wait:
+            if handle._source_thread == questdb_thread_ident():
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    'close(wait=True) cannot wait for its own token source.')
+            if not handle._source_done.wait(seconds):
+                raise TimeoutError('The token source has not returned after close.')
 
     @property
     def name(self) -> str:
@@ -849,6 +945,7 @@ cdef class _ApplicationTokenProvider:
     with ``token()`` and an optional ``on_rejected()`` -- to the native
     function table."""
     cdef dict __dict__
+    cdef object __weakref__
 
     def __cinit__(self):
         self._handle = None
@@ -891,6 +988,17 @@ class _CallableTokenProvider:
         return self._fn()
 
 
+def _token_application_provider_collected(key, reference):
+    try:
+        with _TOKEN_CALLBACKS_LOCK:
+            if _APPLICATION_TOKEN_PROVIDERS.get(key) is reference:
+                _APPLICATION_TOKEN_PROVIDERS.pop(key, None)
+    except BaseException:
+        # Weakref callbacks must also tolerate module teardown, like the
+        # native-handle registry's best-effort unregister path.
+        pass
+
+
 cdef object _tp_resolve_bearer_token_provider(object provider):
     """The native-backed holder for a ``bearer_token_provider=`` argument: a
     ``RefreshingTokenProvider`` as is, anything else wrapped in an
@@ -903,7 +1011,29 @@ cdef object _tp_resolve_bearer_token_provider(object provider):
         raise TypeError(
             'Pass an OidcDeviceAuth as "oidc_auth=", not as '
             '"bearer_token_provider=".')
-    return _ApplicationTokenProvider(provider)
+    # Each Python bound-method lookup creates a new object. Normalize it to
+    # its owner/function identity so attachments still share single-flight.
+    key = ((id(provider.__self__), id(provider.__func__))
+           if isinstance(provider, _TokenBoundMethod) else (id(provider),))
+    with _TOKEN_CALLBACKS_LOCK:
+        reference = _APPLICATION_TOKEN_PROVIDERS.get(key)
+        holder = reference() if reference is not None else None
+        if holder is not None:
+            return holder
+    # Introspection of an application target can execute arbitrary Python;
+    # never do it while holding the callback registry lock. Concurrent misses
+    # may construct unused candidates, but only the atomically published holder
+    # is returned and attached to native clients.
+    candidate = _ApplicationTokenProvider(provider)
+    reference = weakref.ref(
+        candidate, _token_partial(_token_application_provider_collected, key))
+    with _TOKEN_CALLBACKS_LOCK:
+        previous = _APPLICATION_TOKEN_PROVIDERS.setdefault(key, reference)
+        holder = previous()
+        if holder is None:
+            _APPLICATION_TOKEN_PROVIDERS[key] = reference
+            holder = candidate
+    return holder
 
 
 cdef const questdb_token_provider* _tp_holder_raw(object holder) except NULL:

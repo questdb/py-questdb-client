@@ -231,6 +231,9 @@ cdef uint64_t _OIDC_ERROR_FREES = 0
 # logging handler hold back the main thread's interrupt for as long as that
 # handler ran, while the main thread kept executing user code.
 cdef int _OIDC_MAIN_DIAGNOSTIC_DEPTH = 0
+# Token callbacks can run repeatedly inside one GIL-released transport call.
+# Pending exceptions must never be delivered back into those callbacks.
+cdef int _OIDC_MAIN_TOKEN_DEPTH = 0
 # Row serialization wraps ordinary exceptions as dataframe errors. Deliver saved
 # signals only after leaving that region, at Sender.dataframe's outer boundary.
 cdef int _OIDC_MAIN_DATAFRAME_DEPTH = 0
@@ -254,6 +257,7 @@ def _oidc_after_fork_in_child():
     """
     global _OIDC_MAIN_THREAD_IDENT, _OIDC_MAIN_PARKED
     global _OIDC_MAIN_PARK_SCHEDULED, _OIDC_MAIN_DIAGNOSTIC_DEPTH
+    global _OIDC_MAIN_TOKEN_DEPTH
     global _OIDC_MAIN_DATAFRAME_DEPTH
     global _OIDC_REGISTRY_LOCK, _OIDC_DIAGNOSTICS_ACTIVE
     global _OIDC_DIAGNOSTICS_DRAINED
@@ -273,6 +277,7 @@ def _oidc_after_fork_in_child():
     _OIDC_MAIN_PARKED = []
     _OIDC_MAIN_PARK_SCHEDULED = False
     _OIDC_MAIN_DIAGNOSTIC_DEPTH = 0
+    _OIDC_MAIN_TOKEN_DEPTH = 0
     _OIDC_MAIN_DATAFRAME_DEPTH = 0
 
 
@@ -293,7 +298,8 @@ cdef int _oidc_raise_parked_main(void* unused) noexcept:
     thread, and schedule the next one, if any, for the following boundary."""
     global _OIDC_MAIN_PARK_SCHEDULED
     _OIDC_MAIN_PARK_SCHEDULED = False
-    if _OIDC_MAIN_DIAGNOSTIC_DEPTH > 0 or _OIDC_MAIN_DATAFRAME_DEPTH > 0:
+    if (_OIDC_MAIN_DIAGNOSTIC_DEPTH > 0 or _OIDC_MAIN_DATAFRAME_DEPTH > 0
+            or _OIDC_MAIN_TOKEN_DEPTH > 0):
         return 0
     if not _OIDC_MAIN_PARKED:
         return 0
@@ -341,7 +347,7 @@ cdef object _oidc_take_unscheduled_main():
     """
     cdef object exc
     if (_OIDC_MAIN_PARK_SCHEDULED or _OIDC_MAIN_DIAGNOSTIC_DEPTH != 0
-            or _OIDC_MAIN_DATAFRAME_DEPTH != 0
+            or _OIDC_MAIN_DATAFRAME_DEPTH != 0 or _OIDC_MAIN_TOKEN_DEPTH != 0
             or questdb_thread_ident() != _OIDC_MAIN_THREAD_IDENT
             or not _OIDC_MAIN_PARKED):
         return None

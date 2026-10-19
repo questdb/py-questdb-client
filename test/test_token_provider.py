@@ -241,6 +241,77 @@ class RefreshingTokenProviderTest(unittest.TestCase):
             self.assertEqual(provider.token(), 'T2')
             self.assertEqual(len(calls), 2)
 
+    def test_close_can_drain_an_active_source_with_a_deadline(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def source():
+            entered.set()
+            release.wait(10)
+            return ExpiringToken.expires_in('valid', 3600)
+
+        provider = RefreshingTokenProvider(source)
+        try:
+            self.assertTrue(entered.wait(5))
+            with self.assertRaises(TimeoutError):
+                provider.close(wait=True, timeout=0.01)
+            self.assertTrue(provider.closed)
+        finally:
+            release.set()
+            provider.close(wait=True, timeout=datetime.timedelta(seconds=5))
+
+    def test_source_cannot_wait_for_its_own_close(self):
+        ready = threading.Event()
+        completed = threading.Event()
+        errors = []
+
+        def source():
+            ready.wait(5)
+            try:
+                provider.close(wait=True)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                completed.set()
+            return ExpiringToken.expires_in('valid', 3600)
+
+        provider = RefreshingTokenProvider(source)
+        ready.set()
+        try:
+            self.assertTrue(completed.wait(5))
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], questdb.QuestDBError)
+            self.assertIs(errors[0].code, questdb.QuestDBErrorCode.InvalidApiCall)
+        finally:
+            provider.close(wait=True, timeout=5)
+
+    def test_real_shutdown_after_draining_a_native_source(self):
+        script = textwrap.dedent('''
+            import threading
+            from questdb.auth import RefreshingTokenProvider, ExpiringToken
+            entered = threading.Event()
+            release = threading.Event()
+            def source():
+                entered.set()
+                assert release.wait(5)
+                return ExpiringToken.expires_in('valid', 3600)
+            provider = RefreshingTokenProvider(source)
+            assert entered.wait(5)
+            try:
+                provider.close(wait=True, timeout=0)
+            except TimeoutError:
+                pass
+            else:
+                raise AssertionError('active source was not observed')
+            release.set()
+            provider.close(wait=True, timeout=5)
+        ''')
+        result = subprocess.run(
+            [sys.executable, '-c', script], capture_output=True,
+            text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr, '')
+
     def test_close_ends_every_holder(self):
         source, _ = _counting_source()
         provider = RefreshingTokenProvider(source)
@@ -511,6 +582,155 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
             seen = server.snapshot()['upgrade_authorizations']
         self.assertEqual(len(calls), 3)
         self.assertEqual(seen, ['Bearer recovered'])
+
+    def test_http_callback_interrupt_is_delivered_once_after_sending(self):
+        # Use a subprocess so a deferred pending-call interrupt cannot escape
+        # into the test runner if the callback delivery regresses.
+        script = textwrap.dedent('''
+            import signal
+            import os
+            import questdb
+            from questdb import _client
+            from questdb.auth import TokenUnavailableError
+            from mock_server import HttpServer
+            _client._debug_oidc_fail_pending_calls(
+                int(os.environ['QDB_TEST_PENDING_FAILURES']))
+            for kind in ('interrupt', 'deadline', 'classified_deadline', 'rejected'):
+                if 'deadline' in kind and not hasattr(signal, 'SIGALRM'):
+                    continue
+                calls = []
+                rejected = []
+                def alarm(signum, frame):
+                    # Classification must use the pre-callback snapshot, not
+                    # only handlers that remain registered after the raise.
+                    signal.signal(signal.SIGALRM, signal.SIG_IGN)
+                    if kind == 'classified_deadline':
+                        raise TokenUnavailableError('signal deadline', retryable=False)
+                    raise TimeoutError('signal deadline')
+                class Provider:
+                    def token(self):
+                        calls.append(1)
+                        if len(calls) == 1:
+                            if kind == 'interrupt':
+                                raise KeyboardInterrupt()
+                            if 'deadline' in kind:
+                                signal.raise_signal(signal.SIGALRM)
+                        return 'fresh' if rejected else 'stale'
+                    def on_rejected(self, token, status):
+                        rejected.append((token, status))
+                        raise KeyboardInterrupt()
+                if 'deadline' in kind:
+                    signal.signal(signal.SIGALRM, alarm)
+                with HttpServer() as server:
+                    if kind == 'rejected':
+                        server.responses.extend([(0, 401, None, None),
+                                                 (0, 204, None, None)])
+                    sender = questdb.Sender(
+                        questdb.Protocol.Http, '127.0.0.1', server.port,
+                        bearer_token_provider=Provider(), auto_flush=False,
+                        retry_timeout=1000, protocol_version=2)
+                    sender.establish()
+                    sender.row('t', columns={'v': 1}, at=questdb.ServerTimestamp)
+                    expected = (TokenUnavailableError if kind == 'classified_deadline'
+                                else TimeoutError if kind == 'deadline'
+                                else KeyboardInterrupt)
+                    try:
+                        try:
+                            sender.flush()
+                        except expected:
+                            pass
+                        else:
+                            raise AssertionError('signal was swallowed')
+                        assert len(calls) == 2, (kind, calls)
+                        assert len(server.requests) == (2 if kind == 'rejected' else 1)
+                        assert len(sender) == 0
+                        # Pending delivery has completed, not merely moved to
+                        # the next token invocation or client call.
+                        sender.flush()
+                    finally:
+                        sender.close(flush=False)
+        ''')
+        env = os.environ.copy()
+        env['PYTHONPATH'] = os.pathsep.join((
+            str(Path(questdb.__file__).resolve().parent.parent),
+            str(Path(__file__).resolve().parent), env.get('PYTHONPATH', '')))
+        for pending_failures in (0, 64):
+            with self.subTest(pending_failures=pending_failures):
+                env['QDB_TEST_PENDING_FAILURES'] = str(pending_failures)
+                result = subprocess.run(
+                    [sys.executable, '-c', script], env=env,
+                    capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_shared_application_provider_has_one_native_identity(self):
+        class Provider:
+            # Neither hashing nor equality is needed for identity sharing.
+            __hash__ = None
+
+            def __eq__(self, other):
+                raise AssertionError('providers must not be compared')
+
+            def token(self):
+                return 'valid'
+
+        for bound_method in (False, True):
+            with self.subTest(bound_method=bound_method):
+                provider = Provider()
+                before = _client._debug_token_callbacks_ids()
+                first = questdb.Sender.from_conf(
+                    'ws::addr=127.0.0.1:9000;lazy_connect=true;',
+                    bearer_token_provider=provider.token if bound_method else provider)
+                second = questdb.connect(
+                    'ws::addr=127.0.0.1:9000;lazy_connect=true;',
+                    bearer_token_provider=provider.token if bound_method else provider)
+                try:
+                    registered = _client._debug_token_callbacks_ids() - before
+                    self.assertEqual(len(registered), 1)
+                    first.close(flush=False)
+                    self.assertTrue(registered <= _client._debug_token_callbacks_ids())
+                finally:
+                    first.close(flush=False)
+                    second.close()
+                _collect_until(lambda: not (
+                    registered & _client._debug_token_callbacks_ids()))
+
+    def test_concurrent_provider_attachments_publish_one_holder(self):
+        barrier = threading.Barrier(2, timeout=5)
+        clients = []
+        errors = []
+
+        class Provider:
+            @property
+            def token(self):
+                # Both constructors must be able to inspect the application
+                # target without holding the callback-registry lock.
+                barrier.wait()
+                return lambda: 'valid'
+
+        provider = Provider()
+        before = _client._debug_token_callbacks_ids()
+
+        def attach():
+            try:
+                clients.append(questdb.Sender.from_conf(
+                    'ws::addr=127.0.0.1:9000;lazy_connect=true;',
+                    bearer_token_provider=provider))
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=attach) for _ in range(2)]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            _collect_until(lambda: len(_client._debug_token_callbacks_ids() - before) == 1)
+        finally:
+            for client in clients:
+                client.close(flush=False)
+        _collect_until(lambda: _client._debug_token_callbacks_ids() == before)
 
     def test_conflicts_are_rejected(self):
         provider = lambda: 't'

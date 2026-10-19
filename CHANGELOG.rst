@@ -270,7 +270,24 @@ tokens from a secrets vault.
   backoff, refreshes early when a server rejects the token with HTTP 401, and
   never shows a token in an error, log line or ``repr``.
 * Any callable returning a token, or an object with ``token()`` and an
-  optional ``on_rejected()``, works as a provider too.
+  optional ``on_rejected()``, works as a provider too. Reusing the same Python
+  provider across clients shares its native single-flight acquisition, including
+  when passing repeated bound-method lookups.
+* ``RefreshingTokenProvider.close(wait=True, timeout=30)`` optionally drains an
+  active source with a deadline. A timeout leaves the provider closed and raises
+  ``TimeoutError``. Sources must bound their own I/O: interpreter exit cannot
+  safely abandon an executing Python callback even after provider close.
+* Main-thread token callbacks defer interrupts to the native-return boundary
+  without repeatedly interrupting provider retries or swallowing signal-handler
+  deadline exceptions. Pooled dataframe calls fail fast on native foreground
+  OIDC failures rather than spinning through the reconnect budget.
+* A successful OIDC refresh can revalidate the same still-valid token after a
+  transient server rejection. Token-store stale-lock recovery preserves live
+  displaced-owner captures as acquisition fences, and displaced refresh actions
+  cannot clear or restore a successor's state. Concurrent writers in other
+  clients must implement the same capture-fence rule.
+* Cursor close, cancel and recursive pulls reject same-thread reentry while
+  NumPy decoding holds borrowed native batch data.
 * :class:`questdb.auth.TokenUnavailableError` classifies a source's failure
   as retryable or permanent; a connection the caller waits for retries only a
   retryable one.

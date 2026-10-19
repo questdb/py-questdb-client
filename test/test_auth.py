@@ -3487,6 +3487,41 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_pooled_dataframe_does_not_spin_on_oidc_network_failure(self):
+        events = []
+        with OidcTestServer(
+                initial_expires_in=2,
+                refresh_token_response=(
+                    503, {'error': 'temporarily_unavailable'}, {})) as oidc_server:
+            auth = make_discovered_auth(oidc_server)
+            try:
+                auth.sign_in()
+                time.sleep(2.1)
+                with QwpAckServer() as qwp_server:
+                    with questdb.connect(
+                            f'ws::addr=127.0.0.1:{qwp_server.port};'
+                            'lazy_connect=true;reconnect_max_duration_millis=3000;',
+                            oidc_auth=auth, connection_listener=events.append) as db:
+                        started = time.monotonic()
+                        with self.assertRaises(OidcNetworkError):
+                            db.dataframe(
+                                pd.DataFrame({'v': [1]}), table_name='t',
+                                at=questdb.ServerTimestamp)
+                        self.assertLess(time.monotonic() - started, 1.5)
+                    self.assertEqual(
+                        qwp_server.snapshot()['accepted_connections'], 0)
+                # One native foreground failure, not thousands of outer
+                # dataframe retries against the same provider backoff.
+                unavailable = [e for e in events if e.kind is
+                               questdb.ConnectionEventKind.CredentialUnavailable]
+                self.assertEqual(len(unavailable), 1)
+                refreshes = [r for r in oidc_server.requests('/token', 'POST')
+                             if r['form'].get('grant_type') == ['refresh_token']]
+                self.assertEqual(len(refreshes), 1)
+            finally:
+                auth.close()
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_standalone_qwp_dataframe_authenticates_direct_connection(self):
         # Unlike row()/flush(), dataframe() opens a separate poolless QWP
         # connection from the sender's cloned options. A successful upgrade

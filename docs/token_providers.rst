@@ -101,6 +101,16 @@ Clients keep the provider alive while they use it, but never close it. Close
 it, or use it as a context manager, once no client needs it: closing fails
 every client still using it.
 
+Closing prevents new source invocations but cannot cancel one already running.
+Give every source's network calls a deadline and, for deterministic shutdown,
+call ``provider.close(wait=True, timeout=30)`` before leaving the application.
+This releases the GIL while waiting and raises ``TimeoutError`` if the source
+has not returned; the provider stays closed, and a later call can retry the
+drain. A source cannot wait for itself with ``close(wait=True)``.
+Interpreter exit must wait for admitted Python callbacks even after a provider
+is closed. That finalization wait cannot safely abandon Python frames and is
+not interrupted by Ctrl-C: a source without bounded I/O can prevent exit.
+
 Providers and their clients must not be used across ``fork()``. Start workers
 with ``spawn`` (or ``exec()`` after forking), then construct providers inside
 them. Merely constructing a fresh provider in a child of a multithreaded

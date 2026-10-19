@@ -147,8 +147,12 @@ cdef class _CursorHandle:
         self._reset_seq = 0
         self._native_in_flight = False
 
-    cdef void_int _check_not_driving(self, str method) except -1:
-        if self._native_in_flight:
+    cdef void_int _check_not_driving(
+            self, str method, bint check_lock=False) except -1:
+        # At entry, reject a lock already owned by this thread: decoding can
+        # run Python code while it still borrows the current native batch.
+        # Under-lock checks must leave check_lock false.
+        if self._native_in_flight or (check_lock and self._lock._is_owned()):
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f'{method}() cannot be called during a cursor operation.')
@@ -194,7 +198,7 @@ cdef class _CursorHandle:
     cdef void _free(self) noexcept:
         # A finalizer cannot raise; the native caller retains the handle and
         # will release it after returning from its diagnostic callback.
-        if self._native_in_flight:
+        if self._native_in_flight or self._lock._is_owned():
             return
         with self._lock:
             self._free_locked()
@@ -299,6 +303,7 @@ cdef object _fetch_one_batch(
     array.release = NULL
     schema.release = NULL
 
+    handle._check_not_driving('next_arrow_batch', check_lock=True)
     with handle._lock:
         handle._check_not_driving('next_arrow_batch')
         cursor = handle._cursor
@@ -476,6 +481,7 @@ cdef void_int _drain_cursor(_CursorHandle handle) except -1:
     cdef qwp_reader_cursor* cursor
     cdef questdb_error* err = NULL
     cdef const qwp_reader_batch* batch
+    handle._check_not_driving('drain', check_lock=True)
     while True:
         with handle._lock:
             cursor = handle._cursor
@@ -2077,7 +2083,10 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
     cdef bint has_symbol = False
     cdef int seen_seq
 
-    if handle is None or not handle._is_live():
+    if handle is None:
+        raise QuestDBError(QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
+    handle._check_not_driving('to_numpy', check_lock=True)
+    if not handle._is_live():
         raise QuestDBError(QuestDBErrorCode.InvalidApiCall, 'cursor is closed')
     seen_seq = handle._reset_sequence()
 
@@ -2400,7 +2409,7 @@ cdef class _NumpyBatchIter:
         # nor enter cleanup that marks this shared iterator done.
         if self.done or self.handle is None:
             raise StopIteration
-        self.handle._check_not_driving('iter_numpy')
+        self.handle._check_not_driving('iter_numpy', check_lock=True)
         if not self.handle._is_live():
             raise StopIteration
         try:
@@ -2827,7 +2836,7 @@ class QueryResult:
         cdef object exc = None
         if handle is None:
             return
-        handle._check_not_driving('cancel')
+        handle._check_not_driving('cancel', check_lock=True)
         with handle._lock:
             handle._check_not_driving('cancel')
             cursor = handle._cursor
@@ -2873,7 +2882,7 @@ class QueryResult:
             # A native next_batch/next_arrow_batch still borrows this cursor
             # when a synchronous OIDC diagnostic calls back into Python.
             # Reject re-entry before detaching the only public references.
-            handle._check_not_driving('close')
+            handle._check_not_driving('close', check_lock=True)
             with handle._lock:
                 handle._check_not_driving('close')
                 self._cursor_handle = None

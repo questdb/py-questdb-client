@@ -317,6 +317,15 @@ available, so the coordination protocol may still leave empty ``.lock`` files
 use in-memory authentication there; custom keychain-backed stores are currently
 available only through the Rust ``TokenStore`` API. Every failed store operation
 is logged at ``WARNING`` on the ``questdb`` logger during normal operation.
+All processes sharing a rotating credential must use clients with the same
+lock-capture fencing rule. If stale-lock recovery displaces a live owner,
+its captured lock file is preserved and fences new acquisitions until that
+owner returns or its local process is proven dead. Wall-clock age alone does
+not remove a captured live owner. An abandoned remote or legacy capture can
+therefore require investigation and manual recovery; do not delete lock files
+while a peer may still be refreshing. Older clients that discard live captures
+must be upgraded before using the same store concurrently.
+
 Persistence-warning handlers must not call ``sign_in()``, ``clear()``, an
 uncached ``token()``, or an attached transport operation that needs a token from
 the same provider; those operations are rejected before they can deadlock.

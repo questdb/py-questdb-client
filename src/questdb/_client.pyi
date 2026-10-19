@@ -362,8 +362,10 @@ class RefreshingTokenProvider:
     def await_ready(self, timeout: Union[float, timedelta] = 30.0) -> bool:
         """Wait for a usable token."""
 
-    def close(self) -> None:
-        """Stop refreshing and fail every later token request."""
+    def close(
+        self, *, wait: bool = False, timeout: Union[float, timedelta] = 30.0,
+    ) -> None:
+        """Stop refreshing; optionally drain the active source, or raise TimeoutError."""
 
     @property
     def name(self) -> str: ...

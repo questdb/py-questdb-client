@@ -6517,6 +6517,16 @@ cdef void_int _direct_dataframe_run(
             # Foreground calls must honor the provider's retry classification.
             if isinstance(exc, TokenUnavailableError) and not exc.retryable:
                 raise exc
+            # Native foreground borrows fail fast on unclassified OIDC
+            # provider failures (including Network). Do not mistake their
+            # SocketError wrapper for a transport retry that consumed its
+            # budget: re-entering here would busy-spin through provider backoff
+            # and rebuild the dataframe on every iteration.
+            oidc_errors = _oidc_errors_module_if_ready()
+            if (oidc_errors is not None
+                    and isinstance(exc, oidc_errors.OidcError)
+                    and not bool(getattr(exc, '_acquisition_busy', False))):
+                raise exc
             # FailoverRetry = transient flush/sync; SocketError = a
             # re-borrow that has not reached a live primary yet. A *busy*
             # OIDC refusal is transient whatever its code: it clears as soon
@@ -10260,7 +10270,7 @@ cdef class PooledReader:
                 QuestDBErrorCode.InvalidApiCall,
                 'PooledReader.close() cannot release a reader during a query.')
         if last is not None:
-            last._check_not_driving('PooledReader.close')
+            last._check_not_driving('PooledReader.close', check_lock=True)
         if reader is None:
             return
         self._reader = None
@@ -10395,7 +10405,8 @@ cdef class PooledReader:
                 QuestDBErrorCode.InvalidApiCall,
                 'PooledReader.close() cannot release a reader during a query.')
         if self._last_cursor is not None:
-            self._last_cursor._check_not_driving('PooledReader.close')
+            self._last_cursor._check_not_driving(
+                'PooledReader.close', check_lock=True)
         with self._lock:
             self._release_locked()
 
