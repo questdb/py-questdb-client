@@ -2462,7 +2462,9 @@ class TestEgressWithDatabase(unittest.TestCase):
         ``duckdb.from_arrow(result.__arrow_c_stream__())`` read every
         batch and decode each batch's compact SYMBOL dictionary. duckdb
         1.5 reads the schema of ``result`` through ``__arrow_c_schema__``,
-        so it opens the single-use stream only once."""
+        so it opens the single-use stream only once. A projection that
+        drops a column fails on duckdb 1.1, the reason for the 1.2
+        floor."""
         try:
             import duckdb
         except ImportError:
@@ -2485,6 +2487,13 @@ class TestEgressWithDatabase(unittest.TestCase):
                     'v values')
                 _assert_long_list_equal(
                     self, [row[0] for row in rows], exp, 'SYMBOL values')
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            with client.query(sql) as result:
+                rows = duckdb.from_arrow(result).project('v').order(
+                    'v').fetchall()
+        _assert_long_list_equal(
+            self, [row[0] for row in rows], list(range(n)),
+            'projected v values')
 
     _DUCKDB_WITHOUT_PYARROW_SCRIPT = """
 import json

@@ -20,7 +20,7 @@ newer:
   ``iter_*`` helpers on ``QuestDB.query()`` results.
 * ``polars`` → ``polars>=1.32.0`` and ``pyarrow>=14.0.1``. Install it to
   ingest polars frames and to use ``to_polars`` / ``iter_polars``.
-* ``duckdb`` → ``duckdb>=1.1.0``. Install it to read query results with
+* ``duckdb`` → ``duckdb>=1.2.0``. Install it to read query results with
   duckdb.
 
 The extras are optional. polars, pyarrow, duckdb and any other Arrow-native
@@ -34,7 +34,7 @@ The client is tested with these minimum versions:
   readers also need pyarrow 14.0.1 when you ingest them.
 * polars 1.32, to ingest polars frames and to read query results with
   ``polars.DataFrame(result)``.
-* duckdb 1.1, to read query results with ``duckdb.from_arrow(result)``.
+* duckdb 1.2, to read query results with ``duckdb.from_arrow(result)``.
 
 Two features need newer versions:
 

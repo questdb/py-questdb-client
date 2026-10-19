@@ -30,7 +30,7 @@ MIN_VERSIONS = {
     'polars': '1.32.0',
     'fastparquet': '2023.10.1',
 }
-MIN_DUCKDB_VERSION = '1.1.0'
+MIN_DUCKDB_VERSION = '1.2.0'
 
 
 class UnsupportedDependency(Exception):

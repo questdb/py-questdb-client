@@ -65,7 +65,7 @@ Changelog
 - New ``polars`` and ``duckdb`` extras install the oldest tested versions or
   newer: ``pip install questdb[polars]`` installs ``polars>=1.32.0`` and
   ``pyarrow>=14.0.1`` (``to_polars()`` and ``iter_polars()`` need pyarrow), and
-  ``pip install questdb[duckdb]`` installs ``duckdb>=1.1.0``.
+  ``pip install questdb[duckdb]`` installs ``duckdb>=1.2.0``.
 - A second read of a ``QueryResult`` now names the method that read it first,
   for example "QueryResult was already read by to_pandas()". A read after
   ``close()`` now says that the result is closed.

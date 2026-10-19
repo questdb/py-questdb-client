@@ -36,7 +36,7 @@ ci = ["cibuildwheel"]
 dataframe = ["pandas>=2.0.0", "pyarrow>=14.0.1"]
 # pyarrow, because `to_polars()` and `iter_polars()` need it.
 polars = ["polars>=1.32.0", "pyarrow>=14.0.1"]
-duckdb = ["duckdb>=1.1.0"]
+duckdb = ["duckdb>=1.2.0"]
 
 [project.urls]
 Homepage = "https://questdb.com/"

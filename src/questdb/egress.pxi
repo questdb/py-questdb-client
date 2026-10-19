@@ -2444,7 +2444,7 @@ class QueryResult:
     ``__arrow_c_stream__`` is native — the cursor's record batches are
     exposed directly through the Arrow C Data Interface, so polars
     (``polars.DataFrame(result)``, polars 1.32 or later), duckdb
-    (``duckdb.from_arrow(result)``, duckdb 1.1 or later) and other
+    (``duckdb.from_arrow(result)``, duckdb 1.2 or later) and other
     Arrow-native consumers can read query results without pyarrow
     installed. duckdb reads when you fetch, so fetch before the result is
     closed.
