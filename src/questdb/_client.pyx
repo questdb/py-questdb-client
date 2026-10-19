@@ -86,6 +86,7 @@ from cpython.pycapsule cimport (PyCapsule_Destructor,
                                 PyCapsule_New)
 from cpython.pythread cimport (PyThread_tss_create, PyThread_tss_get,
                                PyThread_tss_set)
+from cpython.pystate cimport PyThreadState_GetDict
 from cpython.ref cimport Py_INCREF, Py_DECREF
 
 from .line_sender cimport *
@@ -3037,6 +3038,11 @@ ctypedef struct scoped_table_t:
 
 cdef const char* _SCOPED_TABLE_CAPSULE_NAME = b'questdb._client.scoped_table'
 
+# The key the owning capsule is stored under in each thread state's dict.
+# A module global rather than a C constant, so a test can substitute a key
+# whose hash runs code at the moment the table is first recorded.
+_SCOPED_TABLE_KEY = 'questdb._client.scoped_table'
+
 
 cdef void _scoped_table_free(object capsule) noexcept:
     cdef scoped_table_t* table = <scoped_table_t*>PyCapsule_GetPointer(
@@ -3046,10 +3052,11 @@ cdef void _scoped_table_free(object capsule) noexcept:
     # A thread's Python state can end while its OS thread lives on: every
     # call into Python from a native thread gets a fresh one. That state's
     # table is freed on its own thread, so the native slot is cleared here
-    # and the next scoped call on that thread builds a new table. Module
-    # teardown drops `_THREAD_OWNER_STATE` on the main thread and frees
-    # every thread's table there, so the slot is cleared only when it holds
-    # the table being freed.
+    # and the next scoped call on that thread builds a new table. A thread
+    # state can also be cleared from another thread -- interpreter
+    # finalization clears the states of threads still running, and a
+    # forked child those of the parent's other threads -- so the slot is
+    # cleared only when it holds the table being freed.
     if <scoped_table_t*>PyThread_tss_get(&_SCOPED_DEPTH_KEY) == table:
         PyThread_tss_set(&_SCOPED_DEPTH_KEY, NULL)
     free(table.slots)
@@ -3063,13 +3070,22 @@ cdef inline scoped_table_t* _scoped_table() noexcept:
 cdef scoped_table_t* _scoped_table_ensure() except NULL:
     """This thread's table, created on its first scoped call.
 
-    The capsule in `_THREAD_OWNER_STATE` owns the table: it is what frees
-    it when the thread ends. The native key caches the same pointer so the
-    per-row path never reaches the Python thread-local again.
+    A capsule in the thread state's dict owns the table: it is what frees
+    it when the thread state ends. The native key caches the same pointer
+    so the per-row path never reaches the Python dict again.
+
+    The thread state is shared by every greenlet on the OS thread, so the
+    table's owner lives exactly as long as the per-thread cache, and no
+    greenlet's exit frees a table another greenlet's suspended call is
+    using.
     """
     cdef scoped_table_t* table = _scoped_table()
+    cdef PyObject* state_dict
     if table != NULL:
         return table
+    state_dict = PyThreadState_GetDict()
+    if state_dict == NULL:
+        raise RuntimeError('Could not reach the QuestDB thread state.')
     table = <scoped_table_t*>calloc(1, sizeof(scoped_table_t))
     if table == NULL:
         raise MemoryError('Could not allocate QuestDB thread-use counters.')
@@ -3092,7 +3108,7 @@ cdef scoped_table_t* _scoped_table_ensure() except NULL:
     if PyThread_tss_set(&_SCOPED_DEPTH_KEY, <void*>table) != 0:
         raise RuntimeError('Could not record a QuestDB thread-use counter.')
     try:
-        _THREAD_OWNER_STATE.scoped_table = capsule
+        (<dict>state_dict)[_SCOPED_TABLE_KEY] = capsule
     except:
         PyThread_tss_set(&_SCOPED_DEPTH_KEY, NULL)
         raise
@@ -8936,7 +8952,7 @@ cdef class QuestDB:
             self._state_cond.release()
 
     cdef uintptr_t _scoped_call_depth(self) except? <uintptr_t>-1:
-        """This handle's call depth on the current Python thread."""
+        """This handle's call depth on the current OS thread."""
         return _scoped_depth_for(self._thread_owner_token)
 
     cdef void _enter_scoped_call(self) except *:
@@ -9950,6 +9966,12 @@ cdef class QuestDB:
         the first ``close()`` that finds nothing using the handle, or
         when the handle itself is collected.
 
+        The handle's own calls are counted per OS thread. Under gevent
+        or eventlet monkey-patching, all greenlets on one thread count
+        as one caller, so ``close()`` is also refused while another
+        greenlet on the same thread is suspended inside a call on the
+        handle. See :ref:`sender_threading`.
+
         ``timeout`` sets how long this call waits for that drain.
         Calls are the handle's own methods in progress, such as
         ``dataframe()`` and ``query()``; anything done through a lease
@@ -10085,7 +10107,11 @@ cdef class QuestDB:
                     'this QuestDB handle. It would wait for that '
                     'call to finish, which cannot happen while the '
                     'call is waiting for close(). Close it after '
-                    'the call returns.')
+                    'the call returns. Under gevent or eventlet, '
+                    'every greenlet on an OS thread counts as the '
+                    'same caller, so this is also refused while '
+                    'another greenlet on this thread is suspended '
+                    'inside a call on the handle.')
             # A caller dispatching for this handle can wait on
             # nothing: while its callback frame is out, this thread
             # delivers no events and the native layer holds a borrow

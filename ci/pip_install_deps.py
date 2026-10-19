@@ -127,6 +127,8 @@ def main(args):
     else:
         try_pip_install('polars')
     try_pip_install('psutil')
+    # The greenlet scoped-call test skips without it.
+    try_pip_install('gevent')
     # `TestManifest` reads `examples.manifest.yaml` and skips without it.
     try_pip_install('pyyaml')
 

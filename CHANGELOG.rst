@@ -439,7 +439,10 @@ Fixed
   publishes ``close()``'s state, so a ``close()`` on another thread can no
   longer see the handle closing, wait for that to clear, and return reporting
   success against a handle that is still open — nor can the two ends of that
-  window wait on each other.
+  window wait on each other. Calls are counted per OS thread, so under gevent
+  or eventlet monkey-patching a ``close()`` from one greenlet is also refused
+  while another greenlet on the same thread is suspended inside a call on the
+  handle, where 5.0 waited for that call to return.
 
 - **A Ctrl-C during ``QuestDB.close()`` no longer leaves the handle unable to
   close.** The native teardown runs without the GIL, so a Ctrl-C there is

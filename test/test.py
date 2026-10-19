@@ -16,6 +16,7 @@ import threading
 import uuid
 import ast
 import copy
+import importlib.util
 import inspect
 import json
 import logging
@@ -9406,6 +9407,97 @@ print('OK')
         """
         self._run_in_child_interpreter(self._NATIVE_THREAD_SCOPED_CALL_SCRIPT)
 
+    _GEVENT_SCOPED_CALL_SCRIPT = """
+from gevent import monkey
+monkey.patch_all()
+
+import datetime
+import gc
+import gevent
+import gevent.event
+import questdb._client as qi
+
+# Nothing connects: the one row stays buffered and the lease is closed
+# without flushing.
+db = qi.QuestDB.from_conf(
+    'ws::addr=127.0.0.1:1;lazy_connect=true;'
+    'sender_pool_min=0;query_pool_min=0;pool_reap=manual;')
+
+inside_row = gevent.event.Event()
+finish_row = gevent.event.Event()
+finish_first = gevent.event.Event()
+
+class YieldingZone(datetime.tzinfo):
+    # Runs inside the lease's `row()` and hands the OS thread to the other
+    # greenlets until the script lets the row finish.
+    def utcoffset(self, dt):
+        inside_row.set()
+        finish_row.wait()
+        return datetime.timedelta(0)
+
+    def dst(self, dt):
+        return None
+
+    def tzname(self, dt):
+        return 'Y'
+
+def first_caller():
+    # The first scoped call on this OS thread, so it creates the thread's
+    # call table.
+    db.connection_events_dropped
+    finish_first.wait()
+
+def write_row(lease):
+    lease.row('t', columns={'v': 1},
+              at=datetime.datetime(2026, 1, 1, tzinfo=YieldingZone()))
+
+first = gevent.spawn(first_caller)
+gevent.sleep(0)
+lease = db.sender()
+writer = gevent.spawn(write_row, lease)
+inside_row.wait()
+
+# The first caller ends, and its greenlet-local state goes with it, while
+# the writer is suspended inside its row.
+finish_first.set()
+first.join()
+del first
+gc.collect()
+
+# All greenlets on the thread count as one caller, so a close() from this
+# one is refused while the writer is inside its call.
+try:
+    db.close(timeout=0)
+except qi.QuestDBError as exc:
+    assert exc.code == qi.QuestDBErrorCode.InvalidApiCall, exc
+    assert 'greenlet' in str(exc), exc
+else:
+    raise AssertionError('close() did not refuse')
+
+finish_row.set()
+writer.join()
+assert writer.successful(), repr(writer.exception)
+lease.close(flush=False)
+db.close()
+print('OK')
+"""
+
+    @unittest.skipIf(
+        importlib.util.find_spec('gevent') is None, 'gevent not installed')
+    def test_scoped_calls_from_greenlets_on_one_thread(self):
+        """gevent monkey-patching makes `threading.local` per greenlet,
+        while the cached pointer to the table of scoped call depths is per
+        OS thread. The table belongs to the thread state, so a greenlet
+        that made the thread's first call can end while another is
+        suspended inside a call, and that call still returns normally.
+        A `close()` from a third greenlet meanwhile is refused, as
+        documented.
+
+        Runs in a child interpreter, because monkey-patching cannot be
+        undone and a freed table reads there as a failed return code.
+        """
+        self._run_in_child_interpreter(self._GEVENT_SCOPED_CALL_SCRIPT)
+
     _FINALIZER_CLOSE_AS_CALL_STARTS_SCRIPT = """
 import gc
 import threading
@@ -9420,16 +9512,16 @@ class Closer:
     def __del__(self):
         self.db.close()
 
-class CollectingLocal(threading.local):
-    # Runs a collection at the call table's first write on a thread,
-    # where CPython 3.10/3.11 and PyPy can run one on their own.
+class CollectingKey(str):
+    # Runs a collection where the call table is first recorded on a
+    # thread, where CPython 3.10/3.11 and PyPy can run one on their own.
     armed = False
 
-    def __setattr__(self, name, value):
-        if CollectingLocal.armed and name == 'scoped_table':
-            CollectingLocal.armed = False
+    def __hash__(self):
+        if CollectingKey.armed:
+            CollectingKey.armed = False
             gc.collect()
-        super().__setattr__(name, value)
+        return str.__hash__(self)
 
 gc.disable()
 outcome = []
@@ -9437,11 +9529,11 @@ with QwpAckServer() as server:
     db = qi.QuestDB.from_conf(
         f'ws::addr=127.0.0.1:{server.port};sender_pool_min=0;'
         'query_pool_min=0;pool_reap=manual;')
-    qi._THREAD_OWNER_STATE = CollectingLocal()
+    qi._SCOPED_TABLE_KEY = CollectingKey(qi._SCOPED_TABLE_KEY)
 
     def worker():
         Closer(db)
-        CollectingLocal.armed = True
+        CollectingKey.armed = True
         try:
             outcome.append(db.connection_events_dropped)
         except qi.QuestDBError as exc:
@@ -9450,7 +9542,7 @@ with QwpAckServer() as server:
     thread = threading.Thread(target=worker)
     thread.start()
     thread.join()
-assert not CollectingLocal.armed, 'the collection never ran'
+assert not CollectingKey.armed, 'the collection never ran'
 assert len(outcome) == 1 and 'was closed while the call was starting' in str(
     outcome[0]), outcome
 db.close()
