@@ -2606,8 +2606,8 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
     def test_to_polars_and_iter_polars_fallback_warns(self):
         """If the polars ``Categories`` path fails, ``to_polars`` and
         ``iter_polars`` build each frame with ``polars.from_arrow``. The
-        values stay correct, and each fallback issues a
-        ``RuntimeWarning``."""
+        values stay correct. ``to_polars`` issues one ``RuntimeWarning``;
+        ``iter_polars`` issues one and falls back for every frame."""
         try:
             import polars as pl
         except ImportError:
@@ -2634,15 +2634,66 @@ print(json.dumps({'pyarrow_imported': pyarrow_imported, 'rows': rows}))
                         RuntimeWarning, 'broken Categories'):
                     frames = list(client.query(sql).iter_polars())
             self.assertGreater(len(frames), 1)
+            # The iterator falls back once and keeps the fallback.
             self.assertEqual(
-                qi._debug_polars_hybrid_fallbacks(),
-                fallbacks + 1 + len(frames))
+                qi._debug_polars_hybrid_fallbacks(), fallbacks + 2)
         for out in (full, pl.concat(frames, how='vertical')):
             _assert_long_list_equal(
                 self, out['v'].to_list(), list(range(n)), 'v values')
             _assert_long_list_equal(
                 self, out['sym'].cast(pl.Utf8).to_list(), exp,
                 'SYMBOL values')
+
+    def test_iter_polars_fallback_mid_stream_frames_concat(self):
+        """If the ``Categories`` path fails after ``iter_polars`` yielded
+        frames, the remaining frames come from ``polars.from_arrow``, cast
+        to the same ``Categories``, so ``polars.concat`` still stitches.
+        One warning, one counted fallback."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        import contextlib
+        from unittest import mock
+
+        armed = [False]
+
+        def fail_when_armed(orig):
+            # The registry casts codes to `Categorical(cats)` through
+            # `Series.cast` (`Series.cat.to` on polars >= 1.43). The
+            # fallback casts with an expression, which stays untouched.
+            def wrapper(series, dtype, *args, **kwargs):
+                if armed[0] and isinstance(dtype, pl.Categorical):
+                    raise RuntimeError('broken Categories')
+                return orig(series, dtype, *args, **kwargs)
+            return wrapper
+
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        fallbacks = qi._debug_polars_hybrid_fallbacks()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                pl.Series, 'cast', fail_when_armed(pl.Series.cast)))
+            cat_ns = type(pl.Series([], dtype=pl.UInt32).cat)
+            if hasattr(cat_ns, 'to'):
+                stack.enter_context(mock.patch.object(
+                    cat_ns, 'to', fail_when_armed(cat_ns.to)))
+            with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+                frames = client.query(sql).iter_polars()
+                first = next(frames)
+                armed[0] = True
+                with self.assertWarnsRegex(
+                        RuntimeWarning, 'broken Categories'):
+                    rest = list(frames)
+        self.assertGreater(len(rest), 0)
+        self.assertEqual(qi._debug_polars_hybrid_fallbacks(), fallbacks + 1)
+        for frame in rest:
+            self.assertEqual(frame.schema['sym'], first.schema['sym'])
+        out = pl.concat([first] + rest, how='vertical')
+        _assert_long_list_equal(
+            self, out['v'].to_list(), list(range(n)), 'v values')
+        _assert_long_list_equal(
+            self, out['sym'].cast(pl.Utf8).to_list(), exp, 'SYMBOL values')
 
     def _make_table(self, table_name, rows):
         self._exec(
@@ -4454,13 +4505,14 @@ class TestEgressPool(unittest.TestCase):
 
     def test_arrow_schema_blocks_other_readers(self):
         """After the schema call, the first batch lives in the Arrow
-        producer, so the other readers raise. The stream still works."""
+        producer, so the other readers raise. The stream still works.
+        ``pa.schema(result)`` is one such schema call."""
         self._require_pyarrow()
         import pyarrow as pa
         table = self._seed_table(n_rows=64)
         with qi.QuestDB.from_conf(self._conf()) as client:
             with client.query(f'SELECT x FROM {table} ORDER BY x') as result:
-                result.__arrow_c_schema__()
+                self.assertEqual(pa.schema(result).names, ['x'])
                 readers = {
                     'to_arrow': result.to_arrow,
                     'to_pandas': result.to_pandas,
@@ -4479,8 +4531,9 @@ class TestEgressPool(unittest.TestCase):
                             cm.exception.code,
                             qi.QuestDBErrorCode.InvalidApiCall)
                         self.assertIn(
-                            'opened as an Arrow stream by '
-                            '__arrow_c_schema__()', str(cm.exception))
+                            '__arrow_c_schema__() read the first batch '
+                            '(pa.schema(result)', str(cm.exception))
+                        self.assertIn('pa.table(result)', str(cm.exception))
                 self.assertEqual(pa.table(result).num_rows, 64)
 
     def test_arrow_schema_then_close_or_cancel_releases_reader(self):
@@ -4496,8 +4549,13 @@ class TestEgressPool(unittest.TestCase):
             result.close()
             # The cursor was not at its end, so the reader is dropped.
             self.assertEqual(qi._debug_egress_pool_stats(client), (0, 0))
-            with self.assertRaises(qi.QuestDBError):
+            # Nothing was read, so the error says "closed", not "read by".
+            with self.assertRaises(qi.QuestDBError) as cm:
                 result.__arrow_c_stream__()
+            self.assertIn('QueryResult is closed', str(cm.exception))
+            # close() also drops the saved schema.
+            with self.assertRaises(qi.QuestDBError):
+                result.__arrow_c_schema__()
 
             result = client.query(sql)
             result.__arrow_c_schema__()
@@ -4506,6 +4564,7 @@ class TestEgressPool(unittest.TestCase):
                 result.__arrow_c_stream__()
             self.assertEqual(
                 cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+            self.assertIn('QueryResult is closed', str(cm.exception))
             result.close()
             # cancel() drained the cursor, so close() recycles the reader.
             self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
@@ -4525,10 +4584,13 @@ class TestEgressPool(unittest.TestCase):
             self.assertEqual(cm.exception.code, ref.exception.code)
             self.assertEqual(str(cm.exception), str(ref.exception))
             self.assertEqual(qi._debug_egress_pool_stats(client)[0], 0)
+            # Nothing was read, so a later read says "closed".
             with self.assertRaises(qi.QuestDBError) as cm:
                 result.__arrow_c_schema__()
-            self.assertIn(
-                'already read by __arrow_c_schema__()', str(cm.exception))
+            self.assertIn('QueryResult is closed', str(cm.exception))
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.to_pandas()
+            self.assertIn('QueryResult is closed', str(cm.exception))
 
     def test_arrow_schema_of_empty_results_frees_lease(self):
         """A non-SELECT has no batch: the schema is an empty struct. A

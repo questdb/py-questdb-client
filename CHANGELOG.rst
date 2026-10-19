@@ -40,8 +40,17 @@ Changelog
 - ``duckdb.from_arrow(result)`` now works on duckdb 1.5. Before, it failed
   with "QueryResult already consumed", because duckdb 1.5 requested the
   stream more than once. ``QueryResult`` now has ``__arrow_c_schema__``,
-  which duckdb uses for the schema. It reads the first batch, so after it,
-  read the result only through the Arrow stream.
+  which duckdb uses for the schema. ``pa.schema(result)`` and
+  ``polars.Schema(result)`` call it too. It reads the first batch, so after
+  it, read the result only through the Arrow stream (``pa.table(result)``,
+  ``polars.DataFrame(result)``, duckdb). ``to_pandas()``, ``to_polars()``
+  and the other readers then raise ``InvalidApiCall``; run the query again
+  to use them.
+- A result read through the Arrow stream (``polars.DataFrame(result)``,
+  ``pa.table(result)``, duckdb) now releases its connection when the consumer
+  reads the last batch, not when it releases the stream. A reader lease from
+  ``QuestDB.reader()`` can run its next query as soon as the stream is
+  drained.
 - The ``dataframe`` extra now requires ``pandas>=2.0.0`` and
   ``pyarrow>=14.0.1``, the oldest versions that CI tests. The old minimums did
   not work: with pyarrow before 14, pyarrow sources, ``iter_polars()`` and
@@ -61,13 +70,17 @@ Changelog
   for example "QueryResult was already read by to_pandas()". A read after
   ``close()`` now says that the result is closed.
 - ``QueryResult.__arrow_c_stream__`` now ignores ``requested_schema``, as the
-  Arrow PyCapsule interface allows, so ``pa.table(result, schema=...)`` works
-  and pyarrow casts the result. Before, any ``requested_schema`` raised
+  Arrow PyCapsule interface allows. ``pa.table(result, schema=...)`` and
+  ``polars.DataFrame(result, schema=...)`` cast the result;
+  ``pa.RecordBatchReader.from_stream(result, schema=...)`` returns the
+  result's own schema. Before, any ``requested_schema`` raised
   ``NotImplementedError``.
 - If the polars ``Categorical`` fast path of ``to_polars()`` or
   ``iter_polars()`` fails, the client now issues a ``RuntimeWarning``. It still
   builds the frame with ``polars.from_arrow``, but it no longer hides the
-  failure.
+  failure. ``iter_polars()`` warns once and builds the remaining frames the
+  same way, cast to the ``Categories`` of the frames before, so
+  ``polars.concat`` still stitches them.
 - The docs said that a failover during a ``__arrow_c_stream__`` read raises
   ``FailoverWouldDuplicate``. The consumer raises its own exception type, and
   only the message contains ``[FailoverWouldDuplicate]``. polars before 1.37.1

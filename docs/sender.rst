@@ -1144,7 +1144,15 @@ fetch, so fetch inside the ``with`` block. These reads stream the result and
 do not replay it: if a failover occurs after the first batch, the consumer
 raises its own exception type, and the message contains
 ``[FailoverWouldDuplicate]``. Re-issue the query. polars before 1.37.1 raises
-a ``PanicException``, which ``except Exception`` does not catch.
+a ``PanicException``, which ``except Exception`` does not catch. A stream
+read releases the connection when the consumer reads the last batch, not
+when it releases the stream.
+The result also implements ``__arrow_c_schema__``, which duckdb,
+``pa.schema(result)`` and ``polars.Schema(result)`` call. It reads the first
+batch, so after any of these calls, read the result only through the stream
+(``pa.table(result)``, ``polars.DataFrame(result)``, duckdb); ``to_pandas()``
+and the other readers raise ``InvalidApiCall``, and you must run the query
+again to use them.
 Each result is consumed once. Fully drain it, use it as a context manager
 (``with db.query(...) as result:``), or call :func:`QueryResult.close <questdb.QueryResult.close>`. A
 partially-consumed result cannot return its connection to the pool — closing

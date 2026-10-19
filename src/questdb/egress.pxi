@@ -2155,6 +2155,29 @@ cdef object _polars_hybrid_fallback(object table, object pl, object exc):
     return pl.from_arrow(table)
 
 
+cdef object _polars_frame_with_registry_cats(
+        object frame, object table, object pl, object pa, dict registries):
+    # Give a `pl.from_arrow` frame the registry `Categories` of the hybrid
+    # frames that `iter_polars` yielded before it, so that `pl.concat` still
+    # stitches. Without a registry, every frame is a plain Categorical.
+    if not registries:
+        return frame
+    cdef list types = table.schema.types
+    cdef list names = table.column_names
+    cdef list exprs = []
+    cdef Py_ssize_t i
+    cdef _PolarsSymbolRegistry reg
+    for i in range(len(types)):
+        if pa.types.is_dictionary(types[i]):
+            reg = registries.get(i) or registries.get(-1)
+            if reg is not None:
+                exprs.append(
+                    pl.col(names[i]).cast(pl.Categorical(reg.cats)))
+    if not exprs:
+        return frame
+    return frame.with_columns(exprs)
+
+
 def _debug_polars_hybrid_fallbacks():
     """Internal: the number of `to_polars` / `iter_polars` frames that fell
     back from the polars `Categories` path in this process. Intended for
@@ -2185,13 +2208,20 @@ cdef class _PolarsBatchIter:
     def __next__(self):
         batch = next(self.reader)
         table = self.pa.Table.from_batches([batch])
-        if not self.use_hybrid:
-            return self.pl.from_arrow(table)
-        try:
-            return _polars_dataframe_hybrid(
-                table, self.pl, self.pa, self.registries)
-        except Exception as exc:
-            return _polars_hybrid_fallback(table, self.pl, exc)
+        if self.use_hybrid:
+            try:
+                return _polars_dataframe_hybrid(
+                    table, self.pl, self.pa, self.registries)
+            except Exception as exc:
+                # One warning per iterator: the remaining batches take the
+                # fallback too, cast to the registries' `Categories`, so
+                # every yielded frame has the same dtypes.
+                self.use_hybrid = False
+                frame = _polars_hybrid_fallback(table, self.pl, exc)
+        else:
+            frame = self.pl.from_arrow(table)
+        return _polars_frame_with_registry_cats(
+            frame, table, self.pl, self.pa, self.registries)
 
 
 cdef class _NumpyBatchIter:
@@ -2452,10 +2482,11 @@ class QueryResult:
             if self._schema_producer is not None:
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
-                    'QueryResult was opened as an Arrow stream by '
-                    '__arrow_c_schema__(). Read it through the stream, for '
-                    'example with pa.table(result) or '
-                    'duckdb.from_arrow(result).')
+                    'QueryResult.__arrow_c_schema__() read the first batch '
+                    '(pa.schema(result), polars.Schema(result) and duckdb '
+                    'call it). Read the result through the Arrow stream, '
+                    'for example with pa.table(result) or '
+                    'polars.DataFrame(result), or run the query again.')
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 _query_result_reuse_message(self._consumed_by))
@@ -2477,10 +2508,13 @@ class QueryResult:
 
         It reads the first batch to get the schema, and keeps that batch
         for ``__arrow_c_stream__``. duckdb 1.5 calls it, so that
-        ``duckdb.from_arrow(result)`` opens the stream only once. After
-        this call, read the result only through ``__arrow_c_stream__``:
-        the other readers raise ``InvalidApiCall``. Later calls return the
-        same schema, also after the stream was taken.
+        ``duckdb.from_arrow(result)`` opens the stream only once.
+        ``pa.schema(result)`` and ``polars.Schema(result)`` call it too.
+        After this call, read the result only through ``__arrow_c_stream__``
+        (``pa.table(result)``, ``polars.DataFrame(result)``, duckdb): the
+        other readers raise ``InvalidApiCall`` on their first read. When
+        the schema was read first, later calls return the same schema, also
+        after the stream was taken.
         """
         cdef _QueryStreamProducer prod
         cdef _CursorHandle handle
@@ -2501,7 +2535,9 @@ class QueryResult:
                     'failed to read the result schema: ' + (
                         (<bytes>prod.last_error).decode('utf-8', 'replace')
                         if prod.last_error != NULL else 'out of memory'))
+            # Nothing was read: a later read says "closed", not "read by".
             self._schema_producer = None
+            self._consumed_by = None
             prod._free_cached()
             handle._free()
             raise exc
@@ -2516,9 +2552,15 @@ class QueryResult:
         reconciles them.
 
         ``requested_schema`` is ignored, as the PyCapsule interface
-        allows: the stream always has the result's own schema, and the
-        consumer casts it if necessary (``pa.table(result, schema=...)``
-        does).
+        allows: the stream always has the result's own schema.
+        ``pa.table(result, schema=...)`` and
+        ``polars.DataFrame(result, schema=...)`` cast the result;
+        ``pa.RecordBatchReader.from_stream(result, schema=...)`` returns
+        the result's own schema.
+
+        The stream releases the result's connection when the consumer
+        reads the last batch, not when it releases the stream. A reader
+        lease can run its next query as soon as the stream is drained.
 
         The stream does not replay a result: after a batch has been
         delivered, a failover ends the stream with an error. The consumer
@@ -2703,7 +2745,9 @@ class QueryResult:
         handling) for streaming / low-peak-memory consumption. Every batch's
         SYMBOL Categoricals share one persistent ``Categories`` identity, so
         ``polars.concat`` over the yielded frames stitches without a
-        categories-mismatch error.
+        categories-mismatch error. If the ``Categorical`` fast path fails,
+        it issues one ``RuntimeWarning`` and builds the remaining frames with
+        ``polars.from_arrow``, cast to the same ``Categories``.
 
         Streaming: a mid-query failover after the first batch has been yielded
         surfaces ``QuestDBErrorCode.FailoverWouldDuplicate``; re-issue the
@@ -2780,6 +2824,7 @@ class QueryResult:
         """
         cdef _CursorHandle handle = self._cancel_handle
         self._drop_schema_producer()
+        self._schema_box = None
         self._cursor_handle = None
         self._cancel_handle = None
         self._consumed = True
@@ -2789,8 +2834,10 @@ class QueryResult:
     def _drop_schema_producer(self):
         cdef _QueryStreamProducer prod = self._schema_producer
         if prod is not None:
-            # Nothing outside this result has the producer yet.
+            # Nothing outside this result has the producer yet, and nothing
+            # was read: a later read says "closed", not "read by".
             self._schema_producer = None
+            self._consumed_by = None
             prod._free_cached()
 
     def __enter__(self):

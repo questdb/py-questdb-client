@@ -1365,8 +1365,13 @@ class QueryResult:
     def __arrow_c_schema__(self) -> Any:
         """Arrow schema PyCapsule protocol (no pyarrow needed). It reads the
         first batch to get the schema, and keeps that batch for
-        ``__arrow_c_stream__``. After this call, read the result only through
-        the stream; the other readers raise ``InvalidApiCall``."""
+        ``__arrow_c_stream__``. duckdb, ``pa.schema(result)`` and
+        ``polars.Schema(result)`` call it. After this call, read the result
+        only through the stream (``pa.table(result)``,
+        ``polars.DataFrame(result)``, duckdb); the other readers raise
+        ``InvalidApiCall`` on their first read. When the schema was read
+        first, later calls return the same schema, also after the stream was
+        taken."""
 
     def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
@@ -1376,7 +1381,14 @@ class QueryResult:
         reconciles them.
 
         ``requested_schema`` is ignored: the stream always has the result's
-        own schema, and the consumer casts it if necessary.
+        own schema. ``pa.table(result, schema=...)`` and
+        ``polars.DataFrame(result, schema=...)`` cast the result;
+        ``pa.RecordBatchReader.from_stream(result, schema=...)`` returns the
+        result's own schema.
+
+        The stream releases the result's connection when the consumer reads
+        the last batch, not when it releases the stream. A reader lease can
+        run its next query as soon as the stream is drained.
 
         The stream does not replay a result: after a batch has been
         delivered, a failover ends the stream with an error. The consumer
