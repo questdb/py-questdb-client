@@ -4055,7 +4055,9 @@ class TestQueryResultReuseErrors(unittest.TestCase):
         with mock.patch.object(polars, '__version__', '1.31.0'):
             with self.assertRaises(qi.QuestDBError) as cm:
                 polars.DataFrame(result)
-        self._assert_invalid(cm, 'polars before 1.32')
+        self._assert_invalid(
+            cm, 'polars 1.31.0 misreads multi-batch query results. '
+            'Upgrade to polars 1.32 or later')
         result.__arrow_c_stream__()
 
     def test_failed_schema_read_closes_result(self):

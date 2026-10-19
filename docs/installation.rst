@@ -33,7 +33,8 @@ The client is tested with these minimum versions:
 * pandas 2.0 and pyarrow 14.0.1. pyarrow tables, record batches and
   readers also need pyarrow 14.0.1 when you ingest them.
 * polars 1.32, to ingest polars frames and to read query results with
-  ``polars.DataFrame(result)``.
+  ``polars.DataFrame(result)``. For that read, polars 1.37.1 or later is
+  recommended: older polars raises ``PanicException`` on a failover.
 * duckdb 1.2, to read query results with ``duckdb.from_arrow(result)``.
 
 Two features need newer versions:

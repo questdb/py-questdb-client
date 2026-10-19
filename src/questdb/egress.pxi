@@ -2597,8 +2597,9 @@ class QueryResult:
         if _called_by_old_polars():
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
-                'polars before 1.32 reads SYMBOL columns of a query result '
-                'stream wrongly. Upgrade polars, or call result.to_polars().')
+                f'polars {sys.modules["polars"].__version__} misreads '
+                'multi-batch query results. Upgrade to polars 1.32 or '
+                'later, or call result.to_polars().')
         # Streaming: hand batches out incrementally. A post-delivery
         # failover bumps the cursor's _reset_seq; the capsule producer
         # surfaces FailoverWouldDuplicate rather than feeding the
