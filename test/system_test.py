@@ -4606,6 +4606,8 @@ class TestEgressPool(unittest.TestCase):
                 self.assertIn(
                     'already read by __arrow_c_stream__()',
                     str(cm.exception))
+            # The schema stays readable after close().
+            self.assertEqual(self._schema_of(result), schema)
             self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
 
     def test_arrow_schema_blocks_other_readers(self):
@@ -4669,11 +4671,14 @@ class TestEgressPool(unittest.TestCase):
                 result.__arrow_c_stream__()
             self.assertEqual(
                 cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
-            self.assertIn('QueryResult is closed', str(cm.exception))
+            # The cursor stays open until close(), so the error does not
+            # say "closed".
+            self.assertIn('QueryResult was cancelled', str(cm.exception))
             # cancel() also drops the saved schema, so a schema read and a
             # stream read agree.
-            with self.assertRaises(qi.QuestDBError):
+            with self.assertRaises(qi.QuestDBError) as cm:
                 result.__arrow_c_schema__()
+            self.assertIn('QueryResult was cancelled', str(cm.exception))
             result.close()
             # cancel() drained the cursor, so close() recycles the reader.
             self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
@@ -4833,6 +4838,27 @@ class TestEgressPool(unittest.TestCase):
                 del result
             self.assertEqual(resource_warnings(caught), [])
             self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_abandoned_result_closes_under_warnings_as_errors(self):
+        """Under ``-W error`` the abandonment warning raises inside
+        ``__del__``. The result closes first, so a lease reports its
+        terminal connection, not a result that is still open."""
+        import warnings
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT x FROM {table} ORDER BY x'
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            for read_schema in (False, True):
+                with self.subTest(read_schema=read_schema), \
+                        client.reader() as lease:
+                    result = lease.query(sql)
+                    if read_schema:
+                        result.__arrow_c_schema__()
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('error', ResourceWarning)
+                        del result
+                    with self.assertRaises(qi.QuestDBError) as cm:
+                        lease.query(sql)
+                    self.assertIn('terminal', str(cm.exception))
 
 
 class TestEgressLeaks(unittest.TestCase):

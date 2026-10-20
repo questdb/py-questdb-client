@@ -2548,6 +2548,15 @@ class QueryResult:
                     'result through the Arrow stream, '
                     'for example with pa.table(result) or '
                     'polars.DataFrame(result), or run the query again.')
+            if (self._consumed_by is None
+                    and _cursor_handle_is_live(self._cancel_handle)):
+                # cancel() dropped the batch that `__arrow_c_schema__`
+                # read, and the cursor stays open until close().
+                raise QuestDBError(
+                    QuestDBErrorCode.InvalidApiCall,
+                    'QueryResult was cancelled after __arrow_c_schema__() '
+                    'read its first batch. Call close(), then run the query '
+                    'again to read the result.')
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 _query_result_reuse_message(self._consumed_by))
@@ -2645,13 +2654,17 @@ class QueryResult:
         Arrow C stream itself must still be consumed by only one thread at
         a time; concurrent ``get_next`` / ``release`` calls are unsupported.
         """
-        cdef _QueryStreamProducer prod = self._schema_producer
+        cdef _QueryStreamProducer prod
         if _called_by_old_polars():
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f'polars {sys.modules["polars"].__version__} misreads '
                 'multi-batch query results. Upgrade to polars 1.32 or '
-                'later, or call result.to_polars().')
+                'later, or ' + (
+                    'run the query again and call to_polars().'
+                    if self._consumed else 'call result.to_polars().'))
+        # Read the field after the check, which runs Python code.
+        prod = self._schema_producer
         # Streaming: hand batches out incrementally. A post-delivery
         # failover bumps the cursor's _reset_seq; the capsule producer
         # surfaces FailoverWouldDuplicate rather than feeding the
@@ -2865,7 +2878,6 @@ class QueryResult:
         # stream after the cancel would give that batch and then a clean
         # end: a truncated result without an error. Drop it.
         self._drop_schema_producer()
-        self._schema_box = None
         if handle is None:
             return
         with handle._lock:
@@ -2905,7 +2917,6 @@ class QueryResult:
         """
         cdef _CursorHandle handle = self._cancel_handle
         self._drop_schema_producer()
-        self._schema_box = None
         self._cursor_handle = None
         self._cancel_handle = None
         self._consumed = True
@@ -2916,8 +2927,11 @@ class QueryResult:
         cdef _QueryStreamProducer prod = self._schema_producer
         if prod is not None:
             # Nothing outside this result has the producer yet, and nothing
-            # was read: a later read says "closed", not "read by".
+            # was read: a later read says "closed", not "read by". Drop
+            # the saved schema too, so that a schema read and a stream
+            # read agree. After a stream was taken, keep it.
             self._schema_producer = None
+            self._schema_box = None
             self._consumed_by = None
             prod._free_cached()
 

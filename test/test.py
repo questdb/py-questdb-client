@@ -4057,10 +4057,15 @@ class TestQueryResultReuseErrors(unittest.TestCase):
                 polars.DataFrame(result)
             self._assert_invalid(
                 cm, 'polars 1.31.0 misreads multi-batch query results. '
-                'Upgrade to polars 1.32 or later')
+                'Upgrade to polars 1.32 or later, or call result.to_polars()')
             # Only a direct polars read is checked: another caller gets
             # the stream, also with an old polars installed.
             result.__arrow_c_stream__()
+            # A read result cannot be read with to_polars() either.
+            with self.assertRaises(qi.QuestDBError) as cm:
+                polars.DataFrame(result)
+            self._assert_invalid(
+                cm, 'or run the query again and call to_polars()')
 
     def test_stream_read_from_thread_without_python_frame(self):
         # duckdb 1.5 calls `__arrow_c_stream__` from a worker thread that has
