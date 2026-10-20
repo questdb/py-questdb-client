@@ -7,6 +7,42 @@ Changelog
 5.1.0 (unreleased)
 ------------------
 
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+- If a ``ws::`` or ``wss::`` configuration contains ``max_in_flight`` or
+  ``in_flight_window``, remove it. These options are no longer supported and now
+  raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.ConfigError`` during startup.
+- To read a ``QueryResult`` into polars without pyarrow, use
+  ``polars.DataFrame(result)`` (polars 1.32 or later). The 5.0.0 notes said to
+  use ``polars.from_arrow(result)``, but on Polars 2.0 that call returns a
+  struct ``Series``, not a ``DataFrame``. On Polars 1.21 and older, it raises
+  an error. On Polars 1.22 to 1.31, it returned wrong ``SYMBOL`` values
+  without an error, so when a polars before 1.32 reads the result directly
+  (``polars.DataFrame(result)``, ``polars.from_arrow(result)``), the call
+  now raises ``InvalidApiCall``; use ``to_polars()`` there. A stream that
+  reaches polars through another library is not checked. Ingesting polars
+  frames also needs polars 1.32 or later.
+- The ``dataframe`` extra now requires ``pandas>=2.0.0`` and
+  ``pyarrow>=14.0.1``, the oldest versions that CI tests. The old minimums did
+  not work: with pyarrow before 14, pyarrow sources, ``iter_polars()`` and
+  ``pa.table(result)`` failed. With pandas before 1.5, every DataFrame load
+  failed with an ``AttributeError``; it now raises a clear error.
+  Two features need newer versions: pyarrow-backed pandas frames take the
+  Arrow path (and accept ``schema_overrides``) only on pandas 2.2 or later,
+  and reading ``DECIMAL`` columns with a precision of 18 or less through
+  pyarrow needs pyarrow 20 or later. See :doc:`installation`.
+- A second read of a ``QueryResult`` now names the method that read it first,
+  for example "QueryResult was already read by to_pandas()". A read after
+  ``close()`` now says that the result is closed.
+  Code that matched the old texts ("QueryResult already consumed",
+  "QueryResult cursor was closed") should check
+  ``err.code == QuestDBErrorCode.InvalidApiCall`` instead.
+
+Other changes
+~~~~~~~~~~~~~
+
 - Applications may now create a ``QueryResult`` on one thread and process it on
   another, including through its Arrow stream. Hand it off with normal thread
   synchronization and never use it from two threads at once. If it came from a
@@ -27,20 +63,6 @@ Changelog
   remains, so retrying the whole DataFrame can duplicate rows.
 - When ``sf_dir`` enables disk-backed delivery, shutdown now obeys its configured
   timeout and recovery is safer after a crash or an incomplete final write.
-- If a ``ws::`` or ``wss::`` configuration contains ``max_in_flight`` or
-  ``in_flight_window``, remove it. These options are no longer supported and now
-  raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-  ``QuestDBErrorCode.ConfigError`` during startup.
-- To read a ``QueryResult`` into polars without pyarrow, use
-  ``polars.DataFrame(result)`` (polars 1.32 or later). The 5.0.0 notes said to
-  use ``polars.from_arrow(result)``, but on Polars 2.0 that call returns a
-  struct ``Series``, not a ``DataFrame``. On Polars 1.21 and older, it raises
-  an error. On Polars 1.22 to 1.31, it returned wrong ``SYMBOL`` values
-  without an error, so when a polars before 1.32 reads the result directly
-  (``polars.DataFrame(result)``, ``polars.from_arrow(result)``), the call
-  now raises ``InvalidApiCall``; use ``to_polars()`` there. A stream that
-  reaches polars through another library is not checked. Ingesting polars
-  frames also needs polars 1.32 or later.
 - ``duckdb.from_arrow(result)`` now works on duckdb 1.5. Before, it failed
   with "QueryResult already consumed", because duckdb 1.5 requested the
   stream more than once. ``QueryResult`` now has ``__arrow_c_schema__``,
@@ -55,24 +77,12 @@ Changelog
   reads the last batch, not when it releases the stream. A reader lease from
   ``QuestDB.reader()`` can run its next query as soon as the stream is
   drained.
-- The ``dataframe`` extra now requires ``pandas>=2.0.0`` and
-  ``pyarrow>=14.0.1``, the oldest versions that CI tests. The old minimums did
-  not work: with pyarrow before 14, pyarrow sources, ``iter_polars()`` and
-  ``pa.table(result)`` failed. With pandas before 1.5, every DataFrame load
-  failed with an ``AttributeError``; it now raises a clear error.
-  Two features need newer versions: pyarrow-backed pandas frames take the
-  Arrow path (and accept ``schema_overrides``) only on pandas 2.2 or later,
-  and reading ``DECIMAL`` columns with a precision of 18 or less through
-  pyarrow needs pyarrow 20 or later. See :doc:`installation`.
 - ``to_pandas(dtype_backend=...)`` now checks its arguments before it reads
   the result. Before, an invalid value consumed the result.
 - New ``polars`` and ``duckdb`` extras install the oldest tested versions or
   newer: ``pip install questdb[polars]`` installs ``polars>=1.32.0`` and
   ``pyarrow>=14.0.1`` (``to_polars()`` and ``iter_polars()`` need pyarrow), and
   ``pip install questdb[duckdb]`` installs ``duckdb>=1.2.0``.
-- A second read of a ``QueryResult`` now names the method that read it first,
-  for example "QueryResult was already read by to_pandas()". A read after
-  ``close()`` now says that the result is closed.
 - ``QueryResult.__arrow_c_stream__`` now ignores ``requested_schema``, as the
   Arrow PyCapsule interface allows. ``pa.table(result, schema=...)`` and
   ``polars.DataFrame(result, schema=...)`` cast the result;
@@ -95,6 +105,10 @@ Changelog
   raises the stream's error. Before, ``pa.table(result)`` raised
   ``SystemError`` instead, a later ``close()`` from another thread could
   hang, and ``QuestDB.dataframe(result)`` could crash the process.
+- With duckdb before 1.5, ``duckdb.from_arrow(result)`` no longer crashes
+  the process when the query fails on its first fetch, for example on a
+  missing table. duckdb raises its own error, which does not contain the
+  query's error; duckdb 1.5 raises the query's error.
 
 5.0.0 (2026-07-27)
 ------------------
