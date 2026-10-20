@@ -927,6 +927,8 @@ cdef int _qs_ensure_schema(_QueryStreamProducer prod) noexcept with gil:
 cdef int _qs_get_schema(ArrowArrayStream* stream, ArrowSchema* out) noexcept with gil:
     cdef _QueryStreamProducer prod
     cdef int rc
+    # duckdb before 1.5 reads `out` even when this call fails.
+    memset(out, 0, sizeof(ArrowSchema))
     if stream == NULL or stream.private_data == NULL:
         return 22  # EINVAL
     prod = <_QueryStreamProducer>stream.private_data

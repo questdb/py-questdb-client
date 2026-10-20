@@ -236,6 +236,36 @@ class TestQueryResultSource(unittest.TestCase):
         closer.join(10)
         self.assertFalse(closer.is_alive(), 'close() blocked on the lock')
 
+    def test_failing_get_schema_zeroes_out(self):
+        """A failing ``get_schema`` leaves ``out`` zeroed. duckdb before
+        1.5 reads ``out`` even when ``get_schema`` fails, and crashed on
+        an uninitialised struct."""
+        import ctypes
+
+        class ArrowSchema(ctypes.Structure):
+            _fields_ = [
+                ('format', ctypes.c_void_p), ('name', ctypes.c_void_p),
+                ('metadata', ctypes.c_void_p), ('flags', ctypes.c_int64),
+                ('n_children', ctypes.c_int64),
+                ('children', ctypes.c_void_p),
+                ('dictionary', ctypes.c_void_p),
+                ('release', ctypes.c_void_p),
+                ('private_data', ctypes.c_void_p)]
+
+        capsule = qi.QueryResult(qi._CursorHandle()).__arrow_c_stream__()
+        get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+        get_pointer.restype = ctypes.c_void_p
+        get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+        stream = get_pointer(capsule, b'arrow_array_stream')
+        # `get_schema` is the first field of `ArrowArrayStream`.
+        get_schema = ctypes.CFUNCTYPE(
+            ctypes.c_int, ctypes.c_void_p,
+            ctypes.POINTER(ArrowSchema)).from_address(stream)
+        out = ArrowSchema()
+        ctypes.memset(ctypes.byref(out), 0xAB, ctypes.sizeof(out))
+        self.assertNotEqual(get_schema(stream, ctypes.byref(out)), 0)
+        self.assertEqual(bytes(out), bytes(ctypes.sizeof(out)))
+
 
 class TestServerTimestampAt(unittest.TestCase):
     """`at=ServerTimestamp` on the Arrow batch route: the frame carries no
