@@ -2403,14 +2403,18 @@ cdef bint _called_by_old_polars():
     # polars before 1.32 decodes every batch of a stream with the first
     # batch's dictionary, so SYMBOL values come out wrong without an error.
     # polars calls `__arrow_c_stream__` from its own Python code
-    # (`pycapsule_to_frame`, `Series.__init__`); pyarrow and duckdb call it
-    # from the user's code.
-    if not sys._getframe(0).f_globals.get('__name__', '').startswith(
-            'polars.'):
+    # (`pycapsule_to_frame`, `Series.__init__`), and a Cython function pushes
+    # no frame, so frame 0 is the caller. duckdb 1.5 calls it from a worker
+    # thread with no Python frame, where `sys._getframe` raises ValueError.
+    cdef object pl = sys.modules.get('polars')
+    if pl is None:
         return False
     try:
-        major, minor = sys.modules['polars'].__version__.split('.')[:2]
-        return (int(major), int(minor)) < (1, 32)
+        major, minor = pl.__version__.split('.')[:2]
+        if (int(major), int(minor)) >= (1, 32):
+            return False
+        return sys._getframe(0).f_globals.get('__name__', '').startswith(
+            'polars.')
     except Exception:
         return False
 

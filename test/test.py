@@ -4060,6 +4060,32 @@ class TestQueryResultReuseErrors(unittest.TestCase):
             'Upgrade to polars 1.32 or later')
         result.__arrow_c_stream__()
 
+    def test_stream_read_from_thread_without_python_frame(self):
+        # duckdb 1.5 calls `__arrow_c_stream__` from a worker thread that has
+        # no Python frame. `_thread.start_new_thread` calls the bound method
+        # from C, so it runs without one too.
+        import _thread
+        import contextlib
+        versions = [None]
+        if polars is not None:
+            versions.append('1.31.0')  # reaches the caller check
+        for version in versions:
+            with self.subTest(polars_version=version):
+                result = qi.QueryResult(qi._CursorHandle())
+                unraisable = []
+                patch = (mock.patch.object(polars, '__version__', version)
+                         if version else contextlib.nullcontext())
+                with patch, mock.patch.object(
+                        sys, 'unraisablehook', unraisable.append):
+                    _thread.start_new_thread(result.__arrow_c_stream__, ())
+                    deadline = time.monotonic() + 10
+                    while (result._consumed_by is None and not unraisable
+                           and time.monotonic() < deadline):
+                        time.sleep(0.01)
+                self.assertEqual(
+                    [repr(u.exc_value) for u in unraisable], [])
+                self.assertEqual(result._consumed_by, '__arrow_c_stream__()')
+
     def test_failed_schema_read_closes_result(self):
         result = qi.QueryResult(qi._CursorHandle())
         with self.assertRaises(qi.QuestDBError) as cm:
