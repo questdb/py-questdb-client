@@ -98,6 +98,17 @@ def _collect_until(predicate):
     _await(collected)
 
 
+def _last_failure(provider):
+    """The provider's most recent failed fetch, once one is recorded.
+
+    A ``token()`` that gives up after ``cold_wait`` can return before the
+    refresher thread has run the source at all, so the failure may not be
+    recorded yet when it raises.
+    """
+    _await(lambda: provider.status.last_failure is not None)
+    return provider.status.last_failure
+
+
 class ExpiringTokenTest(unittest.TestCase):
     def test_expiry_forms(self):
         at = datetime.datetime(2030, 1, 1, tzinfo=UTC)
@@ -196,13 +207,15 @@ class RefreshingTokenProviderTest(unittest.TestCase):
             raise TokenUnavailableError(
                 'identity not assigned', retryable=False, retry_after=5)
 
-        with RefreshingTokenProvider(source, cold_wait=0.2) as provider:
+        # A `cold_wait` below the source's `retry_after` returns as soon as
+        # the first fetch fails; it only has to outlast a slow first fetch.
+        with RefreshingTokenProvider(source, cold_wait=2) as provider:
             with self.assertRaises(TokenUnavailableError) as caught:
                 provider.token()
             self.assertFalse(caught.exception.retryable)
             self.assertIsNotNone(caught.exception.retry_after)
             self.assertIn('identity not assigned', str(caught.exception))
-            failure = provider.status.last_failure
+            failure = _last_failure(provider)
             self.assertFalse(failure.retryable)
             self.assertEqual(failure.message, 'identity not assigned')
             self.assertEqual(failure.retry_after, 5.0)
@@ -217,7 +230,7 @@ class RefreshingTokenProviderTest(unittest.TestCase):
             with self.assertRaises(TokenUnavailableError) as caught:
                 provider.token()
             self.assertTrue(caught.exception.retryable)
-            failure = provider.status.last_failure
+            failure = _last_failure(provider)
             self.assertTrue(failure.retryable)
             self.assertIn('RuntimeError: idp unreachable', failure.message)
 
@@ -226,7 +239,7 @@ class RefreshingTokenProviderTest(unittest.TestCase):
                 lambda: 'just-a-string', cold_wait=0.2) as provider:
             with self.assertRaises(TokenUnavailableError):
                 provider.token()
-            self.assertIn('ExpiringToken', provider.status.last_failure.message)
+            self.assertIn('ExpiringToken', _last_failure(provider).message)
 
     def test_on_rejected_forces_a_refresh(self):
         source, calls = _counting_source()
@@ -432,7 +445,7 @@ class RefreshingTokenProviderTest(unittest.TestCase):
                     with self.assertRaises(TokenUnavailableError):
                         provider.token()
                     self.assertFalse(provider.closed)
-                    self.assertIn('Python datetime', provider.status.last_failure.message)
+                    self.assertIn('Python datetime', _last_failure(provider).message)
                 self.assertTrue(provider.closed)
 
     def test_invalid_arguments_are_rejected(self):
