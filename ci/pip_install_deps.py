@@ -20,8 +20,8 @@ arg_parser.add_argument(
     action='store_true',
     help='also install duckdb, which only the system tests use')
 
-# The oldest versions that the `dataframe` extra in `pyproject.toml` and
-# `docs/installation.rst` promise. Keep them in sync. NumPy stays on 1.x
+# The oldest versions that the `dataframe`, `polars` and `duckdb` extras in
+# `pyproject.toml` and `docs/installation.rst` promise. Keep them in sync. NumPy stays on 1.x
 # here; the NumPy floor (1.21) has its own CI jobs.
 MIN_VERSIONS = {
     'numpy': '1.26.4',

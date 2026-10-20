@@ -1360,13 +1360,18 @@ class QueryResult:
     ``to_arrow().to_pandas()`` pay on SYMBOL-heavy results.
     ``to_arrow().to_pandas()`` needs pyarrow 23 or later for SYMBOL
     columns, which use ``uint32`` dictionary indices.
+
+    polars (``polars.DataFrame(result)``, polars 1.32 or later) and duckdb
+    (``duckdb.from_arrow(result)``, duckdb 1.2 or later) read the result
+    through :meth:`__arrow_c_stream__` without pyarrow. duckdb reads when
+    you fetch, so fetch before the result is closed.
     """
 
     def __arrow_c_schema__(self) -> Any:
         """Arrow schema PyCapsule protocol (no pyarrow needed). It reads the
         first batch to get the schema, and keeps that batch for
-        ``__arrow_c_stream__``. duckdb 1.5 and ``pa.schema(result)`` call
-        it. After this call, read the result
+        ``__arrow_c_stream__``. duckdb 1.5, ``pa.schema(result)`` and
+        ``polars.Schema(result)`` call it. After this call, read the result
         only through the stream (``pa.table(result)``,
         ``polars.DataFrame(result)``, duckdb); the other readers raise
         ``InvalidApiCall`` on their first read. When the schema was read
@@ -1384,8 +1389,9 @@ class QueryResult:
         and the result stays unread. A stream that reaches polars through
         another library is not checked.
 
-        ``requested_schema`` is ignored: the stream always has the result's
-        own schema. ``pa.table(result, schema=...)`` and
+        ``requested_schema`` is ignored, also when it does not match: the
+        stream always has the result's own schema, so check the schema you
+        get. ``pa.table(result, schema=...)`` and
         ``polars.DataFrame(result, schema=...)`` cast the result;
         ``pa.RecordBatchReader.from_stream(result, schema=...)`` (pyarrow 15
         or later) returns the result's own schema.
@@ -1397,9 +1403,9 @@ class QueryResult:
         The stream does not replay a result: after a batch has been
         delivered, a failover ends the stream with an error. The consumer
         raises its own exception type, and the message contains
-        ``[FailoverWouldDuplicate]``; re-issue the query. polars before
-        1.37.1 raises a ``PanicException``, which ``except Exception`` does
-        not catch."""
+        ``[FailoverWouldDuplicate]``; re-issue the query. polars raises a
+        ``ComputeError``, but polars before 1.37.1 raises a
+        ``PanicException``, which ``except Exception`` does not catch."""
 
     def to_arrow(self) -> Any:
         """Read the full result into a ``pyarrow.Table``. Requires pyarrow.
@@ -1424,7 +1430,9 @@ class QueryResult:
         """Read the full result into a ``polars.DataFrame``. Requires polars
         and pyarrow. If the polars ``Categorical`` fast path fails, it issues
         a ``RuntimeWarning`` and builds the frame with ``polars.from_arrow``:
-        the values stay correct, but the read is slower."""
+        the values stay correct, but the read is slower. Under ``-W error``
+        that warning raises after the result was read, so the frame is lost;
+        run the query again."""
 
     def iter_arrow(self) -> Iterator[Any]:
         """Iterate result batches as ``pyarrow.RecordBatch``."""

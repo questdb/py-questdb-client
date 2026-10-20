@@ -167,7 +167,8 @@ cdef class _CursorHandle:
                         self._reader_ref._close()
                     self._reader_ref = None
         except BaseException:
-            # Only a KeyboardInterrupt while blocked on the lock gets here.
+            # Only an exception from a signal handler (KeyboardInterrupt by
+            # default) while blocked on the lock gets here.
             # In a `noexcept` function it would skip the restore below and
             # lose both exceptions. The caller's exception wins; without
             # one, report this one as unraisable.
@@ -738,8 +739,10 @@ cdef class _QueryStreamProducer:
     The Arrow stream struct itself is owned by the enclosing PyCapsule;
     this object owns just the cached `(schema, array)` and the
     `_CursorHandle` keep-alive. Refcount is bumped on capsule creation
-    and dropped by the stream's release callback so the consumer's
-    capsule lifetime governs everything downstream.
+    and dropped by the stream's release callback. Before that, a
+    producer from `QueryResult.__arrow_c_schema__` is owned by the
+    result. The cursor is freed when the stream reaches its end, or at
+    release.
     """
     cdef _CursorHandle cursor_handle
     cdef ArrowSchema cached_schema
@@ -2552,8 +2555,8 @@ class QueryResult:
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
                     'QueryResult.__arrow_c_schema__() read the first batch '
-                    '(pa.schema(result) and duckdb 1.5 call it). Read the '
-                    'result through the Arrow stream, '
+                    '(pa.schema(result), polars.Schema(result) and duckdb '
+                    '1.5 call it). Read the result through the Arrow stream, '
                     'for example with pa.table(result) or '
                     'polars.DataFrame(result), or run the query again.')
             if (self._consumed_by is None
@@ -2587,7 +2590,7 @@ class QueryResult:
         It reads the first batch to get the schema, and keeps that batch
         for ``__arrow_c_stream__``. duckdb 1.5 calls it, so that
         ``duckdb.from_arrow(result)`` opens the stream only once.
-        ``pa.schema(result)`` calls it too.
+        ``pa.schema(result)`` and ``polars.Schema(result)`` call it too.
         After this call, read the result only through ``__arrow_c_stream__``
         (``pa.table(result)``, ``polars.DataFrame(result)``, duckdb): the
         other readers raise ``InvalidApiCall`` on their first read. When
@@ -2639,9 +2642,9 @@ class QueryResult:
         and the result stays unread. A stream that reaches polars through
         another library is not checked.
 
-        ``requested_schema`` is ignored, as the PyCapsule interface
-        allows: the stream always has the result's own schema.
-        ``pa.table(result, schema=...)`` and
+        ``requested_schema`` is ignored, also when it does not match: the
+        stream always has the result's own schema, so check the schema you
+        get. ``pa.table(result, schema=...)`` and
         ``polars.DataFrame(result, schema=...)`` cast the result;
         ``pa.RecordBatchReader.from_stream(result, schema=...)`` (pyarrow
         15 or later) returns the result's own schema.
@@ -2658,9 +2661,10 @@ class QueryResult:
         ``PanicException``, which ``except Exception`` does not catch.
 
         The returned stream may be handed to a consumer worker thread.
-        Stream callbacks are serialised by the same cursor lock, but the
-        Arrow C stream itself must still be consumed by only one thread at
-        a time; concurrent ``get_next`` / ``release`` calls are unsupported.
+        The cursor lock serialises the native cursor calls, not the
+        stream's own state, so the Arrow C stream must be consumed by only
+        one thread at a time; concurrent ``get_next`` / ``release`` calls
+        are unsupported.
         """
         cdef _QueryStreamProducer prod
         if _called_by_old_polars():
@@ -2759,6 +2763,8 @@ class QueryResult:
         ``polars.from_arrow`` when polars' (unstable) ``Categories`` API is
         unavailable. If that path fails, it also falls back and issues a
         ``RuntimeWarning``: the values stay correct, but the read is slower.
+        Under ``-W error`` that warning raises after the result was read,
+        so the frame is lost; run the query again.
 
         Materialise-whole: a mid-query failover replays the result
         transparently. This accumulates batches in-library (via pyarrow)
