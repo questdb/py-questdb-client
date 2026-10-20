@@ -3609,8 +3609,8 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
     def test_a_label_reaches_an_index_level(self):
         """Every label the capsule path reads reaches an index level under
         the name the export gives it: a `df.attrs['questdb']` claim on a
-        column that became the index, a `schema_overrides` entry naming
-        the level, `'binary'` included, and a `pa.uuid()` index."""
+        column that became the index, and a `schema_overrides` entry
+        naming the level, `'binary'` included."""
         stamps = pd.array(
             pd.to_datetime(['2025-01-01', '2025-01-02']),
             dtype=pd.ArrowDtype(pyarrow.timestamp('us')))
@@ -3641,20 +3641,40 @@ class TestQwpOnlyRowTypes(unittest.TestCase):
                         indexed, table_name='blobs', at='ts',
                         schema_overrides={'k': 'binary'})['k'],
                     0x17)
-        if hasattr(pyarrow, 'uuid'):
-            uuids = pd.array(
-                pyarrow.ExtensionArray.from_storage(
-                    pyarrow.uuid(),
-                    pyarrow.array(
-                        [bytes(range(16))] * 2, pyarrow.binary(16))),
-                dtype=pd.ArrowDtype(pyarrow.uuid()))
-            self.assertEqual(
-                self._dataframe_column_types(
-                    pd.DataFrame(
-                        {'v': ints, 'ts': stamps},
-                        index=pd.Index(uuids, name='k')),
-                    table_name='blobs', at='ts')['k'],
-                0x0C)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    @unittest.skipIf(
+        pyarrow is None or not hasattr(pyarrow, 'uuid'),
+        'pyarrow with pa.uuid() not installed')
+    def test_a_pa_uuid_index_level_is_written_as_uuid(self):
+        """An index level of the `pa.uuid()` extension type is written as
+        UUID, like a data column of that type.
+
+        pandas 2 cannot export such a level to Arrow at all: its own
+        conversion raises `NotImplementedError` before the frame reaches
+        this client, so the test runs only where pandas can export it."""
+        stamps = pd.array(
+            pd.to_datetime(['2025-01-01', '2025-01-02']),
+            dtype=pd.ArrowDtype(pyarrow.timestamp('us')))
+        ints = pd.array([1, 2], dtype=pd.ArrowDtype(pyarrow.int64()))
+        uuids = pd.array(
+            pyarrow.ExtensionArray.from_storage(
+                pyarrow.uuid(),
+                pyarrow.array(
+                    [bytes(range(16))] * 2, pyarrow.binary(16))),
+            dtype=pd.ArrowDtype(pyarrow.uuid()))
+        frame = pd.DataFrame(
+            {'v': ints, 'ts': stamps}, index=pd.Index(uuids, name='k'))
+        try:
+            pyarrow.table(frame)
+        except NotImplementedError:
+            self.skipTest(
+                f'pandas {pd.__version__} cannot export an arrow.uuid '
+                'index level to Arrow')
+        self.assertEqual(
+            self._dataframe_column_types(
+                frame, table_name='blobs', at='ts')['k'],
+            0x0C)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
