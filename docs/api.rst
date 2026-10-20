@@ -39,6 +39,7 @@ questdb
 .. autoclass:: questdb.QueryResult
    :members:
    :undoc-members:
+   :special-members: __arrow_c_schema__, __arrow_c_stream__
    :show-inheritance:
 
 .. autoclass:: questdb.ConnectionEvent
@@ -112,6 +113,26 @@ questdb
    :show-inheritance:
 
 .. autoclass:: questdb.TimestampNanos
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.Char
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.DateMillis
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.Long256
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autoclass:: questdb.Geohash
    :members:
    :undoc-members:
    :show-inheritance:

@@ -59,8 +59,8 @@ class TestQwpUuid(unittest.TestCase):
                         self.assertIn(value.bytes[::-1], payload)
                         self.assertNotIn(value.bytes, payload)
 
-    def test_unmarked_fixed_size_binary_is_not_byte_swapped(self):
-        for width in (8, 16, 32):
+    def test_unmarked_fixed_size_binary_policy_and_byte_order(self):
+        for width in (8, 12, 16, 32):
             for manual in (False, True):
                 with self.subTest(width=width, manual=manual):
                     value = bytes(range(width))
@@ -69,6 +69,20 @@ class TestQwpUuid(unittest.TestCase):
                         'seq': [0, 1],
                         'b': pd.Series(array, dtype=pd.ArrowDtype(array.type)),
                     }) if manual else pa.table({'b': array}))
+                    # Width 8 is indistinguishable from exported polars
+                    # Object handles. Pandas also refuses unlabelled
+                    # widths 16/32, whose UUID/LONG256 metadata may have
+                    # been lost. Native Arrow retains its field metadata
+                    # and may send those unlabelled widths as BINARY.
+                    if width == 8 or (manual and width in (16, 32)):
+                        with self.assertRaises(qi.QuestDBError) as raised:
+                            self._capture(frame)
+                        expected_code = (
+                            qi.QuestDBErrorCode.ArrowUnsupportedColumnKind
+                            if width == 8 else qi.QuestDBErrorCode.BadDataFrame)
+                        self.assertEqual(raised.exception.code, expected_code)
+                        self.assertFalse(raised.exception.in_doubt)
+                        continue
                     payload = self._capture(frame)
                     self.assertIn(value, payload)
                     self.assertNotIn(value[::-1], payload)

@@ -3,6 +3,7 @@
 import sys
 sys.dont_write_bytecode = True
 import os
+import contextlib
 import datetime
 import importlib.util
 import random
@@ -13,6 +14,7 @@ import threading
 import time
 import unittest
 import uuid
+import warnings
 import pathlib
 import numpy as np
 import decimal
@@ -32,17 +34,85 @@ except ImportError:
     pd = None
     pyarrow = None
 
+# pyarrow-backed pandas frames take the Arrow path only from pandas 2.2,
+# which adds `DataFrame.__arrow_c_stream__`.
+PANDAS_HAS_ARROW_STREAM = (
+    pd is not None and hasattr(pd.DataFrame, '__arrow_c_stream__'))
+# pyarrow reads QuestDB DECIMAL(<=18) columns (decimal32/64) from 19, the
+# version that also adds `pa.decimal64`.
+PYARROW_READS_DECIMAL64 = (
+    pyarrow is not None and hasattr(pyarrow, 'decimal64'))
+
 
 import questdb._client as qi
 
 
-QUESTDB_VERSION = '9.4.3'
+# The released server the integration suite downloads. A CI leg pins a
+# different one through `QDB_VERSION`; `QDB_REPO_PATH` overrides both and
+# builds from a checkout instead.
+QUESTDB_VERSION = os.environ.get('QDB_VERSION') or '9.4.3'
+
+# Set by the CI legs whose job is to cover the QWP-only column types.
+# Where it is set, a server too old for them fails the run instead of
+# skipping it: a leg that silently covers nothing is indistinguishable
+# from one that passes.
+REQUIRE_QWP_ROW_TYPES = (
+    os.environ.get('TEST_QUESTDB_REQUIRE_QWP_ROW_TYPES') == '1')
 QUESTDB_PLAIN_INSTALL_PATH = None
 QUESTDB_AUTH_INSTALL_PATH = None
 FIRST_ARRAY_RELEASE = (8, 4, 0)
 FIRST_DECIMAL_RELEASE = (9, 2, 0)
+#: The first release that speaks QWP at all. It is a beta, and the
+#: integration suite runs against it so the protocol keeps working
+#: there; what this client supports is QuestDB 10 and newer. Tests gated
+#: on this one are those the beta serves.
 FIRST_QWP_WS_RELEASE = (9, 4, 3)
 FIRST_QWP_GAP_HALT_RELEASE = (9, 4, 4)
+#: The QWP-only column types are supported from QuestDB 10, the first
+#: production QWP implementation. 9.4.3 shipped QWP as a beta and the
+#: integration suite still runs against it, so `FIRST_QWP_WS_RELEASE`
+#: means "this server speaks QWP at all" and this one means "this
+#: server speaks the QWP we support".
+#:
+#: The beta accepts these types, so the two cannot be told apart by
+#: running the tests. Measured on 2026-08-24 against the released 9.4.3
+#: (commit 33fa1320) and 10.0.0 (commit d71e25a5): all fifteen tests in
+#: the three classes gated on this constant pass on both, including
+#: every NULL sentinel and GEOHASH precisions 1b to 60b. This is a
+#: support boundary rather than a capability one, so lowering it to see
+#: what breaks shows nothing breaking.
+FIRST_QWP_ROW_TYPES_RELEASE = (10, 0, 0)
+
+
+_POLARS_FALLBACK_WARNING = 'The polars Categorical fast path failed'
+
+
+@contextlib.contextmanager
+def _polars_fallback_warnings():
+    """Record the polars fast-path fallback warnings issued in the block."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        fallbacks = []
+        yield fallbacks
+    fallbacks.extend(
+        w for w in caught
+        if issubclass(w.category, RuntimeWarning)
+        and str(w.message).startswith(_POLARS_FALLBACK_WARNING))
+
+
+def _assert_long_list_equal(test, got, exp, what='values'):
+    """Compare two long lists and report the first wrong rows.
+
+    A plain ``assertEqual`` builds a ``difflib`` diff of both lists. For
+    long, mostly different lists, that diff runs for minutes."""
+    got = list(got)
+    test.assertEqual(
+        len(got), len(exp), f'{what}: got {len(got)} rows, want {len(exp)}')
+    bad = [i for i, (g, e) in enumerate(zip(got, exp)) if g != e]
+    test.assertEqual(
+        [(i, got[i], exp[i]) for i in bad[:5]], [],
+        f'{len(bad)} of {len(exp)} {what} are wrong; first (row, got, want)')
+
 
 def may_install_questdb():
     global QUESTDB_PLAIN_INSTALL_PATH
@@ -123,6 +193,28 @@ class TestWithDatabase(unittest.TestCase):
         if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
             self.skipTest(
                 'QWP/WebSocket integration tests require QuestDB 9.4.3+')
+
+    def _require_qwp_row_types(self):
+        """UUID, IPV4, BINARY, CHAR, DATE, LONG256 and GEOHASH columns
+        need a QWP sender on QuestDB 10 or newer, whichever API
+        produced them. The 9.4.3 beta accepts them; it is not a
+        configuration this client supports."""
+        self._require_qwp_ws()
+        if self.qdb_plain.version < FIRST_QWP_ROW_TYPES_RELEASE:
+            version = '.'.join(str(part) for part in self.qdb_plain.version)
+            if REQUIRE_QWP_ROW_TYPES:
+                self.fail(
+                    f'This run is supposed to cover the QWP-only column '
+                    f'types, but the server reports {version} and they '
+                    f'need '
+                    f'{".".join(str(p) for p in FIRST_QWP_ROW_TYPES_RELEASE)} '
+                    f'or newer. Point QDB_VERSION or QDB_REPO_PATH at a '
+                    f'server that has them, or clear '
+                    f'TEST_QUESTDB_REQUIRE_QWP_ROW_TYPES.')
+            self.skipTest(
+                f'QWP-only column types require QuestDB '
+                f'{".".join(str(p) for p in FIRST_QWP_ROW_TYPES_RELEASE)}'
+                f'+ (the first production QWP), server reports {version}')
 
     def _require_qwp_fuzz(self):
         self._require_qwp_ws()
@@ -2082,12 +2174,17 @@ class TestEgressWithDatabase(unittest.TestCase):
     def tearDownClass(cls):
         TestWithDatabase.tearDownClass.__func__(cls)
 
-    def _require_qwp_ws(self):
-        if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
-            self.skipTest(
-                'QWP/WebSocket integration tests require QuestDB 9.4.3+')
+    # Borrowed rather than restated, like `setUpClass` above. A copy
+    # of a version gate drifts from the one it copied, and the drift
+    # reads as a passing run.
+    _require_qwp_ws = TestWithDatabase._require_qwp_ws
+    _require_qwp_row_types = TestWithDatabase._require_qwp_row_types
 
     def setUp(self):
+        # Writes of the QWP-only column types live in
+        # `TestEgressQwpRowTypes`, whose `setUp` asks for the QuestDB 10
+        # those are supported on. This class holds the reads, which the
+        # QWP beta serves too.
         self._require_qwp_ws()
 
     def _conf(self):
@@ -2303,6 +2400,80 @@ class TestEgressWithDatabase(unittest.TestCase):
             self.assertEqual(row['vc'], 'varchar-value')
             self.assertEqual(row['st'], 'string-value')
             self.assertEqual(row['ch'], ord('C'))
+            # UUID storage is canonical RFC 4122 big-endian, so it equals
+            # `uuid.UUID.bytes`. pyarrow surfaces the cell raw or wrapped
+            # in a `uuid.UUID` depending on whether it has the `arrow.uuid`
+            # extension registered.
+            expect_uuid = uuid.UUID('11111111-2222-3333-4444-555555555555')
+            raw_uu = (row['uu'] if isinstance(row['uu'], bytes)
+                      else row['uu'].bytes)
+            self.assertEqual(raw_uu, expect_uuid.bytes)
+
+            # The pyarrow-free `to_pandas` decoder builds `uuid.UUID`
+            # objects from the same bytes; it has its own reader path, so
+            # check it agrees rather than assuming it does.
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                pdf = client.query(
+                    f'SELECT uu FROM {table_name}').to_pandas()
+            self.assertEqual(pdf['uu'][0], expect_uuid)
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_numpy_uuid_decode_across_rows_and_nulls(self):
+        """`_numpy_uuid_chunk` walks the column with raw pointer
+        arithmetic, a row stride and a byte swap of each half. One
+        non-null row exercises none of that: not the stride past row 0,
+        not the validity bitmap, not a batch boundary. Read the same
+        column through both decoders -- the pyarrow-free one and the
+        Arrow one, which share no code -- and require them to agree
+        across many rows, mixed nulls, and batch-at-a-time reads.
+        """
+        table_name = 't_uuid_rows_' + uuid.uuid4().hex[:8]
+        # Values that differ in every 64-bit half, so a stride or swap
+        # that is off by a row or a half shows up as a mismatch rather
+        # than as the same bytes read twice.
+        rows = 257
+        expected = [
+            None if i % 7 == 3
+            else uuid.UUID(
+                int=((i * 0x0123456789ABCDEF0FEDCBA987654321) % (1 << 128)))
+            for i in range(rows)]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} (ts TIMESTAMP, uu UUID) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            values = ', '.join(
+                "('2024-01-01T00:00:00Z', "
+                + ('null)' if value is None else f"'{value}')")
+                for value in expected)
+            self._exec(f'INSERT INTO {table_name} VALUES {values}')
+            self.qdb_plain.retry_check_table(table_name, min_rows=rows)
+
+            sql = f'SELECT uu FROM {table_name}'
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                native = list(client.query(sql).to_pandas()['uu'])
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                arrow = client.query(sql).to_arrow().column('uu').to_pylist()
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                batched = [
+                    value
+                    for batch in client.query(sql).iter_pandas()
+                    for value in batch['uu']]
+
+            def norm(value):
+                if value is None or value != value:
+                    return None
+                if isinstance(value, uuid.UUID):
+                    return value
+                return uuid.UUID(bytes=value)
+
+            self.assertEqual(len(native), rows)
+            self.assertEqual([norm(v) for v in native], expected)
+            self.assertEqual([norm(v) for v in arrow], expected)
+            self.assertEqual([norm(v) for v in batched], expected)
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -2333,7 +2504,7 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
-    def test_polars_from_arrow_consumes_capsule(self):
+    def test_polars_dataframe_consumes_capsule(self):
         """``QuestDB.query`` exposes ``__arrow_c_stream__`` directly off
         the Rust cursor, so polars can consume it without pyarrow being
         the import-time mediator. Pins that contract: the polars frame
@@ -2358,7 +2529,10 @@ class TestEgressWithDatabase(unittest.TestCase):
                 with client.query(
                         f'SELECT lg, vc FROM {table_name} ORDER BY lg DESC'
                         ) as result:
-                    df = pl.from_arrow(result)
+                    # The DataFrame constructor, not `pl.from_arrow`: on
+                    # polars >= 2.0 that returns a Series of structs for a
+                    # bare Arrow C stream.
+                    df = pl.DataFrame(result)
             self.assertEqual(df.shape, (2, 2))
             self.assertEqual(df['lg'].to_list(), [42, 7])
             self.assertEqual(df['vc'].to_list(), ['hello', 'world'])
@@ -2367,6 +2541,162 @@ class TestEgressWithDatabase(unittest.TestCase):
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
             except Exception:
                 pass
+
+    def _multi_batch_conf(self):
+        return self._conf() + 'max_batch_rows=1000;'
+
+    def _seed_multi_batch_symbols(self, n=10000):
+        """Create a table with a new SYMBOL value every 100 rows, and
+        return ``(sql, expected_symbols)``. Read through
+        ``_multi_batch_conf()``, no two 1000-row batches share a symbol,
+        so each batch carries its own compact SYMBOL dictionary. The
+        table is dropped at cleanup."""
+        import numpy as np
+        table_name = 't_egress_multi_sym_' + uuid.uuid4().hex[:8]
+
+        def drop():
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+        self.addCleanup(drop)
+        exp = [None if i % 11 == 0 else f'sym_{i // 100}' for i in range(n)]
+        self._exec(
+            f'CREATE TABLE {table_name} '
+            '(ts TIMESTAMP, sym SYMBOL, v LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        df = pd.DataFrame({
+            'ts': pd.to_datetime(np.arange(n), unit='s', utc=True),
+            'sym': pd.Series(exp, dtype='string[pyarrow]'),
+            'v': np.arange(n, dtype=np.int64),
+        })
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            client.dataframe(
+                df, table_name=table_name, at='ts', symbols=['sym'])
+        self.qdb_plain.retry_check_table(table_name, min_rows=n)
+        sql = f'SELECT sym, v FROM {table_name} ORDER BY v'
+        # The data must span several batches, and a later batch must hold
+        # symbols that the first batch's dictionary lacks.
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            batch_syms = [
+                set(batch.column('sym').to_pylist()) - {None}
+                for batch in client.query(sql).iter_arrow()]
+        self.assertGreater(len(batch_syms), 1)
+        self.assertTrue(any(s - batch_syms[0] for s in batch_syms[1:]))
+        return sql, exp
+
+    def test_polars_dataframe_multi_batch_symbol(self):
+        """``polars.DataFrame(result)`` reads every batch of a multi-batch
+        result. Each batch carries its own compact SYMBOL dictionary and the
+        batches hold different symbols, so a consumer that keeps only the
+        first batch, or decodes every batch with the first batch's
+        dictionary, fails here. polars before 1.32 does both."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            with client.query(sql) as result:
+                out = pl.DataFrame(result)
+        self.assertEqual(out.shape, (n, 2))
+        _assert_long_list_equal(
+            self, out['v'].to_list(), list(range(n)), 'v values')
+        _assert_long_list_equal(
+            self, out['sym'].cast(pl.Utf8).to_list(), exp, 'SYMBOL values')
+
+    def test_duckdb_reads_multi_batch_symbol(self):
+        """``duckdb.from_arrow(result)`` and
+        ``duckdb.from_arrow(result.__arrow_c_stream__())`` read every
+        batch and decode each batch's compact SYMBOL dictionary. duckdb
+        1.5 reads the schema of ``result`` through ``__arrow_c_schema__``,
+        so it opens the single-use stream only once. A projection that
+        drops a column fails on duckdb 1.1, the reason for the 1.2
+        floor."""
+        try:
+            import duckdb
+        except ImportError:
+            self.skipTest('duckdb not installed')
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        for form in ('object', 'capsule'):
+            with self.subTest(form=form):
+                with qi.QuestDB.from_conf(
+                        self._multi_batch_conf()) as client:
+                    with client.query(sql) as result:
+                        source = (result if form == 'object'
+                                  else result.__arrow_c_stream__())
+                        # duckdb reads at fetch time, so fetch before
+                        # the result is closed.
+                        rows = duckdb.from_arrow(
+                            source).order('v').fetchall()
+                _assert_long_list_equal(
+                    self, [row[1] for row in rows], list(range(n)),
+                    'v values')
+                _assert_long_list_equal(
+                    self, [row[0] for row in rows], exp, 'SYMBOL values')
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            with client.query(sql) as result:
+                rows = duckdb.from_arrow(result).project('v').order(
+                    'v').fetchall()
+        _assert_long_list_equal(
+            self, [row[0] for row in rows], list(range(n)),
+            'projected v values')
+
+    _DUCKDB_WITHOUT_PYARROW_SCRIPT = """
+import json
+import sys
+
+
+class _BlockPyarrow:
+    def find_spec(self, name, path=None, target=None):
+        if name == 'pyarrow' or name.startswith('pyarrow.'):
+            raise ImportError('pyarrow blocked for this test')
+
+
+sys.meta_path.insert(0, _BlockPyarrow())
+import duckdb
+import questdb._client as qi
+
+conf, sql, form = sys.argv[1], sys.argv[2], sys.argv[3]
+with qi.QuestDB.from_conf(conf) as client:
+    with client.query(sql) as result:
+        source = result if form == 'object' else result.__arrow_c_stream__()
+        rows = duckdb.from_arrow(source).order('v').fetchall()
+print(json.dumps({'rows': rows}))
+"""
+
+    def test_duckdb_reads_without_pyarrow(self):
+        """The docs say that duckdb reads a ``QueryResult`` without
+        pyarrow. Run the duckdb read, with ``result`` and with the
+        capsule, in a subprocess that blocks the pyarrow import."""
+        import json
+        import subprocess
+        if importlib.util.find_spec('duckdb') is None:
+            self.skipTest('duckdb not installed')
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [str(pathlib.Path(qi.__file__).parent.parent)]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        for form in ('object', 'capsule'):
+            with self.subTest(form=form):
+                proc = subprocess.run(
+                    [sys.executable, '-c',
+                     self._DUCKDB_WITHOUT_PYARROW_SCRIPT,
+                     self._multi_batch_conf(), sql, form],
+                    capture_output=True, text=True, env=env, timeout=120)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                out = json.loads(proc.stdout.strip().splitlines()[-1])
+                rows = out['rows']
+                _assert_long_list_equal(
+                    self, [row[1] for row in rows], list(range(n)),
+                    'v values')
+                _assert_long_list_equal(
+                    self, [row[0] for row in rows], exp, 'SYMBOL values')
 
     def test_to_polars_and_iter_polars_symbol_categorical(self):
         """SYMBOL egresses as a polars ``Categorical`` (codes + dict via the
@@ -2396,20 +2726,501 @@ class TestEgressWithDatabase(unittest.TestCase):
                     df, table_name=table_name, at='ts', symbols=['sym'])
             self.qdb_plain.retry_check_table(table_name, min_rows=n)
             sql = f'SELECT sym, v FROM {table_name} ORDER BY v'
+            # Both reads must use the Categories path. A fallback gives
+            # the same values, so only its warning shows it.
             with qi.QuestDB.from_conf(self._conf()) as client:
-                full = client.query(sql).to_polars()
+                with _polars_fallback_warnings() as caught:
+                    full = client.query(sql).to_polars()
+            self.assertEqual(caught, [])
             self.assertEqual(full.shape, (n, 2))
             self.assertIsInstance(full.schema['sym'], pl.Categorical)
             self.assertGreater(full['sym'].null_count(), 0)
-            self.assertEqual(full['v'].to_list(), list(range(n)))
-            self.assertEqual(full['sym'].cast(pl.Utf8).to_list(), exp)
+            _assert_long_list_equal(
+                self, full['v'].to_list(), list(range(n)), 'v values')
+            _assert_long_list_equal(
+                self, full['sym'].cast(pl.Utf8).to_list(), exp,
+                'SYMBOL values')
             with qi.QuestDB.from_conf(self._conf()) as client:
-                frames = list(client.query(sql).iter_polars())
+                with _polars_fallback_warnings() as caught:
+                    frames = list(client.query(sql).iter_polars())
+            self.assertEqual(caught, [])
             self.assertGreater(len(frames), 1)
             stitched = pl.concat(frames, how='vertical')
             self.assertIsInstance(stitched.schema['sym'], pl.Categorical)
-            self.assertEqual(stitched['v'].to_list(), list(range(n)))
-            self.assertEqual(stitched['sym'].cast(pl.Utf8).to_list(), exp)
+            _assert_long_list_equal(
+                self, stitched['v'].to_list(), list(range(n)), 'v values')
+            _assert_long_list_equal(
+                self, stitched['sym'].cast(pl.Utf8).to_list(), exp,
+                'SYMBOL values')
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_to_polars_and_iter_polars_fallback_warns(self):
+        """If the polars ``Categories`` path fails, ``to_polars`` and
+        ``iter_polars`` build each frame with ``polars.from_arrow``. The
+        values stay correct. ``to_polars`` issues one ``RuntimeWarning``;
+        ``iter_polars`` issues one and falls back for every frame."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        from unittest import mock
+
+        def broken_random(*args, **kwargs):
+            raise RuntimeError('broken Categories')
+
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        # Only the fast path calls `Categories.random`. Do not replace
+        # `pl.Categories`: `pl.from_arrow` uses it too.
+        with mock.patch.object(pl.Categories, 'random', broken_random):
+            with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+                with _polars_fallback_warnings() as caught:
+                    full = client.query(sql).to_polars()
+            self.assertEqual(len(caught), 1)
+            self.assertIn('broken Categories', str(caught[0].message))
+            with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+                with _polars_fallback_warnings() as caught:
+                    frames = list(client.query(sql).iter_polars())
+            self.assertGreater(len(frames), 1)
+            # The iterator warns once and keeps the fallback.
+            self.assertEqual(len(caught), 1)
+        for out in (full, pl.concat(frames, how='vertical')):
+            _assert_long_list_equal(
+                self, out['v'].to_list(), list(range(n)), 'v values')
+            _assert_long_list_equal(
+                self, out['sym'].cast(pl.Utf8).to_list(), exp,
+                'SYMBOL values')
+
+    def test_iter_polars_fallback_mid_stream_frames_concat(self):
+        """If the ``Categories`` path fails after ``iter_polars`` yielded
+        frames, the remaining frames come from ``polars.from_arrow``, cast
+        to the same ``Categories``, so ``polars.concat`` still stitches.
+        One warning."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        import contextlib
+        from unittest import mock
+
+        armed = [False]
+
+        def fail_when_armed(orig):
+            # The registry casts codes to `Categorical(cats)` through
+            # `Series.cast` (`Series.cat.to` on polars >= 1.43). The
+            # fallback casts with an expression, which stays untouched.
+            def wrapper(series, dtype, *args, **kwargs):
+                if armed[0] and isinstance(dtype, pl.Categorical):
+                    raise RuntimeError('broken Categories')
+                return orig(series, dtype, *args, **kwargs)
+            return wrapper
+
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                pl.Series, 'cast', fail_when_armed(pl.Series.cast)))
+            cat_ns = type(pl.Series([], dtype=pl.UInt32).cat)
+            if hasattr(cat_ns, 'to'):
+                stack.enter_context(mock.patch.object(
+                    cat_ns, 'to', fail_when_armed(cat_ns.to)))
+            with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+                frames = client.query(sql).iter_polars()
+                first = next(frames)
+                armed[0] = True
+                with _polars_fallback_warnings() as caught:
+                    rest = list(frames)
+        self.assertGreater(len(rest), 0)
+        self.assertEqual(len(caught), 1)
+        self.assertIn('broken Categories', str(caught[0].message))
+        for frame in rest:
+            self.assertEqual(frame.schema['sym'], first.schema['sym'])
+        out = pl.concat([first] + rest, how='vertical')
+        _assert_long_list_equal(
+            self, out['v'].to_list(), list(range(n)), 'v values')
+        _assert_long_list_equal(
+            self, out['sym'].cast(pl.Utf8).to_list(), exp, 'SYMBOL values')
+
+    def test_iter_polars_fallback_survives_broken_categorical(self):
+        """The fallback casts to the registries' ``Categories`` with
+        ``pl.Categorical(cats)``. If that constructor itself breaks, the
+        fallback must still give every frame with the right values, from
+        the first batch and from the middle of the stream."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        import warnings
+        orig = pl.Categorical
+        armed = [False]
+
+        def broken_categorical(*args, **kwargs):
+            # Break only the client's own `Categories`: `pl.from_arrow`
+            # builds its Categoricals through this constructor too. (A
+            # subclass would not do: polars rejects it as a dtype, which
+            # breaks the fast path before the hook arms.)
+            cats = args[0] if args else kwargs.get('categories')
+            if (armed[0] and isinstance(cats, pl.Categories)
+                    and cats.namespace() == 'questdb_symbol'):
+                raise RuntimeError('broken Categorical')
+            return orig(*args, **kwargs)
+
+        self.addCleanup(setattr, pl, 'Categorical', orig)
+        pl.Categorical = broken_categorical
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        for mid_stream in (False, True):
+            with self.subTest(mid_stream=mid_stream):
+                armed[0] = not mid_stream
+                with qi.QuestDB.from_conf(
+                        self._multi_batch_conf()) as client:
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter('always')
+                        frames = client.query(sql).iter_polars()
+                        out = [next(frames)]
+                        armed[0] = True
+                        out.extend(frames)
+                # polars builds a `Categorical` through the hook when it
+                # reports dtypes: disarm before inspecting the frames.
+                armed[0] = False
+                self.assertGreater(len(out), 1)
+                # Mid-stream, the cast to the first frame's `Categories`
+                # fails too: the one warning says that `pl.concat` with
+                # the frames before fails, and the dtypes differ.
+                runtime = [str(w.message) for w in caught
+                           if issubclass(w.category, RuntimeWarning)]
+                self.assertEqual(len(runtime), 1, runtime)
+                self.assertEqual(
+                    '`polars.concat` with the frames before fails'
+                    in runtime[0], mid_stream, runtime)
+                if mid_stream:
+                    self.assertNotEqual(
+                        out[1].schema['sym'], out[0].schema['sym'])
+                _assert_long_list_equal(
+                    self, [v for f in out for v in f['v'].to_list()],
+                    list(range(n)), 'v values')
+                _assert_long_list_equal(
+                    self,
+                    [s for f in out
+                     for s in f['sym'].cast(pl.Utf8).to_list()],
+                    exp, 'SYMBOL values')
+
+        # Under `-W error` the warning raises out of `next()`. The frame it
+        # belongs to is returned by the next call, so no batch is lost.
+        armed[0] = False
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', RuntimeWarning)
+                frames = client.query(sql).iter_polars()
+                out = [next(frames)]
+                armed[0] = True
+                raised = 0
+                while True:
+                    try:
+                        out.append(next(frames))
+                    except RuntimeWarning:
+                        raised += 1
+                    except StopIteration:
+                        break
+        armed[0] = False
+        self.assertEqual(raised, 1)
+        _assert_long_list_equal(
+            self, [v for f in out for v in f['v'].to_list()],
+            list(range(n)), 'v values')
+
+    def test_to_polars_multi_batch_symbol_long_varchar(self):
+        """``to_polars`` over a multi-batch result keeps every value. The
+        SYMBOL column goes through the ``Categories`` registry and the
+        VARCHAR column through the ``string_view`` cast, each across
+        several wire batches."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        rows = 300
+        table_name = 't_egress_polars_batches_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, sym SYMBOL, lg LONG, vc VARCHAR) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f'INSERT INTO {table_name} SELECT '
+                "dateadd('s', (x - 1)::int, "
+                "'2024-01-01T00:00:00.000000Z'::timestamp), "
+                "concat('sym_', x % 7), x, concat('v_', x) "
+                f'FROM long_sequence({rows})')
+            self.qdb_plain.retry_check_table(table_name, min_rows=rows)
+            sql = f'SELECT sym, lg, vc FROM {table_name} ORDER BY ts'
+            conf = self._conf() + 'max_batch_rows=64;'
+            with qi.QuestDB.from_conf(conf) as client:
+                batches = list(client.query(sql).iter_arrow())
+                df = client.query(sql).to_polars()
+            self.assertGreater(len(batches), 1)
+            self.assertEqual(df.shape, (rows, 3))
+            self.assertIsInstance(df.schema['sym'], pl.Categorical)
+            self.assertEqual(df['lg'].to_list(), list(range(1, rows + 1)))
+            self.assertEqual(
+                df['sym'].cast(pl.Utf8).to_list(),
+                [f'sym_{x % 7}' for x in range(1, rows + 1)])
+            self.assertEqual(
+                df['vc'].to_list(), [f'v_{x}' for x in range(1, rows + 1)])
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_reentering_the_client_from_a_types_mapper(self):
+        """A ``types_mapper`` runs the caller's code once per column per
+        batch while the reader is still streaming, so it is a way back
+        into this client that nothing else reaches.
+
+        `QueryResult` sits on the re-entrancy grid's allow-list because
+        the offline fixtures serve no read endpoint, and this is where
+        that excuse is redeemed. It holds what the grid holds: the
+        re-entered call answers -- cleanly or by refusing -- and the
+        handle works afterwards. A hang or a dead interpreter is what
+        this is watching for.
+
+        Closing the result from inside its own read is the case row 15
+        of `native_captures.md` records. The cursor handle nulls its
+        pointer under the lock that every fetch re-reads it under, so
+        the read that follows is refused rather than reading freed
+        memory.
+        """
+        rows = 300
+        table_name = 't_mapper_reentry_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f'INSERT INTO {table_name} SELECT '
+                "dateadd('s', (x - 1)::int, "
+                "'2024-01-01T00:00:00.000000Z'::timestamp), x "
+                f'FROM long_sequence({rows})')
+            self.qdb_plain.retry_check_table(table_name, min_rows=rows)
+
+            sql = f'SELECT ts, lg FROM {table_name} ORDER BY ts'
+            # Small batches, so the mapper runs while there is still
+            # more of the result to come.
+            conf = self._conf() + 'max_batch_rows=64;'
+
+            cases = (
+                ('a second query',
+                 lambda client, result: client.query('SELECT 1').to_pandas(),
+                 True),
+                ('reap_idle',
+                 lambda client, result: client.reap_idle(),
+                 True),
+                ('closing the result being read',
+                 lambda client, result: result.close(),
+                 False),
+                ('cancelling the result being read',
+                 lambda client, result: result.cancel(),
+                 False),
+            )
+
+            for label, reenter, read_completes in cases:
+                with self.subTest(reentered=label):
+                    seen = []
+                    held = []
+
+                    with qi.QuestDB.from_conf(conf) as client:
+                        def mapper(arrow_type):
+                            if not seen:
+                                try:
+                                    reenter(client, held[0])
+                                except qi.QuestDBError as exc:
+                                    seen.append(('refused', str(exc)))
+                                else:
+                                    seen.append(('clean', ''))
+                            return None
+
+                        total = 0
+                        batches = 0
+                        result = client.query(sql)
+                        held.append(result)
+                        try:
+                            for batch in result.iter_pandas(
+                                    types_mapper=mapper):
+                                total += len(batch)
+                                batches += 1
+                        except qi.QuestDBError:
+                            # Pulling the cursor out from under the read
+                            # ends it. Refusing is the good answer.
+                            self.assertFalse(read_completes, label)
+
+                        # The handle still works once the read is over.
+                        self.assertEqual(
+                            len(client.query('SELECT 1').to_pandas()), 1)
+
+                    self.assertEqual(len(seen), 1, 'the mapper never ran')
+                    self.assertIn(seen[0][0], ('refused', 'clean'), seen)
+                    if read_completes:
+                        self.assertGreater(
+                            batches, 1, 'the read was not streamed')
+                        self.assertEqual(total, rows)
+                    else:
+                        self.assertLessEqual(total, rows)
+        finally:
+            self._exec(f'DROP TABLE IF EXISTS {table_name}')
+
+    def test_a_batch_disagreeing_with_the_pinned_schema_is_refused(self):
+        """The NumPy backend decodes every batch after the first against
+        the first one's columns, and the claim it hands back names them
+        too. A batch that disagrees would be decoded with the wrong
+        dtype and described by a claim that does not match its own
+        values.
+
+        A result whose schema really changes mid-stream cannot be
+        arranged from a test, so the pin is perturbed instead: the
+        check is a comparison, and a good batch against a doctored pin
+        exercises it exactly as a doctored batch against a good pin
+        would. Each of the four things it compares gets its own case,
+        because a check that fires on the count alone would pass a test
+        that only ever moved the count -- and the byte widths agree for
+        any same-width type swap, which is what left this open.
+        """
+        rows = 256
+        table_name = 't_egress_drift_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, ip IPV4, gh GEOHASH(4c), lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f'INSERT INTO {table_name} SELECT '
+                "dateadd('s', (x - 1)::int, "
+                "'2024-01-01T00:00:00.000000Z'::timestamp), "
+                "'1.2.3.4'::ipv4, #u33d, x "
+                f'FROM long_sequence({rows})')
+            self.qdb_plain.retry_check_table(table_name, min_rows=rows)
+
+            sql = f'SELECT ip, gh, lg FROM {table_name}'
+            conf = self._conf() + 'max_batch_rows=64;'
+
+            with qi.QuestDB.from_conf(conf) as client:
+                probe = client.query(sql).iter_pandas()
+                next(probe)
+                meta, names = qi._debug_numpy_pinned_meta(probe)
+            col_names, kinds, scales, precision, has_symbol = meta
+            gh_index = list(col_names).index('gh')
+
+            def dropped_column():
+                return ((col_names[:-1], kinds[:-1], scales[:-1],
+                         precision[:-1], has_symbol), names[:-1])
+
+            def renamed_column():
+                doctored = list(names)
+                doctored[0] = b'not_' + doctored[0]
+                return (meta, doctored)
+
+            def changed_kind():
+                doctored = list(kinds)
+                # Any other kind will do; the point is that it differs.
+                doctored[0] = kinds[0] + 1
+                return ((col_names, doctored, scales, precision,
+                         has_symbol), names)
+
+            def changed_geohash_precision():
+                doctored = list(precision)
+                doctored[gh_index] = (precision[gh_index] or 20) + 5
+                return ((col_names, kinds, scales, doctored,
+                         has_symbol), names)
+
+            cases = {
+                'a column dropped': dropped_column,
+                'a column renamed': renamed_column,
+                'a column retyped': changed_kind,
+                'a geohash precision changed': changed_geohash_precision,
+            }
+            for label, build in cases.items():
+                with self.subTest(drift=label):
+                    doctored_meta, doctored_names = build()
+                    with qi.QuestDB.from_conf(conf) as client:
+                        stream = client.query(sql).iter_pandas()
+                        qi._debug_numpy_force_pin(
+                            stream, tuple(doctored_meta),
+                            list(doctored_names))
+                        with self.assertRaises(qi.QuestDBError) as caught:
+                            next(stream)
+                    self.assertEqual(
+                        caught.exception.code,
+                        qi.QuestDBErrorCode.SchemaDrift,
+                        f'{label}: wrong error code')
+                    self.assertIn(
+                        'schema changed between batches',
+                        str(caught.exception))
+
+            # A pin that agrees is not refused -- otherwise the four
+            # cases above would pass against a check that always fires.
+            with qi.QuestDB.from_conf(conf) as client:
+                stream = client.query(sql).iter_pandas()
+                qi._debug_numpy_force_pin(stream, meta, list(names))
+                first = next(stream)
+            self.assertEqual(len(first.columns), len(col_names))
+        finally:
+            self._exec(f'DROP TABLE IF EXISTS {table_name}')
+
+    def test_iter_pandas_shares_one_round_trip_claim(self):
+        """Every batch of a streaming read carries the same claim
+        object. One schema covers the whole result, so building the
+        claim per batch re-walked the schema and re-froze one entry per
+        column every time -- 1.2 ms a batch at 1024 columns on the
+        pyarrow-backed variant, on the path a large result takes.
+        Handing every batch the same claim is sound for the reason
+        pandas can share one between copies of a frame: the claim
+        declines to be copied and cannot be edited.
+        """
+        rows = 1000
+        table_name = 't_egress_claim_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, ip IPV4, gh GEOHASH(4c), lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            # The rows are generated server-side. `_exec` carries the
+            # statement in the query string of a GET, and a VALUES list
+            # this long makes a URL the server rejects as too long.
+            self._exec(
+                f'INSERT INTO {table_name} SELECT '
+                "dateadd('s', (x - 1)::int, "
+                "'2024-01-01T00:00:00.000000Z'::timestamp), "
+                "'1.2.3.4'::ipv4, #u33d, x "
+                f'FROM long_sequence({rows})')
+            self.qdb_plain.retry_check_table(table_name, min_rows=rows)
+
+            sql = f'SELECT ip, gh, lg FROM {table_name}'
+            # Small batches so the stream really has several of them.
+            conf = self._conf() + 'max_batch_rows=128;'
+            for backend in (None, 'pyarrow', 'numpy_nullable'):
+                kwargs = {} if backend is None else {'dtype_backend': backend}
+                with self.subTest(dtype_backend=backend):
+                    with qi.QuestDB.from_conf(conf) as client:
+                        claims = [
+                            batch.attrs['questdb'] for batch
+                            in client.query(sql).iter_pandas(**kwargs)]
+                    self.assertGreater(len(claims), 1)
+                    for claim in claims[1:]:
+                        self.assertIs(claim, claims[0])
+
+                    columns = claims[0]['columns']
+                    self.assertEqual(columns['ip']['kind'], 'ipv4')
+                    self.assertEqual(columns['gh']['kind'], 'geohash')
+                    self.assertEqual(columns['gh']['precision_bits'], 20)
+                    self.assertEqual(columns['lg']['kind'], 'long')
+
+                    # The whole-result read says the same thing.
+                    with qi.QuestDB.from_conf(conf) as client:
+                        whole = client.query(sql).to_pandas(**kwargs)
+                    self.assertEqual(whole.attrs['questdb'], claims[0])
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -2430,8 +3241,8 @@ class TestEgressWithDatabase(unittest.TestCase):
     def test_query_result_single_use(self):
         """A ``QueryResult`` is single-use: a second materialisation, or
         any materialisation after ``close()``, raises ``InvalidApiCall``.
-        Also pins the ``__arrow_c_stream__`` ``requested_schema``
-        rejection."""
+        Also checks that ``__arrow_c_stream__`` ignores
+        ``requested_schema``, so that pyarrow casts the result."""
         table_name = 't_egress_single_' + uuid.uuid4().hex[:8]
         try:
             self._make_table(table_name, 1)
@@ -2449,10 +3260,24 @@ class TestEgressWithDatabase(unittest.TestCase):
                 with self.assertRaises(qi.QuestDBError):
                     closed.to_pandas()
 
+                # The spec lets a producer ignore `requested_schema`.
+                # Ignoring it still takes the stream.
                 stream = client.query(sql)
-                with self.assertRaises(NotImplementedError):
-                    stream.__arrow_c_stream__(requested_schema=object())
+                stream.__arrow_c_stream__(requested_schema=object())
+                with self.assertRaises(qi.QuestDBError) as cm:
+                    stream.__arrow_c_stream__()
+                self.assertEqual(
+                    cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
                 stream.close()
+
+                # pyarrow passes `schema` as `requested_schema`, gets the
+                # native schema back and casts it.
+                import pyarrow as pa
+                cast = pa.table(
+                    client.query(sql),
+                    schema=pa.schema([('lg', pa.float64())]))
+                self.assertEqual(cast.schema.field('lg').type, pa.float64())
+                self.assertEqual(cast.column('lg').to_pylist(), [0.0])
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -2531,6 +3356,18 @@ class TestEgressWithDatabase(unittest.TestCase):
                     client.query(
                         f'SELECT count() AS n FROM {table_name} '
                         'WHERE lg = $1', [object()])
+                # `uuid.UUID.bytes` is a property, so a subclass can
+                # hand back a buffer shorter than the 16 bytes the bind
+                # reads. Caught here rather than read off the end.
+                class ShortUuid(uuid.UUID):
+                    @property
+                    def bytes(self):
+                        return b'\x01'
+
+                with self.assertRaisesRegex(ValueError, r'expected 16'):
+                    client.query(
+                        f'SELECT count() AS n FROM {table_name} '
+                        'WHERE u = $1', [ShortUuid(int=0)])
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -2935,53 +3772,11 @@ class TestEgressWithDatabase(unittest.TestCase):
                 except Exception:
                     pass
 
-    def test_numpy_egress_round_trip_overrides(self):
-        """ipv4 / char / geohash round-trip through the native numpy path
-        driven by df.attrs metadata (no pyarrow). The destination column
-        types are verified by re-querying and checking the egress metadata
-        reports the same kinds.
-        """
-        src = 't_rto_src_' + uuid.uuid4().hex[:8]
-        dst = 't_rto_dst_' + uuid.uuid4().hex[:8]
-        cols = 'ts, ip, gh, c'
-        try:
-            self._exec(
-                f'CREATE TABLE {src} '
-                '(ts TIMESTAMP, ip IPV4, gh GEOHASH(4c), c CHAR) '
-                'TIMESTAMP(ts) PARTITION BY DAY WAL')
-            self._exec(
-                f"INSERT INTO {src} VALUES "
-                f"('2024-01-01T00:00:00Z', '1.2.3.4', #u33d, 'A'), "
-                f"('2024-01-01T00:00:01Z', '255.0.0.1', #u33e, 'B')")
-            self.qdb_plain.retry_check_table(src, min_rows=2)
-
-            with qi.QuestDB.from_conf(self._conf()) as client:
-                df = client.query(
-                    f'SELECT {cols} FROM {src} ORDER BY ts').to_pandas()
-            meta = df.attrs['questdb']['columns']
-            self.assertEqual(meta['ip']['kind'], 'ipv4')
-            self.assertEqual(meta['c']['kind'], 'char')
-            self.assertEqual(meta['gh']['kind'], 'geohash')
-            self.assertEqual(meta['gh']['precision_bits'], 20)
-
-            with qi.QuestDB.from_conf(self._conf()) as client:
-                client.dataframe(df, table_name=dst, at='ts')
-            self.qdb_plain.retry_check_table(dst, min_rows=2)
-
-            with qi.QuestDB.from_conf(self._conf()) as client:
-                back = client.query(
-                    f'SELECT ip, gh, c FROM {dst}').to_pandas()
-            bmeta = back.attrs['questdb']['columns']
-            self.assertEqual(bmeta['ip']['kind'], 'ipv4')
-            self.assertEqual(bmeta['c']['kind'], 'char')
-            self.assertEqual(bmeta['gh']['kind'], 'geohash')
-            self.assertEqual(bmeta['gh']['precision_bits'], 20)
-        finally:
-            for t in (src, dst):
-                try:
-                    self._exec(f'DROP TABLE IF EXISTS {t}')
-                except Exception:
-                    pass
+    def _column_type(self, table_name, column):
+        return dict(
+            (row[0], row[1]) for row in
+            self.qdb_plain.http_sql_query(
+                f'SHOW COLUMNS FROM {table_name}')['dataset'])[column]
 
     def test_null_round_trip_per_dtype_backend(self):
         """Pin the null contract across the three dtype_backend variants.
@@ -3167,6 +3962,547 @@ class TestEgressWithDatabase(unittest.TestCase):
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
             except Exception:
                 pass
+
+
+
+
+class TestEgressQwpRowTypes(unittest.TestCase):
+    """Round trips that put a QWP-only column type back on the wire.
+
+    Membership in this class is the version gate. `setUp` asks for
+    `FIRST_QWP_ROW_TYPES_RELEASE`, so a test written here is covered
+    whether or not whoever wrote it thought about the server version --
+    which is the half a per-test call leaves to be remembered, and the
+    half that kept being forgotten.
+
+    The gate is what this client supports, not what a server happens to
+    accept: the QWP beta in 9.4.3 takes these types too, so a run
+    against it proves nothing about the implementation this client is
+    written for. On a leg that sets
+    `TEST_QUESTDB_REQUIRE_QWP_ROW_TYPES`, the skip becomes a failure, so
+    a run that covers none of this cannot look like one that passed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        TestWithDatabase.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        TestWithDatabase.tearDownClass.__func__(cls)
+
+    # Borrowed rather than restated, like `setUpClass` above.
+    _require_qwp_ws = TestWithDatabase._require_qwp_ws
+    _require_qwp_row_types = TestWithDatabase._require_qwp_row_types
+    _conf = TestEgressWithDatabase._conf
+    _exec = TestEgressWithDatabase._exec
+    _column_type = TestEgressWithDatabase._column_type
+
+    def setUp(self):
+        # `_require_qwp_row_types` asks for QWP/WebSocket first.
+        self._require_qwp_row_types()
+
+    def _run_example(self, file_name, table_name):
+        """Run one of the `examples/` scripts against this fixture.
+
+        Loaded and called rather than copied, so the test fails when the
+        example does. An example that only lives in the docs is an
+        example that stops working quietly.
+        """
+        spec = importlib.util.spec_from_file_location(
+            f'questdb_example_{file_name}',
+            PROJ_ROOT / 'examples' / f'{file_name}.py')
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.example(
+            host=self.qdb_plain.host,
+            port=self.qdb_plain.http_server_port,
+            table_name=table_name)
+
+    def test_qwp_column_types_example(self):
+        """`examples/qwp_column_types.py` writes all seven QWP-only
+        types through `row()` and lands them as those types."""
+        table_name = 'ex_row_types_' + uuid.uuid4().hex[:8]
+        try:
+            self._run_example('qwp_column_types', table_name)
+            self.qdb_plain.retry_check_table(table_name, min_rows=1)
+            self.assertEqual(self._column_type(table_name, 'device_id'), 'UUID')
+            self.assertEqual(self._column_type(table_name, 'address'), 'IPv4')
+            self.assertEqual(self._column_type(table_name, 'payload'), 'BINARY')
+            self.assertEqual(self._column_type(table_name, 'grade'), 'CHAR')
+            self.assertEqual(self._column_type(table_name, 'last_seen'), 'DATE')
+            self.assertEqual(self._column_type(table_name, 'checksum'), 'LONG256')
+            self.assertEqual(
+                self._column_type(table_name, 'location'), 'GEOHASH(5c)')
+        finally:
+            self._exec(f'DROP TABLE IF EXISTS {table_name}')
+
+    def test_qwp_column_types_dataframe_example(self):
+        """`examples/qwp_column_types_dataframe.py` writes the same
+        types from a frame and then writes a read-back of that frame
+        out again, which is the round trip the claim exists for. Both
+        writes land, so the table holds four rows."""
+        if pd is None:
+            self.skipTest('pandas not installed')
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        table_name = 'ex_row_types_df_' + uuid.uuid4().hex[:8]
+        try:
+            self._run_example('qwp_column_types_dataframe', table_name)
+            self.qdb_plain.retry_check_table(table_name, min_rows=4)
+            self.assertEqual(self._column_type(table_name, 'device_id'), 'UUID')
+            self.assertEqual(self._column_type(table_name, 'address'), 'IPv4')
+            self.assertEqual(self._column_type(table_name, 'grade'), 'CHAR')
+            self.assertEqual(self._column_type(table_name, 'last_seen'), 'DATE')
+            self.assertEqual(self._column_type(table_name, 'checksum'), 'LONG256')
+            self.assertEqual(
+                self._column_type(table_name, 'location'), 'GEOHASH(5c)')
+        finally:
+            self._exec(f'DROP TABLE IF EXISTS {table_name}')
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_types_mapper_keeps_the_claim_and_the_dtype_decides(self):
+        """A custom ``types_mapper`` gets the same
+        ``df.attrs['questdb']`` claim the built-in backends get, and
+        whether the claim can be applied depends on the dtype the mapper
+        chose.
+
+        The docstring promises exactly that and nothing tested it. A
+        mapper that leaves the claimed columns Arrow-backed round-trips
+        the types; one that maps a claimed column to a float dtype
+        leaves the claim unread and the column lands as that dtype
+        implies.
+        """
+        import pyarrow as pa
+        src = 't_mapper_src_' + uuid.uuid4().hex[:8]
+        made = []
+        try:
+            self._exec(
+                f'CREATE TABLE {src} (ts TIMESTAMP, ip IPV4, lg LONG) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {src} VALUES "
+                "('2024-01-01T00:00:00Z', '1.2.3.4', 7)")
+            self.qdb_plain.retry_check_table(src, min_rows=1)
+            sql = f'SELECT ts, ip, lg FROM {src}'
+
+            # A mapper that keeps every column Arrow-backed: the claim
+            # applies and IPV4 comes back as IPV4.
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                kept = client.query(sql).to_pandas(
+                    types_mapper=pd.ArrowDtype)
+            self.assertEqual(
+                kept.attrs['questdb']['columns']['ip']['kind'], 'ipv4')
+            dst = 't_mapper_kept_' + uuid.uuid4().hex[:8]
+            made.append(dst)
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                client.dataframe(kept, table_name=dst, at='ts')
+            self.qdb_plain.retry_check_table(dst, min_rows=1)
+            self.assertEqual(self._column_type(dst, 'ip'), 'IPv4')
+
+            # A mapper that retypes the claimed column past every shape
+            # that can hold the claim. The claim is still in `attrs`,
+            # and the column lands as the dtype implies.
+            def to_float(arrow_type):
+                return (pd.Float64Dtype()
+                        if pa.types.is_uint32(arrow_type) else None)
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                retyped = client.query(sql).to_pandas(types_mapper=to_float)
+            self.assertEqual(
+                retyped.attrs['questdb']['columns']['ip']['kind'], 'ipv4')
+            self.assertIsInstance(retyped['ip'].dtype, pd.Float64Dtype)
+            dst = 't_mapper_float_' + uuid.uuid4().hex[:8]
+            made.append(dst)
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                client.dataframe(retyped, table_name=dst, at='ts')
+            self.qdb_plain.retry_check_table(dst, min_rows=1)
+            self.assertEqual(self._column_type(dst, 'ip'), 'DOUBLE')
+        finally:
+            for name in [src] + made:
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {name}')
+                except Exception:
+                    pass
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_date_column_survives_a_read_modify_write(self):
+        """A DATE column read back and written straight out again lands
+        as DATE, on all three pandas backends.
+
+        DATE is claimed by the column's Arrow type, and plain
+        `to_pandas()` hands the column back as a NumPy `datetime64[ms]`,
+        which has no route of its own to DATE. Without the claim putting
+        the Arrow type back on, that frame created the destination table
+        with a microsecond TIMESTAMP column and said nothing -- the
+        outcome the round-trip claim exists to prevent.
+        """
+        src = 't_date_rt_src_' + uuid.uuid4().hex[:8]
+        made = []
+        try:
+            self._exec(
+                f'CREATE TABLE {src} (ts TIMESTAMP, d DATE) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {src} VALUES "
+                "('2024-01-01T00:00:00Z', '2024-01-02T03:04:05.678Z'), "
+                "('2024-01-01T00:00:01Z', '1969-07-20T20:17:40.000Z')")
+            self.qdb_plain.retry_check_table(src, min_rows=2)
+            sql = f'SELECT ts, d FROM {src} ORDER BY ts'
+
+            for backend in (None, 'pyarrow', 'numpy_nullable'):
+                kwargs = {} if backend is None else {'dtype_backend': backend}
+                with self.subTest(dtype_backend=backend):
+                    dst = 't_date_rt_dst_' + uuid.uuid4().hex[:8]
+                    made.append(dst)
+                    with qi.QuestDB.from_conf(self._conf()) as client:
+                        df = client.query(sql).to_pandas(**kwargs)
+                    self.assertEqual(
+                        df.attrs['questdb']['columns']['d']['kind'], 'date')
+                    with qi.QuestDB.from_conf(self._conf()) as client:
+                        client.dataframe(df, table_name=dst, at='ts')
+                    self.qdb_plain.retry_check_table(dst, min_rows=2)
+                    self.assertEqual(self._column_type(dst, 'd'), 'DATE')
+                    with qi.QuestDB.from_conf(self._conf()) as client:
+                        back = client.query(
+                            f'SELECT d FROM {dst} ORDER BY timestamp'
+                        ).to_pandas()
+                    self.assertEqual(
+                        back.attrs['questdb']['columns']['d']['kind'], 'date')
+                    self.assertEqual(
+                        self.qdb_plain.http_sql_query(
+                            f'SELECT d FROM {dst} ORDER BY timestamp')[
+                                'dataset'],
+                        self.qdb_plain.http_sql_query(
+                            f'SELECT d FROM {src} ORDER BY ts')['dataset'])
+        finally:
+            for name in [src] + made:
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {name}')
+                except Exception:
+                    pass
+
+    def test_numpy_egress_round_trip_overrides(self):
+        """uuid / long256 / ipv4 / char / geohash round-trip through the
+        native numpy path driven by df.attrs metadata (no pyarrow). UUID
+        comes back as ``uuid.UUID`` cells and LONG256 as Python ints —
+        the widest shape available without pyarrow — and the claim is
+        what turns those ints back into 32-byte values. The destination
+        column types are verified by re-querying and checking the egress
+        metadata reports the same kinds.
+        """
+        src = 't_rto_src_' + uuid.uuid4().hex[:8]
+        dst = 't_rto_dst_' + uuid.uuid4().hex[:8]
+        value = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
+        cols = 'ts, u, l, ip, gh, c'
+        try:
+            self._exec(
+                f'CREATE TABLE {src} '
+                '(ts TIMESTAMP, u UUID, l LONG256, ip IPV4, '
+                'gh GEOHASH(4c), c CHAR) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {src} VALUES "
+                f"('2024-01-01T00:00:00Z', '{value}', "
+                "'0x0001020304050607080910111213141516171819202122232425262728293031', "
+                f"'1.2.3.4', #u33d, 'A'), "
+                f"('2024-01-01T00:00:01Z', '{value}', "
+                "'0x01', "
+                f"'255.0.0.1', #u33e, 'B')")
+            self.qdb_plain.retry_check_table(src, min_rows=2)
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                df = client.query(
+                    f'SELECT {cols} FROM {src} ORDER BY ts').to_pandas()
+            meta = df.attrs['questdb']['columns']
+            self.assertEqual(meta['u']['kind'], 'uuid')
+            self.assertEqual(meta['l']['kind'], 'long256')
+            self.assertEqual(meta['ip']['kind'], 'ipv4')
+            self.assertEqual(meta['c']['kind'], 'char')
+            self.assertEqual(meta['gh']['kind'], 'geohash')
+            self.assertEqual(meta['gh']['precision_bits'], 20)
+            self.assertEqual(list(df['u']), [value, value])
+            self.assertEqual(list(df['l']), [
+                0x0001020304050607080910111213141516171819202122232425262728293031,
+                1])
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                client.dataframe(df, table_name=dst, at='ts')
+            self.qdb_plain.retry_check_table(dst, min_rows=2)
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                back = client.query(
+                    f'SELECT u, l, ip, gh, c FROM {dst}').to_pandas()
+            bmeta = back.attrs['questdb']['columns']
+            self.assertEqual(bmeta['u']['kind'], 'uuid')
+            self.assertEqual(bmeta['l']['kind'], 'long256')
+            self.assertEqual(bmeta['ip']['kind'], 'ipv4')
+            self.assertEqual(bmeta['c']['kind'], 'char')
+            self.assertEqual(bmeta['gh']['kind'], 'geohash')
+            self.assertEqual(bmeta['gh']['precision_bits'], 20)
+
+            # An auto-created table names its designated timestamp
+            # column `timestamp`, so the destination orders by that name
+            # and the source by the `ts` it was created with.
+            self.assertEqual(
+                self.qdb_plain.http_sql_query(
+                    f'SELECT u, l, ip, gh, c FROM {dst} '
+                    'ORDER BY timestamp')['dataset'],
+                self.qdb_plain.http_sql_query(
+                    f'SELECT u, l, ip, gh, c FROM {src} ORDER BY ts')[
+                        'dataset'])
+        finally:
+            for t in (src, dst):
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {t}')
+                except Exception:
+                    pass
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_numpy_egress_keeps_byte_aligned_geohash_max(self):
+        """The all-ones value of a byte-aligned GEOHASH is not NULL in
+        the native NumPy reader path."""
+        table_name = 't_gh_max_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} '
+                '(ts TIMESTAMP, gh GEOHASH(8b)) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                with client.sender() as sender:
+                    sender.row(
+                        table_name,
+                        columns={'gh': qi.Geohash(0xff, 8)},
+                        at=qi.TimestampMicros(1))
+                    sender.row(
+                        table_name,
+                        columns={'gh': qi.Geohash(0, 8)},
+                        at=qi.TimestampMicros(2))
+                    sender.flush(wait=True)
+                self.qdb_plain.retry_check_table(table_name, min_rows=2)
+                frame = client.query(
+                    f'SELECT gh FROM {table_name} ORDER BY ts').to_pandas()
+
+            self.assertEqual(frame['gh'].dtype, np.dtype(np.int16))
+            self.assertEqual(frame['gh'].tolist(), [255, 0])
+            self.assertEqual(
+                frame.attrs['questdb']['columns']['gh'],
+                {'kind': 'geohash', 'precision_bits': 8})
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_numpy_egress_geohash_width_follows_precision(self):
+        """A GEOHASH column comes back as the narrowest signed integer
+        that holds every value of its precision -- 1-7 bits in int8,
+        8-15 in int16, 16-31 in int32, 32-60 in int64 -- which is the
+        width the Arrow egress gives it as well. Each edge of each width
+        carries its all-ones value.
+
+        Zero and all-ones rows alternate, four of them, so a value read
+        wider than its wire bytes picks up a neighbour's set bits unless
+        they are masked off. The precisions between the edges cover each
+        wire width that no NumPy integer matches: 3, 5, 6 and 7 bytes."""
+        widths = {
+            1: np.int8, 7: np.int8,
+            8: np.int16, 15: np.int16,
+            16: np.int32, 20: np.int32, 24: np.int32, 31: np.int32,
+            32: np.int64, 40: np.int64, 48: np.int64, 56: np.int64,
+            60: np.int64,
+        }
+        fills = (False, True, False, True)
+        table_name = 't_gh_width_' + uuid.uuid4().hex[:8]
+        columns = ', '.join(f'gh{bits} GEOHASH({bits}b)' for bits in widths)
+        try:
+            self._exec(
+                f'CREATE TABLE {table_name} (ts TIMESTAMP, {columns}) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                with client.sender() as sender:
+                    for i, fill in enumerate(fills):
+                        sender.row(
+                            table_name,
+                            columns={
+                                f'gh{bits}': qi.Geohash(
+                                    (1 << bits) - 1 if fill else 0, bits)
+                                for bits in widths},
+                            at=qi.TimestampMicros(i + 1))
+                    sender.flush(wait=True)
+                self.qdb_plain.retry_check_table(
+                    table_name, min_rows=len(fills))
+                query = f'SELECT * FROM {table_name} ORDER BY ts'
+                frame = client.query(query).to_pandas()
+                arrow = client.query(query).to_arrow()
+
+            for bits, dtype in widths.items():
+                with self.subTest(bits=bits):
+                    name = f'gh{bits}'
+                    self.assertEqual(frame[name].dtype, np.dtype(dtype))
+                    self.assertEqual(
+                        frame[name].tolist(),
+                        [(1 << bits) - 1 if fill else 0 for fill in fills])
+                    self.assertEqual(
+                        frame.attrs['questdb']['columns'][name],
+                        {'kind': 'geohash', 'precision_bits': bits})
+                    self.assertEqual(
+                        arrow.schema.field(name).type.to_pandas_dtype(),
+                        dtype)
+        finally:
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+    def test_geohash_claim_survives_convert_dtypes_to_pyarrow(self):
+        """A GEOHASH column keeps its type through
+        ``to_pandas()`` followed by
+        ``df.convert_dtypes(dtype_backend='pyarrow')``.
+
+        That conversion is what the ``QuestDB.dataframe`` docstring
+        names, and it moves the frame from the NumPy planner to the
+        Arrow columnar path. The two read the claim in different places.
+        The NumPy egress hands the column back signed, at the width the
+        precision needs, which is the same shape the Arrow egress gives
+        it, so the column is one the native importer takes a ``geohash``
+        on directly.
+        """
+        src = 't_ghs_src_' + uuid.uuid4().hex[:8]
+        dst = 't_ghs_dst_' + uuid.uuid4().hex[:8]
+        try:
+            self._exec(
+                f'CREATE TABLE {src} '
+                '(ts TIMESTAMP, gh GEOHASH(4c)) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {src} VALUES "
+                f"('2024-01-01T00:00:00Z', #u33d), "
+                f"('2024-01-01T00:00:01Z', #u33e)")
+            self.qdb_plain.retry_check_table(src, min_rows=2)
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                df = client.query(
+                    f'SELECT ts, gh FROM {src} ORDER BY ts').to_pandas()
+            self.assertEqual(df.attrs['questdb']['columns']['gh'], {
+                'kind': 'geohash', 'precision_bits': 20})
+            # 20 bits needs a signed slot wide enough to hold
+            # 0 .. 2**20-1, which is int32 -- the same width the Arrow
+            # egress picks for that precision.
+            self.assertEqual(df['gh'].dtype, np.dtype(np.int32))
+            self.assertTrue((df['gh'] >= 0).all())
+
+            converted = df.convert_dtypes(dtype_backend='pyarrow')
+            self.assertEqual(
+                converted.attrs['questdb']['columns']['gh'],
+                {'kind': 'geohash', 'precision_bits': 20})
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                client.dataframe(converted, table_name=dst, at='ts')
+            self.qdb_plain.retry_check_table(dst, min_rows=2)
+
+            # The claim survived the conversion, so the auto-created
+            # column is a GEOHASH and not the LONG its storage type
+            # alone would imply.
+            self.assertEqual(
+                self.qdb_plain.http_sql_query(
+                    f"SELECT typeOf(gh) FROM {dst} LIMIT 1")['dataset'],
+                [['GEOHASH(4c)']])
+            self.assertEqual(
+                self.qdb_plain.http_sql_query(
+                    f'SELECT gh FROM {dst} ORDER BY timestamp')['dataset'],
+                self.qdb_plain.http_sql_query(
+                    f'SELECT gh FROM {src} ORDER BY ts')['dataset'])
+        finally:
+            for t in (src, dst):
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {t}')
+                except Exception:
+                    pass
+
+    def test_arrow_backed_egress_round_trip_overrides(self):
+        """uuid / long256 / ipv4 / char / geohash round-trip through
+        ``to_pandas(dtype_backend='pyarrow')`` and through
+        ``to_pandas(dtype_backend='numpy_nullable')``. The claims the
+        egress writes as Arrow field metadata cannot ride on a pandas
+        frame, which holds Arrow types and no fields, so they travel in
+        ``df.attrs['questdb']`` and are turned back into column types on
+        the way in. The two backends hand the same five columns back in
+        different shapes — Arrow-backed dtypes on one, masked extension
+        and object-dtype ``bytes`` columns on the other — and the claim
+        has to survive both. The destination table is auto-created, so
+        its column types are exactly what the client asked for.
+        """
+        for backend in ('pyarrow', 'numpy_nullable'):
+            with self.subTest(dtype_backend=backend):
+                self._check_arrow_backed_round_trip(backend)
+
+    def _check_arrow_backed_round_trip(self, backend):
+        src = 't_rta_src_' + uuid.uuid4().hex[:8]
+        dst = 't_rta_dst_' + uuid.uuid4().hex[:8]
+        value = uuid.UUID('123e4567-e89b-12d3-a456-426614174000')
+        value_cols = 'u, l, ip, gh, c'
+        cols = f'ts, {value_cols}'
+        try:
+            self._exec(
+                f'CREATE TABLE {src} '
+                '(ts TIMESTAMP, u UUID, l LONG256, ip IPV4, '
+                'gh GEOHASH(4c), c CHAR) '
+                'TIMESTAMP(ts) PARTITION BY DAY WAL')
+            self._exec(
+                f"INSERT INTO {src} VALUES "
+                f"('2024-01-01T00:00:00Z', '{value}', "
+                "'0x0001020304050607080910111213141516171819202122232425262728293031', "
+                "'1.2.3.4', #u33d, 'A')")
+            self.qdb_plain.retry_check_table(src, min_rows=1)
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                df = client.query(
+                    f'SELECT {cols} FROM {src} ORDER BY ts'
+                ).to_pandas(dtype_backend=backend)
+            meta = df.attrs['questdb']['columns']
+            self.assertEqual(meta['u']['kind'], 'uuid')
+            self.assertEqual(meta['l']['kind'], 'long256')
+            self.assertEqual(meta['ip']['kind'], 'ipv4')
+            self.assertEqual(meta['c']['kind'], 'char')
+            self.assertEqual(meta['gh']['kind'], 'geohash')
+            self.assertEqual(meta['gh']['precision_bits'], 20)
+
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                client.dataframe(df, table_name=dst, at='ts')
+            self.qdb_plain.retry_check_table(dst, min_rows=1)
+
+            # An auto-created table names its designated timestamp column
+            # `timestamp`, so only the value columns carry over by name.
+            with qi.QuestDB.from_conf(self._conf()) as client:
+                back = client.query(
+                    f'SELECT {value_cols} FROM {dst}').to_pandas(
+                        dtype_backend=backend)
+            bmeta = back.attrs['questdb']['columns']
+            self.assertEqual(bmeta['u']['kind'], 'uuid')
+            self.assertEqual(bmeta['l']['kind'], 'long256')
+            self.assertEqual(bmeta['ip']['kind'], 'ipv4')
+            self.assertEqual(bmeta['c']['kind'], 'char')
+            self.assertEqual(bmeta['gh']['kind'], 'geohash')
+            self.assertEqual(bmeta['gh']['precision_bits'], 20)
+
+            rows = self.qdb_plain.http_sql_query(
+                f'SELECT {value_cols} FROM {dst}')['dataset']
+            self.assertEqual(
+                rows,
+                self.qdb_plain.http_sql_query(
+                    f'SELECT {value_cols} FROM {src}')['dataset'])
+        finally:
+            for t in (src, dst):
+                try:
+                    self._exec(f'DROP TABLE IF EXISTS {t}')
+                except Exception:
+                    pass
 
 
 class TestEgressPool(unittest.TestCase):
@@ -3943,6 +5279,66 @@ class TestEgressPool(unittest.TestCase):
                     f'SELECT count() FROM {table}').to_arrow()
                 self.assertEqual(after.column(0).to_pylist(), [3])
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_reader_lease_call_refuses_to_end_the_lease(self):
+        """A bind value's conversion runs the caller's Python inside
+        `query()` and `execute()`. From there, a call back into the same
+        lease that would release its connection or start a second query
+        on it is refused, the outer call completes, and the lease stays
+        usable. `__enter__` just hands the lease back."""
+        ends_the_lease = (
+            r"close\(\) can't be called from inside a call on this "
+            r'reader lease')
+        second_query = 'another query or cursor is already in flight'
+        expected = {
+            'close': ends_the_lease,
+            '__exit__': ends_the_lease,
+            'query': second_query,
+            'execute': second_query,
+            '__enter__': None,
+        }
+        value = uuid.UUID(int=5)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            for outer in ('query', 'execute'):
+                for member, refusal in expected.items():
+                    with self.subTest(outer=outer, member=member):
+                        with client.reader() as lease:
+                            seen = []
+
+                            class ReentrantUuid(uuid.UUID):
+                                @property
+                                def bytes(self):
+                                    call = getattr(lease, member)
+                                    try:
+                                        if member == '__exit__':
+                                            got = call(None, None, None)
+                                        elif member in ('query', 'execute'):
+                                            got = call('SELECT 1')
+                                        else:
+                                            got = call()
+                                    except qi.QuestDBError as e:
+                                        got = e
+                                    seen.append(got)
+                                    return uuid.UUID.bytes.fget(self)
+
+                            bound = ReentrantUuid(int=value.int)
+                            if outer == 'query':
+                                frame = lease.query(
+                                    'SELECT $1 AS u', [bound]).to_pandas()
+                                self.assertEqual(frame['u'].tolist(), [value])
+                            else:
+                                self.assertIsNone(
+                                    lease.execute('SELECT $1 AS u', [bound]))
+
+                            self.assertEqual(len(seen), 1)
+                            if refusal is None:
+                                self.assertIs(seen[0], lease)
+                            else:
+                                self.assertIsInstance(seen[0], qi.QuestDBError)
+                                self.assertRegex(str(seen[0]), refusal)
+                            after = lease.query('SELECT 1 AS one').to_pandas()
+                            self.assertEqual(after['one'].tolist(), [1])
+
     def test_query_lease_arrow_c_stream_frees_cursor_for_reuse(self):
         """Consuming a lease result to end-of-stream through the native
         Arrow C stream (``__arrow_c_stream__``) must free its cursor, so
@@ -4168,6 +5564,300 @@ class TestEgressPool(unittest.TestCase):
                 f'pool did not retain any idle reader; '
                 f'in_use={in_use}, idle={idle}')
 
+    # ------------------------------------------------------------------
+    # QueryResult.__arrow_c_schema__: it pulls the first batch and keeps
+    # it, with the cursor, for __arrow_c_stream__.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _schema_of(result):
+        import pyarrow as pa
+        return pa.Schema._import_from_c_capsule(result.__arrow_c_schema__())
+
+    def _require_pyarrow(self):
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+
+    def test_arrow_schema_then_stream_reads_every_row(self):
+        """The schema call keeps the first batch: the stream gives every
+        row once. Later schema calls work, also after the stream was
+        taken, and the reader goes back to the pool."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT x FROM {table} ORDER BY x'
+        # 16-row batches, so that the result has 4 batches.
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            with client.query(sql) as result:
+                schema = self._schema_of(result)
+                self.assertEqual(schema.names, ['x'])
+                self.assertEqual(self._schema_of(result), schema)
+                out = pa.table(result)
+                self.assertEqual(out.schema, schema)
+                self.assertEqual(
+                    out.column('x').to_pylist(), list(range(64)))
+                self.assertEqual(self._schema_of(result), schema)
+                with self.assertRaises(qi.QuestDBError) as cm:
+                    result.__arrow_c_stream__()
+                self.assertIn(
+                    'already read by __arrow_c_stream__()',
+                    str(cm.exception))
+            # The schema stays readable after close().
+            self.assertEqual(self._schema_of(result), schema)
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_arrow_schema_blocks_other_readers(self):
+        """After the schema call, the first batch lives in the Arrow
+        producer, so the other readers raise. The stream still works.
+        ``pa.schema(result)`` is one such schema call."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with client.query(f'SELECT x FROM {table} ORDER BY x') as result:
+                self.assertEqual(pa.schema(result).names, ['x'])
+                readers = {
+                    'to_arrow': result.to_arrow,
+                    'to_pandas': result.to_pandas,
+                    'to_pandas(pyarrow)': lambda: result.to_pandas(
+                        dtype_backend='pyarrow'),
+                    'iter_arrow': lambda: next(result.iter_arrow()),
+                    'iter_pandas': result.iter_pandas,
+                    'iter_pandas(pyarrow)': lambda: next(result.iter_pandas(
+                        dtype_backend='pyarrow')),
+                }
+                for name, read in readers.items():
+                    with self.subTest(reader=name):
+                        with self.assertRaises(qi.QuestDBError) as cm:
+                            read()
+                        self.assertEqual(
+                            cm.exception.code,
+                            qi.QuestDBErrorCode.InvalidApiCall)
+                        self.assertIn(
+                            '__arrow_c_schema__() read the first batch '
+                            '(pa.schema(result)', str(cm.exception))
+                        self.assertIn('pa.table(result)', str(cm.exception))
+                self.assertEqual(pa.table(result).num_rows, 64)
+
+    def test_arrow_schema_then_close_or_cancel_releases_reader(self):
+        """``close()`` and ``cancel()`` drop the buffered first batch: a
+        later stream raises instead of giving a truncated result."""
+        self._require_pyarrow()
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT x FROM {table} ORDER BY x'
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            result = client.query(sql)
+            result.__arrow_c_schema__()
+            self.assertEqual(qi._debug_egress_pool_stats(client)[0], 1)
+            result.close()
+            # The cursor was not at its end, so the reader is dropped.
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 0))
+            # Nothing was read, so the error says "closed", not "read by".
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_stream__()
+            self.assertIn('QueryResult is closed', str(cm.exception))
+            # close() also drops the saved schema.
+            with self.assertRaises(qi.QuestDBError):
+                result.__arrow_c_schema__()
+
+            result = client.query(sql)
+            result.__arrow_c_schema__()
+            result.cancel()
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_stream__()
+            self.assertEqual(
+                cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+            # The cursor stays open until close(), so the error does not
+            # say "closed".
+            self.assertIn('QueryResult was cancelled', str(cm.exception))
+            # cancel() also drops the saved schema, so a schema read and a
+            # stream read agree.
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_schema__()
+            self.assertIn('QueryResult was cancelled', str(cm.exception))
+            result.close()
+            # cancel() drained the cursor, so close() recycles the reader.
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_drained_stream_frees_lease_before_release(self):
+        """A stream releases its connection when the consumer reads the
+        last batch, not when it releases the stream: the lease can run
+        its next query while the reader is still alive."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            with client.reader() as lease:
+                reader = pa.RecordBatchReader._import_from_c_capsule(
+                    lease.query(
+                        f'SELECT x FROM {table} ORDER BY x'
+                    ).__arrow_c_stream__())
+                self.assertEqual(reader.read_all().num_rows, 64)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [64])
+                reader.close()
+
+    def test_drained_stream_returns_reader_before_release(self):
+        """A one-shot ``query()`` returns its pooled reader when the
+        consumer reads the last batch, before the stream is released."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            result = client.query(f'SELECT x FROM {table} ORDER BY x')
+            reader = pa.RecordBatchReader._import_from_c_capsule(
+                result.__arrow_c_stream__())
+            first = reader.read_next_batch()
+            self.assertEqual(qi._debug_egress_pool_stats(client), (1, 0))
+            rest = reader.read_all()
+            self.assertEqual(first.num_rows + rest.num_rows, 64)
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+            reader.close()
+            result.close()
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_arrow_schema_keeps_lease_busy(self):
+        """``__arrow_c_schema__()`` of a SELECT holds the cursor with its
+        first batch: the lease cannot run its next query until the stream
+        is drained."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            with client.reader() as lease:
+                result = lease.query(f'SELECT x FROM {table} ORDER BY x')
+                self.assertEqual(self._schema_of(result).names, ['x'])
+                with self.assertRaises(qi.QuestDBError) as cm:
+                    lease.query(f'SELECT count() FROM {table}')
+                self.assertIn('still open', str(cm.exception))
+                self.assertEqual(pa.table(result).num_rows, 64)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [64])
+
+    def test_arrow_schema_cancel_then_gc_frees_lease(self):
+        """After ``__arrow_c_schema__()`` and ``cancel()``, dropping the
+        result without ``close()`` still frees the cursor, so the lease
+        can run its next query."""
+        self._require_pyarrow()
+        import gc
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            with client.reader() as lease:
+                result = lease.query(f'SELECT x FROM {table} ORDER BY x')
+                result.__arrow_c_schema__()
+                result.cancel()
+                del result
+                gc.collect()
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [64])
+
+    def test_arrow_schema_query_error_raises_reader_error(self):
+        """A query error in the first pull raises the same exception
+        type and code as ``to_arrow()``, and releases the reader."""
+        self._require_pyarrow()
+        sql = 'SELECT * FROM t_egress_no_such_' + uuid.uuid4().hex[:8]
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.QuestDBError) as ref:
+                client.query(sql).to_arrow()
+            result = client.query(sql)
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_schema__()
+            self.assertIs(type(cm.exception), type(ref.exception))
+            self.assertEqual(cm.exception.code, ref.exception.code)
+            self.assertEqual(str(cm.exception), str(ref.exception))
+            self.assertEqual(qi._debug_egress_pool_stats(client)[0], 0)
+            # Nothing was read, so a later read says "closed".
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_schema__()
+            self.assertIn('QueryResult is closed', str(cm.exception))
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.to_pandas()
+            self.assertIn('QueryResult is closed', str(cm.exception))
+
+    def test_arrow_schema_of_empty_results_frees_lease(self):
+        """A non-SELECT has no batch: the schema is an empty struct. A
+        ``SELECT ... WHERE false`` has a zero-row batch with the columns.
+        A lease can run its next query without reading the stream."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with client.reader() as lease:
+                result = lease.query(
+                    f'CREATE TABLE IF NOT EXISTS {table} '
+                    '(ts TIMESTAMP, x LONG) '
+                    'TIMESTAMP(ts) PARTITION BY DAY WAL')
+                self.assertEqual(len(self._schema_of(result)), 0)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [3])
+                self.assertEqual(pa.table(result).num_rows, 0)
+
+                result = lease.query(f'SELECT x FROM {table} WHERE false')
+                self.assertEqual(self._schema_of(result).names, ['x'])
+                self.assertEqual(pa.table(result).num_rows, 0)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [3])
+
+    def test_arrow_schema_abandoned_result_warns(self):
+        """A result with only a schema call is not read: dropping it
+        warns and releases the reader. After a full stream read, there
+        is no warning."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        import warnings
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT x FROM {table} ORDER BY x'
+
+        def resource_warnings(caught):
+            return [w for w in caught
+                    if issubclass(w.category, ResourceWarning)]
+
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            result = client.query(sql)
+            result.__arrow_c_schema__()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                del result
+            self.assertEqual(len(resource_warnings(caught)), 1, caught)
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 0))
+
+            result = client.query(sql)
+            result.__arrow_c_schema__()
+            self.assertEqual(pa.table(result).num_rows, 64)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                del result
+            self.assertEqual(resource_warnings(caught), [])
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_abandoned_result_closes_under_warnings_as_errors(self):
+        """Under ``-W error`` the abandonment warning raises inside
+        ``__del__``. The result closes first, so a lease reports its
+        terminal connection, not a result that is still open."""
+        import warnings
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT x FROM {table} ORDER BY x'
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            for read_schema in (False, True):
+                with self.subTest(read_schema=read_schema), \
+                        client.reader() as lease:
+                    result = lease.query(sql)
+                    if read_schema:
+                        result.__arrow_c_schema__()
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('error', ResourceWarning)
+                        del result
+                    with self.assertRaises(qi.QuestDBError) as cm:
+                        lease.query(sql)
+                    self.assertIn('terminal', str(cm.exception))
+
 
 class TestEgressLeaks(unittest.TestCase):
     """RSS-plateau leak checks for the query/egress path.
@@ -4227,12 +5917,32 @@ class TestEgressLeaks(unittest.TestCase):
     def test_query_consumption_routes_do_not_leak(self):
         from test_dataframe_leaks import _assert_no_leak
         import pyarrow as pa
-        # 64 rows span multiple Arrow batches (see the lease tests), so
-        # the partial-drain route genuinely abandons a live cursor.
+        # `max_batch_rows=16` splits the 64 rows into 4 batches, so the
+        # partial-drain route abandons a cursor with batches still unread.
+        # With the server default (16,384 rows), 64 rows are one batch.
         table = self._seed_table(n_rows=64)
         sql = f'SELECT * FROM {table}'
-        with qi.QuestDB.from_conf(self._conf()) as client:
+        # 200 columns with long names: a leaked schema copy, schema box or
+        # buffered first batch costs tens of KB, above what the harness
+        # can see per call.
+        wide_sql = 'SELECT ' + ', '.join(
+            f'x AS {"wide_column_name_" * 3}{i}' for i in range(200)
+        ) + ' FROM long_sequence(16)'
+        bad_sql = 'SELECT * FROM t_egress_no_such_' + uuid.uuid4().hex[:8]
+        with qi.QuestDB.from_conf(
+                self._conf(max_batch_rows=16)) as client:
             def work():
+                for _ in range(4):
+                    result = client.query(wide_sql)
+                    for _ in range(25):
+                        result.__arrow_c_schema__()
+                        pa.schema(result)
+                    result.close()
+                # A failed schema read keeps the error until it raises it.
+                try:
+                    client.query(bad_sql).__arrow_c_schema__()
+                except qi.QuestDBError:
+                    pass
                 client.query(sql).to_arrow()
                 client.query(sql).to_pandas()
                 result = client.query(sql)
@@ -4243,8 +5953,55 @@ class TestEgressLeaks(unittest.TestCase):
                 next(result.iter_arrow())
                 result.close()
                 client.query(sql).close()
+                # The schema call buffers a batch and keeps a schema copy.
+                result = client.query(sql)
+                result.__arrow_c_schema__()
+                result.close()
+                result = client.query(sql)
+                result.__arrow_c_schema__()
+                result.__arrow_c_schema__()
+                pa.table(result)
 
             _assert_no_leak(self, work, warmup=40, measure=240)
+            self._assert_no_live_streams(client)
+
+    def _assert_no_live_streams(self, client):
+        # A leaked stream producer is too small for the RSS check, and it
+        # no longer pins a pooled reader: a drained stream frees its cursor.
+        import gc
+        gc.collect()
+        self.assertEqual(
+            [o for o in gc.get_objects()
+             if type(o).__name__ == '_QueryStreamProducer'], [])
+        self.assertEqual(qi._debug_egress_pool_stats(client)[0], 0)
+
+    def test_stream_error_does_not_pin_its_connection(self):
+        """A stream keeps the exception behind its error. If that
+        exception was raised, its traceback reaches the frame that holds
+        the stream: a cycle through the stream's C reference, which the GC
+        cannot collect, so the cursor and its connection stay in use."""
+        import pyarrow as pa
+        from unittest import mock
+
+        def raise_runtime_error(*args, **kwargs):
+            raise RuntimeError('injected')
+
+        # Fails on the server after 5000 rows, once the reader exists.
+        sql = ("SELECT x FROM long_sequence(10000) WHERE 1 > "
+               "CASE WHEN x > 5000 THEN 'abc' ELSE '0' END")
+
+        def read(client):
+            reader = pa.RecordBatchReader._import_from_c_capsule(
+                client.query(sql).__arrow_c_stream__())
+            # Building the server's error raises, so the stream keeps a
+            # raised exception.
+            with mock.patch.object(qi, 'QuestDBError', raise_runtime_error):
+                with self.assertRaisesRegex(OSError, 'injected'):
+                    reader.read_all()
+
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=1000)) as client:
+            read(client)
+            self._assert_no_live_streams(client)
 
 
 class TestColumnIngressNarrowTypes(unittest.TestCase):
@@ -4270,12 +6027,17 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     def tearDownClass(cls):
         TestWithDatabase.tearDownClass.__func__(cls)
 
-    def _require_qwp_ws(self):
-        if self.qdb_plain.version < FIRST_QWP_WS_RELEASE:
-            self.skipTest(
-                'QWP/WebSocket integration tests require QuestDB 9.4.3+')
+    # Borrowed rather than restated, like `setUpClass` above. One
+    # definition of a version gate is the whole point of it: a copy
+    # answers whatever it was copied from at the time, and the drift
+    # reads as a passing run.
+    _require_qwp_ws = TestWithDatabase._require_qwp_ws
 
     def setUp(self):
+        # The QWP-only column types are written from
+        # `TestColumnIngressQwpRowTypes`, which asks for the QuestDB 10
+        # they are supported on. This class holds the Arrow primitive
+        # types, which QWP has carried since 9.4.3.
         self._require_qwp_ws()
 
     def _conf(self):
@@ -4341,6 +6103,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self._require_qwp_ws()
         if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
             self.skipTest('old server does not support decimal')
+        if not PYARROW_READS_DECIMAL64:
+            self.skipTest('reading DECIMAL(18,2) needs pyarrow 19 or later')
         table = self._table()
         self._create_table(table, 'x LONG, amt DECIMAL(18,2)')
         ts = pa.array(
@@ -4412,6 +6176,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self._require_qwp_ws()
         if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
             self.skipTest('old server does not support decimal')
+        if not PYARROW_READS_DECIMAL64:
+            self.skipTest('reading DECIMAL(18,3) needs pyarrow 19 or later')
         table = self._table()
         self._create_table(table, 'x LONG, amt DECIMAL(18,3)')
         df = pd.DataFrame({
@@ -4700,78 +6466,25 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             return col.combine_chunks().storage.to_pylist()
         return col.to_pylist()
 
-    def test_uuid_round_trip_via_fsb16(self):
-        """An explicit UUID override on FSB(16) uses RFC-4122 bytes."""
+    def test_uuid_claim_on_wrong_width_is_rejected(self):
+        """A UUID claim requires 16-byte values; a 12-byte column
+        fails client-side rather than sending malformed rows. Twelve
+        rather than eight: an 8-byte column is refused before any
+        override is read (it is the shape of a polars `Object` column),
+        so it would not reach the rule this test is about."""
         import pyarrow as pa
-        import uuid as uuid_mod
         self._require_qwp_ws()
         table = self._table()
-        self._create_table(table, 'v UUID')
-        uuids = [uuid_mod.uuid4() for _ in range(5)]
-        uuid_bytes = [u.bytes for u in uuids]
-        values = pa.array(uuid_bytes, type=pa.binary(16))
-        df = self._make_df_with_ts('v', values, 5)
+        values = pa.array([b'\x00' * 12, b'\xff' * 12], type=pa.binary(12))
+        df = self._make_df_with_ts('v', values, 2)
         with qi.QuestDB.from_conf(self._conf()) as client:
-            client.dataframe(df, table_name=table, at='ts',
-                             schema_overrides={'v': 'uuid'})
-        self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.QuestDB.from_conf(self._conf()) as client:
-            got = client.query(
-                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
-        self.assertEqual(self._extract_uuid_storage(got.column('v')),
-                         uuid_bytes)
-
-    def test_uuid_round_trip_via_arrow_uuid_extension(self):
-        """The arrow.uuid extension accepts standard UUID bytes directly."""
-        import pyarrow as pa
-        import uuid as uuid_mod
-        self._require_qwp_ws()
-        try:
-            uuid_type = pa.uuid()
-        except (AttributeError, TypeError):
-            self.skipTest(
-                'pyarrow.uuid() not available in this pyarrow build')
-        table = self._table()
-        self._create_table(table, 'v UUID')
-        uuids = [uuid_mod.uuid4() for _ in range(3)]
-        uuid_bytes = [u.bytes for u in uuids]
-        values = pa.ExtensionArray.from_storage(
-            uuid_type,
-            pa.array(uuid_bytes, type=pa.binary(16)))
-        df = self._make_df_with_ts('v', values, 3)
-        with qi.QuestDB.from_conf(self._conf()) as client:
-            client.dataframe(df, table_name=table, at='ts')
-        self.qdb_plain.retry_check_table(table, min_rows=3)
-        with qi.QuestDB.from_conf(self._conf()) as client:
-            got = client.query(
-                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
-        self.assertEqual(self._extract_uuid_storage(got.column('v')),
-                         uuid_bytes)
-
-    def test_uuid_with_nulls_round_trip(self):
-        """UUID validity bitmap round-trips: nulls stay null."""
-        import pyarrow as pa
-        import uuid as uuid_mod
-        self._require_qwp_ws()
-        table = self._table()
-        self._create_table(table, 'v UUID')
-        w0 = uuid_mod.uuid4().bytes
-        w2 = uuid_mod.uuid4().bytes
-        w4 = uuid_mod.uuid4().bytes
-        values = pa.array(
-            [w0, None, w2, None, w4], type=pa.binary(16))
-        df = self._make_df_with_ts('v', values, 5)
-        with qi.QuestDB.from_conf(self._conf()) as client:
-            client.dataframe(df, table_name=table, at='ts',
-                             schema_overrides={'v': 'uuid'})
-        self.qdb_plain.retry_check_table(table, min_rows=5)
-        with qi.QuestDB.from_conf(self._conf()) as client:
-            got = client.query(
-                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
-        col = got.column('v')
-        self.assertEqual(self._extract_uuid_storage(col),
-                         [w0, None, w2, None, w4])
-        self.assertEqual(col.null_count, 2)
+            with self.assertRaisesRegex(
+                    qi.QuestDBError,
+                    "override 'uuid' is not applicable") as raised:
+                client.dataframe(df, table_name=table, at='ts',
+                                 schema_overrides={'v': 'uuid'})
+        self.assertEqual(
+            raised.exception.code, qi.QuestDBErrorCode.ArrowIngest)
 
     def test_uuid_string_into_uuid_column_via_server_coercion(self):
         """Strict-mirror policy: `pa.string()` always maps to
@@ -4793,7 +6506,9 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
                 f'SELECT v FROM {table} ORDER BY ts').to_arrow()
-        # Egress exposes canonical UUID bytes, not the server's wire layout.
+        # Server-side coercion lands the value as a UUID; egress emits
+        # the FSB(16) storage as canonical RFC 4122 bytes, the same as
+        # the claimed-binary path.
         expected = [u.bytes for u in uuids]
         self.assertEqual(self._extract_uuid_storage(got.column('v')),
                          expected)
@@ -4816,9 +6531,10 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
 
     def test_fsb16_rejected_by_row_ilp(self):
         """Row-ILP (`Sender.dataframe`) genuinely does not support
-        UUID. `_FIELD_TARGETS_ROW` doesn't include
-        `col_target_column_uuid`, so the resolver fails to map
-        `fsb16_arrow` to any target. This pins that
+        fixed-size binary columns. `_FIELD_TARGETS_ROW` includes
+        neither `col_target_column_uuid` nor
+        `col_target_column_arrow`, so the resolver fails to map an
+        FSB(16) column to any target. This pins that
         protocol-asymmetry contract."""
         import pyarrow as pa
         import uuid as uuid_mod
@@ -4833,25 +6549,6 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         with qi.Sender.from_conf(conf) as sender:
             with self.assertRaises(qi.QuestDBError):
                 sender.dataframe(df, table_name='dummy', at='ts')
-
-    def test_unmarked_fixed_size_binary_round_trip(self):
-        """Width alone must not reinterpret opaque bytes as UUID/LONG256."""
-        import pyarrow as pa
-        self._require_qwp_ws()
-        for width in (8, 16, 32):
-            with self.subTest(width=width):
-                table = self._table()
-                self._create_table(table, 'v BINARY')
-                expected = [bytes(range(width)), None, b'\xff' * width]
-                values = pa.array(expected, type=pa.binary(width))
-                df = self._make_df_with_ts('v', values, 3)
-                with qi.QuestDB.from_conf(self._conf()) as client:
-                    client.dataframe(df, table_name=table, at='ts')
-                self.qdb_plain.retry_check_table(table, min_rows=3)
-                with qi.QuestDB.from_conf(self._conf()) as client:
-                    got = client.query(
-                        f'SELECT v FROM {table} ORDER BY ts').to_arrow()
-                self.assertEqual(got.column('v').to_pylist(), expected)
 
     # ---------- UInt32 / IPV4 policy ----------
 
@@ -5245,6 +6942,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     def test_arrow_symbols_false_forces_dict_columns_to_varchar(self):
         import pyarrow as pa
         self._require_qwp_ws()
+        if not PANDAS_HAS_ARROW_STREAM:
+            self.skipTest('the pandas Arrow path needs pandas 2.2 or later')
         table = self._table()
         dict_type = pa.dictionary(pa.int32(), pa.string())
         df = pd.DataFrame({
@@ -5267,6 +6966,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     def test_arrow_partial_symbol_list_demotes_unlisted_dict_to_varchar(self):
         import pyarrow as pa
         self._require_qwp_ws()
+        if not PANDAS_HAS_ARROW_STREAM:
+            self.skipTest('the pandas Arrow path needs pandas 2.2 or later')
         table = self._table()
         dict_type = pa.dictionary(pa.int32(), pa.string())
         df = pd.DataFrame({
@@ -5336,8 +7037,188 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
 
     # ---------- LONG256 (Category C — FixedSizeBinary(32)) ----------
 
+    def test_fsb32_rejected_by_row_ilp(self):
+        """`Sender.dataframe` runs the NumPy planner, which refuses
+        FSB(32) outright: nothing on that planner can claim the column
+        as LONG256, and row-ILP has no target for opaque bytes either
+        (`_FIELD_TARGETS_ROW` lists neither `col_target_column_arrow`
+        nor a LONG256 target). Symmetric to the FSB(16) row-ILP
+        rejection test."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        values = pa.array(
+            [bytes(range(32)), bytes(range(32, 64))],
+            type=pa.binary(32))
+        df = self._make_df_with_ts('v', values, 2)
+        conf = (
+            f'tcp::addr={self.qdb_plain.host}:'
+            f'{self.qdb_plain.line_tcp_port};')
+        with qi.Sender.from_conf(conf) as sender:
+            with self.assertRaises(qi.QuestDBError):
+                sender.dataframe(df, table_name='dummy', at='ts')
+
+    def test_pa_uint8_auto_creates_as_int(self):
+        """``pa.uint8()`` widens to INT. Auto-create (no ``_create_table``)
+        pins the wire type; a pre-created SHORT column would mask it via
+        server coercion. Order by ``v``: auto-create renames ``ts`` to
+        ``timestamp``."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        values = pa.array([0, 1, 255], type=pa.uint8())
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY v').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int32())
+        self.assertEqual(got.column('v').to_pylist(), [0, 1, 255])
+
+    def test_pa_uint16_auto_creates_as_int(self):
+        """``pa.uint16()`` widens to INT (CHAR only with
+        ``questdb.column_type=char`` metadata, which pandas drops). Like the
+        uint8 case, auto-create pins the wire type."""
+        import pyarrow as pa
+        self._require_qwp_ws()
+        table = self._table()
+        values = pa.array([0, 1, 65535], type=pa.uint16())
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY v').to_arrow()
+        self.assertEqual(got.column('v').type, pa.int32())
+        self.assertEqual(got.column('v').to_pylist(), [0, 1, 65535])
+
+
+
+
+class TestColumnIngressQwpRowTypes(unittest.TestCase):
+    """Column ingress of the QWP-only column types.
+
+    As `TestEgressQwpRowTypes`: the gate is `setUp`, so it covers every
+    test in the class rather than the ones somebody remembered to mark,
+    and it asks for the QuestDB 10 these types are supported on.
+    `TestColumnIngressNarrowTypes` next door keeps the plain
+    QWP/WebSocket gate, which is what its Arrow primitive types need.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        TestWithDatabase.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        TestWithDatabase.tearDownClass.__func__(cls)
+
+    _require_qwp_ws = TestWithDatabase._require_qwp_ws
+    _require_qwp_row_types = TestWithDatabase._require_qwp_row_types
+    _conf = TestColumnIngressNarrowTypes._conf
+    _table = TestColumnIngressNarrowTypes._table
+    _drop_quietly = TestColumnIngressNarrowTypes._drop_quietly
+    _create_table = TestColumnIngressNarrowTypes._create_table
+    _make_df_with_ts = TestColumnIngressNarrowTypes._make_df_with_ts
+    # Reading a `staticmethod` off the class hands back the plain
+    # function, which would bind as an instance method here and take
+    # `self` as its first argument.
+    _extract_uuid_storage = staticmethod(
+        TestColumnIngressNarrowTypes._extract_uuid_storage)
+
+    def setUp(self):
+        self._require_qwp_row_types()
+
+    def test_uuid_round_trip_via_fsb16(self):
+        """``pa.fixed_size_binary(16)`` claimed as UUID via
+        ``schema_overrides`` → UUID wire → server stores as UUID →
+        egress emits the same FSB(16) storage bytes. A 16-byte width
+        claims nothing on its own, so the override is what selects
+        UUID over BINARY. Round-trip is byte-identity on canonical
+        RFC 4122 bytes."""
+        import pyarrow as pa
+        import uuid as uuid_mod
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v UUID')
+        uuids = [uuid_mod.uuid4() for _ in range(5)]
+        canonical = [u.bytes for u in uuids]
+        values = pa.array(canonical, type=pa.binary(16))
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts',
+                             schema_overrides={'v': 'uuid'})
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(self._extract_uuid_storage(got.column('v')),
+                         canonical)
+
+    def test_uuid_round_trip_via_arrow_uuid_extension(self):
+        """If pyarrow has registered the `arrow.uuid` extension type,
+        the label itself claims the column as UUID — no
+        ``schema_overrides`` needed. Per the Arrow spec the storage
+        bytes are RFC 4122 big-endian, which is what the client
+        byte-swaps into wire order."""
+        import pyarrow as pa
+        import uuid as uuid_mod
+        self._require_qwp_ws()
+        try:
+            uuid_type = pa.uuid()
+        except (AttributeError, TypeError):
+            self.skipTest(
+                'pyarrow.uuid() not available in this pyarrow build')
+        table = self._table()
+        self._create_table(table, 'v UUID')
+        uuids = [uuid_mod.uuid4() for _ in range(3)]
+        canonical = [u.bytes for u in uuids]
+        values = pa.ExtensionArray.from_storage(
+            uuid_type,
+            pa.array(canonical, type=pa.binary(16)))
+        df = self._make_df_with_ts('v', values, 3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts')
+        self.qdb_plain.retry_check_table(table, min_rows=3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        self.assertEqual(self._extract_uuid_storage(got.column('v')),
+                         canonical)
+
+    def test_uuid_with_nulls_round_trip(self):
+        """UUID validity bitmap round-trips: nulls stay null."""
+        import pyarrow as pa
+        import uuid as uuid_mod
+        self._require_qwp_ws()
+        table = self._table()
+        self._create_table(table, 'v UUID')
+        w0 = uuid_mod.uuid4().bytes
+        w2 = uuid_mod.uuid4().bytes
+        w4 = uuid_mod.uuid4().bytes
+        values = pa.array(
+            [w0, None, w2, None, w4], type=pa.binary(16))
+        df = self._make_df_with_ts('v', values, 5)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            client.dataframe(df, table_name=table, at='ts',
+                             schema_overrides={'v': 'uuid'})
+        self.qdb_plain.retry_check_table(table, min_rows=5)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            got = client.query(
+                f'SELECT v FROM {table} ORDER BY ts').to_arrow()
+        col = got.column('v')
+        self.assertEqual(self._extract_uuid_storage(col),
+                         [w0, None, w2, None, w4])
+        self.assertEqual(col.null_count, 2)
+
     def test_long256_round_trip(self):
-        """An explicit LONG256 override preserves little-endian limbs."""
+        """``pa.fixed_size_binary(32)`` claimed as LONG256 via
+        ``schema_overrides`` → LONG256 wire → server stores as
+        LONG256 → egress emits FSB(32). Bytes are forwarded
+        verbatim; the 32-byte width alone claims nothing, so without
+        the override the column would be opaque BINARY."""
         import pyarrow as pa
         self._require_qwp_ws()
         table = self._table()
@@ -5393,60 +7274,52 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
             got_bytes = col.to_pylist()
         self.assertEqual(got_bytes, [v0, None, v2, None, v4])
 
-    def test_fsb32_rejected_by_row_ilp(self):
-        """Row-ILP doesn't list `col_target_column_long256` in
-        `_FIELD_TARGETS_ROW`, so `Sender.dataframe` rejects FSB(32)
-        with `BadDataFrame`. Symmetric to the UUID FSB(16) row-ILP
-        rejection test in PR 2."""
+
+    def test_unclaimed_fsb16_lands_as_binary(self):
+        """A bare ``pa.fixed_size_binary(16)`` column in a ``pa.Table``
+        carries no UUID claim, so it is opaque bytes: writing it into a
+        UUID column is a type mismatch the server rejects. A pandas
+        frame refuses the same column before sending anything, which
+        the unit tests pin."""
         import pyarrow as pa
-        self._require_qwp_ws()
-        values = pa.array(
-            [bytes(range(32)), bytes(range(32, 64))],
-            type=pa.binary(32))
-        df = self._make_df_with_ts('v', values, 2)
-        conf = (
-            f'tcp::addr={self.qdb_plain.host}:'
-            f'{self.qdb_plain.line_tcp_port};')
-        with qi.Sender.from_conf(conf) as sender:
+        import uuid as uuid_mod
+        table = self._table()
+        self._create_table(table, 'v UUID')
+        n = 3
+        source = pa.table({
+            'ts': pa.array(
+                [1700000000_000000 + i * 1_000_000 for i in range(n)],
+                type=pa.timestamp('us', tz='UTC')),
+            'v': pa.array(
+                [uuid_mod.uuid4().bytes for _ in range(n)],
+                type=pa.binary(16)),
+        })
+        with qi.QuestDB.from_conf(self._conf()) as client:
             with self.assertRaises(qi.QuestDBError):
-                sender.dataframe(df, table_name='dummy', at='ts')
+                client.dataframe(source, table_name=table, at='ts')
 
-    def test_pa_uint8_auto_creates_as_int(self):
-        """``pa.uint8()`` widens to INT. Auto-create (no ``_create_table``)
-        pins the wire type; a pre-created SHORT column would mask it via
-        server coercion. Order by ``v``: auto-create renames ``ts`` to
-        ``timestamp``."""
+    def test_fsb_other_size_lands_as_binary(self):
+        """``FixedSizeBinary(k)`` carries no QuestDB type claim at any
+        width, so it is opaque bytes and auto-creates a BINARY column
+        holding the rows verbatim. The one exception is width 8, which
+        is refused: it is the shape of a polars ``Object`` column's
+        handles. Auto-create (no ``_create_table``)
+        pins the wire type; a pre-created BINARY column would assert
+        only that the server accepted the rows. Order by ``timestamp``:
+        auto-create renames ``ts``, and BINARY is not orderable."""
         import pyarrow as pa
-        self._require_qwp_ws()
         table = self._table()
-        values = pa.array([0, 1, 255], type=pa.uint8())
-        df = self._make_df_with_ts('v', values, 3)
+        rows = [b'\x00' * 12, b'\xff' * 12]
+        values = pa.array(rows, type=pa.binary(12))
+        df = self._make_df_with_ts('v', values, 2)
         with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
-        self.qdb_plain.retry_check_table(table, min_rows=3)
+        self.qdb_plain.retry_check_table(table, min_rows=2)
         with qi.QuestDB.from_conf(self._conf()) as client:
             got = client.query(
-                f'SELECT v FROM {table} ORDER BY v').to_arrow()
-        self.assertEqual(got.column('v').type, pa.int32())
-        self.assertEqual(got.column('v').to_pylist(), [0, 1, 255])
-
-    def test_pa_uint16_auto_creates_as_int(self):
-        """``pa.uint16()`` widens to INT (CHAR only with
-        ``questdb.column_type=char`` metadata, which pandas drops). Like the
-        uint8 case, auto-create pins the wire type."""
-        import pyarrow as pa
-        self._require_qwp_ws()
-        table = self._table()
-        values = pa.array([0, 1, 65535], type=pa.uint16())
-        df = self._make_df_with_ts('v', values, 3)
-        with qi.QuestDB.from_conf(self._conf()) as client:
-            client.dataframe(df, table_name=table, at='ts')
-        self.qdb_plain.retry_check_table(table, min_rows=3)
-        with qi.QuestDB.from_conf(self._conf()) as client:
-            got = client.query(
-                f'SELECT v FROM {table} ORDER BY v').to_arrow()
-        self.assertEqual(got.column('v').type, pa.int32())
-        self.assertEqual(got.column('v').to_pylist(), [0, 1, 65535])
+                f'SELECT v FROM {table} ORDER BY timestamp').to_arrow()
+        self.assertEqual(got.column('v').type, pa.binary())
+        self.assertEqual(got.column('v').to_pylist(), rows)
 
 
 class TestColumnIngressFailover(unittest.TestCase):
@@ -5600,6 +7473,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         store-and-forward spool."""
         if pyarrow is None:
             self.skipTest('pyarrow not installed')
+        if not PANDAS_HAS_ARROW_STREAM:
+            self.skipTest('the pandas Arrow path needs pandas 2.2 or later')
 
         table = self._table('t_sf_conf_df_arrow_')
         sender_id = 'py-df-arrow-' + uuid.uuid4().hex[:8]
@@ -5700,7 +7575,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         with qi.QuestDB.from_conf(conf) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=2000)
-        self.assertEqual(self._read_back_v(table), list(range(2000)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(2000)), 'v values')
 
     def test_dead_then_live_endpoint_arrow_route(self):
         """Same, via the Arrow capsule (pyarrow-backed) route."""
@@ -5716,7 +7592,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         with qi.QuestDB.from_conf(conf) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=2000)
-        self.assertEqual(self._read_back_v(table), list(range(2000)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(2000)), 'v values')
 
     def test_polars_dataframe_round_trip(self):
         """``pl.DataFrame`` (the Arrow capsule route) lands every row;
@@ -5738,7 +7615,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=1500)
-        self.assertEqual(self._read_back_v(table), list(range(1500)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(1500)), 'v values')
 
     def test_mid_stream_bounce_resends_whole_df_numpy(self):
         """Bounce the server mid-call: the transient ``FailoverRetry``
@@ -5759,7 +7637,8 @@ class TestColumnIngressFailover(unittest.TestCase):
             self.qdb_plain.start()
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=20000)
-        self.assertEqual(self._read_back_v(table), list(range(20000)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(20000)), 'v values')
 
     def test_mid_stream_bounce_resends_whole_df_arrow(self):
         """Same bounce, Arrow capsule route."""
@@ -5773,7 +7652,8 @@ class TestColumnIngressFailover(unittest.TestCase):
             self.qdb_plain.start()
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=20000)
-        self.assertEqual(self._read_back_v(table), list(range(20000)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(20000)), 'v values')
 
     def test_bounce_without_dedup_is_at_least_once(self):
         """Mid-stream bounce on a table WITHOUT dedup keys: the whole-df
@@ -5796,8 +7676,9 @@ class TestColumnIngressFailover(unittest.TestCase):
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=20000)
         rows = self._read_back_v(table)
-        self.assertEqual(
-            sorted(set(rows)), list(range(20000)), 'no row may be lost')
+        _assert_long_list_equal(
+            self, sorted(set(rows)), list(range(20000)),
+            'distinct v values (no row may be lost)')
         self.assertLessEqual(
             len(rows), 2 * 20000, 'duplication must stay bounded')
 
@@ -5892,9 +7773,12 @@ class TestEgressFailover(unittest.TestCase):
             pass
 
     def _seed(self, n_rows):
-        """A multi-batch result: enough rows that QuestDB streams more
-        than one record batch, so a mid-stream bounce lands after the
-        first batch is delivered."""
+        """Create a table with ``n_rows`` rows (``v`` = 0..n_rows-1).
+
+        The result is multi-batch only when ``n_rows`` is larger than one
+        server batch (16,384 rows by default). The bounce tests pass
+        200,000 rows, so that a mid-stream bounce lands after the first
+        batch is delivered. The 2,048-row callers get one batch."""
         table = 't_egress_fo_' + uuid.uuid4().hex[:8]
         self.addCleanup(lambda: self._drop_quietly(table))
         self._exec(
@@ -5928,7 +7812,8 @@ class TestEgressFailover(unittest.TestCase):
             self.qdb_plain.stop()
             self.qdb_plain.start()
             table_out = result.to_arrow()
-        self.assertEqual(table_out.column('v').to_pylist(), expected)
+        _assert_long_list_equal(
+            self, table_out.column('v').to_pylist(), expected, 'v values')
 
     def test_to_pandas_numpy_transparent_across_bounce(self):
         """Default ``to_pandas`` (the numpy accumulator we own) is
@@ -5942,7 +7827,7 @@ class TestEgressFailover(unittest.TestCase):
             self.qdb_plain.stop()
             self.qdb_plain.start()
             df = result.to_pandas()
-        self.assertEqual(df['v'].tolist(), expected)
+        _assert_long_list_equal(self, df['v'].tolist(), expected, 'v values')
 
     def test_to_polars_transparent_across_bounce(self):
         try:
@@ -5958,7 +7843,7 @@ class TestEgressFailover(unittest.TestCase):
             self.qdb_plain.stop()
             self.qdb_plain.start()
             df = result.to_polars()
-        self.assertEqual(df['v'].to_list(), expected)
+        _assert_long_list_equal(self, df['v'].to_list(), expected, 'v values')
 
     def test_to_polars_dead_then_live_endpoint(self):
         """Polars materialisation uses the same reader failover walk as
@@ -5978,9 +7863,10 @@ class TestEgressFailover(unittest.TestCase):
                            target='primary',
                            failover_max_duration_ms='60000')) as client:
             df = client.query(f'SELECT v FROM {table} ORDER BY ts').to_polars()
-        self.assertEqual(df['v'].to_list(), list(range(n)))
+        _assert_long_list_equal(
+            self, df['v'].to_list(), list(range(n)), 'v values')
 
-    def test_polars_from_arrow_dead_then_live_endpoint(self):
+    def test_polars_dataframe_dead_then_live_endpoint(self):
         """The pyarrow-free Polars capsule path also borrows through the
         same multi-endpoint reader pool before Polars starts consuming
         the Arrow stream."""
@@ -5998,8 +7884,9 @@ class TestEgressFailover(unittest.TestCase):
                            target='primary',
                            failover_max_duration_ms='60000')) as client:
             with client.query(f'SELECT v FROM {table} ORDER BY ts') as result:
-                df = pl.from_arrow(result)
-        self.assertEqual(df['v'].to_list(), list(range(n)))
+                df = pl.DataFrame(result)
+        _assert_long_list_equal(
+            self, df['v'].to_list(), list(range(n)), 'v values')
 
     def test_iter_arrow_surfaces_failover_would_duplicate(self):
         """Streaming ``iter_arrow`` installs no reset: a mid-stream
@@ -6027,6 +7914,101 @@ class TestEgressFailover(unittest.TestCase):
             self.assertEqual(
                 cm.exception.code,
                 qi.QuestDBErrorCode.FailoverWouldDuplicate)
+
+    def test_arrow_stream_failover_error_names_failover_would_duplicate(
+            self):
+        """A ``__arrow_c_stream__`` consumer raises its own exception
+        type, not ``QuestDBError``. A failover after the first batch must
+        still end the stream with an error whose message contains
+        ``[FailoverWouldDuplicate]``."""
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        n = 100000000
+        with qi.QuestDB.from_conf(
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
+            with client.query(
+                    f'SELECT x - 1 AS v FROM long_sequence({n})') as result:
+                # `from_stream` exists since pyarrow 15.
+                if hasattr(pa.RecordBatchReader, 'from_stream'):
+                    reader = pa.RecordBatchReader.from_stream(result)
+                else:
+                    reader = pa.RecordBatchReader._import_from_c_capsule(
+                        result.__arrow_c_stream__())
+                first = reader.read_next_batch()
+                self.assertGreater(first.num_rows, 0)
+                self.qdb_plain.stop()
+                self.qdb_plain.start()
+                with self.assertRaisesRegex(
+                        Exception, r'\[FailoverWouldDuplicate\]'):
+                    for _ in reader:
+                        pass
+                # Release the stream, so that the client can close.
+                reader.close()
+                del reader
+
+    def test_arrow_schema_then_failover_names_failover_would_duplicate(
+            self):
+        """``__arrow_c_schema__`` buffers the first batch, and the stream
+        delivers it. A failover after that batch still ends the stream
+        with ``[FailoverWouldDuplicate]``, not with duplicate rows."""
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        n = 100000000
+        with qi.QuestDB.from_conf(
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
+            with client.query(
+                    f'SELECT x - 1 AS v FROM long_sequence({n})') as result:
+                schema = pa.Schema._import_from_c_capsule(
+                    result.__arrow_c_schema__())
+                self.assertEqual(schema.names, ['v'])
+                reader = pa.RecordBatchReader._import_from_c_capsule(
+                    result.__arrow_c_stream__())
+                first = reader.read_next_batch()
+                self.assertGreater(first.num_rows, 0)
+                self.assertEqual(first.column(0)[0].as_py(), 0)
+                self.qdb_plain.stop()
+                self.qdb_plain.start()
+                with self.assertRaisesRegex(
+                        Exception, r'\[FailoverWouldDuplicate\]'):
+                    for _ in reader:
+                        pass
+                # Release the stream, so that the client can close.
+                reader.close()
+                del reader
+
+    def test_pa_table_failover_keeps_error_and_releases_lock(self):
+        """``pa.table(result)`` drops its reader while the stream error is
+        pending, so the stream is released during the unwind. The user
+        must still get the ``[FailoverWouldDuplicate]`` error, and the
+        release must not leave the cursor lock held for other threads."""
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        import threading
+        n = 100000000
+        with qi.QuestDB.from_conf(
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
+            result = client.query(f'SELECT x - 1 AS v FROM long_sequence({n})')
+            # The schema call buffers batch 0, so the failover is hit
+            # after the stream delivered it.
+            pa.schema(result)
+            self.qdb_plain.stop()
+            self.qdb_plain.start()
+            with self.assertRaisesRegex(
+                    Exception, r'\[FailoverWouldDuplicate\]'):
+                pa.table(result)
+            closer = threading.Thread(target=result.close, daemon=True)
+            closer.start()
+            closer.join(10)
+            self.assertFalse(closer.is_alive(), 'close() blocked on the lock')
 
     def test_iter_pandas_surfaces_failover_would_duplicate(self):
         """Same contract for the numpy streaming ``iter_pandas``."""
