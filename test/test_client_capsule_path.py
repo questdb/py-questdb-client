@@ -468,6 +468,8 @@ class TestQueryResultSource(unittest.TestCase):
         1.5 reads ``out`` even when ``get_schema`` fails, and crashed on
         an uninitialised struct."""
         import ctypes
+        if not hasattr(ctypes, 'pythonapi'):
+            self.skipTest('ctypes.pythonapi is CPython-only (PyPy lacks it)')
 
         class ArrowSchema(ctypes.Structure):
             _fields_ = [
