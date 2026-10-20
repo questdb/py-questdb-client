@@ -3906,13 +3906,20 @@ class TestEgressQwpRowTypes(unittest.TestCase):
         that holds every value of its precision -- 1-7 bits in int8,
         8-15 in int16, 16-31 in int32, 32-60 in int64 -- which is the
         width the Arrow egress gives it as well. Each edge of each width
-        carries its all-ones value."""
+        carries its all-ones value.
+
+        Zero and all-ones rows alternate, four of them, so a value read
+        wider than its wire bytes picks up a neighbour's set bits unless
+        they are masked off. The precisions between the edges cover each
+        wire width that no NumPy integer matches: 3, 5, 6 and 7 bytes."""
         widths = {
             1: np.int8, 7: np.int8,
             8: np.int16, 15: np.int16,
-            16: np.int32, 31: np.int32,
-            32: np.int64, 60: np.int64,
+            16: np.int32, 20: np.int32, 24: np.int32, 31: np.int32,
+            32: np.int64, 40: np.int64, 48: np.int64, 56: np.int64,
+            60: np.int64,
         }
+        fills = (False, True, False, True)
         table_name = 't_gh_width_' + uuid.uuid4().hex[:8]
         columns = ', '.join(f'gh{bits} GEOHASH({bits}b)' for bits in widths)
         try:
@@ -3921,7 +3928,7 @@ class TestEgressQwpRowTypes(unittest.TestCase):
                 'TIMESTAMP(ts) PARTITION BY DAY WAL')
             with qi.QuestDB.from_conf(self._conf()) as client:
                 with client.sender() as sender:
-                    for i, fill in enumerate((True, False)):
+                    for i, fill in enumerate(fills):
                         sender.row(
                             table_name,
                             columns={
@@ -3930,7 +3937,8 @@ class TestEgressQwpRowTypes(unittest.TestCase):
                                 for bits in widths},
                             at=qi.TimestampMicros(i + 1))
                     sender.flush(wait=True)
-                self.qdb_plain.retry_check_table(table_name, min_rows=2)
+                self.qdb_plain.retry_check_table(
+                    table_name, min_rows=len(fills))
                 query = f'SELECT * FROM {table_name} ORDER BY ts'
                 frame = client.query(query).to_pandas()
                 arrow = client.query(query).to_arrow()
@@ -3940,7 +3948,8 @@ class TestEgressQwpRowTypes(unittest.TestCase):
                     name = f'gh{bits}'
                     self.assertEqual(frame[name].dtype, np.dtype(dtype))
                     self.assertEqual(
-                        frame[name].tolist(), [(1 << bits) - 1, 0])
+                        frame[name].tolist(),
+                        [(1 << bits) - 1 if fill else 0 for fill in fills])
                     self.assertEqual(
                         frame.attrs['questdb']['columns'][name],
                         {'kind': 'geohash', 'precision_bits': bits})

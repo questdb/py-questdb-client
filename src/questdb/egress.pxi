@@ -1351,6 +1351,26 @@ cdef void _symbol_categories_extend(
                 <const char*>(sd.heap + e.offset), <Py_ssize_t>e.length))
 
 
+cdef inline uint64_t _geohash_wire_value(
+        const unsigned char* src, size_t row, size_t stride, size_t nbytes,
+        uint64_t mask) noexcept nogil:
+    """Row `row` of a GEOHASH column `stride` bytes wide, zero-extended.
+
+    Wherever 8 bytes remain, it is one unaligned load masked to the
+    value's own bytes; the last few rows assemble theirs byte by byte.
+    The load reads the wire's little-endian bytes as a host integer,
+    which `_numpy_uuid_chunk` also relies on."""
+    cdef size_t off = row * stride
+    cdef uint64_t v = 0
+    cdef size_t b
+    if off + 8 <= nbytes:
+        memcpy(&v, src + off, 8)
+        return v & mask
+    for b in range(stride):
+        v |= (<uint64_t>src[off + b]) << (8 * b)
+    return v
+
+
 cdef object _numpy_geohash_chunk(
         const qwp_reader_batch* batch,
         size_t col_idx,
@@ -1364,6 +1384,9 @@ cdef object _numpy_geohash_chunk(
     cdef unsigned int precision
     cdef Py_ssize_t nbytes
     cdef unsigned char* src
+    cdef uint64_t mask
+    cdef void* dst
+    cdef size_t r
     _reader_check(
         qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
         'qwp_reader_batch_column_data')
@@ -1382,7 +1405,11 @@ cdef object _numpy_geohash_chunk(
     # unsigned byte and more than a signed one can express, so it takes
     # the 16-bit slot. That keeps every value positive in its container,
     # which is what the range check on the way back in expects.
-    if precision >= 1 and precision <= 7:
+    if precision < 1 or precision > 60:
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
+            'unexpected geohash precision {} bits'.format(precision))
+    if precision <= 7:
         dtype = np.dtype(np.int8)
         target = 1
     elif precision <= 15:
@@ -1391,14 +1418,10 @@ cdef object _numpy_geohash_chunk(
     elif precision <= 31:
         dtype = np.dtype(np.int32)
         target = 4
-    elif precision <= 60:
+    else:
         dtype = np.dtype(np.int64)
         target = 8
-    else:
-        raise QuestDBError(
-            QuestDBErrorCode.ServerFlushError,
-            'unexpected geohash precision {} bits'.format(precision))
-    if stride > target:
+    if stride == 0 or stride > target:
         raise QuestDBError(
             QuestDBErrorCode.ServerFlushError,
             'geohash column of {} bits arrived {} bytes wide'.format(
@@ -1413,12 +1436,26 @@ cdef object _numpy_geohash_chunk(
     src = <unsigned char*>cd.values
     if stride == target:
         return np.frombuffer((<unsigned char[:nbytes]>src), dtype=dtype).copy()
-    raw = np.frombuffer(
-        (<unsigned char[:nbytes]>src), dtype=np.uint8).reshape(
-            <Py_ssize_t>row_count, <Py_ssize_t>stride)
-    wide = np.zeros((<Py_ssize_t>row_count, <Py_ssize_t>target), dtype=np.uint8)
-    wide[:, :stride] = raw
-    return wide.view(dtype).reshape(<Py_ssize_t>row_count)
+    if stride == 1 or stride == 2 or stride == 4:
+        # A narrower power-of-two width widens in one vectorized cast.
+        return np.frombuffer(
+            (<unsigned char[:nbytes]>src),
+            dtype=np.dtype('<u{}'.format(stride))).astype(dtype)
+    # Strides 3, 5, 6 and 7 have no NumPy integer type to cast from, so
+    # each value is assembled from its bytes.
+    mask = (<uint64_t>1 << (8 * stride)) - 1
+    out = np.empty(<Py_ssize_t>row_count, dtype=dtype)
+    dst = cnp.PyArray_DATA(<cnp.ndarray>out)
+    with nogil:
+        if target == 4:
+            for r in range(row_count):
+                (<int32_t*>dst)[r] = <int32_t>_geohash_wire_value(
+                    src, r, stride, <size_t>nbytes, mask)
+        else:
+            for r in range(row_count):
+                (<int64_t*>dst)[r] = <int64_t>_geohash_wire_value(
+                    src, r, stride, <size_t>nbytes, mask)
+    return out
 
 
 cdef object _numpy_uuid_chunk(
