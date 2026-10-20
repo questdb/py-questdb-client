@@ -266,6 +266,21 @@ class TestQueryResultSource(unittest.TestCase):
         self.assertNotEqual(get_schema(stream, ctypes.byref(out)), 0)
         self.assertEqual(bytes(out), bytes(ctypes.sizeof(out)))
 
+    def test_duckdb_reads_failing_stream(self):
+        """A failing stream makes duckdb raise. duckdb before 1.5 read
+        ``out`` of a failed ``get_schema`` and crashed the process.
+        duckdb 1.5 reads the schema through ``__arrow_c_schema__`` and
+        raises the stream's own error."""
+        try:
+            import duckdb
+        except ImportError:
+            self.skipTest('duckdb not installed')
+        with self.assertRaises(Exception) as cm:
+            duckdb.from_arrow(qi.QueryResult(qi._CursorHandle())).fetchall()
+        version = tuple(int(p) for p in duckdb.__version__.split('.')[:2])
+        if version >= (1, 5):
+            self.assertIn('cursor is closed', str(cm.exception))
+
 
 class TestServerTimestampAt(unittest.TestCase):
     """`at=ServerTimestamp` on the Arrow batch route: the frame carries no
