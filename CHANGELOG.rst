@@ -270,12 +270,24 @@ Breaking changes
   ``pyarrow>=14.0.1``, the oldest versions that CI tests. The old minimums did
   not work: with pyarrow before 14, pyarrow sources, ``iter_polars()`` and
   ``pa.table(result)`` failed. With pandas before 1.5, every DataFrame load
-  failed with an ``AttributeError``; it now raises a clear error. Before
-  pandas 2.2, a pyarrow-backed pandas frame took the NumPy path: it rejected
-  ``schema_overrides`` and did not write named index levels, which pandas
-  2.2 and later write as columns. Reading ``DECIMAL`` columns with a
-  precision of 18 or less through pyarrow needs pyarrow 20 or later. See
-  :doc:`installation`.
+  failed with an ``AttributeError``; it now raises a clear error. Reading
+  ``DECIMAL`` columns with a precision of 18 or less through pyarrow needs
+  pyarrow 20 or later. See :doc:`installation`.
+
+  If the extra moves you from pandas 2.0 or 2.1 to 2.2 or later,
+  ``QuestDB.dataframe()`` writes a pyarrow-backed pandas frame differently.
+  On pandas 2.0 and 2.1 the frame goes through the NumPy path; the client
+  does not check the pandas version, so this still happens when you install
+  pandas yourself. On pandas 2.2 and later it takes the Arrow path, where:
+
+  * an index other than a ``RangeIndex`` is written as columns, an unnamed
+    level as ``__index_level_0__``. A filtered or sorted frame has such an
+    index; ``reset_index(drop=True)`` drops it.
+  * ``symbols=False``, or a ``symbols`` list that leaves a dictionary column
+    out, sends that column as ``VARCHAR``, not ``SYMBOL``. A ``symbols``
+    list may name a dictionary column.
+  * ``table_name`` is required; the index name is not used.
+  * ``schema_overrides`` is accepted.
 
 - A second read of a ``QueryResult`` now names the method that read it first,
   for example "QueryResult was already read by to_pandas()". A read after

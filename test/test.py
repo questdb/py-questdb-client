@@ -5692,7 +5692,8 @@ print('OK')
         shapes = [
             ('pyarrow Table', lambda array: pyarrow.table({'gh': array})),
             ('pyarrow RecordBatch',
-             lambda array: pyarrow.record_batch({'gh': array})),
+             # `record_batch` takes a dict only from pyarrow 15.
+             lambda array: pyarrow.RecordBatch.from_pydict({'gh': array})),
         ]
         if pd is not None:
             shapes.append(
