@@ -41,7 +41,7 @@
     including ingesting data from Pandas dataframes.
 
     ```
-    python3 -m pip install -U questdb pandas
+    python3 -m pip install -U 'questdb[dataframe]'
     ```
   addr:
     host: localhost
@@ -57,7 +57,7 @@
     including ingesting data from Pandas dataframes.
 
     ```
-    python3 -m pip install -U 'questdb[dataframe]' polars
+    python3 -m pip install -U 'questdb[polars]'
     ```
   conf: ws::addr=localhost:9000;
 - name: qwpws-pyarrow
