@@ -2989,9 +2989,6 @@ cdef inline object _conn_event_str(const char* buf, size_t buf_len):
     return PyUnicode_FromStringAndSize(buf, <Py_ssize_t>buf_len)
 
 
-_THREAD_OWNER_STATE = threading.local()
-
-
 cdef class _DispatchContext:
     """Python callback targets and the exact owner they dispatch for.
 
@@ -3039,49 +3036,16 @@ cdef _release_callback_refs(size_t key):
         _LIVE_CALLBACK_REFS.pop(key, None)
 
 
-cdef dict _dispatch_depths(bint create):
-    cdef object depths = getattr(
-        _THREAD_OWNER_STATE, 'dispatch_depths', None)
-    if depths is None and create:
-        depths = {}
-        _THREAD_OWNER_STATE.dispatch_depths = depths
-    return depths
-
-
-cdef void _enter_dispatch(object owner_token) except *:
-    cdef dict depths = _dispatch_depths(True)
-    depths[owner_token] = depths.get(owner_token, 0) + 1
-
-
-cdef void _exit_dispatch(object owner_token) except *:
-    cdef dict depths = _dispatch_depths(False)
-    cdef object depth
-    if depths is None:
-        raise RuntimeError('QuestDB callback-dispatch counter underflow.')
-    depth = depths.get(owner_token, 0)
-    if depth == 0:
-        raise RuntimeError('QuestDB callback-dispatch counter underflow.')
-    if depth == 1:
-        del depths[owner_token]
-    else:
-        depths[owner_token] = depth - 1
-
-
-cdef bint _dispatching_for(object owner_token):
-    cdef dict depths = _dispatch_depths(False)
-    if depths is None:
-        return False
-    return depths.get(owner_token, 0) != 0
-
-
-# Scoped call depths live in native thread-local storage, keyed by owner
-# token identity, because `row()` raises and lowers one on every row: the
+# Scoped call depths and callback-dispatch depths live in native
+# thread-local storage, keyed by owner token identity, because `row()`
+# raises and lowers a scoped depth on every pooled row and checks the
+# dispatch depth on every standalone ws row while auto-flush is on: the
 # whole table is reached through a single `PyThread_tss_get`, and the
 # per-owner entry through a scan of the handful of owners a thread has
-# calls in progress on. The key is process-wide -- OS TLS keys are a
-# capped process resource, so one per handle exhausts them -- and holds a
-# table per thread rather than a single count, which is what keeps the
-# per-handle identity the dispatch registry also needs.
+# calls or dispatches in progress on. The key is process-wide -- OS TLS
+# keys are a capped process resource, so one per handle exhausts them --
+# and holds a table per thread rather than a single count, so each count
+# belongs to one owner.
 cdef Py_tss_t _SCOPED_DEPTH_KEY
 
 if PyThread_tss_create(&_SCOPED_DEPTH_KEY) != 0:
@@ -3093,11 +3057,15 @@ cdef enum:
 
 ctypedef struct scoped_slot_t:
     # Borrowed identity only, never dereferenced: the owning handle keeps
-    # its token alive for as long as it can have calls in progress, and an
-    # entry is dropped the moment its depth reaches zero, so an address a
-    # later token reuses is never already in the table.
+    # its token alive for as long as it can have calls in progress, a
+    # dispatch context keeps it alive for as long as its callbacks can
+    # run, and an entry is dropped the moment both its counts reach zero,
+    # so an address a later token reuses is never already in the table.
     void* owner
+    # Scoped calls in progress for this owner on this thread.
     uintptr_t depth
+    # Callback dispatches in progress for this owner on this thread.
+    uintptr_t dispatch
 
 
 ctypedef struct scoped_table_t:
@@ -3126,11 +3094,11 @@ cdef void _scoped_table_free(object capsule) noexcept:
     # A thread's Python state can end while its OS thread lives on: every
     # call into Python from a native thread gets a fresh one. That state's
     # table is freed on its own thread, so the native slot is cleared here
-    # and the next scoped call on that thread builds a new table. A thread
-    # state can also be cleared from another thread -- interpreter
-    # finalization clears the states of threads still running, and a
-    # forked child those of the parent's other threads -- so the slot is
-    # cleared only when it holds the table being freed.
+    # and the next scoped call or dispatch on that thread builds a new
+    # table. A thread state can also be cleared from another thread --
+    # interpreter finalization clears the states of threads still running,
+    # and a forked child those of the parent's other threads -- so the slot
+    # is cleared only when it holds the table being freed.
     if <scoped_table_t*>PyThread_tss_get(&_SCOPED_DEPTH_KEY) == table:
         PyThread_tss_set(&_SCOPED_DEPTH_KEY, NULL)
     free(table.slots)
@@ -3142,7 +3110,8 @@ cdef inline scoped_table_t* _scoped_table() noexcept:
 
 
 cdef scoped_table_t* _scoped_table_ensure() except NULL:
-    """This thread's table, created on its first scoped call.
+    """This thread's table, created on its first scoped call or callback
+    dispatch.
 
     A capsule in the thread state's dict owns the table: it is what frees
     it when the thread state ends. The native key caches the same pointer
@@ -3210,15 +3179,12 @@ cdef uintptr_t _scoped_depth_for(object owner_token) except? <uintptr_t>-1:
     return slot.depth
 
 
-cdef void _enter_scoped_for(object owner_token) except *:
-    cdef scoped_table_t* table = _scoped_table_ensure()
-    cdef void* owner = <void*>owner_token
-    cdef scoped_slot_t* slot = _scoped_slot(table, owner)
+cdef inline scoped_slot_t* _scoped_slot_add(
+        scoped_table_t* table, void* owner) except NULL:
+    """Append an entry for `owner` with both counts at zero."""
     cdef size_t cap
     cdef scoped_slot_t* grown
-    if slot != NULL:
-        slot.depth += 1
-        return
+    cdef scoped_slot_t* slot
     if table.used == table.cap:
         cap = table.cap * 2
         grown = <scoped_slot_t*>realloc(
@@ -3228,9 +3194,30 @@ cdef void _enter_scoped_for(object owner_token) except *:
                 'Could not allocate QuestDB thread-use counters.')
         table.slots = grown
         table.cap = cap
-    table.slots[table.used].owner = owner
-    table.slots[table.used].depth = 1
+    slot = &table.slots[table.used]
+    slot.owner = owner
+    slot.depth = 0
+    slot.dispatch = 0
     table.used += 1
+    return slot
+
+
+cdef inline void _scoped_slot_drop_if_idle(
+        scoped_table_t* table, scoped_slot_t* slot) noexcept:
+    # Vacated by moving the last entry down, which keeps the scan over
+    # `used` dense and drops the borrowed owner address.
+    if slot.depth == 0 and slot.dispatch == 0:
+        table.used -= 1
+        slot[0] = table.slots[table.used]
+
+
+cdef void _enter_scoped_for(object owner_token) except *:
+    cdef scoped_table_t* table = _scoped_table_ensure()
+    cdef void* owner = <void*>owner_token
+    cdef scoped_slot_t* slot = _scoped_slot(table, owner)
+    if slot == NULL:
+        slot = _scoped_slot_add(table, owner)
+    slot.depth += 1
 
 
 cdef void _exit_scoped_for(object owner_token) except *:
@@ -3239,14 +3226,40 @@ cdef void _exit_scoped_for(object owner_token) except *:
     if table == NULL:
         raise RuntimeError('QuestDB thread-use counter underflow.')
     slot = _scoped_slot(table, <void*>owner_token)
-    if slot == NULL:
+    if slot == NULL or slot.depth == 0:
         raise RuntimeError('QuestDB thread-use counter underflow.')
     slot.depth -= 1
-    if slot.depth == 0:
-        # Vacated by moving the last entry down, which keeps the scan over
-        # `used` dense and drops the borrowed owner address.
-        table.used -= 1
-        slot[0] = table.slots[table.used]
+    _scoped_slot_drop_if_idle(table, slot)
+
+
+cdef void _enter_dispatch(object owner_token) except *:
+    cdef scoped_table_t* table = _scoped_table_ensure()
+    cdef void* owner = <void*>owner_token
+    cdef scoped_slot_t* slot = _scoped_slot(table, owner)
+    if slot == NULL:
+        slot = _scoped_slot_add(table, owner)
+    slot.dispatch += 1
+
+
+cdef void _exit_dispatch(object owner_token) except *:
+    cdef scoped_table_t* table = _scoped_table()
+    cdef scoped_slot_t* slot
+    if table == NULL:
+        raise RuntimeError('QuestDB callback-dispatch counter underflow.')
+    slot = _scoped_slot(table, <void*>owner_token)
+    if slot == NULL or slot.dispatch == 0:
+        raise RuntimeError('QuestDB callback-dispatch counter underflow.')
+    slot.dispatch -= 1
+    _scoped_slot_drop_if_idle(table, slot)
+
+
+cdef inline bint _dispatching_for(object owner_token) noexcept:
+    cdef scoped_table_t* table = _scoped_table()
+    cdef scoped_slot_t* slot
+    if table == NULL:
+        return False
+    slot = _scoped_slot(table, <void*>owner_token)
+    return slot != NULL and slot.dispatch != 0
 
 
 cdef void _connection_event_dispatch(
@@ -8958,11 +8971,10 @@ cdef class QuestDB:
         self._closing = False
         self._close_running = False
         self._close_deadline = None
-        # This exact owner token indexes the handle's entries in the
-        # per-OS-thread table of scoped call depths and in the
-        # module-level thread-local of callback-dispatch depths. Both are
-        # shared by every handle, so a handle keeps its own identity per
-        # thread without allocating an OS TLS key or a threading.local
+        # This exact owner token indexes the handle's entry in the
+        # per-OS-thread table of scoped call and callback-dispatch
+        # depths. The table is shared by every handle, so a handle keeps
+        # its own identity per thread without allocating an OS TLS key
         # of its own.
         self._thread_owner_token = object()
         self._dispatch_context = None

@@ -2179,6 +2179,17 @@ class TestQwpWebSocketApi(unittest.TestCase):
                     except qi.QuestDBError:
                         pass
                     time.sleep(0.01)
+                # The handler has returned, so this thread is no longer
+                # dispatching for the sender.
+                for call in (
+                        sender.published_fsn,
+                        lambda: sender.row(
+                            'events', columns={'value': 3},
+                            at=qi.ServerTimestamp)):
+                    try:
+                        call()
+                    except qi.QuestDBError as exc:
+                        self.assertNotIn('own error_handler', str(exc))
             finally:
                 sender.close(False)
 
@@ -2187,6 +2198,54 @@ class TestQwpWebSocketApi(unittest.TestCase):
             all(code is qi.QuestDBErrorCode.InvalidApiCall
                 for code in captured),
             captured)
+
+    def test_standalone_sender_row_from_listener_is_refused(self):
+        """A standalone ws sender's connection listener runs on a native
+        dispatcher thread, whose call table is built for that callback.
+        `row()` from inside it is refused while auto-flush is on and
+        leaves the buffer as it was."""
+        established = threading.Event()
+        done = threading.Event()
+        outcome = {}
+
+        def on_event(event):
+            if (event.kind is not qi.ConnectionEventKind.Connected
+                    or done.is_set()):
+                return
+            try:
+                established.wait(5)
+                before = len(sender)
+                try:
+                    sender.row(
+                        'from_cb', columns={'v': 1}, at=qi.ServerTimestamp)
+                except qi.QuestDBError as exc:
+                    outcome['code'] = exc.code
+                else:
+                    outcome['code'] = None
+                outcome['len_unchanged'] = len(sender) == before
+            except BaseException as exc:
+                outcome['unexpected'] = repr(exc)
+            finally:
+                done.set()
+
+        with QwpAckServer() as server:
+            sender = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};',
+                connection_listener=on_event)
+            try:
+                sender.establish()
+                established.set()
+                self.assertTrue(done.wait(5), 'the listener must fire')
+                self.assertNotIn(
+                    'unexpected', outcome, outcome.get('unexpected'))
+                self.assertIs(
+                    outcome['code'], qi.QuestDBErrorCode.InvalidApiCall)
+                self.assertTrue(outcome['len_unchanged'])
+                sender.row(
+                    'events', columns={'v': 2}, at=qi.ServerTimestamp)
+                sender.flush()
+            finally:
+                sender.close(flush=False)
 
     def test_standalone_senders_sharing_handler_have_distinct_ownership(self):
         """Callback identity is not sender identity: a handler dispatched by
@@ -9345,6 +9404,55 @@ print('OK')
                 with self.assertRaises(qi.QuestDBError) as closed:
                     db.sender()
                 self.assertIn('closed', str(closed.exception))
+
+    def test_handle_listener_lease_shares_the_dispatch_slot(self):
+        """A handle's own connection listener that writes through a lease
+        has a scoped call and a dispatch in progress for the same handle
+        on one thread. Both counts unwind without an underflow."""
+        box = {'done': threading.Event()}
+        unraisable = []
+
+        def listener(event):
+            if (event.kind is not qi.ConnectionEventKind.Connected
+                    or 'res' in box):
+                return
+            try:
+                lease = box['db'].sender()
+                try:
+                    lease.row('cb', columns={'v': 1},
+                              at=qi.TimestampNanos(2))
+                finally:
+                    lease.close(flush=False)
+                box['res'] = 'ok'
+            except BaseException as exc:
+                box['res'] = repr(exc)
+            finally:
+                box['done'].set()
+
+        old_hook = sys.unraisablehook
+        sys.unraisablehook = unraisable.append
+        try:
+            with QwpAckServer() as server:
+                conf = (f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;'
+                        'sender_pool_min=1;sender_pool_max=2;')
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    db = qi.QuestDB.from_conf(
+                        conf, connection_listener=listener)
+                    box['db'] = db
+                    lease = db.sender()
+                    lease.row('t', columns={'v': 1},
+                              at=qi.TimestampNanos(1))
+                    lease.flush()
+                    self.assertTrue(
+                        box['done'].wait(10), 'the listener must run')
+                    self.assertEqual(box['res'], 'ok')
+                    lease.close()
+                    db.close()
+        finally:
+            sys.unraisablehook = old_hook
+        self.assertEqual(unraisable, [])
 
     def test_no_column_helper_takes_a_pre_encoded_name(self):
         """A `line_sender_column_name` borrows the string arena, which
