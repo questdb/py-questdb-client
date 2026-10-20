@@ -1210,6 +1210,7 @@ cdef class SenderTransaction:
         QWP-only and are not supported by ``SenderTransaction``, which is
         ILP/HTTP-only by construction.
         """
+        cdef Buffer buf
         self._check_usable('row')
         if at is None:
             raise QuestDBError(
@@ -1223,7 +1224,12 @@ cdef class SenderTransaction:
                 "row() can\'t be called: Sender is closed."
             )
 
-        self._sender._buffer._row(
+        # The sender holds the only reference to the buffer, and a column
+        # value whose conversion runs Python code can reach back in here.
+        # A strong local reference keeps the buffer alive for the whole
+        # row, including its cleanup.
+        buf = self._sender._buffer
+        buf._row(
             False,  # allow_auto_flush
             self._table_name,
             symbols=symbols,
