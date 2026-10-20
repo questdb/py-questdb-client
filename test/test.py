@@ -4055,10 +4055,12 @@ class TestQueryResultReuseErrors(unittest.TestCase):
         with mock.patch.object(polars, '__version__', '1.31.0'):
             with self.assertRaises(qi.QuestDBError) as cm:
                 polars.DataFrame(result)
-        self._assert_invalid(
-            cm, 'polars 1.31.0 misreads multi-batch query results. '
-            'Upgrade to polars 1.32 or later')
-        result.__arrow_c_stream__()
+            self._assert_invalid(
+                cm, 'polars 1.31.0 misreads multi-batch query results. '
+                'Upgrade to polars 1.32 or later')
+            # Only a direct polars read is checked: another caller gets
+            # the stream, also with an old polars installed.
+            result.__arrow_c_stream__()
 
     def test_stream_read_from_thread_without_python_frame(self):
         # duckdb 1.5 calls `__arrow_c_stream__` from a worker thread that has

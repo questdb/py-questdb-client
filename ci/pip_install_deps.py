@@ -165,7 +165,9 @@ def main(args):
         try_pip_install('polars')
         try_pip_install('psutil')
         if args.with_duckdb:
-            try_pip_install('duckdb')
+            # A hard failure: the duckdb system tests skip without it,
+            # which would hide a missing wheel.
+            pip_install('duckdb')
 
     on_linux_is_glibc = (
             (not platform.system() == 'Linux') or

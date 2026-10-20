@@ -155,16 +155,24 @@ cdef class _CursorHandle:
         # that exception aside: `with self._lock` fails while one is
         # pending, which would leave the lock held and lose the exception.
         PyErr_Fetch(&exc_type, &exc_value, &exc_tb)
-        with self._lock:
-            if self._cursor != NULL:
-                _ensure_doesnt_have_gil(&gs)
-                qwp_reader_cursor_free(self._cursor)
-                _ensure_has_gil(&gs)
-                self._cursor = NULL
-            if self._reader_ref is not None:
-                if self._owns_reader:
-                    self._reader_ref._close()
-                self._reader_ref = None
+        try:
+            with self._lock:
+                if self._cursor != NULL:
+                    _ensure_doesnt_have_gil(&gs)
+                    qwp_reader_cursor_free(self._cursor)
+                    _ensure_has_gil(&gs)
+                    self._cursor = NULL
+                if self._reader_ref is not None:
+                    if self._owns_reader:
+                        self._reader_ref._close()
+                    self._reader_ref = None
+        except BaseException:
+            # Only a KeyboardInterrupt while blocked on the lock gets here.
+            # In a `noexcept` function it would skip the restore below and
+            # lose both exceptions. The caller's exception wins; without
+            # one, report this one as unraisable.
+            if exc_type == NULL:
+                raise
         PyErr_Restore(exc_type, exc_value, exc_tb)
 
     def __dealloc__(self):
@@ -2127,34 +2135,40 @@ cdef object _polars_dataframe_hybrid(
     return pl.DataFrame(cols)
 
 
+cdef str _polars_fallback_warning(object exc):
+    return (
+        'The polars Categorical fast path failed '
+        f'({type(exc).__name__}: {exc}); the frame was built with '
+        '`polars.from_arrow` instead, which is slower. Please report this '
+        'at https://github.com/questdb/py-questdb-client/issues.')
+
+
 cdef object _polars_hybrid_fallback(object table, object pl, object exc):
     # polars marks the `Categories` API as unstable, so a new release can
     # break the hybrid path. `pl.from_arrow` gives the same values, only
     # slower, so fall back, but do not hide the failure.
     # cdef frames and this module's def entry points are invisible to the
     # warnings stack walker, so level 1 is already the user's call.
-    warnings.warn(
-        'The polars Categorical fast path failed '
-        f'({type(exc).__name__}: {exc}); the frame was built with '
-        '`polars.from_arrow` instead, which is slower. Please report this '
-        'at https://github.com/questdb/py-questdb-client/issues.',
-        RuntimeWarning,
-        stacklevel=1)
-    return pl.from_arrow(table)
+    frame = pl.from_arrow(table)
+    warnings.warn(_polars_fallback_warning(exc), RuntimeWarning, stacklevel=1)
+    return frame
 
 
-cdef object _polars_frame_with_registry_cats(
+cdef tuple _polars_frame_with_registry_cats(
         object frame, object table, object pl, object pa, dict registries):
     # Give a `pl.from_arrow` frame the registry `Categories` of the hybrid
     # frames that `iter_polars` yielded before it, so that `pl.concat` still
     # stitches. Without a registry, every frame is a plain Categorical.
-    if not registries:
-        return frame
-    cdef list types = table.schema.types
-    cdef list names = table.column_names
+    # Returns `(frame, exc)`: `exc` is the cast failure, or None.
+    cdef list types
+    cdef list names
     cdef list exprs = []
     cdef Py_ssize_t i
     cdef _PolarsSymbolRegistry reg
+    if not registries:
+        return (frame, None)
+    types = table.schema.types
+    names = table.column_names
     try:
         for i in range(len(types)):
             if pa.types.is_dictionary(types[i]):
@@ -2164,12 +2178,14 @@ cdef object _polars_frame_with_registry_cats(
                         pl.col(names[i]).cast(pl.Categorical(reg.cats)))
         if exprs:
             frame = frame.with_columns(exprs)
-    except Exception:
+    except Exception as exc:
         # The cast uses the `Categories` API that the fallback works
-        # around, so it can fail the same way. Keep the values: only
-        # `pl.concat` with the earlier frames fails. Stop casting.
+        # around, so it can fail the same way. Keep the values, stop
+        # casting, and let the caller warn: `pl.concat` with the earlier
+        # frames fails.
         registries.clear()
-    return frame
+        return (frame, exc)
+    return (frame, None)
 
 
 cdef class _PolarsBatchIter:
@@ -2182,6 +2198,9 @@ cdef class _PolarsBatchIter:
     cdef dict registries
     cdef bint use_hybrid
     cdef bint hybrid_yielded
+    # A built frame whose warning raised (`-W error`): the next call
+    # returns it, so that no batch is lost.
+    cdef object pending
 
     def __cinit__(self, _CursorHandle handle, object pl, object pa):
         self.reader = _build_record_batch_reader(handle)
@@ -2190,11 +2209,17 @@ cdef class _PolarsBatchIter:
         self.registries = {}
         self.use_hybrid = getattr(pl, 'Categories', None) is not None
         self.hybrid_yielded = False
+        self.pending = None
 
     def __iter__(self):
         return self
 
     def __next__(self):
+        cdef list msgs = []
+        frame = self.pending
+        if frame is not None:
+            self.pending = None
+            return frame
         batch = next(self.reader)
         table = self.pa.Table.from_batches([batch])
         if self.use_hybrid:
@@ -2210,14 +2235,32 @@ cdef class _PolarsBatchIter:
                     # No yielded frame uses the registries: plain frames
                     # stitch, and the cast would only cost a string remap.
                     self.registries.clear()
-                frame = _polars_hybrid_fallback(table, self.pl, exc)
+                msgs.append(_polars_fallback_warning(exc))
+                frame = self.pl.from_arrow(table)
             else:
                 self.hybrid_yielded = True
                 return frame
         else:
             frame = self.pl.from_arrow(table)
-        return _polars_frame_with_registry_cats(
+        frame, cast_exc = _polars_frame_with_registry_cats(
             frame, table, self.pl, self.pa, self.registries)
+        if cast_exc is not None:
+            msgs.append(
+                'The cast to the Categories of the frames before failed '
+                f'({type(cast_exc).__name__}: {cast_exc}); this frame and '
+                'the following ones have a plain Categorical dtype, so '
+                '`polars.concat` with the frames before fails. Please '
+                'report this at '
+                'https://github.com/questdb/py-questdb-client/issues.')
+        # One warning, after the frame is built: under `-W error` the
+        # warning raises, and the frame must not be lost with it.
+        if msgs:
+            try:
+                warnings.warn(' '.join(msgs), RuntimeWarning, stacklevel=1)
+            except BaseException:
+                self.pending = frame
+                raise
+        return frame
 
 
 cdef class _NumpyBatchIter:
@@ -2571,8 +2614,11 @@ class QueryResult:
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
         (e.g. ``polars.DataFrame(result)`` on polars 1.32 or later)
-        reconciles them. Older polars misreads such a stream, so polars
-        before 1.32 gets ``InvalidApiCall`` and the result stays unread.
+        reconciles them. Older polars misreads such a stream, so when polars
+        before 1.32 reads the result directly (``polars.DataFrame(result)``,
+        ``polars.from_arrow(result)``), the call raises ``InvalidApiCall``
+        and the result stays unread. A stream that reaches polars through
+        another library is not checked.
 
         ``requested_schema`` is ignored, as the PyCapsule interface
         allows: the stream always has the result's own schema.
@@ -2776,7 +2822,10 @@ class QueryResult:
         ``polars.concat`` over the yielded frames stitches without a
         categories-mismatch error. If the ``Categorical`` fast path fails,
         it issues one ``RuntimeWarning`` and builds the remaining frames with
-        ``polars.from_arrow``, cast to the same ``Categories``.
+        ``polars.from_arrow``, cast to the same ``Categories``. If that cast
+        fails too, the warning says so: those frames have a plain
+        ``Categorical`` dtype, and ``polars.concat`` with the frames before
+        fails.
 
         Streaming: a mid-query failover after the first batch has been yielded
         surfaces ``QuestDBErrorCode.FailoverWouldDuplicate``; re-issue the

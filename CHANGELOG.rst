@@ -36,9 +36,11 @@ Changelog
   use ``polars.from_arrow(result)``, but on Polars 2.0 that call returns a
   struct ``Series``, not a ``DataFrame``. On Polars 1.21 and older, it raises
   an error. On Polars 1.22 to 1.31, it returned wrong ``SYMBOL`` values
-  without an error, so a polars before 1.32 that reads the stream now gets
-  ``InvalidApiCall``; use ``to_polars()`` there. Ingesting polars frames also
-  needs polars 1.32 or later.
+  without an error, so when a polars before 1.32 reads the result directly
+  (``polars.DataFrame(result)``, ``polars.from_arrow(result)``), the call
+  now raises ``InvalidApiCall``; use ``to_polars()`` there. A stream that
+  reaches polars through another library is not checked. Ingesting polars
+  frames also needs polars 1.32 or later.
 - ``duckdb.from_arrow(result)`` now works on duckdb 1.5. Before, it failed
   with "QueryResult already consumed", because duckdb 1.5 requested the
   stream more than once. ``QueryResult`` now has ``__arrow_c_schema__``,
@@ -82,7 +84,9 @@ Changelog
   builds the frame with ``polars.from_arrow``, but it no longer hides the
   failure. ``iter_polars()`` warns once and builds the remaining frames the
   same way, cast to the ``Categories`` of the frames before, so
-  ``polars.concat`` still stitches them.
+  ``polars.concat`` still stitches them. If that cast fails too, the warning
+  says so: those frames have a plain ``Categorical`` dtype, and
+  ``polars.concat`` with the frames before fails.
 - The docs said that a failover during a ``__arrow_c_stream__`` read raises
   ``FailoverWouldDuplicate``. The consumer raises its own exception type, and
   only the message contains ``[FailoverWouldDuplicate]``. polars before 1.37.1

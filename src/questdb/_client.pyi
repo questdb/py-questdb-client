@@ -1378,8 +1378,11 @@ class QueryResult:
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
         (e.g. ``polars.DataFrame(result)`` on polars 1.32 or later)
-        reconciles them. Older polars misreads such a stream, so polars
-        before 1.32 gets ``InvalidApiCall`` and the result stays unread.
+        reconciles them. Older polars misreads such a stream, so when polars
+        before 1.32 reads the result directly (``polars.DataFrame(result)``,
+        ``polars.from_arrow(result)``), the call raises ``InvalidApiCall``
+        and the result stays unread. A stream that reaches polars through
+        another library is not checked.
 
         ``requested_schema`` is ignored: the stream always has the result's
         own schema. ``pa.table(result, schema=...)`` and
@@ -1432,7 +1435,10 @@ class QueryResult:
         ``polars.concat`` over them stitches cleanly. Requires polars and
         pyarrow. If the ``Categorical`` fast path fails, it issues one
         ``RuntimeWarning`` and builds the remaining frames with
-        ``polars.from_arrow``."""
+        ``polars.from_arrow``, cast to the same ``Categories``. If that cast
+        fails too, the warning says so: those frames have a plain
+        ``Categorical`` dtype, and ``polars.concat`` with the frames before
+        fails."""
 
     def iter_pandas(
         self,

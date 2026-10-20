@@ -2726,18 +2726,19 @@ print(json.dumps({'rows': rows}))
         orig = pl.Categorical
         armed = [False]
 
-        class BrokenCategorical(orig):
+        def broken_categorical(*args, **kwargs):
             # Break only the client's own `Categories`: `pl.from_arrow`
-            # builds its Categoricals through this class too.
-            def __init__(self, *args, **kwargs):
-                cats = args[0] if args else kwargs.get('categories')
-                if (armed[0] and isinstance(cats, pl.Categories)
-                        and cats.namespace() == 'questdb_symbol'):
-                    raise RuntimeError('broken Categorical')
-                super().__init__(*args, **kwargs)
+            # builds its Categoricals through this constructor too. (A
+            # subclass would not do: polars rejects it as a dtype, which
+            # breaks the fast path before the hook arms.)
+            cats = args[0] if args else kwargs.get('categories')
+            if (armed[0] and isinstance(cats, pl.Categories)
+                    and cats.namespace() == 'questdb_symbol'):
+                raise RuntimeError('broken Categorical')
+            return orig(*args, **kwargs)
 
         self.addCleanup(setattr, pl, 'Categorical', orig)
-        pl.Categorical = BrokenCategorical
+        pl.Categorical = broken_categorical
         sql, exp = self._seed_multi_batch_symbols()
         n = len(exp)
         for mid_stream in (False, True):
@@ -2751,10 +2752,22 @@ print(json.dumps({'rows': rows}))
                         out = [next(frames)]
                         armed[0] = True
                         out.extend(frames)
+                # polars builds a `Categorical` through the hook when it
+                # reports dtypes: disarm before inspecting the frames.
+                armed[0] = False
                 self.assertGreater(len(out), 1)
+                # Mid-stream, the cast to the first frame's `Categories`
+                # fails too: the one warning says that `pl.concat` with
+                # the frames before fails, and the dtypes differ.
+                runtime = [str(w.message) for w in caught
+                           if issubclass(w.category, RuntimeWarning)]
+                self.assertEqual(len(runtime), 1, runtime)
                 self.assertEqual(
-                    len([w for w in caught
-                         if issubclass(w.category, RuntimeWarning)]), 1)
+                    '`polars.concat` with the frames before fails'
+                    in runtime[0], mid_stream, runtime)
+                if mid_stream:
+                    self.assertNotEqual(
+                        out[1].schema['sym'], out[0].schema['sym'])
                 _assert_long_list_equal(
                     self, [v for f in out for v in f['v'].to_list()],
                     list(range(n)), 'v values')
@@ -2763,6 +2776,29 @@ print(json.dumps({'rows': rows}))
                     [s for f in out
                      for s in f['sym'].cast(pl.Utf8).to_list()],
                     exp, 'SYMBOL values')
+
+        # Under `-W error` the warning raises out of `next()`. The frame it
+        # belongs to is returned by the next call, so no batch is lost.
+        armed[0] = False
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', RuntimeWarning)
+                frames = client.query(sql).iter_polars()
+                out = [next(frames)]
+                armed[0] = True
+                raised = 0
+                while True:
+                    try:
+                        out.append(next(frames))
+                    except RuntimeWarning:
+                        raised += 1
+                    except StopIteration:
+                        break
+        armed[0] = False
+        self.assertEqual(raised, 1)
+        _assert_long_list_equal(
+            self, [v for f in out for v in f['v'].to_list()],
+            list(range(n)), 'v values')
 
     def _make_table(self, table_name, rows):
         self._exec(
@@ -4660,6 +4696,44 @@ class TestEgressPool(unittest.TestCase):
                     f'SELECT count() FROM {table}').to_arrow()
                 self.assertEqual(after.column(0).to_pylist(), [64])
                 reader.close()
+
+    def test_drained_stream_returns_reader_before_release(self):
+        """A one-shot ``query()`` returns its pooled reader when the
+        consumer reads the last batch, before the stream is released."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            result = client.query(f'SELECT x FROM {table} ORDER BY x')
+            reader = pa.RecordBatchReader._import_from_c_capsule(
+                result.__arrow_c_stream__())
+            first = reader.read_next_batch()
+            self.assertEqual(qi._debug_egress_pool_stats(client), (1, 0))
+            rest = reader.read_all()
+            self.assertEqual(first.num_rows + rest.num_rows, 64)
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+            reader.close()
+            result.close()
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_arrow_schema_keeps_lease_busy(self):
+        """``__arrow_c_schema__()`` of a SELECT holds the cursor with its
+        first batch: the lease cannot run its next query until the stream
+        is drained."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            with client.reader() as lease:
+                result = lease.query(f'SELECT x FROM {table} ORDER BY x')
+                self.assertEqual(self._schema_of(result).names, ['x'])
+                with self.assertRaises(qi.QuestDBError) as cm:
+                    lease.query(f'SELECT count() FROM {table}')
+                self.assertIn('still open', str(cm.exception))
+                self.assertEqual(pa.table(result).num_rows, 64)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [64])
 
     def test_arrow_schema_cancel_then_gc_frees_lease(self):
         """After ``__arrow_c_schema__()`` and ``cancel()``, dropping the
