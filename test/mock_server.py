@@ -115,6 +115,40 @@ class Server:
     def __exit__(self, _ex_type, _ex_value, _ex_tb):
         self.close()
 
+
+class UdpServer:
+    """Collects the datagrams a ``udp::`` sender sends to it."""
+
+    def __init__(self):
+        self._sock = None
+        self.datagrams = []
+
+    def __enter__(self):
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.bind(('127.0.0.1', 0))
+        self.port = self._sock.getsockname()[1]
+        return self
+
+    def recv(self, wait_timeout_sec=1.0, quiet_sec=0.1):
+        """Every datagram that arrives until none has for `quiet_sec`,
+        waiting up to `wait_timeout_sec` for the first."""
+        new_datagrams = []
+        timeout = wait_timeout_sec
+        while select.select([self._sock], [], [], timeout)[0]:
+            new_datagrams.append(self._sock.recv(65536))
+            timeout = quiet_sec
+        self.datagrams.extend(new_datagrams)
+        return new_datagrams
+
+    def close(self):
+        if self._sock:
+            self._sock.close()
+            self._sock = None
+
+    def __exit__(self, _ex_type, _ex_value, _ex_tb):
+        self.close()
+
+
 SETTINGS_WITH_PROTOCOL_VERSION_V1 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[1],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
 SETTINGS_WITH_PROTOCOL_VERSION_V2 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[2],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'
 SETTINGS_WITH_PROTOCOL_VERSION_V3 = '{"config":{"release.type":"OSS","release.version":"[DEVELOPMENT]","line.proto.support.versions":[3],"ilp.proto.transports":["tcp","http"],"posthog.enabled":false,"posthog.api.key":null,"cairo.max.file.name.length":127},"preferences.version":0,"preferences":{}}'

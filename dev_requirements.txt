@@ -11,3 +11,4 @@ numpy>=1.21.0
 # PyArrow 26+ needs NumPy 2. If your venv keeps NumPy 1.x, install pyarrow<26.
 pyarrow>=14.0.1
 fastparquet>=2023.10.1
+PyYAML>=6.0
