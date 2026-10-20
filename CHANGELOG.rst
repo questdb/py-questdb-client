@@ -245,6 +245,16 @@ Breaking changes
   ``QuestDB.dataframe()``, is still waited for without a limit. See *Fixed*
   below for the rest of the change, and *New* for ``timeout``.
 
+- **With greenlets, ``QuestDB.close()`` refuses to wait for another
+  greenlet's call.** This covers gevent, eventlet, and ``greenlet`` used
+  directly. Calls are counted per OS thread, and every greenlet on a
+  thread counts as the same caller. A ``close()`` from one greenlet
+  therefore raises :class:`QuestDBError <questdb.QuestDBError>` with
+  ``code`` set to ``QuestDBErrorCode.InvalidApiCall`` while another
+  greenlet on that thread is suspended inside a call on the handle or on
+  one of its leases. 5.0 waited instead. Call ``close()`` once in-flight
+  work has finished, or call it again after the refusal.
+
 New
 ~~~
 
@@ -439,10 +449,7 @@ Fixed
   publishes ``close()``'s state, so a ``close()`` on another thread can no
   longer see the handle closing, wait for that to clear, and return reporting
   success against a handle that is still open — nor can the two ends of that
-  window wait on each other. Calls are counted per OS thread, so under gevent
-  or eventlet monkey-patching a ``close()`` from one greenlet is also refused
-  while another greenlet on the same thread is suspended inside a call on the
-  handle, where 5.0 waited for that call to return.
+  window wait on each other.
 
 - **A Ctrl-C during ``QuestDB.close()`` no longer leaves the handle unable to
   close.** The native teardown runs without the GIL, so a Ctrl-C there is

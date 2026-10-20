@@ -3039,9 +3039,13 @@ ctypedef struct scoped_table_t:
 cdef const char* _SCOPED_TABLE_CAPSULE_NAME = b'questdb._client.scoped_table'
 
 # The key the owning capsule is stored under in each thread state's dict.
-# A module global rather than a C constant, so a test can substitute a key
-# whose hash runs code at the moment the table is first recorded.
-_SCOPED_TABLE_KEY = 'questdb._client.scoped_table'
+# The dict is shared by everything in the process, so the key is an object
+# unique to this module instance: no other writer, including another loaded
+# copy of this extension, can replace the capsule and free a table that a
+# call in progress is using. A module global rather than a C constant, so
+# a test can substitute a key whose hash runs code at the moment the table
+# is first recorded.
+_SCOPED_TABLE_KEY = object()
 
 
 cdef void _scoped_table_free(object capsule) noexcept:
@@ -8884,10 +8888,12 @@ cdef class QuestDB:
         self._closing = False
         self._close_running = False
         self._close_deadline = None
-        # One module-level Python thread-local registry indexes scoped calls
-        # by this exact owner token. This preserves per-handle/per-thread
-        # identity without allocating either an OS TLS key or a separate
-        # threading.local object for every handle.
+        # This exact owner token indexes the handle's entries in the
+        # per-OS-thread table of scoped call depths and in the
+        # module-level thread-local of callback-dispatch depths. Both are
+        # shared by every handle, so a handle keeps its own identity per
+        # thread without allocating an OS TLS key or a threading.local
+        # of its own.
         self._thread_owner_token = object()
         self._dispatch_context = None
         self._connection_listener = None
@@ -9966,11 +9972,12 @@ cdef class QuestDB:
         the first ``close()`` that finds nothing using the handle, or
         when the handle itself is collected.
 
-        The handle's own calls are counted per OS thread. Under gevent
-        or eventlet monkey-patching, all greenlets on one thread count
-        as one caller, so ``close()`` is also refused while another
-        greenlet on the same thread is suspended inside a call on the
-        handle. See :ref:`sender_threading`.
+        Calls on the handle and on its leases are counted per OS
+        thread. With greenlets -- gevent, eventlet, or ``greenlet``
+        used directly -- all greenlets on one thread count as one
+        caller, so ``close()`` is also refused while another greenlet
+        on the same thread is suspended inside a call on the handle or
+        on one of its leases. See :ref:`sender_threading`.
 
         ``timeout`` sets how long this call waits for that drain.
         Calls are the handle's own methods in progress, such as
@@ -10101,17 +10108,22 @@ cdef class QuestDB:
             # caller. Refused before `_closing` is published, so a
             # refused close changes nothing for any other thread.
             if self._scoped_call_depth() != 0:
-                raise QuestDBError(
-                    QuestDBErrorCode.InvalidApiCall,
-                    "close() can't be called from inside a call on "
-                    'this QuestDB handle. It would wait for that '
-                    'call to finish, which cannot happen while the '
-                    'call is waiting for close(). Close it after '
-                    'the call returns. Under gevent or eventlet, '
-                    'every greenlet on an OS thread counts as the '
-                    'same caller, so this is also refused while '
-                    'another greenlet on this thread is suspended '
-                    'inside a call on the handle.')
+                msg = ("close() can't be called from inside a call on "
+                       'this QuestDB handle. It would wait for that '
+                       'call to finish, which cannot happen while the '
+                       'call is waiting for close(). Close it after '
+                       'the call returns.')
+                # Only greenlets let another caller be suspended inside
+                # a call on this OS thread, so only a process that has
+                # loaded them is told about that case. gevent and
+                # eventlet both run on `greenlet`.
+                if 'greenlet' in sys.modules:
+                    msg += (' With greenlets, every greenlet on an OS '
+                            'thread counts as the same caller, so this '
+                            'is also refused while another greenlet on '
+                            'this thread is suspended inside a call on '
+                            'the handle or on one of its leases.')
+                raise QuestDBError(QuestDBErrorCode.InvalidApiCall, msg)
             # A caller dispatching for this handle can wait on
             # nothing: while its callback frame is out, this thread
             # delivers no events and the native layer holds a borrow

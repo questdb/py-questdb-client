@@ -864,15 +864,16 @@ a lease's call -- a column value's conversion, the Arrow stream
 ``dataframe()`` logs its warnings to -- therefore must not wait on another
 thread that uses the same lease.
 
-Under gevent or eventlet monkey-patching, all greenlets on one OS thread
-count as a single caller of the :class:`QuestDB <questdb.QuestDB>` handle.
-A call's native work holds its OS thread, so another greenlet runs during a
-call only when code inside it yields -- for example, a logging handler that
-sends log records over the network, or an Arrow stream that reads from a
-socket. While such a greenlet is suspended inside a call,
-:meth:`QuestDB.close() <questdb.QuestDB.close>` from another greenlet on the
-same thread is refused with ``QuestDBErrorCode.InvalidApiCall``, as if it had
-been made from inside that call, rather than waiting for the call to return.
+With greenlets -- gevent or eventlet monkey-patching, or ``greenlet`` used
+directly -- all greenlets on one OS thread count as a single caller of the
+:class:`QuestDB <questdb.QuestDB>` handle and its leases. A call's native work
+holds its OS thread, so another greenlet runs during a call only when code
+inside it yields or switches -- for example, a logging handler that sends log
+records over the network, or an Arrow stream that reads from a socket. While
+such a greenlet is suspended inside a call on the handle or on one of its
+leases, :meth:`QuestDB.close() <questdb.QuestDB.close>` from another greenlet
+on the same thread is refused with ``QuestDBErrorCode.InvalidApiCall``, as if
+it had been made from inside that call, rather than waiting.
 Call ``close()`` once the in-flight work has finished, or call it again after
 the refusal.
 

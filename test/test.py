@@ -9209,6 +9209,10 @@ print('OK')
                 "close() can't be called from inside a call on this "
                 'QuestDB handle',
                 str(outcome[0]))
+            # The greenlet case is explained only where greenlets are
+            # loaded.
+            if 'greenlet' not in sys.modules:
+                self.assertNotIn('greenlet', str(outcome[0]))
             # The handle survives the refusal and still works.
             lease.row('after', columns={'v': 1}, at=qi.ServerTimestamp)
             lease.close()
@@ -9512,7 +9516,7 @@ class Closer:
     def __del__(self):
         self.db.close()
 
-class CollectingKey(str):
+class CollectingKey:
     # Runs a collection where the call table is first recorded on a
     # thread, where CPython 3.10/3.11 and PyPy can run one on their own.
     armed = False
@@ -9521,7 +9525,7 @@ class CollectingKey(str):
         if CollectingKey.armed:
             CollectingKey.armed = False
             gc.collect()
-        return str.__hash__(self)
+        return object.__hash__(self)
 
 gc.disable()
 outcome = []
@@ -9529,7 +9533,7 @@ with QwpAckServer() as server:
     db = qi.QuestDB.from_conf(
         f'ws::addr=127.0.0.1:{server.port};sender_pool_min=0;'
         'query_pool_min=0;pool_reap=manual;')
-    qi._SCOPED_TABLE_KEY = CollectingKey(qi._SCOPED_TABLE_KEY)
+    qi._SCOPED_TABLE_KEY = CollectingKey()
 
     def worker():
         Closer(db)
@@ -9552,8 +9556,8 @@ print('OK')
     @unittest.skipIf(
         sys.implementation.name == 'pypy',
         'the harness swaps a module global the compiled module reads '
-        'and needs gc.collect() to run finalizers on the spot; under '
-        'PyPy the swapped object never sees the write')
+        'and needs gc.collect() to run finalizers on the spot; neither '
+        'is established under PyPy')
     def test_a_close_from_a_finalizer_as_a_call_starts_is_refused(self):
         """The first scoped call on a thread allocates its call table
         between reading the pool pointer and counting the call. A

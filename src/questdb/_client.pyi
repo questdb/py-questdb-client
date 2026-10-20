@@ -1593,6 +1593,13 @@ class QuestDB:
         the first ``close()`` that finds nothing using the handle, or
         when the handle itself is collected.
 
+        Calls on the handle and on its leases are counted per OS
+        thread. With greenlets -- gevent, eventlet, or ``greenlet``
+        used directly -- all greenlets on one thread count as one
+        caller, so ``close()`` is also refused while another greenlet
+        on the same thread is suspended inside a call on the handle or
+        on one of its leases. See :ref:`sender_threading`.
+
         ``timeout`` sets how long this call waits for that drain.
         Calls are the handle's own methods in progress, such as
         ``dataframe()`` and ``query()``; anything done through a lease
