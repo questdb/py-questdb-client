@@ -266,15 +266,16 @@ Breaking changes
   reaches polars through another library is not checked. Ingesting polars
   frames is tested with polars 1.32 or later.
 
-- The ``dataframe`` extra now requires ``pandas>=2.0.0`` and
+- The ``dataframe`` extra now requires ``pandas>=2.2.0`` and
   ``pyarrow>=14.0.1``, the oldest versions that CI tests. The old minimums did
   not work: with pyarrow before 14, pyarrow sources, ``iter_polars()`` and
   ``pa.table(result)`` failed. With pandas before 1.5, every DataFrame load
-  failed with an ``AttributeError``; it now raises a clear error.
-  Two features need newer versions: pyarrow-backed pandas frames take the
-  Arrow path (and accept ``schema_overrides``) only on pandas 2.2 or later,
-  and reading ``DECIMAL`` columns with a precision of 18 or less through
-  pyarrow needs pyarrow 20 or later. See :doc:`installation`.
+  failed with an ``AttributeError``; it now raises a clear error. Before
+  pandas 2.2, a pyarrow-backed pandas frame took the NumPy path: it rejected
+  ``schema_overrides`` and did not write named index levels, which pandas
+  2.2 and later write as columns. Reading ``DECIMAL`` columns with a
+  precision of 18 or less through pyarrow needs pyarrow 20 or later. See
+  :doc:`installation`.
 
 - A second read of a ``QueryResult`` now names the method that read it first,
   for example "QueryResult was already read by to_pandas()". A read after

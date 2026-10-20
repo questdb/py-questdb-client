@@ -3222,7 +3222,7 @@ def expect(exc_type, fn):
         fn()
     except exc_type as e:
         msg = str(e)
-        assert 'is too old' in msg and 'pandas 2.0 or later' in msg, repr(e)
+        assert 'is too old' in msg and 'pandas 2.2 or later' in msg, repr(e)
         return e
     raise AssertionError(f'{fn} did not raise {exc_type.__name__}')
 

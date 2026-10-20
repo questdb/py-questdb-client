@@ -27,7 +27,7 @@ arg_parser.add_argument(
 # here; the NumPy floor (1.21) has its own CI jobs.
 MIN_VERSIONS = {
     'numpy': '1.26.4',
-    'pandas': '2.0.0',
+    'pandas': '2.2.0',
     'pyarrow': '14.0.1',
     'polars': '1.32.0',
     'fastparquet': '2023.10.1',
@@ -110,7 +110,7 @@ def install_pandas2_dependencies(pandas_version=None):
     if pandas_version is not None:
         pip_install_required('pandas', pandas_version)
     else:
-        try_pip_install('pandas>=2,<3')
+        try_pip_install('pandas>=2.2,<3')
     try_pip_install('numpy<2')
     # PyArrow 26 requires NumPy 2. Keep this lane testing NumPy 1.x.
     try_pip_install('pyarrow<26')

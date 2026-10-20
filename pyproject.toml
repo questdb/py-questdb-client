@@ -33,7 +33,7 @@ ci = ["cibuildwheel"]
 # `dev_requirements.txt`, `docs/installation.rst` and `MIN_VERSIONS` /
 # `MIN_DUCKDB_VERSION` in `ci/pip_install_deps.py`. `TestDependencyFloors`
 # in `test/test.py` checks all of these except `docs/installation.rst`.
-dataframe = ["pandas>=2.0.0", "pyarrow>=14.0.1"]
+dataframe = ["pandas>=2.2.0", "pyarrow>=14.0.1"]
 # pyarrow, because `to_polars()` and `iter_polars()` need it.
 polars = ["polars>=1.32.0", "pyarrow>=14.0.1"]
 duckdb = ["duckdb>=1.2.0"]

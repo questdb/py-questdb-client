@@ -6,7 +6,7 @@ cibuildwheel>=3.0.1
 Sphinx>=8.2.3
 sphinx-rtd-theme>=3.0.2
 twine>=6.1.0
-pandas>=2.0.0
+pandas>=2.2.0
 numpy>=1.21.0
 # PyArrow 26+ needs NumPy 2. If your venv keeps NumPy 1.x, install pyarrow<26.
 pyarrow>=14.0.1

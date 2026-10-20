@@ -409,7 +409,10 @@ class TestCapsulePathPolars(unittest.TestCase):
         self._assert_object_handles_refused(
             table, "Bad column 'id': its values are 8 bytes each")
 
-    @unittest.skipIf(pl is None or pa is None, 'polars/pyarrow not installed')
+    @unittest.skipIf(
+        pl is None or pa is None
+        or not hasattr(pa.RecordBatchReader, 'from_stream'),
+        'needs polars and pyarrow 15+ (RecordBatchReader.from_stream)')
     def test_polars_object_column_through_record_batch_reader_rejected(self):
         reader = pa.RecordBatchReader.from_stream(self._uuid_object_frame())
         self._assert_object_handles_refused(
