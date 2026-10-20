@@ -128,8 +128,9 @@ def _to_polars(result):
 
 def _arrow_c_stream(result, pl):
     # Consume the native __arrow_c_stream__ capsule with polars (no pyarrow on
-    # the consumer side). polars.DataFrame accepts any object exposing the
-    # Arrow C stream protocol.
+    # the consumer side). The polars.DataFrame constructor accepts any object
+    # exposing the Arrow C stream protocol; polars.from_arrow returns a Series
+    # of structs for one on polars >= 2.0.
     df = pl.DataFrame(result)
     return {"rows": df.height, "columns": df.width}
 

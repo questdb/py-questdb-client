@@ -134,6 +134,21 @@ the Java client's configuration.
 
   Default: 4.
 
+* ``query_timeout_ms`` - ``int``: How long the server lets each statement
+  sent through :meth:`QuestDB.query <questdb.QuestDB.query>`,
+  :meth:`QuestDB.execute <questdb.QuestDB.execute>` or a reader lease run,
+  in place of its own ``query.timeout``. The server applies no ceiling, so a
+  value above ``query.timeout`` lets a long statement finish. A statement
+  that runs past it raises :class:`QuestDBError <questdb.QuestDBError>` with
+  ``code`` set to ``QuestDBErrorCode.QueryTimeout``. ``0`` leaves the
+  server's own timeout in place.
+
+  It needs a server that supports per-query timeouts. Against one that does
+  not, which includes QuestDB 10.0.1, every statement is refused with
+  ``QuestDBErrorCode.UnsupportedServer`` before it is sent.
+
+  Default: 0.
+
 * ``acquire_timeout_ms`` - ``int``: How long a borrow at the cap waits for
   a connection to be returned before failing. ``0`` fails fast.
 

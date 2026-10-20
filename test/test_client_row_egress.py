@@ -1025,18 +1025,18 @@ class TestRowEgressLive(_LiveCase):
         hasattr(signal, 'pthread_kill'), 'needs signal.pthread_kill')
     def test_interrupt_while_close_waits_for_a_worker(self):
         with qdb.connect(f'ws::addr={self.addr};') as db:
-            result = db.query('select * from sleep(3)')
-            self._interrupt_close_while_a_worker_reads(result, result.close)
-            result.close()
+            with db.query('select * from sleep(3)') as result:
+                self._interrupt_close_while_a_worker_reads(
+                    result, result.close)
             self.assertEqual(_pool_stats(db)[0], 0)
 
     @unittest.skipUnless(
         hasattr(signal, 'pthread_kill'), 'needs signal.pthread_kill')
     def test_interrupt_while_lease_close_waits_for_a_worker(self):
         with qdb.connect(f'ws::addr={self.addr};') as db:
-            lease = db.reader()
-            result = lease.query('select * from sleep(3)')
-            self._interrupt_close_while_a_worker_reads(result, lease.close)
+            with db.reader() as lease:
+                result = lease.query('select * from sleep(3)')
+                self._interrupt_close_while_a_worker_reads(result, lease.close)
             self.assertEqual(_pool_stats(db)[0], 0)
 
     def test_lease_finalised_mid_decode_is_safe(self):
@@ -1642,7 +1642,7 @@ class TestUuidByteOrder(_LiveCase):
         self.assertIn(None, got)
 
     def test_arrow_fixed_size_binary_uuid_column(self):
-        # `pa.binary(16)` holds `UUID.bytes` and lands as that UUID.
+        # An explicitly claimed `pa.binary(16)` holds canonical UUID bytes.
         try:
             import pandas as pd
             import pyarrow as pa
@@ -1654,7 +1654,8 @@ class TestUuidByteOrder(_LiveCase):
             dtype=pd.ArrowDtype(pa.binary(16)))
         self.db.dataframe(
             pd.DataFrame({'u': col}),
-            table_name=table, at=qdb.ServerTimestamp)
+            table_name=table, at=qdb.ServerTimestamp,
+            schema_overrides={'u': 'uuid'})
         self._wait(table)
         got = dict(self.db.query(
             f'select u, cast(u as varchar) as s from {table}').iter_rows())
@@ -1686,7 +1687,8 @@ class TestUuidByteOrder(_LiveCase):
                     {'v': pd.array([7], dtype=pd.ArrowDtype(pa.int64()))},
                     index=index)
                 self.db.dataframe(
-                    frame, table_name=table, at=qdb.ServerTimestamp)
+                    frame, table_name=table, at=qdb.ServerTimestamp,
+                    schema_overrides={'u': 'uuid'})
                 self._wait(table)
                 columns = dict(self.db.query(
                     f"select \"column\", type from table_columns('{table}')"
@@ -1711,7 +1713,8 @@ class TestUuidByteOrder(_LiveCase):
             dtype=pd.ArrowDtype(pa.binary(32)))
         self.db.dataframe(
             pd.DataFrame({'v': col}),
-            table_name=table, at=qdb.ServerTimestamp)
+            table_name=table, at=qdb.ServerTimestamp,
+            schema_overrides={'v': 'long256'})
         self._wait(table)
         value, = list(self.db.query(f'select v from {table}').iter_rows())
         self.assertEqual(value[0], int.from_bytes(raw, 'little'))
@@ -1726,15 +1729,20 @@ class TestUuidByteOrder(_LiveCase):
             self.skipTest('needs pandas and pyarrow')
         table = self._fresh_table('u uuid, v long256, n long')
         raw = bytes(range(32, 64))
+        frame = pd.DataFrame({
+            'u': pd.Series(
+                pa.array([self.U.bytes], type=pa.binary(16)),
+                dtype=pd.ArrowDtype(pa.binary(16))),
+            'v': pd.Series(
+                pa.array([raw], type=pa.binary(32)),
+                dtype=pd.ArrowDtype(pa.binary(32))),
+            'n': [1]})
+        frame.attrs['questdb'] = {
+            'version': 1,
+            'columns': {'u': {'kind': 'uuid'}, 'v': {'kind': 'long256'}},
+        }
         self.db.dataframe(
-            pd.DataFrame({
-                'u': pd.Series(
-                    pa.array([self.U.bytes], type=pa.binary(16)),
-                    dtype=pd.ArrowDtype(pa.binary(16))),
-                'v': pd.Series(
-                    pa.array([raw], type=pa.binary(32)),
-                    dtype=pd.ArrowDtype(pa.binary(32))),
-                'n': [1]}),
+            frame,
             table_name=table, at=qdb.ServerTimestamp)
         self._wait(table)
         rows = list(self.db.query(

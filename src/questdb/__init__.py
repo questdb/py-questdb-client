@@ -6,9 +6,13 @@ from typing import Callable as _Callable, Optional as _Optional, Union as _Union
 
 from questdb import _client
 from questdb._client import (
+    Char,
     ConnectionEvent,
     ConnectionEventKind,
+    DateMillis,
     ExecDone,
+    Geohash,
+    Long256,
     PooledReader,
     PooledSender,
     Protocol,
@@ -34,9 +38,13 @@ from questdb._client import (
 )
 
 __all__ = [
+    'Char',
     'ConnectionEvent',
     'ConnectionEventKind',
+    'DateMillis',
     'ExecDone',
+    'Geohash',
+    'Long256',
     'PooledReader',
     'PooledSender',
     'Protocol',

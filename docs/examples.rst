@@ -131,6 +131,43 @@ PyArrow.
 .. literalinclude:: ../examples/pyarrow_basic.py
    :language: python
 
+.. _qwp_column_types_example:
+
+UUID, IPV4, BINARY, CHAR, DATE, LONG256, GEOHASH (QuestDB 10.0.0+)
+------------------------------------------------------------------
+
+The following example writes all seven column types row by row. ``UUID``,
+``IPV4`` and ``BINARY`` take the Python types that already mean them; the
+other four take the :class:`Char <questdb.Char>`,
+:class:`DateMillis <questdb.DateMillis>`,
+:class:`Long256 <questdb.Long256>` and :class:`Geohash <questdb.Geohash>`
+wrappers.
+
+.. literalinclude:: ../examples/qwp_column_types.py
+   :language: python
+
+The same types from a DataFrame, stated through the column's Arrow type
+and through ``schema_overrides``, and then read back and written out
+again on the strength of ``df.attrs['questdb']`` alone:
+
+.. literalinclude:: ../examples/qwp_column_types_dataframe.py
+   :language: python
+
+.. note::
+
+    These types need QuestDB server 10.0.0 or later -- the first
+    production QWP implementation -- and a QWP sender (``udp::``,
+    ``ws::`` or ``wss::``). The legacy ILP transports have no
+    such column types: over them a ``uuid.UUID`` or an
+    ``ipaddress.IPv4Address`` is rejected, and so are the four wrappers.
+    The DataFrame route is narrower still: it runs on ``ws::`` / ``wss::``
+    only, because it is
+    :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` that writes these
+    columns and ``questdb.connect()`` takes no other scheme. On ``udp::``
+    they go one row at a time through
+    :meth:`Sender.row <questdb.Sender.row>`.
+    See :ref:`sender_qwp_column_types`.
+
 Decimal Types (QuestDB 9.2.0+)
 ------------------------------
 

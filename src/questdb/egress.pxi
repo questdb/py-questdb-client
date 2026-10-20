@@ -1626,6 +1626,26 @@ cdef class _SymbolStrings:
         return s
 
 
+cdef inline uint64_t _geohash_wire_value(
+        const unsigned char* src, size_t row, size_t stride, size_t nbytes,
+        uint64_t mask) noexcept nogil:
+    """Row `row` of a GEOHASH column `stride` bytes wide, zero-extended.
+
+    Wherever 8 bytes remain, it is one unaligned load masked to the
+    value's own bytes; the last few rows assemble theirs byte by byte.
+    The load reads the wire's little-endian bytes as a host integer,
+    which `_numpy_uuid_chunk` also relies on."""
+    cdef size_t off = row * stride
+    cdef uint64_t v = 0
+    cdef size_t b
+    if off + 8 <= nbytes:
+        memcpy(&v, src + off, 8)
+        return v & mask
+    for b in range(stride):
+        v |= (<uint64_t>src[off + b]) << (8 * b)
+    return v
+
+
 cdef object _numpy_geohash_chunk(
         const qwp_reader_batch* batch,
         size_t col_idx,
@@ -1636,28 +1656,51 @@ cdef object _numpy_geohash_chunk(
     cdef object dtype
     cdef size_t stride
     cdef size_t target
+    cdef unsigned int precision
     cdef Py_ssize_t nbytes
     cdef unsigned char* src
+    cdef uint64_t mask
+    cdef void* dst
+    cdef size_t r
     _reader_check(
         qwp_reader_batch_column_data(batch, col_idx, &cd, &err), &err,
         'qwp_reader_batch_column_data')
     stride = cd.value_stride
-    if stride == 1:
-        dtype = np.dtype(np.uint8)
-        target = 1
-    elif stride == 2:
-        dtype = np.dtype(np.uint16)
-        target = 2
-    elif stride == 3 or stride == 4:
-        dtype = np.dtype(np.uint32)
-        target = 4
-    elif stride >= 5 and stride <= 8:
-        dtype = np.dtype(np.uint64)
-        target = 8
-    else:
+    precision = cd.geohash_precision_bits
+    # The width comes from the precision rather than from the wire
+    # stride, and is signed, so that it matches what the Arrow egress
+    # gives the same column. A signed width is also what every write
+    # route takes as it stands: the native Arrow importer carries a
+    # `geohash` claim only on a signed Int8/16/32/64, and an unsigned
+    # column reaches it only once `_dataframe_reinterpret_unsigned_geohash`
+    # has given it the signed type of the same width.
+    #
+    # Each width carries a bit of headroom because a precision fills its
+    # bits: an 8-bit geohash holds 0..255, which is every bit of an
+    # unsigned byte and more than a signed one can express, so it takes
+    # the 16-bit slot. That keeps every value positive in its container,
+    # which is what the range check on the way back in expects.
+    if precision < 1 or precision > 60:
         raise QuestDBError(
             QuestDBErrorCode.ServerFlushError,
-            'unexpected geohash byte width {}'.format(stride))
+            'unexpected geohash precision {} bits'.format(precision))
+    if precision <= 7:
+        dtype = np.dtype(np.int8)
+        target = 1
+    elif precision <= 15:
+        dtype = np.dtype(np.int16)
+        target = 2
+    elif precision <= 31:
+        dtype = np.dtype(np.int32)
+        target = 4
+    else:
+        dtype = np.dtype(np.int64)
+        target = 8
+    if stride == 0 or stride > target:
+        raise QuestDBError(
+            QuestDBErrorCode.ServerFlushError,
+            'geohash column of {} bits arrived {} bytes wide'.format(
+                precision, stride))
     if row_count == 0:
         return np.empty(0, dtype=dtype)
     if cd.values == NULL:
@@ -1668,12 +1711,26 @@ cdef object _numpy_geohash_chunk(
     src = <unsigned char*>cd.values
     if stride == target:
         return np.frombuffer((<unsigned char[:nbytes]>src), dtype=dtype).copy()
-    raw = np.frombuffer(
-        (<unsigned char[:nbytes]>src), dtype=np.uint8).reshape(
-            <Py_ssize_t>row_count, <Py_ssize_t>stride)
-    wide = np.zeros((<Py_ssize_t>row_count, <Py_ssize_t>target), dtype=np.uint8)
-    wide[:, :stride] = raw
-    return wide.view(dtype).reshape(<Py_ssize_t>row_count)
+    if stride == 1 or stride == 2 or stride == 4:
+        # A narrower power-of-two width widens in one vectorized cast.
+        return np.frombuffer(
+            (<unsigned char[:nbytes]>src),
+            dtype=np.dtype('<u{}'.format(stride))).astype(dtype)
+    # Strides 3, 5, 6 and 7 have no NumPy integer type to cast from, so
+    # each value is assembled from its bytes.
+    mask = (<uint64_t>1 << (8 * stride)) - 1
+    out = np.empty(<Py_ssize_t>row_count, dtype=dtype)
+    dst = cnp.PyArray_DATA(<cnp.ndarray>out)
+    with nogil:
+        if target == 4:
+            for r in range(row_count):
+                (<int32_t*>dst)[r] = <int32_t>_geohash_wire_value(
+                    src, r, stride, <size_t>nbytes, mask)
+        else:
+            for r in range(row_count):
+                (<int64_t*>dst)[r] = <int64_t>_geohash_wire_value(
+                    src, r, stride, <size_t>nbytes, mask)
+    return out
 
 
 cdef object _numpy_uuid_chunk(
@@ -1707,7 +1764,15 @@ cdef object _numpy_uuid_chunk(
     for r in range(row_count):
         if validity != NULL and ((validity[r >> 3] >> (r & 7)) & 1):
             continue
-        # Canonical RFC 4122 big-endian rows: high half first.
+        # The reader hands out canonical RFC 4122 big-endian rows,
+        # having already reversed them out of QWP wire order: the first
+        # eight bytes are the high half and the second eight the low
+        # half, each most-significant byte first. `UUID(int=...)` takes
+        # the two halves as host-order integers, so each one is byte
+        # swapped on the way in. `UUID(bytes=...)` would accept the row
+        # verbatim but costs about 70 ns more per row, because CPython
+        # builds the same integer from the buffer anyway on top of
+        # allocating a `bytes` object for every row.
         memcpy(&hi, values + r * stride, 8)
         memcpy(&lo, values + r * stride + 8, 8)
         hi = bswap64(hi)
@@ -1959,6 +2024,122 @@ cdef object _combine_hybrid_mask(list value_chunks, list mask_chunks, object np)
     return np.concatenate(parts)
 
 
+cdef list _numpy_pinned_name_bytes(tuple pinned):
+    """The pinned column names as UTF-8, encoded once per result.
+
+    The per-batch check compares them against the borrowed name buffer
+    the reader hands back, so no `PyUnicode` is built per column per
+    batch.
+    """
+    return [(<str>name).encode('utf-8') for name in <list>pinned[0]]
+
+
+cdef _numpy_check_meta_pinned(
+        tuple pinned, list pinned_names, const qwp_reader_batch* batch):
+    """Refuse a batch whose schema disagrees with the first one's.
+
+    The NumPy path reads the column names, kinds, decimal scales and
+    geohash precisions once and decodes every later batch against them,
+    and the round-trip claim it hands back names them too. A batch that
+    disagrees would be decoded with the wrong dtype and described by a
+    claim that does not match its own values, so it stops here instead.
+
+    The count, the names, the kinds and the two numbers the decoders
+    read per batch are all compared. The names are compared as raw
+    bytes against the buffer the reader borrows out, because a
+    `PyUnicode` per column per batch is the cost this path had removed
+    -- and a rename is the one alteration that moves neither the count
+    nor the kinds, which is exactly what the reference client checks
+    first.
+    """
+    cdef list pinned_kinds = <list>pinned[1]
+    cdef list pinned_scales = <list>pinned[2]
+    cdef list pinned_precision = <list>pinned[3]
+    cdef size_t n_cols = qwp_reader_batch_column_count(batch)
+    cdef size_t col_idx
+    cdef qwp_reader_column_kind kind = qwp_reader_column_kind_unknown
+    cdef questdb_error* err = NULL
+    cdef qwp_reader_column_data cd_meta
+    cdef object want
+    cdef const char* name_buf = NULL
+    cdef size_t name_len = 0
+    cdef bytes want_name
+    if n_cols != <size_t>len(pinned_kinds):
+        _numpy_meta_drift()
+    for col_idx in range(n_cols):
+        _reader_check(
+            qwp_reader_batch_column_name(
+                batch, col_idx, &name_buf, &name_len, &err),
+            &err, 'qwp_reader_batch_column_name')
+        want_name = <bytes>pinned_names[col_idx]
+        if (name_len != <size_t>len(want_name)
+                or memcmp(name_buf, <const char*>want_name,
+                          name_len) != 0):
+            _numpy_meta_drift()
+        _reader_check(
+            qwp_reader_batch_column_kind(batch, col_idx, &kind, &err),
+            &err, 'qwp_reader_batch_column_kind')
+        if <int>kind != <int>(<object>pinned_kinds[col_idx]):
+            _numpy_meta_drift()
+        if kind == qwp_reader_column_kind_geohash:
+            want = pinned_precision[col_idx]
+        elif (kind == qwp_reader_column_kind_decimal64
+                or kind == qwp_reader_column_kind_decimal128
+                or kind == qwp_reader_column_kind_decimal256):
+            want = pinned_scales[col_idx]
+        else:
+            continue
+        if qwp_reader_batch_column_data(batch, col_idx, &cd_meta, &err):
+            if kind == qwp_reader_column_kind_geohash:
+                if want is not None and cd_meta.geohash_precision_bits != want:
+                    _numpy_meta_drift()
+            elif want is not None and cd_meta.decimal_scale != want:
+                _numpy_meta_drift()
+        elif err != NULL:
+            questdb_error_free(err)
+            err = NULL
+
+
+def _debug_numpy_pinned_meta(_NumpyBatchIter it):
+    """The schema a NumPy-backed iterator pinned from its first batch.
+
+    Not part of the public API. The drift check compares a later batch
+    against this, and a result whose schema really changes mid-stream
+    cannot be arranged from a test, so the pin is what a test perturbs
+    instead. Comparing a good batch against a doctored pin exercises
+    the same comparison as a doctored batch against a good pin.
+    """
+    return (it.pinned_meta, list(it.pinned_names_b))
+
+
+def _debug_numpy_force_pin(_NumpyBatchIter it, tuple pinned_meta,
+                           list pinned_names_b):
+    """Seed an iterator's pinned schema so its *first* batch is checked
+    against it rather than pinning one of its own.
+
+    Not part of the public API.
+    """
+    it.pinned_meta = pinned_meta
+    it.pinned_names_b = pinned_names_b
+    (it.col_names, it.col_kinds, it.col_scales,
+     it.col_precision, it.has_symbol) = pinned_meta
+    it.claim = _numpy_roundtrip_claim(
+        it.col_names, it.col_kinds, it.col_scales, it.col_precision)
+    it.first = False
+
+
+cdef _numpy_meta_drift():
+    # `SchemaDrift` is the code the header gives a mid-stream schema
+    # change, and the one `to_arrow()` and `iter_polars()` already raise
+    # for the same event through the Arrow reader. `ServerSchemaMismatch`
+    # is a server-reported ingest status and means something else.
+    raise QuestDBError(
+        QuestDBErrorCode.SchemaDrift,
+        'The result schema changed between batches: this reader '
+        'decodes every batch against the first one\'s columns, so a '
+        'later batch that disagrees cannot be read.')
+
+
 cdef tuple _numpy_extract_meta(const qwp_reader_batch* batch):
     cdef size_t n_cols = qwp_reader_batch_column_count(batch)
     cdef size_t col_idx
@@ -2027,10 +2208,36 @@ cdef object _symbol_from_codes(object pd, object arr, object dtype):
     return pd.Categorical.from_codes(arr, dtype=dtype)
 
 
+cdef object _numpy_roundtrip_claim(
+        list col_names, list col_kinds, list col_scales, list col_precision):
+    """The ``df.attrs['questdb']`` claim for a native (no pyarrow) result.
+
+    Built from the schema the first batch reported, which the whole
+    result shares, so a streaming read builds it once and hands the same
+    claim to every batch. That is sound for the same reason pandas can
+    share it between copies of one frame: the claim declines to be
+    copied and cannot be edited.
+    """
+    cdef size_t col_idx
+    cdef size_t n_cols = <size_t>len(col_names)
+    cdef dict columns_meta = {}
+    cdef dict entry
+    for col_idx in range(n_cols):
+        entry = {'kind': _KIND_NAMES.get(col_kinds[col_idx], 'unknown')}
+        if col_scales[col_idx] is not None:
+            entry['scale'] = col_scales[col_idx]
+        if col_precision[col_idx] is not None:
+            entry['precision_bits'] = col_precision[col_idx]
+        columns_meta[col_names[col_idx]] = entry
+    return _RoundtripClaim(
+        {'version': _ROUNDTRIP_META_VERSION, 'columns': columns_meta})
+
+
 cdef object _numpy_assemble_frame(
         list col_names, list col_kinds, list col_scales,
         list col_precision, list col_chunks, list symbol_categories,
-        object np, object pd, list col_masks, object symbol_dtype=None):
+        object np, object pd, list col_masks, object symbol_dtype=None,
+        object claim=None):
     cdef size_t n_cols = <size_t>len(col_names)
     cdef size_t col_idx
     cdef qwp_reader_column_kind kind
@@ -2059,15 +2266,10 @@ cdef object _numpy_assemble_frame(
     frame = pd.DataFrame(dict(enumerate(arrays)), copy=False)
     # Keep pandas 3 from inferring a pyarrow-backed StringDtype Index.
     frame.columns = pd.Index(col_names, dtype=object)
-    columns_meta = {}
-    for col_idx in range(n_cols):
-        entry = {'kind': _KIND_NAMES.get(col_kinds[col_idx], 'unknown')}
-        if col_scales[col_idx] is not None:
-            entry['scale'] = col_scales[col_idx]
-        if col_precision[col_idx] is not None:
-            entry['precision_bits'] = col_precision[col_idx]
-        columns_meta[col_names[col_idx]] = entry
-    frame.attrs['questdb'] = {'version': 1, 'columns': columns_meta}
+    frame.attrs['questdb'] = (
+        _numpy_roundtrip_claim(
+            col_names, col_kinds, col_scales, col_precision)
+        if claim is None else claim)
     return frame
 
 
@@ -2422,7 +2624,7 @@ cdef list _row_column_values(
     if kind == <int>qwp_reader_column_kind_ipv4:
         # The server already turns its IPv4 null sentinel into a validity
         # bit (`appendIPv4OrNull`), so there is no zero to special-case.
-        ipv4_cls = _ipaddress.IPv4Address
+        ipv4_cls = ipaddress.IPv4Address
         for r in range(row_count):
             if _cell_is_null(validity, r):
                 out.append(None)
@@ -2786,6 +2988,8 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
     cdef size_t col_idx
     cdef size_t prev_dict_n = 0
     cdef bint first = True
+    cdef tuple pinned_meta = None
+    cdef list pinned_names_b = None
     cdef bint has_symbol = False
     cdef int seen_seq
 
@@ -2828,12 +3032,17 @@ cdef object _numpy_frame_from_cursor(_CursorHandle handle):
                         break
                     row_count = qwp_reader_batch_row_count(batch)
                     if first:
+                        pinned_meta = _numpy_extract_meta(batch)
+                        pinned_names_b = _numpy_pinned_name_bytes(pinned_meta)
                         (col_names, col_kinds, col_scales, col_precision,
-                         has_symbol) = _numpy_extract_meta(batch)
+                         has_symbol) = pinned_meta
                         n_cols = <size_t>len(col_names)
                         col_chunks = [[] for _ in range(n_cols)]
                         col_masks = [[] for _ in range(n_cols)]
                         first = False
+                    else:
+                        _numpy_check_meta_pinned(
+                            pinned_meta, pinned_names_b, batch)
                     if has_symbol:
                         _reader_check(
                             qwp_reader_batch_symbol_dict(batch, &sd, &err),
@@ -3066,6 +3275,9 @@ cdef class _NumpyBatchIter:
     cdef list col_kinds
     cdef list col_scales
     cdef list col_precision
+    cdef object claim
+    cdef tuple pinned_meta
+    cdef list pinned_names_b
     cdef bint first
     cdef bint has_symbol
     cdef bint done
@@ -3085,6 +3297,7 @@ cdef class _NumpyBatchIter:
         self.col_kinds = []
         self.col_scales = []
         self.col_precision = []
+        self.claim = None
         self.first = True
         self.has_symbol = False
         self.done = False
@@ -3134,6 +3347,7 @@ cdef class _NumpyBatchIter:
                         # the accumulated schema and categories.
                         self.seen_seq = self.handle._reset_seq
                         self.first = True
+                        self.claim = None
                         self.has_symbol = False
                         self.prev_dict_n = 0
                         self.symbol_categories = []
@@ -3146,10 +3360,19 @@ cdef class _NumpyBatchIter:
                         raise StopIteration
                     row_count = qwp_reader_batch_row_count(batch)
                     if self.first:
+                        self.pinned_meta = _numpy_extract_meta(batch)
+                        self.pinned_names_b = _numpy_pinned_name_bytes(
+                            self.pinned_meta)
                         (self.col_names, self.col_kinds, self.col_scales,
                          self.col_precision, self.has_symbol) = \
-                            _numpy_extract_meta(batch)
+                            self.pinned_meta
+                        self.claim = _numpy_roundtrip_claim(
+                            self.col_names, self.col_kinds,
+                            self.col_scales, self.col_precision)
                         self.first = False
+                    else:
+                        _numpy_check_meta_pinned(
+                            self.pinned_meta, self.pinned_names_b, batch)
                     n_cols = <size_t>len(self.col_names)
                     if self.has_symbol:
                         _reader_check(
@@ -3176,7 +3399,8 @@ cdef class _NumpyBatchIter:
             frame = _numpy_assemble_frame(
                 self.col_names, self.col_kinds, self.col_scales,
                 self.col_precision, col_chunks, self.symbol_categories,
-                self.np, self.pd, col_masks, symbol_dtype=self.symbol_dtype)
+                self.np, self.pd, col_masks, symbol_dtype=self.symbol_dtype,
+                claim=self.claim)
         except:
             self.done = True
             self.handle._free()
@@ -3187,6 +3411,106 @@ cdef class _NumpyBatchIter:
     def __dealloc__(self):
         if not self.done and self.handle is not None:
             self.handle._free()
+
+
+cdef bytes _ARROW_MD_COLUMN_TYPE = b'questdb.column_type'
+cdef bytes _ARROW_MD_GEOHASH_BITS = b'questdb.geohash_bits'
+
+
+# The Rust egress spells a few kinds differently on the Arrow field than
+# the QWP reader reports them, so map them onto the `_KIND_NAMES`
+# vocabulary: `df.attrs['questdb']` then means the same thing whichever
+# backend built the frame.
+cdef dict _ARROW_KIND_ALIASES = {
+    'timestamp_nanos': 'timestamp_ns',
+    'decimal64': 'decimal',
+    'decimal128': 'decimal',
+    'decimal256': 'decimal',
+}
+
+
+cdef object _arrow_field_roundtrip_meta(object field):
+    """One `df.attrs['questdb']['columns']` entry built from an Arrow
+    field's QuestDB metadata, or None where the field claims no kind."""
+    cdef object md = field.metadata
+    cdef object raw
+    cdef object bits
+    cdef object scale
+    cdef dict entry
+    if not md:
+        return None
+    raw = md.get(_ARROW_MD_COLUMN_TYPE)
+    if raw is None:
+        return None
+    kind = raw.decode('utf-8', 'replace')
+    kind = _ARROW_KIND_ALIASES.get(kind, kind)
+    entry = {'kind': kind}
+    if kind == 'geohash':
+        bits = md.get(_ARROW_MD_GEOHASH_BITS)
+        if bits is not None:
+            try:
+                entry['precision_bits'] = int(bits)
+            except ValueError:
+                pass
+    elif kind == 'decimal':
+        scale = getattr(field.type, 'scale', None)
+        if scale is not None:
+            entry['scale'] = scale
+    return entry
+
+
+cdef dict _arrow_roundtrip_columns_meta(object schema):
+    """The `columns` map of `df.attrs['questdb']`, read off the Arrow
+    schema's QuestDB field metadata."""
+    cdef dict columns_meta = {}
+    cdef Py_ssize_t i
+    cdef object entry
+    # `schema.names` rebuilds the list and decodes every field name on
+    # each read, so it is read once. Every column of a QuestDB result
+    # carries type metadata, which made the old per-column read
+    # quadratic in the column count and `iter_pandas` paid it per batch.
+    cdef list names = schema.names
+    for i in range(len(names)):
+        entry = _arrow_field_roundtrip_meta(schema.field(i))
+        if entry is not None:
+            columns_meta[names[i]] = entry
+    return columns_meta
+
+
+cdef object _arrow_roundtrip_claim(object schema):
+    """The ``df.attrs['questdb']`` claim for an Arrow schema.
+
+    One schema covers every batch of a stream, and the claim declines to
+    be copied and cannot be edited, so a streaming read builds it once
+    and hands the same claim to every batch it yields.
+    """
+    return _RoundtripClaim(
+        {'version': _ROUNDTRIP_META_VERSION,
+         'columns': _arrow_roundtrip_columns_meta(schema)})
+
+
+cdef object _attach_arrow_roundtrip_attrs(object frame, object schema):
+    """Carry the per-column QuestDB kinds into `df.attrs['questdb']`,
+    matching what the native numpy path attaches.
+
+    The kind claim rides on the Arrow *field*, while a pandas dtype holds
+    only the *type*, so `Table.to_pandas` drops it. `attrs` is the
+    pandas-level carrier `QuestDB.dataframe()` reads back to restore
+    IPV4 / CHAR / GEOHASH / UUID / LONG256 columns, which are otherwise
+    indistinguishable from their storage types on the way back in.
+    """
+    frame.attrs['questdb'] = _arrow_roundtrip_claim(schema)
+    return frame
+
+
+def _debug_arrow_roundtrip_columns_meta(schema):
+    """Internal: the ``df.attrs['questdb']['columns']`` map that the
+    pyarrow-backed ``to_pandas`` / ``iter_pandas`` attach for a
+    ``pyarrow.Schema``. Lets the mapping be tested without a server.
+
+    Not part of the public API.
+    """
+    return _arrow_roundtrip_columns_meta(schema)
 
 
 cdef object _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper):
@@ -3381,6 +3705,10 @@ class QueryResult:
         nulls it stays plain numpy. ``double``/``float`` stay numpy with
         ``NaN``; ``SYMBOL`` → ``Categorical``; ``TIMESTAMP`` →
         ``datetime64`` (``NaT``); strings/decimal/uuid/binary → ``object``.
+        With no arguments or a ``dtype_backend``, a ``GEOHASH`` column is
+        a signed integer sized by its precision: ``int8`` up to 7 bits,
+        ``int16`` to 15, ``int32`` to 31, ``int64`` to 60, as
+        :meth:`to_arrow` gives it.
         Analysis-safe (aggregations skip ``pd.NA``/``NaN``), and feeds back
         into :meth:`QuestDB.dataframe` for a type round-trip — the column
         kinds are carried in ``df.attrs['questdb']``.
@@ -3388,7 +3716,33 @@ class QueryResult:
         ``dtype_backend="pyarrow"`` / ``"numpy_nullable"`` / ``types_mapper``
         select the pyarrow-backed path instead (``pd.ArrowDtype``, pandas
         nullable extension dtypes, or a custom mapper) — matching the
-        ``pd.read_sql`` / ``pd.read_parquet`` convention.
+        ``pd.read_sql`` / ``pd.read_parquet`` convention. Those paths
+        attach ``df.attrs['questdb']`` too: a pandas dtype holds an Arrow
+        type and no field, so ``attrs`` is what carries the IPV4 / CHAR /
+        GEOHASH / UUID / LONG256 claims that live in Arrow field metadata.
+        :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` reads the
+        claim back from either built-in backend — including the masked
+        and object-dtype columns ``"numpy_nullable"`` produces for those
+        five — so writing the result out again gives the same column
+        types, and for those five the same wire bytes.
+
+        A custom ``types_mapper`` gets the same ``attrs``, but whether
+        the claim can be applied depends on the dtype the mapper picked.
+        It has to be a shape that still holds the value:
+        an Arrow-backed column, a NumPy ``uint32`` / ``uint16`` / integer
+        column, or an object column of Python ints or ``bytes``. Map one
+        of those five columns to a float or a string dtype and the claim
+        is ignored — the column lands as that dtype implies, and
+        re-ingestion logs a ``questdb`` warning about the dropped claim.
+
+        ``df.attrs['questdb']`` reads as an ordinary mapping but cannot
+        be edited in place: pandas deep-copies the whole of ``attrs``
+        once per column whenever it propagates it, so a per-column claim
+        that copied would make slicing and exporting quadratic in the
+        column count. Every copy of the frame shares the one claim
+        instead. To change what a frame claims, assign a new mapping to
+        ``df.attrs['questdb']``, or state the type outright with
+        ``schema_overrides`` / ``symbols``, which outrank it.
         """
         if dtype_backend is not None and types_mapper is not None:
             raise ValueError(
@@ -3401,8 +3755,9 @@ class QueryResult:
         table = (pa.table({}) if schema is None
                  else _table_shared_symbol_dict(
                      pa.Table.from_batches(batches, schema)))
-        return table.to_pandas(
+        frame = table.to_pandas(
             **_resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper))
+        return _attach_arrow_roundtrip_attrs(frame, table.schema)
 
     def to_polars(self):
         """Read the full result into a ``polars.DataFrame``. Requires polars
@@ -3469,9 +3824,12 @@ class QueryResult:
         """Iterate result batches as ``pandas.DataFrame``.
 
         Mirrors :meth:`to_pandas`: with no arguments each batch is
-        materialised straight into numpy (no pyarrow, sentinel-preserving,
-        ``df.attrs['questdb']`` per batch). ``dtype_backend`` /
-        ``types_mapper`` select the pyarrow-backed path instead.
+        materialised straight into numpy (no pyarrow, sentinel-preserving).
+        ``dtype_backend`` / ``types_mapper`` select the pyarrow-backed path
+        instead. Either way every batch carries ``df.attrs['questdb']``,
+        a ``GEOHASH`` column gets the same signed integer type, and what
+        a custom ``types_mapper`` costs the round trip is the same as it
+        is there.
         """
         if dtype_backend is not None and types_mapper is not None:
             raise ValueError(
@@ -3484,9 +3842,16 @@ class QueryResult:
         import pyarrow as pa
         kwargs = _resolve_arrow_to_pandas_kwargs(dtype_backend, types_mapper)
         reader = _build_record_batch_reader(self._take_cursor_handle())
+        # `_table_shared_symbol_dict` re-types SYMBOL columns but keeps
+        # every field's name and metadata, which is all the claim reads,
+        # so the stream's own schema gives the same answer for every
+        # batch.
+        claim = _arrow_roundtrip_claim(reader.schema)
         for batch in reader:
             table = _table_shared_symbol_dict(pa.Table.from_batches([batch]))
-            yield table.to_pandas(**kwargs)
+            frame = table.to_pandas(**kwargs)
+            frame.attrs['questdb'] = claim
+            yield frame
 
     def iter_polars(self):
         """Iterate result batches as ``polars.DataFrame``.
