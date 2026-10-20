@@ -2771,6 +2771,67 @@ cdef void_int _parse_pooled_auto_flush(
     c_auto_flush_bytes_dynamic[0] = default_auto_flush_bytes
 
 
+cdef size_t _qwp_row_byte_limit(
+        const auto_flush_mode_t* mode,
+        bint bytes_dynamic,
+        size_t hard_cap,
+        bint server_cap_known) noexcept:
+    """
+    The `auto_flush_bytes` threshold of a QWP/WebSocket row buffer whose
+    byte trigger is on.
+
+    A threshold derived from the frame cap is 90% of it, and at most 8 MiB
+    while the server has not advertised its cap. An explicit threshold
+    above 90% of the cap is lowered to it.
+    """
+    # floor(hard_cap * 0.9) without overflowing size_t.
+    cdef size_t soft_cap = ((hard_cap // 10) * 9
+                            + ((hard_cap % 10) * 9) // 10)
+    if bytes_dynamic:
+        if not server_cap_known and soft_cap > 8 * 1024 * 1024:
+            return 8 * 1024 * 1024
+        return soft_cap
+    if soft_cap < <size_t>mode.byte_count:
+        return soft_cap
+    return <size_t>mode.byte_count
+
+
+cdef bint _qwp_row_should_auto_flush(
+        const auto_flush_mode_t* mode,
+        bint bytes_dynamic,
+        line_sender_buffer* buf,
+        size_t hard_cap,
+        bint server_cap_known,
+        int64_t interval_start_ms) noexcept:
+    """
+    Whether a QWP/WebSocket row buffer is due for auto-flush.
+
+    Besides the configured row, byte and interval triggers, a buffer whose
+    size estimate reaches the full frame cap is always due: it cannot go out
+    as one frame, and publishing now lets the rows before the newest one go
+    out on their own. `auto_flush_bytes=off` therefore turns off only the
+    configured byte trigger.
+    """
+    cdef size_t buffer_size
+    if not mode.enabled:
+        return False
+    if (mode.row_count != -1 and
+            line_sender_buffer_row_count(buf) >= <size_t>mode.row_count):
+        return True
+    buffer_size = line_sender_buffer_size(buf)
+    if buffer_size >= hard_cap:
+        return True
+    if (mode.byte_count != -1 and
+            buffer_size >= _qwp_row_byte_limit(
+                mode, bytes_dynamic, hard_cap, server_cap_known)):
+        return True
+    if (mode.interval != -1 and
+            ((line_sender_now_micros() // 1000) - interval_start_ms)
+            >= mode.interval):
+        return True
+    return False
+
+
 class TaggedEnum(Enum):
     """
     Base class for tagged enums.
@@ -10482,6 +10543,7 @@ cdef class Sender:
     cdef object _error_handler
     cdef object _connection_listener
     cdef auto_flush_mode_t _auto_flush_mode
+    cdef bint _auto_flush_bytes_dynamic
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
     cdef bint _in_txn
@@ -10829,6 +10891,12 @@ cdef class Sender:
                     '"request_timeout" must be an int or a timedelta, '
                     f'not {_fqn(type(request_timeout))}')
 
+        if _is_qwp_ws_protocol(self._c_protocol) and auto_flush_bytes is None:
+            # As on a pooled lease, the byte threshold derives from the
+            # connection's frame cap, read on every check. The placeholder
+            # lets the byte trigger alone turn auto-flush on.
+            auto_flush_bytes = 1
+            self._auto_flush_bytes_dynamic = True
         _parse_auto_flush(
             self._c_protocol,
             auto_flush,
@@ -10859,6 +10927,7 @@ cdef class Sender:
         self._error_handler = None
         self._connection_listener = None
         self._auto_flush_mode.enabled = False
+        self._auto_flush_bytes_dynamic = False
         self._last_flush_ms = NULL
         self._init_buf_size = 0
         self._in_txn = False
@@ -10890,7 +10959,7 @@ cdef class Sender:
             object request_timeout=None,
             object auto_flush=None,  # Default True
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
-            object auto_flush_bytes=None,  # Default off
+            object auto_flush_bytes=None,  # Default off (90% of the frame cap for ws and wss)
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 1 for QWP/UDP
@@ -10988,7 +11057,7 @@ cdef class Sender:
             object request_timeout=None,
             object auto_flush=None,  # Default True
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
-            object auto_flush_bytes=None,  # Default off
+            object auto_flush_bytes=None,  # Default off (90% of the frame cap for ws and wss)
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 1 for QWP/UDP
@@ -11166,7 +11235,7 @@ cdef class Sender:
             object request_timeout=None,
             object auto_flush=None,  # Default True
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
-            object auto_flush_bytes=None,  # Default off
+            object auto_flush_bytes=None,  # Default off (90% of the frame cap for ws and wss)
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 1 for QWP/UDP
@@ -11298,13 +11367,36 @@ cdef class Sender:
     @property
     def auto_flush_bytes(self) -> Optional[int]:
         """
-        Byte-count threshold for the auto-flush logic, or None if disabled.
+        Byte-count threshold for the auto-flush logic, or None if disabled or
+        not yet known.
+
+        Over ``ws`` and ``wss`` the threshold is at most 90% of the
+        connection's frame cap, and by default it is 90% of that cap. The
+        cap is known once :func:`Sender.establish` has connected, so before
+        that the default reports ``None``.
         """
+        cdef size_t hard_cap = 0
+        cdef cbool server_cap_known = False
+        cdef line_sender_error* err = NULL
         if not self._auto_flush_mode.enabled:
             return None
         if self._auto_flush_mode.byte_count == -1:
             return None
-        return self._auto_flush_mode.byte_count
+        if not _is_qwp_ws_protocol(self._c_protocol):
+            return self._auto_flush_mode.byte_count
+        if self._impl == NULL:
+            if self._auto_flush_bytes_dynamic:
+                return None
+            return self._auto_flush_mode.byte_count
+        self._check_not_in_own_callback('auto_flush_bytes')
+        if not line_sender_qwpws_effective_frame_cap(
+                self._impl, &hard_cap, &server_cap_known, &err):
+            raise c_err_to_py(err)
+        return _qwp_row_byte_limit(
+            &self._auto_flush_mode,
+            self._auto_flush_bytes_dynamic,
+            hard_cap,
+            server_cap_known)
     
     @property
     def auto_flush_interval(self) -> Optional[datetime.timedelta]:
@@ -11491,6 +11583,22 @@ cdef class Sender:
         it runs could not be flushed until it returned. Over ``ws`` and
         ``wss`` the frame goes out on a connection of its own, so a row
         written from inside it is accepted and flushed as usual.
+
+        Over ``ws`` and ``wss``, auto-flush also publishes a buffer whose size
+        estimate reaches the connection's frame cap, even with
+        ``auto_flush_bytes=off``. Every published frame fits the frame cap:
+        when the whole buffer does not, the rows buffered before this one go
+        out as a frame of their own and this row starts the next batch, so
+        one call publishes at most two frames. Re-adding the row converts its
+        values a second time.
+
+        Over ``ws`` and ``wss``, :class:`QuestDBError <questdb.QuestDBError>`
+        (``BatchTooLarge``) from this method means the row was not added.
+        Either it does not fit in a frame on its own, or the rows buffered
+        before it do not fit even without it, which can happen after the
+        frame cap shrinks on reconnect; those rows are then discarded, and
+        the error says how many. Any other error raised by a publish clears
+        the internal buffer, as :func:`Sender.flush` does.
         """
         if self._in_txn:
             raise QuestDBError(
@@ -11516,7 +11624,17 @@ cdef class Sender:
             "A logging handler that writes the `questdb` logger's records "
             "through this same sender arrives here too; give it a Sender "
             "of its own.")
-        self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
+        if _is_qwp_ws_protocol(self._c_protocol):
+            if self._auto_flush_mode.enabled:
+                # Auto-flush reads the frame cap from the native sender on
+                # every row, so a call from this sender's own callback is
+                # refused before the row is added.
+                self._check_not_in_own_callback('row')
+            _qwp_row_append(
+                self, None, self._buffer, table_name, symbols, columns, at)
+        else:
+            self._buffer.row(
+                table_name, symbols=symbols, columns=columns, at=at)
         return self
 
     def dataframe(
@@ -11735,13 +11853,16 @@ cdef class Sender:
             transactionally. This feature requires ILP/HTTP and is not available
             when connecting over TCP. *Default: False.*
 
+        If the flush fails, the internal buffer is cleared, rows and all; a
+        buffer passed as ``buffer`` is left as it is. Over QWP/WebSocket a
+        buffer is published as one frame, and one whose encoded frame
+        exceeds the connection's frame cap raises
+        :class:`QuestDBError <questdb.QuestDBError>` (``BatchTooLarge``)
+        without publishing anything.
+
         The Python GIL is released during the network IO operation.
         """
-        cdef line_sender* sender = self._impl
-        cdef line_sender_error* err = NULL
         cdef line_sender_buffer* c_buf = NULL
-        cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
-        cdef bint ok = False
 
         self._check_not_in_own_callback('flush')
 
@@ -11753,7 +11874,7 @@ cdef class Sender:
         if buffer is None and not clear:
             raise ValueError('The internal buffer must always be cleared.')
 
-        if sender == NULL:
+        if self._impl == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'flush() can\'t be called: Sender is closed.')
@@ -11771,6 +11892,37 @@ cdef class Sender:
             'flush')
         if line_sender_buffer_size(c_buf) == 0 and not _is_qwp_ws_protocol(self._c_protocol):
             return
+        self._flush_c_buf(c_buf, clear, transactional, False)
+
+    cdef void_int _flush_c_buf(
+            self,
+            line_sender_buffer* c_buf,
+            bint clear,
+            bint transactional,
+            bint keep_on_batch_too_large) except -1:
+        """
+        Flush `c_buf`, which the caller has checked against this sender,
+        with the GIL released.
+
+        A failed flush of the internal buffer clears it. With
+        `keep_on_batch_too_large`, a `BatchTooLarge` refusal leaves it
+        intact instead: that refusal publishes nothing and leaves the sender
+        usable, so the caller can rewind the row it just added and publish
+        the rest.
+        """
+        cdef line_sender* sender = self._impl
+        cdef line_sender_error* err = NULL
+        cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
+        cdef bint ok = False
+        cdef object exc
+
+        # Every publish of this sender's rows comes through here, including
+        # auto-flush from `row()`, so the re-entry guard lives here too.
+        self._check_not_in_own_callback('flush')
+        if sender == NULL:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'flush() can\'t be called: Sender is closed.')
 
         # We might be blocking on IO, so temporarily release the GIL.
         _ensure_doesnt_have_gil(&gs)
@@ -11790,17 +11942,20 @@ cdef class Sender:
         if ok and c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
         if not ok:
-            if c_buf == self._buffer._impl:
+            if _is_tcp_protocol(self._c_protocol):
+                # Provide further context pointing to the logs.
+                exc = c_err_to_py_fmt(err, _FLUSH_FMT)
+            else:
+                exc = c_err_to_py(err)
+            if c_buf == self._buffer._impl and not (
+                    keep_on_batch_too_large and
+                    exc.code == QuestDBErrorCode.BatchTooLarge):
                 # Prevent a follow-up call to `.close(flush=True)` (as is
                 # usually called from `__exit__`) to raise after the sender
                 # entered an error state following a failed call to `.flush()`.
                 # Note: In this case `clear` is always `True`.
                 line_sender_buffer_clear(c_buf)
-            if _is_tcp_protocol(self._c_protocol):
-                # Provide further context pointing to the logs.
-                raise c_err_to_py_fmt(err, _FLUSH_FMT)
-            else:
-                raise c_err_to_py(err)
+            raise exc
 
     cdef inline void_int _check_not_in_own_callback(self, str method) except -1:
         # Native QWP/WebSocket callback dispatch keeps this sender borrowed.
@@ -12178,6 +12333,202 @@ cdef class Sender:
         free(self._last_flush_ms)
 
 
+# QWP/WebSocket row auto-flush, shared by a standalone `Sender` and a
+# `PooledSender` lease: each function takes both, exactly one of them set.
+
+cdef void_int _qwp_row_add(
+        Sender sender,
+        PooledSender pooled,
+        Buffer buf,
+        str table_name,
+        dict symbols,
+        dict columns,
+        object at) except -1:
+    """Append a row, holding the rewind point just before it."""
+    cdef bint starts_batch = line_sender_buffer_row_count(buf._impl) == 0
+    buf._row(False, table_name, symbols, columns, at, True)
+    if pooled is not None and starts_batch:
+        pooled._batch_started_ms = line_sender_now_micros() // 1000
+
+
+cdef bint _qwp_row_due(
+        Sender sender,
+        PooledSender pooled,
+        Buffer buf,
+        size_t* hard_cap) except -1:
+    """
+    Whether the row buffer is due for auto-flush, reporting the
+    connection's current frame cap through `hard_cap`.
+    """
+    cdef auto_flush_mode_t* mode
+    cdef bint bytes_dynamic
+    cdef int64_t interval_start_ms
+    cdef cbool server_cap_known = False
+    cdef line_sender_error* err = NULL
+    cdef bint ok
+    if pooled is not None:
+        mode = &pooled._handle._auto_flush_mode
+        if not mode.enabled:
+            return False
+        bytes_dynamic = pooled._handle._auto_flush_bytes_dynamic
+        interval_start_ms = pooled._batch_started_ms
+        ok = qwp_sender_effective_frame_cap(
+            pooled._qwp, hard_cap, &server_cap_known, &err)
+    else:
+        mode = &sender._auto_flush_mode
+        if not mode.enabled:
+            return False
+        if sender._impl == NULL:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                "row() can't be called: Sender is closed.")
+        bytes_dynamic = sender._auto_flush_bytes_dynamic
+        interval_start_ms = sender._last_flush_ms[0]
+        ok = line_sender_qwpws_effective_frame_cap(
+            sender._impl, hard_cap, &server_cap_known, &err)
+    if not ok:
+        raise c_err_to_py(err)
+    return _qwp_row_should_auto_flush(
+        mode,
+        bytes_dynamic,
+        buf._impl,
+        hard_cap[0],
+        server_cap_known,
+        interval_start_ms)
+
+
+cdef void_int _qwp_row_publish(Sender sender, PooledSender pooled) except -1:
+    """
+    Publish the whole row buffer as one frame and clear it.
+
+    A `BatchTooLarge` refusal publishes nothing and leaves the buffer intact
+    on both senders. After any other failure a pooled lease keeps its rows
+    and a standalone sender has cleared them, as their `flush()` does.
+    """
+    if pooled is not None:
+        pooled._flush_locked(False)
+    else:
+        sender._flush_c_buf(sender._buffer._impl, True, False, True)
+
+
+cdef void_int _qwp_row_reject(
+        PooledSender pooled,
+        Buffer buf,
+        object exc,
+        bint earlier_rows_published) except -1:
+    """Remove the newest row, which does not fit in a frame on its own."""
+    buf._rewind_to_marker()
+    if pooled is not None:
+        pooled._batch_started_ms = 0
+    raise QuestDBError(
+        QuestDBErrorCode.BatchTooLarge,
+        'The row was not added: it does not fit in one QWP/WebSocket '
+        'frame on its own. '
+        + ('The rows buffered before it were published. '
+           if earlier_rows_published else '')
+        + str(exc)) from exc
+
+
+cdef void_int _qwp_row_split(
+        Sender sender,
+        PooledSender pooled,
+        Buffer buf,
+        str table_name,
+        dict symbols,
+        dict columns,
+        object at) except -1:
+    """
+    Publish the rows buffered before the newest one as a frame of their
+    own, then add the newest row back to start the next batch.
+    """
+    cdef size_t hard_cap = 0
+    cdef size_t discarded
+    buf._rewind_to_marker()
+    try:
+        _qwp_row_publish(sender, pooled)
+    except QuestDBError as exc:
+        if exc.code == QuestDBErrorCode.BatchTooLarge:
+            # No frame can carry these rows, and the routine cannot cut
+            # them any finer: it removes only the newest row.
+            discarded = line_sender_buffer_row_count(buf._impl)
+            line_sender_buffer_clear(buf._impl)
+            if pooled is not None:
+                qdb_pystr_buf_clear(buf._b)
+                pooled._batch_started_ms = 0
+            raise QuestDBError(
+                QuestDBErrorCode.BatchTooLarge,
+                f'{discarded} buffered '
+                + ('row was' if discarded == 1 else 'rows were')
+                + ' discarded and the row was not added: the buffered rows '
+                'do not fit in one QWP/WebSocket frame even without it. '
+                'This happens when the frame cap shrinks on reconnect, or '
+                'when the size estimate behind the auto-flush threshold is '
+                'too low. ' + str(exc)) from exc
+        if pooled is not None:
+            # A pooled lease keeps its rows when a publish fails, so the
+            # new row goes back in with them.
+            _qwp_row_add(
+                sender, pooled, buf, table_name, symbols, columns, at)
+        raise
+    # Converts the row's values a second time.
+    _qwp_row_add(sender, pooled, buf, table_name, symbols, columns, at)
+    if _qwp_row_due(sender, pooled, buf, &hard_cap):
+        try:
+            _qwp_row_publish(sender, pooled)
+        except QuestDBError as exc:
+            if exc.code == QuestDBErrorCode.BatchTooLarge:
+                _qwp_row_reject(pooled, buf, exc, True)
+            raise
+
+
+cdef void_int _qwp_row_append(
+        Sender sender,
+        PooledSender pooled,
+        Buffer buf,
+        str table_name,
+        dict symbols,
+        dict columns,
+        object at) except -1:
+    """
+    Append a row to a QWP/WebSocket row buffer and run auto-flush, keeping
+    every published frame within the connection's frame cap.
+
+    The whole buffer goes out as one frame when it fits. When it does not,
+    the rows buffered before the new one go out on their own and the new
+    row starts the next batch, so a single call publishes at most two
+    frames.
+
+    A `BatchTooLarge` from here always means the new row is not in the
+    buffer: either it does not fit in a frame on its own, or the rows
+    before it do not fit even without it, and those rows are discarded.
+    Other publish failures leave the buffer as the sender's `flush()` does.
+    """
+    cdef size_t hard_cap = 0
+    cdef size_t row_count
+    cdef bint split
+    _qwp_row_add(sender, pooled, buf, table_name, symbols, columns, at)
+    try:
+        if not _qwp_row_due(sender, pooled, buf, &hard_cap):
+            return 0
+        row_count = line_sender_buffer_row_count(buf._impl)
+        # An estimate already past the cap rules the whole buffer out, so
+        # the encode that would only confirm it is skipped.
+        split = (row_count > 1 and
+                 line_sender_buffer_size(buf._impl) > hard_cap)
+        if not split:
+            try:
+                _qwp_row_publish(sender, pooled)
+                return 0
+            except QuestDBError as exc:
+                if exc.code != QuestDBErrorCode.BatchTooLarge:
+                    raise
+                if row_count == 1:
+                    _qwp_row_reject(pooled, buf, exc, False)
+        _qwp_row_split(sender, pooled, buf, table_name, symbols, columns, at)
+    finally:
+        buf._clear_marker()
+
+
 @cython.no_gc_clear
 cdef class PooledSender:
     """
@@ -12331,51 +12682,6 @@ cdef class PooledSender:
                 'while that call is still using it. Close the lease '
                 'after the call returns.')
 
-    cdef bint _should_auto_flush_locked(self) except -1:
-        cdef auto_flush_mode_t* mode = &self._handle._auto_flush_mode
-        cdef size_t row_count
-        cdef size_t buffer_size
-        cdef size_t hard_cap = 0
-        cdef size_t soft_cap = 0
-        cdef size_t byte_limit = 0
-        cdef cbool server_cap_known = False
-        cdef line_sender_error* err = NULL
-
-        if not mode.enabled:
-            return False
-
-        row_count = line_sender_buffer_row_count(self._buffer._impl)
-        if mode.row_count != -1 and row_count >= <size_t>mode.row_count:
-            return True
-
-        if mode.byte_count != -1:
-            if not qwp_sender_effective_frame_cap(
-                    self._qwp, &hard_cap, &server_cap_known, &err):
-                raise c_err_to_py(err)
-
-            # floor(hard_cap * 0.9) without overflowing size_t.
-            soft_cap = ((hard_cap // 10) * 9
-                        + ((hard_cap % 10) * 9) // 10)
-            if self._handle._auto_flush_bytes_dynamic:
-                byte_limit = soft_cap
-                if not server_cap_known and byte_limit > 8 * 1024 * 1024:
-                    byte_limit = 8 * 1024 * 1024
-            else:
-                byte_limit = <size_t>mode.byte_count
-                if soft_cap < byte_limit:
-                    byte_limit = soft_cap
-
-            buffer_size = line_sender_buffer_size(self._buffer._impl)
-            if buffer_size >= byte_limit:
-                return True
-
-        if mode.interval != -1 and (
-                (line_sender_now_micros() // 1000)
-                - self._batch_started_ms) >= mode.interval:
-            return True
-
-        return False
-
     cdef void_int _wait_locked(self, uint64_t timeout_millis) except -1:
         cdef line_sender_error* err = NULL
         cdef PyThreadState* gs = NULL
@@ -12469,18 +12775,25 @@ cdef class PooledSender:
         When pooled auto-flush is enabled on the :class:`QuestDB` handle,
         completing a row that breaches a configured row, byte, or interval
         threshold publishes the buffer without waiting for an acknowledgement.
-        Any error raised by that publish propagates from this method.
-        If a single row cannot fit in a QWP frame, that row is removed before
-        :class:`QuestDBErrorCode.BatchTooLarge` is raised. If a multi-row
-        batch exceeds the exact encoded limit despite the byte-size estimate,
-        the complete batch remains buffered.
+        A buffer whose size estimate reaches the connection's frame cap is
+        published too, even with ``auto_flush_bytes=off``. Every published
+        frame fits the frame cap: when the whole buffer does not, the rows
+        buffered before this one go out as a frame of their own and this row
+        starts the next batch, so one call publishes at most two frames.
+        Re-adding the row converts its values a second time.
+
+        :class:`QuestDBErrorCode.BatchTooLarge` from this method means the row
+        was not added. Either it does not fit in a frame on its own, or the
+        rows buffered before it do not fit even without it, which can happen
+        after the frame cap shrinks on reconnect; those rows are then
+        discarded, and the error says how many. Any other error raised by a
+        publish propagates from this method and leaves every row buffered,
+        this one included.
 
         See :func:`Buffer.row <questdb.ingress.Buffer.row>` for supported
         column types, protocol restrictions, server requirements, and
         ``NULL``-sentinel behavior.
         """
-        cdef bint starts_batch
-        cdef bint auto_flush
         cdef Buffer buf
         cdef QuestDB handle
         if at is None:
@@ -12497,34 +12810,8 @@ cdef class PooledSender:
                 # back in here. A strong local reference keeps the buffer
                 # alive for the whole row, including its cleanup.
                 buf = self._buffer
-                starts_batch = (
-                    line_sender_buffer_row_count(buf._impl) == 0)
-                buf._row(
-                    False, table_name, symbols, columns, at, True)
-                if starts_batch:
-                    self._batch_started_ms = line_sender_now_micros() // 1000
-                try:
-                    auto_flush = self._should_auto_flush_locked()
-                except:
-                    buf._clear_marker()
-                    raise
-                if not auto_flush:
-                    buf._clear_marker()
-                    return self
-                try:
-                    self._flush_locked(False)
-                except QuestDBError as exc:
-                    if (starts_batch and
-                            exc.code == QuestDBErrorCode.BatchTooLarge):
-                        buf._rewind_to_marker()
-                        self._batch_started_ms = 0
-                    else:
-                        buf._clear_marker()
-                    raise
-                except:
-                    buf._clear_marker()
-                    raise
-                buf._clear_marker()
+                _qwp_row_append(
+                    None, self, buf, table_name, symbols, columns, at)
             finally:
                 self._exit_call_locked(handle)
         return self

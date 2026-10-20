@@ -10,6 +10,13 @@ Changelog
 Breaking changes
 ~~~~~~~~~~~~~~~~
 
+- **A standalone QWP/WebSocket flush too large for one frame raises
+  ``BatchTooLarge``**, as a pooled one does, instead of ``InvalidApiCall``.
+  The message names the limit that applies: ``max_buf_size``, the server's
+  advertised limit, or the store-and-forward segment capacity, which the
+  standalone sender now also checks. Code that caught ``InvalidApiCall`` for
+  this case must catch ``BatchTooLarge``.
+
 - **UUID raw bytes are now RFC 4122 byte order** (big-endian, the same bytes
   as ``uuid.UUID.bytes``) everywhere they cross the API. This affects Arrow
   and binary DataFrame columns you write, and the bytes you read back from a
@@ -361,6 +368,23 @@ New
 
 Fixed
 ~~~~~
+
+- **QWP/WebSocket ``row()`` auto-flush no longer fails on rows that each fit
+  a frame** (`#161 <https://github.com/questdb/py-questdb-client/issues/161>`_).
+  In 5.0 a standalone ``ws::`` / ``wss::`` ``Sender`` had no byte trigger, so
+  600 rows of 4 KiB already exceeded the server's default 2 MiB frame limit,
+  and a pooled lease checked its byte trigger only after appending, so one
+  large row could push a batch past the limit. Either way the whole batch
+  failed: the standalone sender discarded it, and a pooled lease kept it
+  but could never publish it. Now both senders auto-flush at 90% of the
+  frame limit, and publish as soon as the size estimate reaches the full
+  limit, even with ``auto_flush_bytes=off``. When the whole buffer still
+  does not fit in one frame, the rows buffered before the newest one go out
+  as a frame of their own and the newest row starts the next batch.
+  ``BatchTooLarge`` from ``row()`` now always means the row was not added:
+  it does not fit in a frame on its own, or the rows before it no longer fit
+  after the frame limit shrank on reconnect, in which case those rows are
+  discarded and the error says how many.
 
 - **Python ``True`` in an object-dtype DataFrame column was written as
   ``False``** by ``QuestDB.dataframe()``, ``PooledSender.dataframe()`` and

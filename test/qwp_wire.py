@@ -106,6 +106,61 @@ def only_table_column_data(payload):
     return payload[_first_table_schema(payload)[1]:]
 
 
+def table_values(payload):
+    """Every table block of a QWP1 frame, in frame order, as
+    ``(table name, {column name: [values]})``.
+
+    Decodes only LONG and VARCHAR columns without a null bitmap, which is
+    what the row-splitting tests send.
+    """
+    pos = _first_table_start(payload)
+    tables = []
+    for _ in range(int.from_bytes(payload[6:8], 'little')):
+        name_len, pos = read_varint(payload, pos)
+        table_name = payload[pos:pos + name_len].decode('utf-8')
+        pos += name_len
+        row_count, pos = read_varint(payload, pos)
+        column_count, pos = read_varint(payload, pos)
+        schema = []
+        for _ in range(column_count):
+            name_len, pos = read_varint(payload, pos)
+            schema.append(
+                (payload[pos:pos + name_len].decode('utf-8'),
+                 payload[pos + name_len]))
+            pos += name_len + 1
+        columns = {}
+        for name, tag in schema:
+            if payload[pos] != 0:
+                raise AssertionError(f'column {name!r} has a null bitmap')
+            pos += 1
+            if tag == 0x05:
+                values = [
+                    int.from_bytes(
+                        payload[pos + 8 * i:pos + 8 * i + 8], 'little',
+                        signed=True)
+                    for i in range(row_count)]
+                pos += 8 * row_count
+            elif tag == 0x0F:
+                offsets = [
+                    int.from_bytes(payload[pos + 4 * i:pos + 4 * i + 4],
+                                   'little')
+                    for i in range(row_count + 1)]
+                pos += 4 * (row_count + 1)
+                data = payload[pos:pos + offsets[-1]]
+                values = [
+                    data[offsets[i]:offsets[i + 1]].decode('utf-8')
+                    for i in range(row_count)]
+                pos += offsets[-1]
+            else:
+                raise AssertionError(
+                    f'column {name!r} of type {type_name(tag)} is not decoded')
+            columns[name] = values
+        tables.append((table_name, columns))
+    if pos != len(payload):
+        raise AssertionError('trailing bytes after the last QWP table')
+    return tables
+
+
 def _first_table_schema(payload):
     """The first table's ``(column name, type tag)`` pairs, and the
     position its column data starts at."""

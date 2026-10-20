@@ -741,6 +741,13 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint line_sender_qwpws_effective_frame_cap(
+        const line_sender* sender,
+        size_t* cap_out,
+        cbool* server_cap_known_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint line_sender_qwpws_close_drain(
         line_sender* sender,
         line_sender_error** err_out

@@ -529,7 +529,9 @@ senders auto-flush by default to avoid accumulating large or stale batches.
 Their defaults reflect the different protocols:
 
 * A standalone sender publishes at 75,000 rows over HTTP, or 600 rows over
-  TCP and QWP, and after 1 second.
+  TCP and QWP, and after 1 second. Over QWP/WebSocket it also publishes when
+  its estimated encoded size reaches 90% of the current frame limit, as a
+  pooled sender does.
 
 * A pooled QWP sender publishes at 1,000 rows, after 100 milliseconds, or when
   its estimated encoded size reaches 90% of the current frame limit. Before a
@@ -537,6 +539,13 @@ Their defaults reflect the different protocols:
   limit. Explicit byte thresholds above that 90% limit are clamped. The
   estimate is a batching heuristic; the exact encoded size is checked when
   publishing, particularly for symbol dictionaries.
+
+Over QWP/WebSocket the frame limit is the smallest of ``max_buf_size``, the
+server's advertised limit and the store-and-forward segment payload capacity.
+Every auto-flushed frame fits it. A buffer whose estimate reaches the full
+limit is published even with ``auto_flush_bytes=off``, and when the whole
+buffer does not fit in one frame, the rows buffered before the newest one go
+out as a frame of their own and the newest row starts the next batch.
 
 Auto-flushing is triggered when:
 
@@ -560,9 +569,16 @@ interval starts when the first row enters an empty lease buffer.
 A pooled auto-flush only publishes into the store-and-forward path; it does
 not wait for an acknowledgement. Keep acknowledgement barriers explicit with
 ``sender.flush(wait=True)`` or ``sender.wait()``. Errors encountered while
-auto-publishing propagate from ``PooledSender.row()``. An oversized single row
-is removed; if a multi-row batch exceeds the exact frame limit, the whole batch
-remains buffered. If every explicit
+auto-publishing propagate from ``PooledSender.row()``.
+
+On both QWP/WebSocket senders, ``BatchTooLarge`` from ``row()`` means the row
+was not added. Either it does not fit in a frame on its own, or the rows
+buffered before it do not fit even without it, which can happen when the frame
+limit shrinks on reconnect; those rows are then discarded, and the error says
+how many. Any other auto-publish error leaves every row buffered on a pooled
+sender, and clears the buffer on a standalone one, as its ``flush()`` does.
+
+If every explicit
 ``flush_and_get_fsn()`` must return the receipt for one complete application
 batch, configure ``auto_flush=off``; otherwise an earlier auto-flush may have
 already published and cleared some or all of that batch.

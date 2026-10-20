@@ -1169,8 +1169,16 @@ class PooledSender:
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> PooledSender:
         """Append one row to this sender's QWP buffer. If a configured
-        auto-flush threshold is breached, this publishes without waiting for
-        an acknowledgement; a publish error propagates from ``row()``.
+        auto-flush threshold is breached, or the buffer's size estimate
+        reaches the connection's frame cap, this publishes without waiting
+        for an acknowledgement. Every published frame fits the frame cap:
+        when the whole buffer does not, the rows buffered before this one go
+        out on their own and this row starts the next batch.
+
+        ``BatchTooLarge`` from this method means the row was not added:
+        either it does not fit in a frame on its own, or the rows buffered
+        before it do not fit even without it, and those rows are discarded.
+        Any other publish error propagates and leaves every row buffered.
 
         See :func:`Buffer.row` for supported column types, protocol
         restrictions, server requirements, and ``NULL``-sentinel behavior.
@@ -1943,7 +1951,13 @@ class Sender:
     @property
     def auto_flush_bytes(self) -> Optional[int]:
         """
-        Byte-count threshold for the auto-flush logic, or None if disabled.
+        Byte-count threshold for the auto-flush logic, or None if disabled or
+        not yet known.
+
+        Over ``ws`` and ``wss`` the threshold is at most 90% of the
+        connection's frame cap, and by default it is 90% of that cap. The
+        cap is known once :func:`Sender.establish` has connected, so before
+        that the default reports ``None``.
         """
 
     @property
@@ -2035,6 +2049,16 @@ class Sender:
         returned. Over ``ws`` and ``wss`` the frame goes out on a connection
         of its own, so a row written from inside it is accepted and flushed
         as usual.
+
+        Over ``ws`` and ``wss``, auto-flush also publishes a buffer whose
+        size estimate reaches the connection's frame cap, and every published
+        frame fits that cap: when the whole buffer does not, the rows buffered
+        before this one go out on their own and this row starts the next
+        batch. ``BatchTooLarge`` from this method means the row was not
+        added: either it does not fit in a frame on its own, or the rows
+        buffered before it do not fit even without it, and those rows are
+        discarded. Any other publish error clears the internal buffer, as
+        :func:`Sender.flush` does.
         """
 
     def dataframe(
@@ -2142,6 +2166,12 @@ class Sender:
             contains row for a single table, ensuring all data can be written
             transactionally. This feature requires ILP/HTTP and is not available
             when connecting over TCP. *Default: False.*
+
+        If the flush fails, the internal buffer is cleared, rows and all; a
+        buffer passed as ``buffer`` is left as it is. Over QWP/WebSocket a
+        buffer is published as one frame, and one whose encoded frame
+        exceeds the connection's frame cap raises :class:`QuestDBError`
+        (``BatchTooLarge``) without publishing anything.
 
         The Python GIL is released during the network IO operation.
         """

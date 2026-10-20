@@ -450,12 +450,14 @@ auto-flush by default, with the API-specific thresholds below. Set
 * ``auto_flush_bytes`` - ``int > 0`` | ``'off'``: The number of bytes that will
   trigger a flush. Set to ``'off'`` to disable.
 
-  *Default when auto-flush is enabled: off (TCP, HTTP, standalone
-  QWP/WebSocket) | max_datagram_size (QWP/UDP, 1400 by default) | 90% of the
-  effective frame cap (pooled QWP/WebSocket; before a server cap is known, the
-  lower of 8 MiB and 90% of the local queue cap). Explicit pooled thresholds
-  above 90% of the effective cap are clamped. The pooled byte count is a local
-  encoded-size estimate.*
+  *Default when auto-flush is enabled: off (TCP, HTTP) | max_datagram_size
+  (QWP/UDP, 1400 by default) | 90% of the effective frame cap (QWP/WebSocket,
+  standalone and pooled; before a server cap is known, the lower of 8 MiB and
+  90% of the local queue cap). Explicit QWP/WebSocket thresholds above 90% of
+  the effective cap are clamped. The QWP/WebSocket byte count is a local
+  encoded-size estimate. Over QWP/WebSocket, ``off`` disables only this
+  threshold: a buffer whose estimate reaches the full frame cap is still
+  published.*
 
 * ``auto_flush_interval`` - ``int > 0`` | ``'off'``: The time in milliseconds
   that will trigger a flush. Set to ``'off'`` to disable.

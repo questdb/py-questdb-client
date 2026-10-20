@@ -6116,6 +6116,43 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self.assertEqual(got.column(1).to_pylist(), [0])
         self.assertEqual(got.column(2).to_pylist(), [rows - 1])
 
+    def test_row_auto_flush_lands_rows_that_each_fit_the_frame_cap(self):
+        """The two reproductions from issue #161, against the server's
+        default 2 MiB frame cap: 600 rows of 4 KiB through a standalone
+        sender's default triggers, and eight 256 KiB rows through a pooled
+        lease. Each row fits a frame and every row must land. The interval
+        trigger is off so the frame boundaries do not depend on timing."""
+        self._require_qwp_ws()
+        conf = self._conf() + 'auto_flush_interval=off;'
+        for kind, count, width in (
+                ('standalone', 600, 4096),
+                ('pooled', 8, 256 * 1024)):
+            with self.subTest(kind=kind):
+                table = self._table('t_row_split_')
+                value = 'x' * width
+                if kind == 'standalone':
+                    with qi.Sender.from_conf(conf) as sender:
+                        for _ in range(count):
+                            sender.row(
+                                table, columns={'v': value},
+                                at=qi.ServerTimestamp)
+                else:
+                    with qi.QuestDB.from_conf(conf) as client:
+                        with client.sender() as sender:
+                            for _ in range(count):
+                                sender.row(
+                                    table, columns={'v': value},
+                                    at=qi.ServerTimestamp)
+                            sender.flush(wait=True)
+                self.qdb_plain.retry_check_table(table, min_rows=count)
+                with qi.QuestDB.from_conf(self._conf()) as client:
+                    got = client.query(
+                        f'SELECT count(), min(length(v)), max(length(v)) '
+                        f'FROM {table}').to_arrow()
+                self.assertEqual(got.column(0).to_pylist(), [count])
+                self.assertEqual(got.column(1).to_pylist(), [width])
+                self.assertEqual(got.column(2).to_pylist(), [width])
+
     def test_dataframe_single_oversize_value_raises_batch_too_large(self):
         """A single value larger than the cap is irreducible: the split
         bottoms out and surfaces batch_too_large rather than silently
