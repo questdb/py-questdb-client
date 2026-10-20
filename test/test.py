@@ -84,6 +84,11 @@ try:
 except ImportError:
     pyarrow = None
 
+try:
+    import polars
+except ImportError:
+    polars = None
+
 
 # The QWP frame decoder lives in `qwp_wire` so the claim grid and these
 # tests read a captured frame the same way. A test that asks what the
@@ -97,6 +102,7 @@ from test_client_capsule_path import (
     TestArrowFfiProducerLayoutMatrix,
     TestCapsulePathPyArrow,
     TestCapsulePathPolars,
+    TestQueryResultSource,
     TestServerTimestampAt,
     TestScalarAt,
     TestNdarrayArrayColumns,
@@ -147,6 +153,7 @@ if pd is not None and pyarrow is not None:
     from test_dataframe import TestPandasProtocolVersionV3
     from test_dataframe import TestNaTScalarDatetime
     from test_dataframe import TestColumnarPlanWithoutPyarrow
+    from test_dataframe import TestPandasTooOld
     from test_dataframe import TestDecimalWithoutCAccelerator
     from test_dataframe import TestDecimalImpostorRefused
 elif pd is None:
@@ -5685,7 +5692,8 @@ print('OK')
         shapes = [
             ('pyarrow Table', lambda array: pyarrow.table({'gh': array})),
             ('pyarrow RecordBatch',
-             lambda array: pyarrow.record_batch({'gh': array})),
+             # `record_batch` takes a dict only from pyarrow 15.
+             lambda array: pyarrow.RecordBatch.from_pydict({'gh': array})),
         ]
         if pd is not None:
             shapes.append(
@@ -13423,6 +13431,171 @@ class TestQueryResultFinalizer(unittest.TestCase):
         finally:
             sys.unraisablehook = original_hook
         self.assertEqual(unraisable, [])
+
+
+class TestQueryResultReuseErrors(unittest.TestCase):
+    """A second read names the first reader, and a read after ``close()``
+    says that the result is closed. A dead cursor is enough: the
+    single-use check runs before any server I/O."""
+
+    def _assert_invalid(self, cm, text):
+        self.assertEqual(
+            cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+        self.assertIn(text, str(cm.exception))
+
+    def test_second_read_names_first_reader(self):
+        result = qi.QueryResult(qi._CursorHandle())
+        result.__arrow_c_stream__()
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.to_pandas()
+        self._assert_invalid(
+            cm, 'already read by __arrow_c_stream__(). A result can be '
+                'read only once.')
+        result.close()
+        # After a read, close() keeps the more useful text.
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.iter_pandas()
+        self._assert_invalid(cm, 'already read by __arrow_c_stream__()')
+
+    def test_read_after_close_says_closed(self):
+        result = qi.QueryResult(qi._CursorHandle())
+        result.close()
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.to_pandas()
+        self._assert_invalid(cm, 'QueryResult is closed.')
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_bad_dtype_backend_does_not_consume(self):
+        result = qi.QueryResult(qi._CursorHandle())
+        with self.assertRaises(ValueError):
+            result.to_pandas(dtype_backend='bogus')
+        result.__arrow_c_stream__()
+
+    def test_stream_ignores_requested_schema(self):
+        result = qi.QueryResult(qi._CursorHandle())
+        result.__arrow_c_stream__(requested_schema=object())
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.__arrow_c_stream__()
+        self._assert_invalid(cm, 'already read by __arrow_c_stream__()')
+
+    @unittest.skipIf(polars is None, 'polars not installed')
+    def test_old_polars_stream_read_is_rejected(self):
+        # polars before 1.32 decodes every batch with the first batch's
+        # dictionary. The check runs before the result is taken.
+        result = qi.QueryResult(qi._CursorHandle())
+        with mock.patch.object(polars, '__version__', '1.31.0'):
+            with self.assertRaises(qi.QuestDBError) as cm:
+                polars.DataFrame(result)
+            self._assert_invalid(
+                cm, 'polars 1.31.0 misreads multi-batch query results. '
+                'Upgrade to polars 1.32 or later, or call result.to_polars()')
+            # Only a direct polars read is checked: another caller gets
+            # the stream, also with an old polars installed.
+            result.__arrow_c_stream__()
+            # A read result cannot be read with to_polars() either.
+            with self.assertRaises(qi.QuestDBError) as cm:
+                polars.DataFrame(result)
+            self._assert_invalid(
+                cm, 'or run the query again and call to_polars()')
+
+    def test_stream_read_from_thread_without_python_frame(self):
+        # duckdb 1.5 calls `__arrow_c_stream__` from a worker thread that has
+        # no Python frame. `_thread.start_new_thread` calls the bound method
+        # from C, so it runs without one too.
+        import _thread
+        import contextlib
+        versions = [None]
+        if polars is not None:
+            versions.append('1.31.0')  # reaches the caller check
+        for version in versions:
+            with self.subTest(polars_version=version):
+                result = qi.QueryResult(qi._CursorHandle())
+                unraisable = []
+                patch = (mock.patch.object(polars, '__version__', version)
+                         if version else contextlib.nullcontext())
+                with patch, mock.patch.object(
+                        sys, 'unraisablehook', unraisable.append):
+                    _thread.start_new_thread(result.__arrow_c_stream__, ())
+                    deadline = time.monotonic() + 10
+                    while (result._consumed_by is None and not unraisable
+                           and time.monotonic() < deadline):
+                        time.sleep(0.01)
+                self.assertEqual(
+                    [repr(u.exc_value) for u in unraisable], [])
+                self.assertEqual(result._consumed_by, '__arrow_c_stream__()')
+
+    def test_failed_schema_read_closes_result(self):
+        result = qi.QueryResult(qi._CursorHandle())
+        with self.assertRaises(qi.QuestDBError) as cm:
+            result.__arrow_c_schema__()
+        self._assert_invalid(cm, 'failed to read the result schema')
+        for read in (result.__arrow_c_schema__, result.__arrow_c_stream__,
+                     result.to_pandas):
+            with self.assertRaises(qi.QuestDBError) as cm:
+                read()
+            self._assert_invalid(cm, 'QueryResult is closed.')
+
+
+class TestDependencyFloors(unittest.TestCase):
+    """The floors of the ``pyproject.toml`` extras and of
+    ``dev_requirements.txt`` are the versions that the ``linux-min-deps``
+    CI job installs (``ci/pip_install_deps.py``), so that pip enforces only
+    tested minimums."""
+
+    ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+    def _ci_pins(self):
+        import importlib.util
+        path = self.ROOT / 'ci' / 'pip_install_deps.py'
+        spec = importlib.util.spec_from_file_location('pip_install_deps', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        pins = dict(module.MIN_VERSIONS)
+        pins['duckdb'] = module.MIN_DUCKDB_VERSION
+        return pins
+
+    def _specifiers(self, specs):
+        """Map each requirement's name to its ``(operator, version)``
+        pairs, parsed the way pip parses them."""
+        try:
+            from packaging.requirements import Requirement
+        except ImportError:
+            self.skipTest('packaging not installed')
+        out = {}
+        for spec in specs:
+            req = Requirement(spec)
+            out[req.name.lower()] = sorted(
+                (s.operator, s.version) for s in req.specifier)
+        return out
+
+    def test_extras_floors_match_ci_pins(self):
+        import re
+        pins = self._ci_pins()
+        text = (self.ROOT / 'pyproject.toml').read_text(encoding='utf-8')
+        # Python 3.10 has no `tomllib`: read the extras with a regex.
+        section = text.split('[project.optional-dependencies]', 1)[1]
+        section = section.split('\n[', 1)[0]
+        extras = dict(re.findall(r'^(\w+)\s*=\s*\[(.*?)\]', section, re.M))
+        for extra in ('dataframe', 'polars', 'duckdb'):
+            specs = self._specifiers(re.findall(r'"([^"]+)"', extras[extra]))
+            self.assertTrue(specs, extra)
+            # Every requirement of the extra is exactly a tested floor.
+            for package, ops in specs.items():
+                with self.subTest(extra=extra, package=package):
+                    self.assertEqual(ops, [('>=', pins[package])])
+
+    def test_dev_requirements_floors_match_ci_pins(self):
+        pins = self._ci_pins()
+        lines = (self.ROOT / 'dev_requirements.txt').read_text(
+            encoding='utf-8').splitlines()
+        specs = self._specifiers(
+            line for line in map(str.strip, lines)
+            if line and not line.startswith('#'))
+        # Separate CI jobs test the numpy floor (1.21); the minimum-versions
+        # job uses numpy 1.26.4.
+        for package in ('pandas', 'pyarrow', 'fastparquet'):
+            with self.subTest(package=package):
+                self.assertEqual(specs[package], [('>=', pins[package])])
 
 
 class TestBufferConstruction(unittest.TestCase):

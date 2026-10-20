@@ -1441,14 +1441,13 @@ class QuestDB:
         - **pandas** ``pandas.DataFrame`` (NumPy-backed columns route
           through the legacy planner; pyarrow-backed columns route
           through the Arrow C Stream capsule path).
-        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``.
-          ``LazyFrame`` is materialised via
-          ``.collect(engine='streaming')`` (eager ``.collect()`` on
-          polars < 1.0).
+        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``
+          (polars 1.32 or later). ``LazyFrame`` is materialised via
+          ``.collect(engine='streaming')``.
         - **pyarrow** ``pa.Table``, ``pa.RecordBatch``, and
           ``pa.RecordBatchReader``.
         - Any object exposing the Arrow C Data Interface — i.e. with
-          ``__arrow_c_stream__`` (duckdb / cudf / modin / pyarrow-backed
+          ``__arrow_c_stream__`` (duckdb / cudf / pyarrow-backed
           pandas 2.2+) or ``__arrow_c_array__`` (single Arrow array
           exporters, wrapped into a one-batch ``pa.Table``).
 
@@ -1705,16 +1704,63 @@ class QueryResult:
     target is a polars / pandas frame, the dedicated methods avoid the
     re-reconciliation that ``polars.DataFrame(result)`` /
     ``to_arrow().to_pandas()`` pay on SYMBOL-heavy results.
+    ``to_arrow().to_pandas()`` needs pyarrow 23 or later for SYMBOL
+    columns, which use ``uint32`` dictionary indices.
+
+    polars (``polars.DataFrame(result)``, polars 1.32 or later) and duckdb
+    (``duckdb.from_arrow(result)``, duckdb 1.2 or later) read the result
+    through :meth:`__arrow_c_stream__` without pyarrow. duckdb reads when
+    you fetch, so fetch before the result is closed.
     """
+
+    def __arrow_c_schema__(self) -> Any:
+        """Arrow schema PyCapsule protocol (no pyarrow needed). It reads the
+        first batch to get the schema, and keeps that batch for
+        ``__arrow_c_stream__``. duckdb 1.5, ``pa.schema(result)`` and
+        ``polars.Schema(result)`` call it. After this call, read the result
+        only through the stream (``pa.table(result)``,
+        ``polars.DataFrame(result)``, duckdb); the other readers raise
+        ``InvalidApiCall`` on their first read. When the schema was read
+        first, later calls return the same schema, also after the stream was
+        taken."""
 
     def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
-        (e.g. ``polars.DataFrame(result)``) reconciles them."""
+        (e.g. ``polars.DataFrame(result)`` on polars 1.32 or later)
+        reconciles them. Older polars misreads such a stream, so when polars
+        before 1.32 reads the result directly (``polars.DataFrame(result)``,
+        ``polars.from_arrow(result)``), the call raises ``InvalidApiCall``
+        and the result stays unread. A stream that reaches polars through
+        another library is not checked.
+
+        ``requested_schema`` is ignored, also when it does not match: the
+        stream always has the result's own schema, so check the schema you
+        get. ``pa.table(result, schema=...)`` and
+        ``polars.DataFrame(result, schema=...)`` cast the result;
+        ``pa.RecordBatchReader.from_stream(result, schema=...)`` (pyarrow 15
+        or later) returns the result's own schema.
+
+        The stream releases the result's connection when the consumer reads
+        the last batch, not when it releases the stream. A reader lease can
+        run its next query as soon as the stream is drained.
+
+        The stream does not replay a result: after a batch has been
+        delivered, a failover ends the stream with an error. The consumer
+        raises its own exception type, and the message contains
+        ``[FailoverWouldDuplicate]``; re-issue the query. polars raises a
+        ``ComputeError``, but polars before 1.37.1 raises a
+        ``PanicException``, which ``except Exception`` does not catch."""
 
     def to_arrow(self) -> Any:
-        """Read the full result into a ``pyarrow.Table``. Requires pyarrow."""
+        """Read the full result into a ``pyarrow.Table``. Requires pyarrow.
+
+        SYMBOL columns use ``uint32`` dictionary indices, which
+        ``Table.to_pandas()`` accepts only from pyarrow 23. For a pandas
+        frame, call :meth:`to_pandas` instead. DECIMAL columns with a
+        precision of 18 or less arrive as ``decimal32`` / ``decimal64``,
+        which need pyarrow 20 or later."""
 
     def to_pandas(
         self,
@@ -1731,7 +1777,11 @@ class QueryResult:
 
     def to_polars(self) -> Any:
         """Read the full result into a ``polars.DataFrame``. Requires polars
-        and pyarrow."""
+        and pyarrow. If the polars ``Categorical`` fast path fails, it issues
+        a ``RuntimeWarning`` and builds the frame with ``polars.from_arrow``:
+        the values stay correct, but the read is slower. Under ``-W error``
+        that warning raises after the result was read, so the frame is lost;
+        run the query again."""
 
     def iter_arrow(self) -> Iterator[Any]:
         """Iterate result batches as ``pyarrow.RecordBatch``."""
@@ -1740,7 +1790,12 @@ class QueryResult:
         """Iterate result batches as ``polars.DataFrame`` (streaming /
         low-peak-memory). Batches share one ``Categories`` identity so
         ``polars.concat`` over them stitches cleanly. Requires polars and
-        pyarrow."""
+        pyarrow. If the ``Categorical`` fast path fails, it issues one
+        ``RuntimeWarning`` and builds the remaining frames with
+        ``polars.from_arrow``, cast to the same ``Categories``. If that cast
+        fails too, the warning says so: those frames have a plain
+        ``Categorical`` dtype, and ``polars.concat`` with the frames before
+        fails."""
 
     def iter_pandas(
         self,

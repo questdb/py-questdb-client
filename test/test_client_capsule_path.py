@@ -36,6 +36,11 @@ try:
 except ImportError:
     pd = None
 
+# pyarrow-backed pandas frames take the Arrow path only from pandas 2.2,
+# which adds `DataFrame.__arrow_c_stream__`.
+PANDAS_HAS_ARROW_STREAM = (
+    pd is not None and hasattr(pd.DataFrame, '__arrow_c_stream__'))
+
 
 def _client_conf(port):
     return (
@@ -404,7 +409,10 @@ class TestCapsulePathPolars(unittest.TestCase):
         self._assert_object_handles_refused(
             table, "Bad column 'id': its values are 8 bytes each")
 
-    @unittest.skipIf(pl is None or pa is None, 'polars/pyarrow not installed')
+    @unittest.skipIf(
+        pl is None or pa is None
+        or not hasattr(pa.RecordBatchReader, 'from_stream'),
+        'needs polars and pyarrow 15+ (RecordBatchReader.from_stream)')
     def test_polars_object_column_through_record_batch_reader_rejected(self):
         reader = pa.RecordBatchReader.from_stream(self._uuid_object_frame())
         self._assert_object_handles_refused(
@@ -434,6 +442,76 @@ class TestCapsulePathPolars(unittest.TestCase):
         self.assertEqual(frame['id'].dtype, pd.ArrowDtype(pa.binary(8)))
         self._assert_object_handles_refused(
             frame, "Bad column 'id': its values are 8 bytes each")
+
+
+class TestQueryResultSource(unittest.TestCase):
+
+    def test_failing_query_result_stream_raises(self):
+        """A ``QueryResult`` whose stream fails is released while the
+        ingest error is pending. The release must keep that error, and
+        must not leave the cursor lock held. A dead cursor fails in
+        ``get_schema``, so no server is needed for the source."""
+        import threading
+        result = qi.QueryResult(qi._CursorHandle())
+        with QwpAckServer() as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, 'get_schema failed: cursor is closed'):
+                    client.dataframe(result, table_name='t', at='ts')
+            finally:
+                client.close()
+        closer = threading.Thread(target=result.close, daemon=True)
+        closer.start()
+        closer.join(10)
+        self.assertFalse(closer.is_alive(), 'close() blocked on the lock')
+
+    def test_failing_get_schema_zeroes_out(self):
+        """A failing ``get_schema`` leaves ``out`` zeroed. duckdb before
+        1.5 reads ``out`` even when ``get_schema`` fails, and crashed on
+        an uninitialised struct."""
+        import ctypes
+        if not hasattr(ctypes, 'pythonapi'):
+            self.skipTest('ctypes.pythonapi is CPython-only (PyPy lacks it)')
+
+        class ArrowSchema(ctypes.Structure):
+            _fields_ = [
+                ('format', ctypes.c_void_p), ('name', ctypes.c_void_p),
+                ('metadata', ctypes.c_void_p), ('flags', ctypes.c_int64),
+                ('n_children', ctypes.c_int64),
+                ('children', ctypes.c_void_p),
+                ('dictionary', ctypes.c_void_p),
+                ('release', ctypes.c_void_p),
+                ('private_data', ctypes.c_void_p)]
+
+        capsule = qi.QueryResult(qi._CursorHandle()).__arrow_c_stream__()
+        get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+        get_pointer.restype = ctypes.c_void_p
+        get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+        stream = get_pointer(capsule, b'arrow_array_stream')
+        # `get_schema` is the first field of `ArrowArrayStream`.
+        get_schema = ctypes.CFUNCTYPE(
+            ctypes.c_int, ctypes.c_void_p,
+            ctypes.POINTER(ArrowSchema)).from_address(stream)
+        out = ArrowSchema()
+        ctypes.memset(ctypes.byref(out), 0xAB, ctypes.sizeof(out))
+        self.assertNotEqual(get_schema(stream, ctypes.byref(out)), 0)
+        self.assertEqual(bytes(out), bytes(ctypes.sizeof(out)))
+
+    def test_duckdb_reads_failing_stream(self):
+        """A failing stream makes duckdb raise. duckdb before 1.5 read
+        ``out`` of a failed ``get_schema`` and crashed the process.
+        duckdb 1.5 reads the schema through ``__arrow_c_schema__`` and
+        raises the stream's own error."""
+        try:
+            import duckdb
+        except ImportError:
+            self.skipTest('duckdb not installed')
+        with self.assertRaises(Exception) as cm:
+            duckdb.from_arrow(qi.QueryResult(qi._CursorHandle())).fetchall()
+        version = tuple(int(p) for p in duckdb.__version__.split('.')[:2])
+        if version >= (1, 5):
+            self.assertIn('cursor is closed', str(cm.exception))
 
 
 class TestServerTimestampAt(unittest.TestCase):
@@ -1404,6 +1482,9 @@ class TestPyArrowRecordBatchDirect(unittest.TestCase):
 class TestSchemaOverridesPandas(unittest.TestCase):
 
     @unittest.skipIf(pa is None, 'pyarrow not installed')
+    @unittest.skipIf(
+        not PANDAS_HAS_ARROW_STREAM,
+        'the pandas Arrow path needs pandas 2.2 or later')
     def test_arrow_backed_pandas_with_schema_overrides_ipv4(self):
         import pandas as pd
         df = pd.DataFrame({
