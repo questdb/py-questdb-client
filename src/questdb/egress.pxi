@@ -787,6 +787,14 @@ cdef class _QueryStreamProducer:
 cdef void _qs_set_error(
         _QueryStreamProducer prod, const char* msg, size_t msg_len,
         object exc=None) noexcept:
+    if exc is not None:
+        # A raised `exc` can reach the consumer's frames through its
+        # traceback and context. If a frame holds the stream, that is a
+        # cycle through the stream's C reference to `prod`, which the GC
+        # cannot see: the cursor and its connection would never be freed.
+        exc.__traceback__ = None
+        exc.__context__ = None
+        exc.__cause__ = None
     prod.last_exc = exc
     if prod.last_error != NULL:
         free(prod.last_error)

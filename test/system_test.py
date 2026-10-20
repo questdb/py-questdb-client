@@ -4965,6 +4965,45 @@ class TestEgressLeaks(unittest.TestCase):
                 pa.table(result)
 
             _assert_no_leak(self, work, warmup=40, measure=240)
+            self._assert_no_live_streams(client)
+
+    def _assert_no_live_streams(self, client):
+        # A leaked stream producer is too small for the RSS check, and it
+        # no longer pins a pooled reader: a drained stream frees its cursor.
+        import gc
+        gc.collect()
+        self.assertEqual(
+            [o for o in gc.get_objects()
+             if type(o).__name__ == '_QueryStreamProducer'], [])
+        self.assertEqual(qi._debug_egress_pool_stats(client)[0], 0)
+
+    def test_stream_error_does_not_pin_its_connection(self):
+        """A stream keeps the exception behind its error. If that
+        exception was raised, its traceback reaches the frame that holds
+        the stream: a cycle through the stream's C reference, which the GC
+        cannot collect, so the cursor and its connection stay in use."""
+        import pyarrow as pa
+        from unittest import mock
+
+        def raise_runtime_error(*args, **kwargs):
+            raise RuntimeError('injected')
+
+        # Fails on the server after 5000 rows, once the reader exists.
+        sql = ("SELECT x FROM long_sequence(10000) WHERE 1 > "
+               "CASE WHEN x > 5000 THEN 'abc' ELSE '0' END")
+
+        def read(client):
+            reader = pa.RecordBatchReader._import_from_c_capsule(
+                client.query(sql).__arrow_c_stream__())
+            # Building the server's error raises, so the stream keeps a
+            # raised exception.
+            with mock.patch.object(qi, 'QuestDBError', raise_runtime_error):
+                with self.assertRaisesRegex(OSError, 'injected'):
+                    reader.read_all()
+
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=1000)) as client:
+            read(client)
+            self._assert_no_live_streams(client)
 
 
 class TestColumnIngressNarrowTypes(unittest.TestCase):
