@@ -223,6 +223,7 @@ class QuestDBErrorCode(Enum):
     BatchTooLarge = line_sender_error_batch_too_large
     StoreResendRequired = line_sender_error_store_resend_required
     SymbolDictFull = line_sender_error_symbol_dict_full
+    QueryTimeout = line_sender_error_query_timeout
     # Python-only sentinel with no backing FFI code: raised by the Cython
     # DataFrame-shape validation path. Sits in a reserved high band, disjoint
     # from the contiguous FFI code space, so an appended FFI variant can never
@@ -413,6 +414,8 @@ cdef inline object c_err_code_to_py(line_sender_error_code code):
         return QuestDBErrorCode.StoreResendRequired
     elif code == line_sender_error_symbol_dict_full:
         return QuestDBErrorCode.SymbolDictFull
+    elif code == line_sender_error_query_timeout:
+        return QuestDBErrorCode.QueryTimeout
     else:
         raise ValueError('Internal error converting error code.')
 

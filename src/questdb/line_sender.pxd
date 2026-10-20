@@ -76,7 +76,9 @@ cdef extern from "questdb/ingress/line_sender.h":
         # Client-side QWP/WebSocket sender error codes (35..37).
         line_sender_error_batch_too_large,
         line_sender_error_store_resend_required,
-        line_sender_error_symbol_dict_full
+        line_sender_error_symbol_dict_full,
+        # A query that ran past its per-query timeout (38).
+        line_sender_error_query_timeout
 
     ctypedef line_sender_error_code questdb_error_code
 

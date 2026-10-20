@@ -358,6 +358,10 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertIs(
             qi._debug_error_code_to_py(37),
             qi.QuestDBErrorCode.SymbolDictFull)
+        self.assertEqual(qi.QuestDBErrorCode.QueryTimeout.value, 38)
+        self.assertIs(
+            qi._debug_error_code_to_py(38),
+            qi.QuestDBErrorCode.QueryTimeout)
 
     def test_default_max_chunk_rows_matches_core_literal(self):
         # Pinned to the Rust core's DEFAULT_MAX_CHUNK_ROWS. Both sides hardcode

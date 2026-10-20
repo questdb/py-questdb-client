@@ -269,6 +269,17 @@ New
   statement: the close the block makes on its way out waits only for
   what is left of that timeout.
 
+- **``query_timeout_ms`` sets a per-query timeout.** The configuration
+  string key bounds each statement sent through ``query()``,
+  ``execute()`` or a reader lease, in place of the server's own
+  ``query.timeout``. A statement that runs past it raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to the
+  new ``QuestDBErrorCode.QueryTimeout``. Do not retry a write on that
+  error: a statement that timed out waiting for the table writer may
+  still be applied. It needs a server that supports per-query timeouts.
+  QuestDB 10.0.1 does not, so while the key is set every statement fails
+  with ``QuestDBErrorCode.UnsupportedServer`` before it is sent.
+
 - **``row()`` on QWP senders now writes UUID, IPV4, BINARY, CHAR, DATE,
   LONG256, and GEOHASH columns.** Pass ``uuid.UUID``,
   ``ipaddress.IPv4Address``, ``bytes``, ``bytearray`` or ``memoryview``

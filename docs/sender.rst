@@ -1184,6 +1184,14 @@ it durably applies them, so the client can confirm delivery.
   the failed input: a chunked flush may already have published an earlier
   prefix.
 
+* **Query timeout.** ``QuestDBErrorCode.QueryTimeout`` means that a statement
+  ran past the ``query_timeout_ms`` set in the configuration string. Do not
+  retry a write on this error: an ``INSERT``, ``UPDATE`` or DDL statement that
+  timed out waiting for the table writer may still be applied afterwards. A
+  statement that completes past its timeout returns normally rather than
+  raising this error, so it is never reported as timed out after it took
+  effect.
+
 * **Draining on close.** :func:`Sender.close_drain <questdb.Sender.close_drain>` waits for outstanding
   frames to be acknowledged before closing.
 
