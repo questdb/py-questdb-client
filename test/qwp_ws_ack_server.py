@@ -130,7 +130,7 @@ class QwpAckServer:
                  error_after_commit=False,
                  tls=False, required_authorization=None,
                  close_after_upgrade_unless_authorization=None,
-                 durable_ack=False):
+                 durable_ack=False, idle_timeout_s=30):
         """
         `close_plan`: iterable consumed one value per accepted connection;
         a connection with value N is closed after handling its Nth binary
@@ -172,6 +172,10 @@ class QwpAckServer:
         whose Authorization value does not match. This deterministically keeps
         a reconnect loop active until a rotating provider supplies the expected
         credential, without a test-side sleep or a server-auth rejection.
+
+        `idle_timeout_s`: seconds an upgraded connection may remain idle;
+        None waits indefinitely. The HTTP upgrade always retains its own
+        bounded timeout.
         """
         self.host = host
         self.ack_delay_s = ack_delay_s
@@ -186,6 +190,7 @@ class QwpAckServer:
         self.required_authorization = required_authorization
         self.close_after_upgrade_unless_authorization = (
             close_after_upgrade_unless_authorization)
+        self.idle_timeout_s = idle_timeout_s
         self._tls_context = None
         if tls:
             self._tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -261,6 +266,27 @@ class QwpAckServer:
                 "errors": list(self.errors),
                 "tls_handshake_failures": self.tls_handshake_failures,
             }
+
+    def snapshot_when_closed(self, timeout_s=5.0):
+        """Return :meth:`snapshot` once every accepted connection has
+        finished. Call it after the client has closed.
+
+        A handler counts each frame as it reads it, on its own thread,
+        so a frame the client sent without waiting for an ack -- a
+        deferred frame under ``defer_aware_acks`` -- can still be unread
+        when the client call returns. A closed client's connections each
+        reach EOF once their frames are read, so the counts are final
+        when every handler has exited. Unlike
+        :meth:`wait_binary_frames_settled`, this has no quiet-period
+        fallback, which a slow runner's handler thread can outlast.
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            with self._lock:
+                finished = self.finished_count == self.accept_count
+            if finished or time.monotonic() >= deadline:
+                return self.snapshot()
+            time.sleep(0.001)
 
     def wait_binary_frames_settled(self, quiet_s=0.02, timeout_s=5.0):
         """Return the ``binary_frames`` count once no more are in flight.
@@ -374,6 +400,7 @@ class QwpAckServer:
                     self.close_after_upgrade_unless_authorization):
                 _fin_close(conn)
                 return
+            conn.settimeout(self.idle_timeout_s)
             if close_after is not None and close_after == 0:
                 _fin_close(conn)
                 return

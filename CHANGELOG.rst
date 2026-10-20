@@ -10,94 +10,274 @@ Changelog
 Breaking changes
 ~~~~~~~~~~~~~~~~
 
-UUID and fixed-size-binary DataFrame columns
-********************************************
+- **UUID raw bytes are now RFC 4122 byte order** (big-endian, the same bytes
+  as ``uuid.UUID.bytes``) everywhere they cross the API. This affects Arrow
+  and binary DataFrame columns you write, and the bytes you read back from a
+  UUID column. If your code byte-swapped to match QuestDB's old wire layout,
+  remove that swapping. Passing ``uuid.UUID`` objects is unaffected, in
+  ``row()``, in object-dtype columns, and as query binds — so are the UUIDs
+  that plain ``to_pandas()``, without ``dtype_backend``, gives you.
+  Arrow-shaped results you saved from 5.0 need a one-time fix before you
+  write them back; see *UUIDs in Arrow-shaped results saved from 5.0* below.
 
-UUID bytes are now **canonical RFC 4122 big-endian** at every API boundary, and
-a 16-byte Arrow column needs an explicit UUID type claim rather than its width
-alone. Three changes; the first affects **both
-ingestion and query results**, the other two ``dataframe()`` /
-``Sender.dataframe()`` over QWP:
-
-* **UUID byte order.** Values are read and written in canonical RFC 4122
-  order; the client byte-swaps to QWP wire order internally. If you previously
-  worked around the old layout by pre-reversing bytes yourself, remove that
-  workaround. The bytes on the wire are unchanged and still match the Java
-  client, so stored data and round-trips are unaffected — only the bytes your
-  application hands over or receives change. A well-formed ``uuid.UUID`` object
-  column needs no byte-order change. Malformed or subclassed UUID objects whose
-  integer representation does not produce exactly 16 bytes are now rejected
-  instead of serializing invalid or adjacent-memory bytes.
-
-  This is **not confined to ingestion**: the raw bytes a UUID column yields on
-  the read path changed in the same way, and silently. Anything that
-  reconstructs a UUID from, hashes, or joins on those bytes must drop its
-  byte-reversing workaround, on every Arrow-backed reader —
-  :meth:`questdb.QueryResult.to_arrow`, :meth:`~questdb.QueryResult.to_polars`,
-  :meth:`~questdb.QueryResult.iter_arrow`, :meth:`~questdb.QueryResult.iter_polars`,
+  On the read side that is every Arrow-backed reader:
+  :meth:`~questdb.QueryResult.to_arrow`, :meth:`~questdb.QueryResult.iter_arrow`,
+  :meth:`~questdb.QueryResult.to_polars`, :meth:`~questdb.QueryResult.iter_polars`,
   ``__arrow_c_stream__`` (so ``polars.DataFrame(db.query(...))`` too), and
   :meth:`~questdb.QueryResult.to_pandas` / :meth:`~questdb.QueryResult.iter_pandas`
-  whenever ``dtype_backend`` or ``types_mapper`` is passed — including
+  whenever ``dtype_backend`` or ``types_mapper`` is passed -- including
   ``dtype_backend="numpy_nullable"``, which leaves a UUID column as raw
-  ``bytes``. Only the argument-free
-  :meth:`~questdb.QueryResult.to_pandas` / :meth:`~questdb.QueryResult.iter_pandas`,
-  which build ``uuid.UUID`` objects directly, are unaffected and need no
-  change.
+  ``bytes``. Anything that reconstructs a UUID from, hashes, or joins on those
+  bytes must drop its byte-reversing workaround.
 
-* **Unclaimed** ``pa.fixed_size_binary(16)`` **now lands as BINARY, not
-  UUID.** The ``arrow.uuid`` extension label claims a 16-byte column as a UUID.
-  Whole-table or stream Arrow inputs can also claim it through column-field
-  metadata ``questdb.column_type=uuid``. Without a type claim the column is
-  opaque bytes. If you were relying on the width alone, either preserve this
-  metadata, wrap the column in the ``arrow.uuid`` extension type, or claim it
-  explicitly:
+- **A 16- or 32-byte Arrow column is no longer assumed to be a UUID or a
+  LONG256.** Width alone no longer decides the type. Native Arrow input
+  writes such a column as BINARY with a warning, and a pandas frame refuses
+  it, as *Unlabelled 16- and 32-byte columns* below explains. To get the
+  old behaviour back, say what the column is: build it with ``pa.uuid()``,
+  attach ``questdb.column_type`` field metadata, or pass
+  ``schema_overrides={'col': 'uuid'}`` (or ``'long256'``).
 
-  .. code-block:: python
+  ``pa.uuid()`` needs pyarrow 18 or newer, and the column must carry the
+  extension *type* rather than the metadata key — a pandas ``ArrowDtype``
+  holds a type and no field, so the key does not survive. ``uuid.UUID``
+  cells and ``schema_overrides`` work on every pyarrow version.
 
-      sender.dataframe(df, table_name='t', at='ts',
-                       schema_overrides={'u': 'uuid'})
+  ``schema_overrides`` needs fully Arrow-backed input -- pyarrow, polars, or a
+  pandas frame whose every column is an ``ArrowDtype`` -- and no
+  ``table_name_col``. A frame with even one NumPy column (a plain
+  ``datetime64`` ``at=`` column is enough) takes the NumPy planner, which
+  raises :class:`~questdb.UnsupportedDataFrameShapeError` instead. That is
+  the shape that used to write LONG256 with no claim at all, so convert it
+  first with ``df.convert_dtypes(dtype_backend='pyarrow')``, or claim the
+  column in ``df.attrs['questdb']``, which both planners read.
 
-* **Width alone no longer maps** ``pa.fixed_size_binary(32)`` **to LONG256.**
-  Whole-table or stream Arrow inputs retaining column-field metadata
-  ``questdb.column_type=long256`` still claim LONG256 without an override.
-  However, pyarrow drops field metadata when it exports a single pandas column,
-  so the pandas per-column planner cannot use that metadata. Claim it explicitly:
+- **If you write UUIDs as raw bytes, change the byte order too.** Two of the
+  changes above affect such a column, and only one of them produces an
+  error. Your unlabelled 16-byte column is now written as BINARY or
+  refused, and the usual fix for that is
+  ``schema_overrides={'col': 'uuid'}``. It
+  gets the UUID column back and leaves the byte order still wrong. Any 16 bytes are a valid UUID, so
+  nothing fails at any point — the values are simply stored reversed.
 
-  .. code-block:: python
+  Change how you produce the bytes at the same time::
 
-      sender.dataframe(df, table_name='t', at='ts',
-                       schema_overrides={'h': 'long256'})
+      value.int.to_bytes(16, 'little')   # before: QuestDB's old wire layout
+      value.bytes                        # now: RFC 4122 big-endian
 
-``schema_overrides`` accepts the new ``'uuid'`` and ``'long256'`` kinds for
-exactly this purpose. Writing an unclaimed 16- or 32-byte column to an
-existing UUID or LONG256 table column without one of the above will be rejected
-by the server as a type mismatch, rather than silently storing the wrong type.
+  Keeping the old form stores
+  ``123e4567-e89b-12d3-a456-426614174000`` as
+  ``00401714-6642-56a4-d312-9be867453e12``.
 
-``schema_overrides`` requires **fully Arrow-backed input** — pyarrow, polars,
-or a pandas frame where *every* column uses ``ArrowDtype`` — and no
-``table_name_col``. A frame with even one NumPy-dtype column (a plain
-``datetime64`` ``at=`` column is enough) takes the NumPy planner, which does
-not apply overrides and raises
-:class:`~questdb.UnsupportedDataFrameShapeError` instead. That is the shape
-that previously wrote LONG256 with no override at all, so convert the frame
-first::
+- **Unlabelled 16- and 32-byte columns.** A label is ``pa.uuid()``,
+  ``questdb.column_type`` field metadata of ``uuid`` or ``long256``,
+  ``schema_overrides``, or a ``df.attrs['questdb']`` claim; another
+  extension type or ``questdb.column_type`` value is not one. What happens
+  to an unlabelled column depends on where it comes from. Native Arrow input — a ``pa.Table``,
+  ``pa.RecordBatch``, ``pa.RecordBatchReader`` or any other
+  ``__arrow_c_stream__`` producer — keeps its field metadata, so an
+  unlabelled column there is written as BINARY, and once the write is done
+  the ``questdb`` logger records a WARNING naming the column and the
+  remedies. A pandas frame,
+  fully Arrow-backed or not, refuses it with ``BadDataFrame``: a pandas
+  ``ArrowDtype`` holds no field metadata, so the column may be a UUID or
+  LONG256 column that lost its label on the way into pandas. To write
+  either width as BINARY without the warning or the refusal, label it as
+  plain bytes: ``schema_overrides={'col': 'binary'}``, or
+  ``{"questdb.column_type": "binary"}`` field metadata on native Arrow
+  input. Either sends the column as it is, without a copy.
 
-    df = df.convert_dtypes(dtype_backend='pyarrow')
+- **UUIDs in Arrow-shaped results saved from 5.0 are stored reversed when
+  written back.** In 5.0, ``to_arrow()``, ``iter_arrow()``,
+  ``pa.table(result)``, and ``to_pandas()`` / ``iter_pandas()`` with
+  ``dtype_backend='pyarrow'`` or ``types_mapper=pd.ArrowDtype`` returned UUID
+  columns as ``arrow.uuid`` values in QuestDB's old wire layout, and 5.0's
+  ``dataframe()`` wrote those bytes back unchanged. This release reads every
+  ``arrow.uuid`` column as RFC 4122. If you kept such a result from 5.0, in a
+  Parquet, Feather or Arrow IPC file or pickled, every UUID in it is stored
+  reversed when you write it back now. Nothing raises and nothing is logged.
+  The saved result has the same Arrow type and metadata as one from this
+  release, so the client cannot tell the two apart and fix it for you.
+  ``to_polars()`` returned the same bytes as ``Binary``. Those land as
+  BINARY, and are stored reversed too once you add
+  ``schema_overrides={'col': 'uuid'}``.
 
-For the 16-byte case the ``arrow.uuid`` extension type works on either path
-and needs no conversion. LONG256 has no equivalent extension label for the
-pandas per-column planner: use ``schema_overrides`` on a fully Arrow-backed
-frame, or supply a whole Arrow table/stream retaining the column-field metadata
-``questdb.column_type=long256``. Field metadata is distinct from top-level
-schema metadata and is preserved on the whole-table/stream ingestion path.
+  Fix each saved 5.0 result once, before you write it back. Results read
+  with this release are already in the right order, and so are the
+  ``uuid.UUID`` values that plain ``to_pandas()`` gave you in 5.0. With
+  pyarrow 18 or newer::
 
-``schema_overrides`` now rejects an argument for any kind except ``'geohash'``.
-For example, ``{'x': ('symbol', 16)}`` previously worked by silently discarding
-``16``; write ``{'x': 'symbol'}`` instead. Only
-``('geohash', bits)`` accepts a two-item tuple.
+      import uuid
+      import pyarrow as pa
 
-The new public :data:`questdb.SchemaOverride` type alias describes one
-``schema_overrides`` value and can be imported for application annotations.
+      def fixed_uuids(column):
+          return pa.array(
+              [None if v is None else uuid.UUID(bytes=v.bytes[::-1])
+               for v in column.to_pylist()],
+              pa.uuid())
+
+      # A pyarrow Table
+      table = table.set_column(table.schema.get_field_index('col'), 'col',
+                               fixed_uuids(table['col']))
+      # A pandas frame from to_pandas(dtype_backend='pyarrow')
+      df['col'] = pd.arrays.ArrowExtensionArray(
+          fixed_uuids(pa.array(df['col'])))
+      # A polars frame from to_polars(); write it with
+      # schema_overrides={'col': 'uuid'}
+      pl_df = pl_df.with_columns(pl.col('col').map_elements(
+          lambda b: b[::-1], return_dtype=pl.Binary))
+
+  Keep the pandas column Arrow-backed, as above. An object column of
+  ``uuid.UUID`` would send the frame to the NumPy planner, which refuses any
+  LONG256 column in it. On the Arrow path such a LONG256 column lands as
+  BINARY unless you pass ``schema_overrides={'col': 'long256'}``.
+
+- **Arrow field metadata that does not fit the column's Arrow type is
+  refused.** Every column of a result from ``to_arrow()``, ``iter_arrow()``
+  or ``pa.table(result)`` carries a ``questdb.column_type`` metadata key
+  naming its QuestDB type. The key stays on the field when you change the
+  column's type with ``Table.cast`` and a schema built by
+  ``field.with_type(...)``, or with ``pa.concat_tables(...,
+  promote_options='permissive')``. 5.0's ``dataframe()`` ignored a key that
+  no longer fitted and wrote the column by its Arrow type. It now raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.ArrowIngest`` and sends nothing. An INT column widened
+  to ``pa.int64()``, for example, gives::
+
+      [column='n'] column 'n' has column_type='int', which is not applicable to Arrow type Int64
+
+  The check covers BYTE, SHORT, INT, CHAR, IPV4, SYMBOL, UUID, LONG256 and
+  GEOHASH columns. A ``df.attrs['questdb']`` claim that does not fit is
+  logged instead and the write goes ahead; see *A claim the column's type
+  can never carry is now logged* under *Fixed*. The difference is
+  deliberate. The refusal is the native client's rule for Arrow field
+  metadata in every language, and a field claim goes stale only when a
+  retyped column keeps its old field, while ``df.attrs`` survives
+  ``astype`` and arithmetic. Once you change a column's type, drop its
+  stale metadata::
+
+      i = table.schema.get_field_index('col')
+      table = table.cast(table.schema.set(
+          i, table.schema.field(i).remove_metadata()))
+
+- **A ``df.attrs['questdb']`` claim with a version other than 1 is
+  ignored.** The version is checked rather than just carried, so that a
+  future claim vocabulary is not applied under today's rules. Frames from
+  ``to_pandas()`` always carry ``'version': 1``, and a hand-written mapping
+  without the key still reads as version 1. A claim that is not read, or a
+  column entry in it of the wrong shape or with an unknown kind, is
+  reported through the ``questdb`` logger and the write goes ahead. The
+  full shape is documented on ``QuestDB.dataframe()``::
+
+      df.attrs['questdb'] = {'version': 1,
+                             'columns': {'src_ip': {'kind': 'ipv4'}}}
+
+- **``to_pandas()`` returns a GEOHASH column as a signed integer**, sized by
+  the column's precision: ``int8`` up to 7 bits, ``int16`` to 15, ``int32``
+  to 31, ``int64`` to 60. This matches what ``to_arrow()`` and
+  ``to_pandas(dtype_backend='pyarrow')`` already give you. Code that reads
+  the dtype of a GEOHASH column will see a signed type where it saw an
+  unsigned one. Writing a frame back keeps the column GEOHASH either way,
+  so frames saved from 5.0 still write back as GEOHASH, including after
+  ``df.convert_dtypes(dtype_backend='pyarrow')``.
+
+- **DECIMAL now requires CPython.** Writing a DECIMAL reinterprets the
+  memory of a ``decimal.Decimal`` using the layout CPython's ``_decimal``
+  module gives it, which is undefined behaviour anywhere else. ``row()`` now
+  raises ``ValueError`` naming the interpreter instead, and ``dataframe()``
+  raises ``QuestDBError`` (``BadDataFrame``) whose message includes that
+  explanation. Over QWP/WebSocket, ``dataframe()`` converts the column
+  through pyarrow and is unaffected. This affects the PyPy wheels this package publishes: DECIMAL
+  was never safe there, and now says so rather than writing corrupt values.
+
+- **``schema_overrides`` rejects an argument for any kind except
+  ``'geohash'``.** For example, ``{'x': ('symbol', 16)}`` previously worked by
+  silently discarding ``16``; write ``{'x': 'symbol'}`` instead. Only
+  ``('geohash', bits)`` accepts a two-item tuple.
+
+- **QWP-only column values raise ``QuestDBError`` on ILP senders**, where
+  they previously raised ``TypeError``. See the new ``row()`` types below.
+
+- **``df.attrs['questdb']`` is now cheap to copy and refuses the ordinary
+  mutating ``dict`` operations.** pandas deep-copies the whole of ``attrs``
+  every time it propagates a frame, once per column while slicing or
+  exporting, which made those passes quadratic.
+  ``pyarrow.table(df)`` on a 1024-column frame took
+  730 ms, of which 710 ms was copying the claim; it now takes 26 ms, against
+  23 ms with no claim at all.
+
+  It is still a ``dict`` — it indexes, iterates, compares, pickles and
+  serializes to JSON as before, and a hand-written ``dict`` is read the same
+  way. A pickled frame loads without this package installed: the claim comes
+  back as a plain ``dict``, which pandas copies the ordinary way until the
+  table is read from QuestDB again. To change what a frame claims, assign a
+  whole new mapping — the nested ``columns`` mapping is frozen too, so unpack
+  that one as well::
+
+      df.attrs['questdb'] = {
+          'version': 1,
+          'columns': {
+              **df.attrs['questdb']['columns'],
+              'grade': {'kind': 'char'}}}
+
+  Or use ``schema_overrides`` / ``symbols``, which outrank the claim.
+
+- **``ipaddress.IPv4Interface`` cells are rejected** rather than silently
+  written with their network prefix discarded. The old messages read as
+  contradictions, because ``IPv4Interface`` subclasses ``IPv4Address`` and
+  they listed ``IPv4Address`` as accepted. The new ones name the prefix as
+  the reason and give the fix: ``value.ip`` for ``row()``, and
+  ``df['col'] = df['col'].map(lambda value: value.ip)`` for ``dataframe()``.
+
+- **``Buffer.clear()`` now raises while a row is being written.** A column
+  value whose conversion runs Python code — a ``uuid.UUID`` or an
+  ``ipaddress.IPv4Address`` subclass — can call back into the buffer that
+  ``row()`` or ``dataframe()`` is part-way through filling. Clearing there
+  destroyed the rows already buffered and left the write half-finished, so
+  it now raises :class:`QuestDBError <questdb.QuestDBError>` with ``code``
+  set to ``QuestDBErrorCode.InvalidApiCall`` and says which call is in
+  progress. Flushing from the same place, and returning a pooled sender to
+  its pool, are refused for the same reason. Clearing a buffer that holds
+  finished rows, or one whose last ``row()`` failed, is unaffected.
+
+- **``Sender.row()`` raises while ``Sender.dataframe()`` on the same sender
+  is still running, over ``tcp``, ``http`` and ``udp``.** On those
+  protocols the frame is written into the sender's own buffer, which it
+  holds from the moment it starts, and it can run your Python before its
+  first row — a logging handler on the ``questdb`` logger, for example. A
+  row written from there could not be flushed until the frame returned, so
+  ``row()`` raises :class:`QuestDBError <questdb.QuestDBError>` with
+  ``code`` set to ``QuestDBErrorCode.InvalidApiCall`` before writing
+  anything. A logging handler that ships records through the sender it is
+  logging about needs a ``Sender`` of its own. Over ``ws`` and ``wss`` the
+  frame goes out on a connection of its own, and a row written from inside
+  it is accepted and flushed as usual.
+
+- If a ``ws::`` or ``wss::`` configuration contains ``max_in_flight`` or
+  ``in_flight_window``, remove it. These options are no longer supported and now
+  raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.ConfigError`` during startup.
+
+- **``QuestDB.close()`` stops waiting for leases after 60 seconds.** It used
+  to wait for every ``sender()`` and ``reader()`` lease however long it
+  stayed open, which hung for ever on a lease nobody was going to close. It
+  now raises :class:`QuestDBError <questdb.QuestDBError>` when a lease is
+  still open after 60 seconds, even one another thread is still using for a
+  long load. Close your leases before closing the handle, or call
+  ``close()`` again once they are closed. ``close(timeout=None)`` waits
+  for leases without a limit, as before. A call in progress, such as a long
+  ``QuestDB.dataframe()``, is still waited for without a limit. See *Fixed*
+  below for the rest of the change, and *New* for ``timeout``.
+
+- **With greenlets, ``QuestDB.close()`` refuses to wait for another
+  greenlet's call.** This covers gevent, eventlet, and ``greenlet`` used
+  directly. Calls are counted per OS thread, and every greenlet on a
+  thread counts as the same caller. A ``close()`` from one greenlet
+  therefore raises :class:`QuestDBError <questdb.QuestDBError>` with
+  ``code`` set to ``QuestDBErrorCode.InvalidApiCall`` while another
+  greenlet on that thread is suspended inside a call on the handle or on
+  one of its leases. 5.0 waited instead. Call ``close()`` once in-flight
+  work has finished, or call it again after the refusal.
 
 Callback inbox capacities are capped
 ************************************
@@ -147,28 +327,6 @@ that runs out of *attempts* already raised. In every other case, including a
 query that ran past the budget before its first failure, the original failure
 is still raised unchanged.
 
-``QuestDB.close()`` no longer waits for a lease held by its own thread
-**********************************************************************
-
-:meth:`QuestDB.close <questdb.QuestDB.close>` used to wait for every
-outstanding lease. When the calling thread itself held one, that wait could
-never end. It now raises :class:`QuestDBError <questdb.QuestDBError>` with
-``code`` set to ``QuestDBErrorCode.InvalidApiCall`` instead of waiting while
-the calling thread owns an active pool operation or a lease attributed to it.
-A sender lease is attributed to the thread that last used it; a reader lease
-always to the thread that borrowed it.
-
-This also affects a sender lease taken on one thread and handed to a worker:
-the lease belongs to the borrowing thread until the worker first uses it. A
-``close()`` on the borrowing thread before that first use now raises where 5.0
-waited for the worker to return the lease. Have the worker use the lease (for
-example, enter its context) and signal that before closing the pool, or close
-the pool from a thread that never held the lease. A reader lease does not
-move with use, so 5.0 code that borrowed a reader on one thread, used it on a
-worker and closed the pool on the borrowing thread must close from another
-thread instead; reader leases were always documented as thread-affine. A
-``close()`` on another thread still waits for outstanding leases.
-
 A sender's own callbacks can no longer drive that sender
 ********************************************************
 
@@ -191,11 +349,15 @@ counters when the sender is not flushing.
 Likewise, a :class:`Buffer <questdb.ingress.Buffer>` that a native call is modifying --
 the sender's internal buffer during ``flush()``, an explicit buffer during
 ``flush(buffer)`` (``clear=True``) or ``flush_and_get_fsn(buffer)``, or any
-buffer during ``dataframe()`` (``SenderTransaction.dataframe()`` included) --
-now raises that error from ``len()``,
+buffer during a row-serializing ``dataframe()`` (``SenderTransaction.dataframe()``
+included) -- now raises that error from ``len()``,
 ``bytes()``, truthiness (``if buffer:`` / ``if sender:``), ``capacity()``,
-``reserve()``, ``clear()`` and ``row()``, from any thread, instead of reading or
-modifying memory the native call is using. A ``flush(buffer, clear=False)`` or
+``reserve()``, ``clear()`` and ``row()``, from any other thread, instead of
+reading or modifying memory the native call is using. Code that a
+``dataframe()`` itself runs on its own thread -- a cell's conversion, a
+handler on the ``questdb`` logger -- follows the rules for re-entering
+``row()`` instead: reads are answered, and every call that would change the
+buffer is refused. A ``flush(buffer, clear=False)`` or
 ``flush_and_keep_and_get_fsn(buffer)`` only reads the buffer, so other threads
 may keep reading it and flushing it with ``clear=False`` to other senders;
 only modifying it raises.
@@ -250,8 +412,113 @@ sender (``drain_orphans=on``) whose fixed credential is rejected is now left on
 disk for the next session at once, rather than retried for the rest of this
 one. See :ref:`token_rejections`.
 
-Features
-~~~~~~~~
+New
+~~~
+
+- **``QuestDB.close(timeout=...)`` sets how long closing may wait.** With
+  no argument, ``close()`` waits for a call in progress until it returns
+  and for an open lease up to 60 seconds. A number of seconds bounds both;
+  ``0`` closes only if nothing is in flight. ``None`` waits for both
+  without a limit. When the limit runs out, ``close()`` raises
+  :class:`QuestDBError <questdb.QuestDBError>` and the handle stays
+  closing; a later ``close()`` picks the wait up again. To bound leaving
+  a ``with`` block, call ``db.close(timeout=...)`` as the block's last
+  statement: the close the block makes on its way out waits only for
+  what is left of that timeout.
+
+- **``query_timeout_ms`` sets a per-query timeout.** The configuration
+  string key bounds each statement sent through ``query()``,
+  ``execute()`` or a reader lease, in place of the server's own
+  ``query.timeout``. A statement that runs past it raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to the
+  new ``QuestDBErrorCode.QueryTimeout``. Do not retry a write on that
+  error: a statement that timed out waiting for the table writer may
+  still be applied. It needs a server that supports per-query timeouts.
+  QuestDB 10.0.1 does not, so while the key is set every statement fails
+  with ``QuestDBErrorCode.UnsupportedServer`` before it is sent.
+
+- **``row()`` on QWP senders now writes UUID, IPV4, BINARY, CHAR, DATE,
+  LONG256, and GEOHASH columns.** Pass ``uuid.UUID``,
+  ``ipaddress.IPv4Address``, ``bytes``, ``bytearray`` or ``memoryview``
+  directly. For the rest use the new :class:`Char <questdb.Char>`,
+  :class:`DateMillis <questdb.DateMillis>`,
+  :class:`Long256 <questdb.Long256>` and :class:`Geohash <questdb.Geohash>`
+  wrappers. These types need a QWP sender (``udp::``, ``ws::`` or
+  ``wss::``) and QuestDB 10 or newer, the first production QWP
+  implementation. The four wrappers are also exported by the deprecated
+  ``questdb.ingress`` shim, so ``from questdb.ingress import *`` now
+  brings in ``Char``, ``DateMillis``, ``Geohash`` and ``Long256`` too.
+
+- **``schema_overrides`` accepts ``'uuid'`` and ``'long256'``.** Both work on
+  fixed-size and variable-length binary columns — which is how polars frames
+  get there, since polars has no fixed-size binary dtype. Every non-null
+  value must be exactly 16 or 32 bytes.
+
+- The new public :data:`questdb.SchemaOverride` type alias describes one
+  ``schema_overrides`` value and can be imported for application
+  annotations.
+
+- **``schema_overrides`` accepts ``'binary'``.** It says a 16- or 32-byte
+  binary column holds plain bytes, so the column is written as BINARY
+  without the refusal or warning an unlabelled one gets, and without a copy.
+  It applies to binary columns only, and is refused on a column whose
+  ``pa.uuid()`` type or ``uuid`` / ``long256`` field metadata already says
+  otherwise.
+
+- **A ``('geohash', bits)`` override accepts an unsigned integer column.**
+  Until now it had to be signed (``int8`` to ``int64``), and an unsigned
+  column was refused with "override 'geohash' is not applicable". It now
+  goes out as the signed integer of the same width holding the same bits,
+  as a GEOHASH claim on an unsigned column already does, in pandas,
+  pyarrow and polars frames. A one-shot stream such as a
+  ``RecordBatchReader`` still needs a signed column.
+
+- **DataFrame BINARY columns accept ``bytearray`` and ``memoryview`` cells**
+  as well as ``bytes``. An object column of ``numpy.bytes_`` now works too.
+
+- **Query results keep their column types when you write them back.**
+  ``to_pandas(dtype_backend=...)`` and ``iter_pandas(dtype_backend=...)`` now
+  attach ``df.attrs['questdb']``, which plain ``to_pandas()`` already
+  carried, and ``dataframe()`` reads it. Without it, IPV4, CHAR and GEOHASH
+  columns went back out as plain integers, and with ``'numpy_nullable'``
+  UUID and LONG256 went back out as BINARY too, so a new destination table
+  was created with the wrong types.
+
+  All three built-in backends round-trip these five types, in whatever shape
+  they hand them back — Arrow-backed columns, NumPy columns, and the object
+  columns of Python ints or ``bytes`` that plain ``to_pandas()`` and
+  ``'numpy_nullable'`` produce. LONG256 in particular now survives a plain
+  ``to_pandas()``: that backend returns it as Python ints, and values must
+  satisfy ``0 <= value < 2**256``.
+
+  Editing the frame is safe. A column you dropped, renamed or retyped simply
+  loses its claim, and ``symbols`` / ``schema_overrides`` outrank it. BYTE
+  and SHORT columns still come back as INT, and INT as LONG. A custom
+  ``types_mapper`` gets the same metadata, but the claim only applies if the
+  dtype it picked can still hold the values — map one of the five to a float
+  or a string and the column lands as that dtype implies.
+
+- **An all-null column claimed as UUID, LONG256, IPV4, CHAR or GEOHASH keeps
+  its claim** and is written as the claimed type. On its own such a column
+  names no type, so it would be left out of the write and out of the table
+  the write creates. Claims of other kinds do not rescue an all-null column;
+  it is still dropped from the write.
+
+- Applications may now create a ``QueryResult`` on one thread and process it on
+  another, including through its Arrow stream. Hand it off with normal thread
+  synchronization and never use it from two threads at once. If it came from a
+  ``PooledReader``, keep that reader on its original thread until processing
+  finishes.
+
+- WebSocket connections keep a dictionary of ``SYMBOL`` values to avoid sending
+  repeated text in full. Repeated values do not grow it, but a long-lived
+  connection fills it after 2,000,000 distinct values or 256 MiB of symbol
+  text. The client then raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.SymbolDictFull``. Pooled clients replace the connection;
+  standalone senders should call ``close_drain()`` and reconnect. Before
+  retrying, check ``err.in_doubt``; when it is true, some rows may already be
+  stored.
 
 Rotating Bearer tokens (:class:`questdb.auth.RefreshingTokenProvider`)
 **********************************************************************
@@ -561,6 +828,413 @@ unchanged, the new kind is appended as ``7``, and a 5.0 listener keeps
 working untouched. A listener that wants to distinguish the two conditions
 opts in by handling the new kind.
 
+Fixed
+~~~~~
+
+- **Python ``True`` in an object-dtype DataFrame column was written as
+  ``False``** by ``QuestDB.dataframe()``, ``PooledSender.dataframe()`` and
+  the WebSocket ``Sender.dataframe()`` in 5.0. An object column of Python
+  bools stored every row as ``false``, and a Python bool inside an
+  object column of integers stored ``0`` in place of ``1``. Nothing was
+  raised. NumPy and Arrow bool columns, and the ILP path, were not
+  affected. Rows written this way in 5.0 hold ``false`` or ``0`` where
+  the frame held ``True``; re-ingest them from the source if they matter.
+
+- **An object cell that replaces itself in the frame no longer crashes the
+  interpreter.** ``QuestDB.dataframe()``, ``PooledSender.dataframe()`` and
+  the WebSocket ``Sender.dataframe()`` read an object-dtype column through
+  the frame's own array. In 5.0, code that a cell ran while it was being
+  read, such as a ``__class__`` property consulted by ``isinstance()``,
+  could replace that cell in the array, freeing it while the client still
+  used it. UUID and ``datetime`` object columns were affected, and so was
+  the check that picks an object column's type. The client now holds its own
+  reference to each cell while it reads it.
+
+- **A ``uuid.UUID`` whose ``int`` slot was replaced can no longer put bytes
+  from outside the value on the wire.** ``QuestDB.dataframe()``,
+  ``PooledSender.dataframe()`` and the WebSocket ``Sender.dataframe()``
+  copied exactly 16 bytes out of whatever the slot's ``to_bytes`` returned,
+  so a subclass returning fewer read past the end of them. The integer such
+  a cell holds is now written as it is, and a slot that does not hold an
+  integer raises ``TypeError``.
+
+- **A column name containing a NUL character (``'\0'``) no longer aborts the
+  process or lands under a shortened name.** ``QuestDB.dataframe()``,
+  ``PooledSender.dataframe()`` and the WebSocket ``Sender.dataframe()`` pass
+  a polars, pyarrow or Arrow-backed pandas frame, or a polars Series, to the
+  client through the Arrow C Data Interface, which carries a name only up to
+  its first NUL. In 5.0 such a name in a polars frame or Series, including a
+  struct field name, aborted the Python process inside polars. In a pyarrow
+  Table, RecordBatch or RecordBatchReader, or an Arrow-backed pandas frame,
+  the column was written under the name cut at the NUL, so ``'a\0b'``
+  became ``a``. The same
+  happened to the name of a pandas index other than a ``RangeIndex``, which
+  that route writes as a column. These frames now raise
+  :class:`QuestDBError <questdb.QuestDBError>` before anything is sent. A
+  column or index name gets the ``InvalidName`` error that ``row()`` raises
+  for it, and a polars struct field name gets a ``BadDataFrame`` error. For
+  other Arrow sources (for example DuckDB, nanoarrow or arro3) the client
+  does not read the names before the export, so it cannot see the NUL.
+
+- **A polars ``Object`` column gets a clear error on every DataFrame
+  route.** polars infers ``Object`` for a list of ``uuid.UUID`` or
+  ``ipaddress.IPv4Address`` values and exports it as an Arrow
+  ``fixed_size_binary(8)`` column of handles to objects in its own process,
+  with nothing else marking it. Stored, those would be meaningless BINARY
+  blobs. ``QuestDB.dataframe()``, ``PooledSender.dataframe()`` and the
+  WebSocket ``Sender.dataframe()`` refuse such a column with
+  ``QuestDBErrorCode.ArrowUnsupportedColumnKind``, the code 5.0 refused it
+  with, and now say why and what to do instead. That covers a polars
+  ``DataFrame``, ``LazyFrame`` or ``Series`` with an ``Object`` column, and
+  an 8-byte fixed-size binary column from any other source: a pyarrow
+  ``Table`` such as ``df.to_arrow()`` of a polars frame, a
+  ``RecordBatchReader``, a pandas ``ArrowDtype`` column, or any object with
+  ``__arrow_c_stream__``. To write the UUIDs or addresses, pass
+  ``df.to_pandas()`` instead, or convert them first: UUIDs to 16-byte
+  ``pl.Binary`` with ``schema_overrides={'col': 'uuid'}``, addresses to
+  ``pl.UInt32`` with ``schema_overrides={'col': 'ipv4'}``. Genuine 8-byte
+  values land as BINARY once the column is variable-length binary:
+  ``pa.binary()``, ``pl.Binary``, or an object column of ``bytes``.
+
+- Direct QWP DataFrame ingestion reports ``in_doubt=True`` when a failure
+  follows an earlier batch that may have committed, including local validation
+  and Arrow stream failures. Delivery status is aggregated by the DataFrame
+  call across its internal checkpoints; low-level sender errors retain their
+  current-operation scope. The client does not automatically replay the whole
+  source after publication. A consumed one-shot stream retains its fresh-reader
+  guidance.
+
+- On the guarded ``QuestDB.dataframe()``/C-ABI path, addressable malformed
+  Arrow streams from hand-rolled C Data Interface exporters (for example
+  nanoarrow, DuckDB, or arro3) are rejected before the known panicking
+  arrow-rs operations covered by native preflight. For example, a batch whose
+  slice extends past a column raises :class:`QuestDBError
+  <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.ArrowIngest`` before import. Producer-owned pointers,
+  allocations, and strings must still satisfy the Arrow ABI; dangling
+  pointers, undersized allocations, unterminated strings, and concurrent
+  producer mutation are outside this guarantee. Ordinary pandas, Polars, and
+  pyarrow exports do not normally emit the hand-rolled batch-slice shape.
+
+- Python extension builds now use the committed ``questdb-rs-ffi`` Cargo
+  lockfile and require its Arrow dependency graph to remain at 59.0.0. Wheel
+  and source-distribution builds fail when that lockfile drifts instead of
+  silently compiling against a different Arrow implementation. The published
+  ``questdb-rs`` crate keeps its existing compatible Arrow version range.
+
+- **NumPy and pandas integers now work everywhere a Python ``int`` does in the
+  round-trip vocabulary.** One rule covers every number this client reads out
+  of a ``df.attrs['questdb']`` claim, a ``schema_overrides`` entry, or one of
+  the QWP-only wrapper classes: a whole number that is not a boolean. A
+  ``numpy.int64`` ``precision_bits`` — which is what a claim rebuilt from
+  array metadata carries, and what ``df.loc[i, 'bits']`` hands you — was
+  dropped along with the rest of the claim, and the column was created as
+  LONG where the caller asked for GEOHASH. ``Long256``, ``DateMillis`` and
+  ``Geohash`` take the same numbers now. ``True`` is still refused everywhere.
+
+- **``QuestDB.close()`` from inside one of the handle's own calls is refused
+  before anything is published.** The refusal is decided under the lock that
+  publishes ``close()``'s state, so a ``close()`` on another thread can no
+  longer see the handle closing, wait for that to clear, and return reporting
+  success against a handle that is still open — nor can the two ends of that
+  window wait on each other.
+
+- **A Ctrl-C during ``QuestDB.close()`` no longer leaves the handle unable to
+  close.** The native teardown runs without the GIL, so a Ctrl-C there is
+  raised as soon as it finishes. That used to skip recording the close as
+  finished: every later ``close()`` then waited for a "concurrent close()"
+  that did not exist, and the handle's callbacks stayed referenced for good.
+  The close is now recorded first. The ``KeyboardInterrupt`` still comes out
+  of ``close()``, and a later ``close()`` returns at once.
+
+  The same holds for a Ctrl-C at any other point in ``close()``, or in the
+  close a ``with QuestDB(...)`` block makes on its way out. One landing just
+  as ``close()`` took over the handle used to skip the native teardown
+  altogether, leaving the same stuck handle and leaking its connections.
+  And one landing as ``close()`` let go of the handle's internal lock could
+  leave that lock held, so every other thread using the handle blocked for
+  good, which usually showed as a program that would not exit.
+
+- **Returning a pooled sender to its pool cannot raise.** Every refusal a
+  lease makes belongs to ``close()``, which runs them before it releases. The
+  release path is also the deallocation path, where a raise would skip the
+  return to the pool and leave ``QuestDB.close()`` waiting for a lease that
+  can never come back.
+
+- **A transaction whose commit cannot flush is over.** ``commit()`` used to
+  mark the transaction complete before the flush that carries it, so a flush
+  that failed left the transaction closed with its rows still buffered, for
+  the next ordinary flush to send outside the transaction you asked for. A
+  commit that reached the wire and failed now ends the transaction, and one
+  refused before it got that far leaves the transaction open for you to
+  finish or roll back. A caller who caught the error and called ``commit()``
+  again now gets ``Transaction already completed`` where it previously made
+  a second attempt.
+
+- **A rollback requested while a row or dataframe is being written is
+  refused.** In 5.0.0, a ``rollback()`` called from code that ``row()``
+  runs while writing, such as a column value's conversion, cleared the
+  buffer under the row being written, and the interrupted ``row()`` then
+  failed with ``Can't rewind to the marker``. Now ``rollback()`` called from
+  code that ``row()`` or ``dataframe()`` runs while writing raises
+  ``InvalidApiCall`` before it changes anything. When that error
+  propagates, the ``with`` block rolls the transaction back as usual. If the
+  caller catches it and the block exits normally, the transaction commits.
+
+- **A completed transaction object cannot append rows outside a transaction
+  or be entered again.** ``row()``, ``dataframe()`` and ``__enter__()`` now
+  raise ``Transaction already completed`` after either commit or rollback.
+  Previously those writing methods accepted more data after the sender had
+  already left transaction mode, leaving it in the ordinary buffer to be sent
+  without the transaction the caller had requested.
+
+- **A transaction refuses every competing call while its commit is in
+  progress.** ``commit()`` releases the GIL during HTTP I/O, so another call
+  through the same transaction could previously overwrite its state, append
+  to the buffer, or clear it while the flush still borrowed it. Such calls now
+  raise ``Transaction commit is already in progress`` until the commit has
+  published its success or failure state.
+
+- **A pooled lease cannot be returned to the pool from inside its own
+  ``dataframe()``.** The plan build runs your Python — reading ``attrs``,
+  sniffing object cells, pulling ``__arrow_c_stream__`` — and closing the
+  lease from there left the rest of that call working against a lease that
+  was already back in the pool, so every later use in the enclosing block
+  raised ``Sender is closed``. Closing a *different* lease from there is
+  unaffected: it has nothing to do with the call that is running.
+
+- **A sender lease is used by one thread at a time, and every call on it
+  holds it for the whole call.** ``dataframe()`` now holds the lease's lock
+  for the whole load, as its other methods already did through their own
+  work, so a call on the same lease from a second thread waits until the
+  running one returns. A ``close()`` from another thread during a load
+  therefore waits for the load, then flushes the lease's rows. To ingest
+  from several threads, share the ``QuestDB`` handle and borrow one lease
+  per thread; code that runs inside a lease's call, such as the Arrow
+  stream a load reads or a handler on the ``questdb`` logger, which a
+  load logs its warnings to, must not wait on another thread using that
+  lease.
+
+- **A sender lease garbage-collected without ``close()`` reports the rows
+  it discards.** Such a lease returns its connection to the pool without
+  sending the rows still buffered in it, and nothing said so. It now logs
+  how many rows it discarded through the ``questdb`` logger at ``WARNING``.
+  Close every lease, or use it in a ``with`` block.
+
+- **``close()`` says which buffer it holds to "no row part-way through".**
+  It is the sender's internal buffer, because that is the buffer
+  ``close(flush=True)`` flushes. A buffer of your own from ``new_buffer()``
+  is neither flushed nor checked there — the sender is never told which
+  buffers exist. Nothing is lost if you close mid-row on one of those: every
+  byte stays in your buffer. What you lose is the sender that could have
+  sent it, so finish the row and flush before closing. This is now written
+  down on ``close()`` rather than left to be discovered.
+
+- **``bytes(sender)`` and ``len(sender)`` are answered mid-row, not
+  refused**, and the answer may end mid-line. They read and act on nothing,
+  so a snapshot taken from inside a column conversion is the honest state of
+  the buffer at that moment; every call that would *change* the buffer is
+  still refused there.
+
+- **``QuestDB.close()`` from inside a pooled lease's own call is refused
+  instead of hanging.** ``close()`` waits for outstanding leases to come
+  back, and a lease's ``row()`` runs your Python for every column value
+  whose conversion is not pure C. Closing the handle from there waited on
+  the very frame that would return the lease — a warning every five seconds
+  and no return. It now raises, and says to close the handle after the call
+  returns.
+
+- **``QuestDB.close()`` is one-way and its wait is bounded.** The
+  first ``close()`` that proceeds — one refused outright, from inside
+  the handle's own calls or callbacks, changes nothing — puts the
+  handle into a closing state it never leaves: new calls and leases
+  are refused with ``QuestDB is closing``, while work already in
+  flight drains — a call in progress (``dataframe()``, ``query()``,
+  …) runs to completion, and an outstanding lease keeps working until
+  its holder closes it. The exception is ``PooledSender.dataframe()``,
+  which forwards to ``QuestDB.dataframe()`` over its own pooled
+  connection: started after ``close()``, it is new work and is refused;
+  one already running finishes. The native pool is torn down by the first
+  ``close()`` that finds nothing using the handle, or when the handle
+  itself is collected.
+  With no ``timeout``, ``close()`` waits for a call in progress until it
+  returns. It waits for leases too, but not for ever: a lease held by the
+  calling thread, or by one that has since finished, can never be
+  returned, and neither is distinguishable from a lease still in use.
+  While a lease is still outstanding after 60 seconds, ``close()`` raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.InvalidApiCall``, saying how many leases and how
+  many calls are still outstanding — so close every ``sender()`` and
+  ``reader()`` lease before closing the handle. ``close()`` cannot
+  interrupt a call, so a ``dataframe()`` reading a stream that never ends
+  keeps it waiting; pass ``timeout`` (see *New*) to bound that too. While
+  it waits, it reports what it is still waiting for through the
+  ``questdb`` logger at ``WARNING``, every five seconds for the first
+  minute and then once a minute (these notices were ``UserWarning``\ s
+  before, which ended the wait at the first notice under ``-W error``).
+  The handle stays closing: close the remaining leases and call
+  ``close()`` again to finish the teardown. No ``close()`` returns success unless the
+  teardown has run — when several race, one runs it and the others
+  return once it is done.
+  Called from inside one of the handle's own ``error_handler`` /
+  ``connection_listener`` callbacks, ``close()`` never waits — while
+  the callback runs, that thread delivers nothing, including whatever
+  a wait would need. It closes immediately when nothing is using the
+  handle, refuses when leases or calls are outstanding, and returns
+  without waiting when a concurrent close is already running —
+  possibly before that close finishes; the handle only moves toward
+  closed, never back to open.
+
+- **Leaving a ``with questdb.connect(...) as db:`` block on an
+  exception no longer replaces it with a close failure.** The frames
+  unwinding out of the block are often the ones holding the leases
+  ``close()`` waits for, so the close could fail on account of the
+  very exception being reported — and an ``except`` clause around the
+  block is written for the original, not for a shutdown complaint that
+  follows from it. ``__exit__`` still closes; when the close cannot
+  finish it reports through the ``questdb`` logger and lets the
+  original exception through. Leaving the block normally still raises,
+  because a lease left open there is a leak worth hearing about.
+
+- **Every call that would change or end the buffer is refused while a row
+  is being written**: ``clear()``, ``flush()``, ``flush_and_get_fsn()``,
+  ``flush_and_keep_and_get_fsn()``, ``close()``, ``close_drain()``,
+  ``commit()``, ``transaction()``, entering a transaction, ``rollback()`` of
+  a transaction that was never entered, and ``dataframe()``, on senders and
+  on pooled leases alike. A column value whose conversion runs Python can
+  call back into the sender that is part-way through a row, and each of
+  these would have destroyed or reordered what that row was writing.
+  ``close_drain()`` is the sharpest of them: draining stops the sender
+  accepting anything further, so the row still being written can never be
+  finished and the complete rows buffered before it go with it — after
+  which ``close(flush=True)`` reported success having sent nothing. A
+  transaction entered from there swallowed the whole frame, whether
+  ``transaction()`` made it at that point or earlier, or it was constructed
+  directly as ``SenderTransaction``: a ``dataframe()`` part-way through its
+  plan build still has the clear buffer a transaction requires, and the
+  rollback that ends such a block then discarded it. Rolling back a
+  transaction that was never entered discarded the frame the same way.
+
+- **Bulk GEOHASH values retain the permissive narrowing contract.** The client
+  validates the declared precision and the integer carrier width, but does not
+  check individual NumPy, Arrow or object-column values against that
+  precision. A wrong precision can therefore be accepted and store a different
+  GEOHASH location or ``NULL``: for example, ``32`` is accepted under
+  ``GEOHASH(5b)`` even though it needs six bits. Only the low
+  ``ceil(precision / 8)`` bytes are encoded, and the exact result is
+  unspecified. This is a semantic data-integrity risk, not a memory-safety
+  risk for otherwise valid NumPy/Arrow buffers. The scalar
+  :class:`Geohash <questdb.Geohash>` wrapper remains strict, and malformed
+  custom Arrow C Data structures remain invalid input.
+
+  Byte-aligned GEOHASH precisions now carry an explicit validity bitmap even
+  when every row is present. This keeps the maximum legitimate value
+  distinct from the all-ones null sentinel without adding a value scan.
+
+- **A claim the column can never carry is reported the same way by both
+  DataFrame planners**, for all five kinds rather than only for GEOHASH. A
+  claim the column *does* carry stays quiet, including the ``uuid.UUID`` and
+  ``ipaddress.IPv4Address`` object columns plain ``to_pandas()`` hands back.
+
+- **A query result whose schema changes between batches is refused** on the
+  pandas NumPy backend. Every batch after the first was decoded against the
+  first one's columns, and the only guard compared byte widths, which agree
+  for any same-width type swap. A GEOHASH precision or DECIMAL scale that
+  changed mid-stream also left the frame's ``df.attrs['questdb']``
+  disagreeing with its own values.
+
+
+- **A claim the column's type can never carry is now logged.** The write still
+  goes ahead as the column's own type implies — a frame retyped since you
+  read it must not fail on that account — but a claim guaranteed to do
+  nothing, such as a float column under ``geohash``, is a mistake
+  rather than drift, and the two were indistinguishable in silence. A claim
+  the column does carry, and one whose column has gone, stay quiet.
+
+- **A claim a string column cannot carry is now logged on the Arrow path
+  too.** A ``df.attrs['questdb']`` claim naming ``uuid``, ``long256``,
+  ``ipv4``, ``char`` or ``geohash`` on a column whose dtype holds no Arrow
+  type was dropped there without a word, while the NumPy planner said so.
+  On pandas 3 that includes an ordinary string column, and those reach the
+  Arrow columnar path, so this is the common way to meet it. Both planners
+  now emit a warning-level record on the ``questdb`` logger.
+
+  Its message starts with ``questdb: column``. It is deliberately a log
+  record rather than a ``UserWarning``: ``-W error`` must not turn a valid
+  frame into ``QuestDBErrorCode.InvalidApiCall`` or stop its write. Logging
+  has no warnings-style deduplication: every write emits one record for every
+  claim it cannot apply, so repeated writes of the same frame repeat the
+  notice. Cast the column to a type the kind fits, name the type outright
+  with ``schema_overrides``, or drop the claim. To silence these notices
+  instead, configure the standard-library logger::
+
+      import logging
+
+      logging.getLogger('questdb').setLevel(logging.ERROR)
+
+  A claim whose column has been dropped or renamed is still ignored in
+  silence. That is ordinary schema drift, and surviving it quietly is what
+  the claim is for.
+
+- **An object pretending to be a ``decimal.Decimal`` is refused.** DECIMAL
+  cells are encoded by reading the object's raw memory, and the check in
+  front of that was ``isinstance``, which asks the object for its
+  ``__class__`` and believes it. An object setting ``__class__ = Decimal``
+  sent the encoder walking unrelated memory: a short one crashed the
+  interpreter with no traceback, a longer one read heap contents into the
+  mantissa, once surfacing a heap address in an error message. The check now
+  reads the object's real type, which cannot be forged. Genuine ``Decimal``
+  subclasses still work.
+
+- **An ``int`` too wide for a LONG column now says so.** On a QWP sender
+  ``row()`` raises ``OverflowError`` pointing at
+  :class:`Long256 <questdb.Long256>`, and ``dataframe()`` raises
+  ``QuestDBError`` pointing at the claim that makes the column a LONG256.
+  Both used to surface CPython's bare "int too large to convert".
+
+- **``QuestDB.dataframe()`` explains ``table_name_col`` properly.** It writes
+  one table per call and has never accepted that argument, but a column it
+  could not type by itself raised first and suggested
+  ``schema_overrides`` — which the same call then refused. It now checks
+  ``table_name_col`` up front and tells you to split the frame and make one
+  call per table. To vary the table name per row, use ``Sender.row()``.
+
+- **Malformed round-trip metadata is skipped on both ingest paths**, as the
+  contract always said. A ``kind`` that was not hashable (a list left by a
+  JSON round trip, say) raised ``TypeError`` from the Arrow path, and an
+  ``attrs['questdb']`` that was not a dict raised ``AttributeError`` from
+  the NumPy one. Both paths now read the claim through one shared entry
+  point, so they cannot drift apart.
+
+- **DATE columns are written differently by the two ingestion styles**, which
+  is now documented. ``row()`` takes the new ``DateMillis`` wrapper.
+  ``dataframe()`` takes the column's Arrow type — ``pa.timestamp('ms')``,
+  ``pa.date32()`` or ``pa.date64()``, in a fully Arrow-backed frame or in a
+  mixed one — so there is no DATE cell type and no ``'date'`` kind for
+  ``schema_overrides``. What has no route of its own to DATE is the NumPy
+  ``datetime64[ms]`` dtype, which widens to TIMESTAMP, and its tz-aware
+  ``datetime64[ms, tz]`` form, which is rejected. Both styles need a QWP
+  sender.
+
+- **A DATE column survives a read-modify-write on every pandas backend.**
+  Reading back, a DATE column arrives as ``pa.timestamp('ms', 'UTC')``, so
+  ``to_arrow()`` and ``dtype_backend='pyarrow'`` feed it straight back as
+  DATE. Plain ``to_pandas()`` gives a NumPy ``datetime64[ms]`` column,
+  which used to go back out as a microsecond TIMESTAMP with nothing said,
+  auto-creating the destination table with the wrong column type. The
+  ``df.attrs['questdb']`` claim that comes with the frame names the column
+  DATE, and ``dataframe()`` now puts the Arrow type back on before writing.
+  A column retyped to another unit since it was read is drift and still
+  goes out as its own type implies.
+
+- If a DataFrame load fails, batches waiting in memory are now discarded. Most
+  loads commit once at the end, but very large Arrow loads may commit an earlier
+  checkpoint. If a later batch fails, that prefix from the same DataFrame call
+  remains, so retrying the whole DataFrame can duplicate rows.
+
+- When ``sf_dir`` enables disk-backed delivery, shutdown now obeys its configured
+  timeout and recovery is safer after a crash or an incomplete final write.
+
 Other changes
 ~~~~~~~~~~~~~
 
@@ -570,61 +1244,96 @@ Other changes
   :class:`~questdb.auth.TokenUnavailableError`; any other failure, an
   ``oidc_auth`` network error included, fails the connection at once.
   Background reconnects keep retrying every provider failure.
+
 - A 401 is retried with a refreshed token only when the server's
   ``WWW-Authenticate`` challenge allows it: no Bearer ``error``, or
   ``invalid_token``.
+
 - The configuration-string keys ``token_provider``, ``azure_resource``,
   ``azure_client_id`` and ``azure_credential`` are rejected on every protocol.
   ILP/HTTP and ILP/TCP previously ignored them silently.
+
 - Wheels are now also published for free-threaded CPython 3.14 on Windows
   (``cp314t-win32`` and ``cp314t-win_amd64``). On every free-threaded build the
   extension re-enables the GIL; see :doc:`installation`.
-- A :meth:`QuestDB.close <questdb.QuestDB.close>` that waits for a ``close()``
-  already running on another thread now closes the pool itself if that other
-  close gives up (interrupted by ``Ctrl-C``, or bounded inside an OIDC
-  callback) instead of returning with the pool still open.
+
 - Finalizers and garbage collection no longer block on, or free, a query
   cursor that another operation is using: an abandoned ``QueryResult``,
   ``PooledReader``, Arrow stream or batch iterator is reclaimed without
   waiting, and cursor ``close()`` / ``cancel()`` / pulls reject same-thread
   re-entry while a native read is in progress.
+
 - A connection event whose kind this build does not recognise is dropped,
   with one warning on the ``questdb`` logger, instead of being delivered to
   the listener as ``Connected``.
+
 - DataFrame errors that gain a remediation hint (a batch too large for the
   server) or a note (a partially consumed input stream) keep their exception
   class, ``in_doubt`` and ``sender_error`` instead of being rebuilt as a plain
   :class:`QuestDBError <questdb.QuestDBError>`. The batch-too-large hint is
   also added when the rejection surfaces at the trailing sync.
-- Applications may now create a ``QueryResult`` on one thread and process it on
-  another, including through its Arrow stream. Hand it off with normal thread
-  synchronization and never use it from two threads at once. If it came from a
-  ``PooledReader``, keep that reader on its original thread until processing
-  finishes.
-- WebSocket connections keep a dictionary of ``SYMBOL`` values to avoid sending
-  repeated text in full. Repeated values do not grow it, but a long-lived
-  connection fills it after 2,000,000 distinct values or 256 MiB of symbol
-  text. The client then raises
-  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-  ``QuestDBErrorCode.SymbolDictFull``. Pooled clients replace the connection;
-  standalone senders should call ``close_drain()`` and reconnect. Before
-  retrying, check ``err.in_doubt``; when it is true, some rows may already be
-  stored.
-- If a DataFrame load fails, batches waiting in memory are now discarded. Most
-  loads commit once at the end, but very large Arrow loads may commit an earlier
-  checkpoint. If a later batch fails, that prefix from the same DataFrame call
-  remains, so retrying the whole DataFrame can duplicate rows.
-- When ``sf_dir`` enables disk-backed delivery, shutdown now obeys its configured
-  timeout and recovery is safer after a crash or an incomplete final write.
-- If a ``ws::`` or ``wss::`` configuration contains ``max_in_flight`` or
-  ``in_flight_window``, remove it. These options are no longer supported and now
-  raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-  ``QuestDBErrorCode.ConfigError`` during startup.
+
 - The ILP/HTTP sender now ignores the ``HTTP_PROXY``, ``HTTPS_PROXY`` and
   ``ALL_PROXY`` environment variables (in either case) and always connects
   directly. Previously, setting any of them made every flush fail with a
   misleading ``Connection refused`` without contacting anything, because the
   proxy was read but never dialled. HTTP proxies remain unsupported.
+
+Faster
+~~~~~~
+
+- **Writing rows over QWP/WebSocket is no longer quadratic in the number of
+  rows buffered.** ``row()`` sets a rewind point before each row, so that a
+  row which fails part-way can be taken back out of the buffer. On a
+  WebSocket buffer, setting that point copied everything already buffered,
+  so each row cost more than the one before it, and filling a batch took
+  time proportional to the square of its size. The rewind point now records
+  only lengths; the change is in the bundled ``c-questdb-client``. This
+  applies to ``Sender.row()`` over ``ws::`` and ``wss::``, to
+  ``PooledSender.row()`` on a lease from ``QuestDB.sender()``, and to a
+  buffer from such a sender's ``new_buffer()``. With CPython 3.14 on an
+  arm64 Mac, a row of one symbol and five columns cost about 5 µs with
+  2,000 rows buffered and about 62 µs with 40,000; it now costs under 1 µs
+  at either size. ILP buffers were not affected.
+
+- **Writing a frame whose ``df.attrs['questdb']`` is a plain ``dict`` is no
+  longer quadratic in the column count.** pandas 2.2 and later deep-copy the
+  whole of ``attrs`` into every Series they derive, and writing a frame
+  derives one per column. A claim from ``to_pandas()`` declines to be copied,
+  but one that is a plain ``dict`` (from a pickle, or written or replaced by
+  hand) was copied in full once per column. ``dataframe()`` now freezes such
+  a claim for the length of the write, on a shallow copy of the frame; the
+  caller's frame and claim are left as they are. With pandas 3.0.3 and 1000
+  columns, ``Buffer.dataframe()`` drops from 944 ms to 63 ms, and
+  ``QuestDB.dataframe()`` from 1395 ms to 498 ms for a NumPy-backed frame
+  and from 1352 ms to 492 ms for an Arrow-backed one. Each is about the time
+  with no claim.
+
+- **Reading round-trip metadata is no longer quadratic in the column count.**
+  Reading it off an Arrow schema and applying it to a pandas frame both
+  re-read ``schema.names`` and ``frame.dtypes`` once per column. At 1024
+  columns the read pass drops from about 85 ms to 0.7 ms, and
+  ``iter_pandas`` was paying it per batch.
+
+- **A streaming read builds ``df.attrs['questdb']`` once per result**, not
+  once per batch. One schema covers every batch, and the claim is now shared
+  rather than copied. At 1024 columns that was 1.2 ms per batch on
+  ``iter_pandas``, so a 10-million-row read in 10,000-row batches spent
+  about 1.2 seconds on nothing else.
+
+- **The DataFrame IPV4 builder is about 3x faster per cell**, from roughly
+  95 ns to about 30. Its type test looked ``IPv4Address`` and
+  ``IPv4Interface`` up through the ``ipaddress`` module on every cell,
+  costing about 65 ns; both are now bound once at import, and an exact type
+  test settles the common cell in under 2 ns. What remains per cell is the
+  ``int()`` conversion, which is a Python-level call and dominates what is
+  left.
+
+- **``Buffer.row()`` cell dispatch is cheaper.** The QWP-only types moved out
+  of the inlined dispatch function, and the wrapper classes are now tested
+  before ``uuid.UUID`` and IPV4. A ``Geohash`` cell is about 33% cheaper and
+  an ``IPv4Address`` cell about 15%, and the common ``int`` / ``float`` /
+  ``str`` path no longer has that code laid out around it.
 
 5.0.0 (2026-07-27)
 ------------------

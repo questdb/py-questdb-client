@@ -5,14 +5,16 @@ Migration Guide
 5.0 to 6.0
 ==========
 
-Eleven changes need action: the two UUID / fixed-size-binary items below, the
+These changes need action: the two UUID / fixed-size-binary items below, the
 stricter ``schema_overrides`` tuple validation, caps on callback inbox
 capacities and config-string length, the error a query failover that runs out
-of time raises, ``QuestDB.close()`` raising instead of waiting for its own
-thread's lease, a sender's own callbacks no longer being able to append to it,
-the exception a commit raises once its sender is closed, a warning an abandoned
+of time raises, ``QuestDB.close()`` no longer waiting without a limit for
+leases, a sender's own callbacks no longer being able to append to it, the
+exception a commit raises once its sender is closed, a warning an abandoned
 query result now surfaces instead of swallowing, and a connected sender riding
-out a rejected credential instead of stopping. The new
+out a rejected credential instead of stopping. The :ref:`changelog
+<changelog>` lists the rest of 6.0's breaking changes, most of them about the
+new QWP-only column types. The new
 ``ConnectionEventKind.CredentialUnavailable`` event kind needs none — it is
 additive, and an existing listener keeps working.
 
@@ -20,10 +22,8 @@ additive, and an existing listener keeps working.
   canonical big-endian order at every API boundary; the client byte-swaps to
   QWP wire order internally. The wire format is unchanged and still matches the
   Java client, so stored data and round-trips are unaffected — only the bytes
-  your application supplies or receives change. A well-formed ``uuid.UUID``
-  object column needs no byte-order change; malformed or subclassed UUID objects
-  whose integer representation does not produce exactly 16 bytes are rejected.
-  If you pre-reversed bytes to work around the old layout, remove that workaround
+  your application supplies or receives change. A ``uuid.UUID`` object column
+  needs no byte-order change. If you pre-reversed bytes to work around the old layout, remove that workaround
   — on the **read** path too. The bytes a UUID column
   yields changed in the same way and just as silently, on every Arrow-backed
   reader: :meth:`~questdb.QueryResult.to_arrow`,
@@ -38,9 +38,15 @@ additive, and an existing listener keeps working.
   unaffected.
 
 * **Fixed-size-binary width alone no longer claims UUID or LONG256.** An
-  unclaimed 16- or 32-byte column now lands as ``BINARY``, which the server
-  rejects against an existing UUID or LONG256 column rather than storing the
-  wrong type silently. The ``arrow.uuid`` extension label claims a 16-byte
+  unclaimed 16- or 32-byte column in native Arrow input -- a ``pa.Table``, a
+  ``RecordBatchReader`` or any other ``__arrow_c_stream__`` producer -- now
+  lands as ``BINARY``, with a warning on the ``questdb`` logger, which the
+  server rejects against an existing UUID or LONG256 column rather than storing
+  the wrong type silently. A pandas frame refuses such a column with
+  ``BadDataFrame`` before sending anything: its ``ArrowDtype`` cannot carry a
+  label, so the column may be a UUID or LONG256 column that lost one. To write
+  either width as plain bytes, label it with
+  ``schema_overrides={'col': 'binary'}``. The ``arrow.uuid`` extension label claims a 16-byte
   column as UUID. Whole-table or stream Arrow inputs can also retain
   column-field metadata ``questdb.column_type=uuid`` or
   ``questdb.column_type=long256`` to claim either type without overrides.
@@ -112,30 +118,26 @@ additive, and an existing listener keeps working.
   credential rejection (``AuthError``), not a transient socket failure; fix
   the credentials before retrying. See :doc:`auth` for OIDC-specific handling.
 
-* :meth:`QuestDB.close <questdb.QuestDB.close>` **raises instead of waiting
-  for a lease held by the calling thread.** It raises
-  ``QuestDBError(InvalidApiCall)`` while the calling thread owns an active pool
-  operation or a lease attributed to it; 5.0 waited, which never ended for a
-  same-thread lease. A sender lease handed to a worker stays attributed to the
-  borrowing thread until the worker first uses it, so a ``close()`` there that
-  5.0 would have waited through now raises. A reader lease (``db.reader()``)
-  stays attributed to the borrowing thread however it is used, so close the
-  pool from another thread while one is open. For a sender lease, have the
-  worker use the lease and signal that before closing, or close from a thread
-  that never held it::
+* :meth:`QuestDB.close <questdb.QuestDB.close>` **no longer waits without a
+  limit for leases.** It waits up to a minute by default for outstanding
+  ``sender()`` / ``reader()`` leases, then raises
+  ``QuestDBError(InvalidApiCall)`` and leaves the handle closing; 5.0 waited
+  for ever, which never ended for a lease held by the calling thread. Called
+  from inside a call on the handle or on one of its leases, it is refused at
+  once; with greenlets, every greenlet on an OS thread counts as the same
+  caller. Close every lease before closing the handle, or pass ``timeout``
+  (``None`` waits without a limit). A lease handed to a worker is waited for
+  until the worker returns it::
 
       sender = db.sender()
-      used = threading.Event()
 
       def work():
           with sender:
-              used.set()
               sender.row('trades', columns={'price': 1.0},
                          at=questdb.ServerTimestamp)
 
       threading.Thread(target=work).start()
-      used.wait()
-      db.close()  # waits for the worker to return the lease
+      db.close()  # waits, up to its timeout, for the worker to return it
 
 * **A sender's own callbacks can no longer append to it.** Called from the
   sender's own ``connection_listener`` or ``error_handler``, ``row()``,
@@ -149,7 +151,9 @@ additive, and an existing listener keeps working.
   truthiness, ``capacity()``, ``reserve()``, ``clear()`` and ``row()`` on a
   :class:`~questdb.ingress.Buffer` that a native call is modifying (the internal buffer
   during ``flush()``, an explicit one during ``flush(buffer)``, or any one
-  during ``dataframe()``, ``SenderTransaction.dataframe()`` included); a
+  during a row-serializing ``dataframe()``, ``SenderTransaction.dataframe()``
+  included), from any other thread; code a ``dataframe()`` runs on its own
+  thread follows the rules for re-entering ``row()`` instead. A
   ``flush(buffer, clear=False)`` only reads the buffer, so
   concurrent reads and other ``clear=False`` flushes of it still work. Hand
   listener events to another sender or to the owning thread instead::
@@ -164,8 +168,10 @@ additive, and an existing listener keeps working.
 
 * :meth:`SenderTransaction.commit <questdb.SenderTransaction.commit>` **after
   the owning sender was closed now raises** ``QuestDBError(InvalidApiCall)``
-  instead of an internal ``TypeError``. A commit whose flush fails leaves the
-  sender's buffer empty and the transaction completed, exactly as in 5.0.
+  instead of an internal ``TypeError``. A commit whose flush fails at the
+  server leaves the sender's buffer empty and the transaction completed, as in
+  5.0; one refused before it sends anything now leaves the transaction open,
+  to commit again or roll back.
 
 * **An abandoned** :class:`~questdb.QueryResult` **now reports its**
   ``ResourceWarning`` **when promoted to an exception**. The finalizer previously
@@ -299,14 +305,24 @@ handle; the sender variants exist as conveniences and share the same path:
         sender.dataframe(frame, table_name='weather', at='ts')
 
 On success, each call returns only after every row in the source has been
-committed. Most loads queue their batches and commit once at the end. To keep
-memory bounded, a very large Arrow load checkpoints about every 100 batches.
-The client may checkpoint earlier if the connection cannot queue another batch
-or if a batch must be split to fit. If a later batch fails, the exception means
-that the load did not finish, not necessarily that no rows landed. Any already
-committed prefix from that call remains in the table, and retrying the entire
-DataFrame can duplicate it unless the table uses suitable
-``DEDUP UPSERT KEYS``.
+committed. The first successful batch on a fresh direct connection is already
+a commit boundary; subsequent batches are pipelined until the final commit.
+To keep memory bounded, a very large Arrow load adds a checkpoint about every
+100 batches, and the client may checkpoint earlier if deferred capacity fills
+or a batch must be split to fit. This interval caps the uncommitted tail; it is
+not a safe whole-source replay window.
+
+After a transient failure, the client replays the original source only if no
+batch was successfully published and the failed operation is not ``in_doubt``.
+Otherwise it raises. When any batch from the call may have committed, the
+public exception has ``in_doubt=True`` even if the final native write itself
+was provably not delivered. This includes local validation and Arrow stream
+errors after publication. Internal checkpoints do not reset this call-level
+status. The load may then have an already committed prefix, and an
+application-level retry of the entire DataFrame can duplicate
+it unless the table uses suitable ``DEDUP UPSERT KEYS``. A consumed one-shot
+stream can be non-replayable with ``in_doubt=False`` when no rows could have
+landed; its error asks the caller to supply a fresh reader.
 
 These calls are independent of ``sf_dir``, and none converts the DataFrame
 into row calls. ``dataframe()`` opens a direct connection just for that call

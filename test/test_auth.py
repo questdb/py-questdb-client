@@ -8239,12 +8239,14 @@ class OidcRendererReentryTest(_IsolatedReentry, unittest.TestCase):
             self.assertEqual(code, questdb.QuestDBErrorCode.InvalidApiCall)
             self.assertIn(
                 'outstanding lease(s) inside an OIDC callback', message)
-            # It waited for the lease a bounded time, then gave up and put
-            # the pool back for it.
+            # It waited for the lease a bounded time, then gave up. Closing
+            # is one-way, so the pool stays closing: it takes no new work,
+            # the lease keeps working, and a later close() finishes the
+            # teardown once the lease is returned.
             self.assertGreaterEqual(elapsed, 1.0)
             self.assertLess(elapsed, 10.0)
             self.assertTrue(holder.is_alive())
-            self.assertFalse(_pool_claimed(db))
+            self.assertTrue(_pool_claimed(db))
 
     def test_pool_close_from_renderer_during_a_concurrent_close(self):
         self._run_isolated(

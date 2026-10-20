@@ -364,7 +364,9 @@ renderer callback, or a persistence-warning handler of a different provider,
 may close the pool, but that ``db.close()`` waits at most two seconds for
 leases other threads hold -- or for a ``db.close()`` already running on another
 thread -- and then raises the same error, because such a lease may be blocked
-on a token the provider cannot supply until the callback returns. In both
+on a token the provider cannot supply until the callback returns. Closing is
+one-way, so the pool is left closing: it takes no new work, and a later
+``db.close()`` finishes the teardown once the leases are returned. In both
 cases, close the pool after the callback returns instead. The binding imports
 ``logging`` before registering its own shutdown hook, so the hook detaches OIDC
 callbacks while logging handlers are still live;

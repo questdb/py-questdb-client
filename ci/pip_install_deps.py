@@ -3,6 +3,7 @@ import subprocess
 import shlex
 import textwrap
 import platform
+import sysconfig
 import argparse
 import importlib.metadata
 
@@ -12,6 +13,8 @@ arg_parser = argparse.ArgumentParser(
 )
 
 arg_parser.add_argument('--pandas-version')
+arg_parser.add_argument('--pyarrow-version')
+arg_parser.add_argument('--polars-version')
 
 
 class UnsupportedDependency(Exception):
@@ -53,6 +56,20 @@ def try_pip_install(package, version=None):
         sys.stderr.write(f'    Ignored unsatisfiable dependency:\n{msg}\n')
 
 
+def pip_install_required(package, version):
+    try:
+        pip_install(package, version)
+    except UnsupportedDependency as e:
+        raise SystemExit(
+            f'Required dependency {package}=={version} is not installable:\n'
+            f'{e}') from None
+    installed = importlib.metadata.version(package)
+    if installed != version:
+        raise SystemExit(
+            f'Required dependency {package}=={version} was requested, but '
+            f'version {installed} is installed')
+
+
 def ensure_timezone():
     try:
         import zoneinfo
@@ -64,7 +81,7 @@ def ensure_timezone():
 
 def install_pandas2_and_numpy(pandas_version=None):
     if pandas_version is not None:
-        try_pip_install('pandas', pandas_version)
+        pip_install_required('pandas', pandas_version)
     else:
         try_pip_install('pandas>=2,<3')
     try_pip_install('numpy<2')
@@ -120,8 +137,14 @@ def main(args):
         install_default_pandas_and_numpy()
 
     try_pip_install('fastparquet>=2023.10.1')
-    try_pip_install(pyarrow_requirement())
-    try_pip_install('polars')
+    if args.pyarrow_version:
+        pip_install_required('pyarrow', args.pyarrow_version)
+    else:
+        try_pip_install(pyarrow_requirement())
+    if args.polars_version:
+        pip_install_required('polars', args.polars_version)
+    else:
+        try_pip_install('polars')
     try_pip_install('psutil')
     # Optional OIDC extra. Without it `_qr_ascii` / `_qr_data_uri` return None,
     # so every `qr=True` path in the renderers -- and every test that exercises
@@ -151,6 +174,8 @@ def main(args):
     # unit and is skipped rather than left with a driver that cannot import.
     try_pip_install('sqlalchemy>=2')
     try_pip_install('psycopg[binary]')
+    # The greenlet scoped-call test skips without it.
+    try_pip_install('gevent')
     # `TestManifest` (test/test.py) parses examples.manifest.yaml, then
     # compiles every Python example and checks each header's `questdb[...]`
     # extras against pyproject.toml. Without PyYAML both tests skip, and
@@ -163,6 +188,7 @@ def main(args):
     is_64bits = sys.maxsize > 2 ** 32
     is_cpython = platform.python_implementation() == 'CPython'
     is_final = sys.version_info.releaselevel == 'final'
+    is_free_threaded = bool(sysconfig.get_config_var('Py_GIL_DISABLED'))
     py_version = (sys.version_info.major, sys.version_info.minor)
     if on_linux_is_glibc and is_64bits and is_cpython and is_final:
         # Ensure that we've managed to install the expected dependencies.
@@ -174,6 +200,10 @@ def main(args):
         # Compat will still be tested on older releases.
         if py_version < (3, 14):
             import fastparquet
+
+        # PyYAML publishes no wheel for free-threaded 3.13.
+        if not (is_free_threaded and py_version == (3, 13)):
+            import yaml
 
 
 if __name__ == "__main__":

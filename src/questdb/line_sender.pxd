@@ -93,7 +93,9 @@ cdef extern from "questdb/ingress/line_sender.h":
         # Client-side QWP/WebSocket sender error codes (35..37).
         line_sender_error_batch_too_large,
         line_sender_error_store_resend_required,
-        line_sender_error_symbol_dict_full
+        line_sender_error_symbol_dict_full,
+        # A query that ran past its per-query timeout (38).
+        line_sender_error_query_timeout
 
     ctypedef line_sender_error_code questdb_error_code
 
@@ -357,6 +359,58 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_buffer* buffer,
         line_sender_column_name name,
         line_sender_utf8 value,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_buffer_column_uuid(
+        line_sender_buffer* buffer,
+        line_sender_column_name name,
+        uint64_t lo,
+        uint64_t hi,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_buffer_column_long256(
+        line_sender_buffer* buffer,
+        line_sender_column_name name,
+        const uint8_t* value,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_buffer_column_ipv4(
+        line_sender_buffer* buffer,
+        line_sender_column_name name,
+        uint32_t value,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_buffer_column_date(
+        line_sender_buffer* buffer,
+        line_sender_column_name name,
+        int64_t millis,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_buffer_column_char(
+        line_sender_buffer* buffer,
+        line_sender_column_name name,
+        uint16_t value,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_buffer_column_binary(
+        line_sender_buffer* buffer,
+        line_sender_column_name name,
+        const uint8_t* data,
+        size_t data_len,
+        line_sender_error** err_out
+        ) noexcept nogil
+
+    bint line_sender_buffer_column_geohash(
+        line_sender_buffer* buffer,
+        line_sender_column_name name,
+        uint64_t bits,
+        uint8_t precision_bits,
         line_sender_error** err_out
         ) noexcept nogil
 
