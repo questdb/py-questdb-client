@@ -1013,7 +1013,11 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(
             _first_qwp_table_row_count(data_frames[0]), row_count)
 
-    def test_pooled_sender_auto_flush_default_bytes_falls_back_to_8_mib(self):
+    def test_pooled_sender_plans_for_default_cap_without_server_cap(self):
+        # The server advertises no cap, so the lease plans its frames for the
+        # cap a server has by default rather than for its local 16 MiB limit.
+        # A row above that cap still goes out: only the local limit refuses
+        # a frame.
         with QwpAckServer() as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
@@ -1026,7 +1030,16 @@ class TestQwpWebSocketApi(unittest.TestCase):
             with qi.QuestDB.from_conf(conf) as client:
                 with client.sender() as sender:
                     sender.row(
-                        'events', columns={'value': 'x' * (8 * 1024 * 1024)},
+                        'events', columns={'value': 'x' * 1_200_000},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 1)
+                    # Past 90% of the default cap: the first row goes out.
+                    sender.row(
+                        'events', columns={'value': 'y' * 1_200_000},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 1)
+                    sender.row(
+                        'events', columns={'value': 'z' * (8 * 1024 * 1024)},
                         at=qi.ServerTimestamp)
                     self.assertEqual(len(sender), 0)
                     sender.wait(30000)
@@ -1034,7 +1047,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             stats = server.snapshot()
 
         self.assertEqual(stats['errors'], [])
-        self.assertEqual(stats['binary_frames'], 1)
+        self.assertEqual(stats['binary_frames'], 3)
 
     def test_pooled_sender_auto_flush_oversize_row_error_propagates(self):
         connected = threading.Event()
@@ -1583,11 +1596,12 @@ class TestQwpWebSocketApi(unittest.TestCase):
                         self.assertNotEqual(
                             raised.exception.code,
                             qi.QuestDBErrorCode.BatchTooLarge)
-                        # A pooled lease keeps the row that could not go
-                        # out; a standalone sender clears its buffer.
-                        self.assertEqual(
-                            self._qwp_row_split_buffered(kind, sender),
-                            kind == 'pooled')
+                        self.assertIn(
+                            'The row was not added. The rows buffered '
+                            'before it were published.',
+                            str(raised.exception))
+                        self.assertFalse(
+                            self._qwp_row_split_buffered(kind, sender))
                         self._qwp_row_split_wait_acked(kind, sender)
                     finally:
                         self._qwp_row_split_close(sender, client)
@@ -1598,6 +1612,135 @@ class TestQwpWebSocketApi(unittest.TestCase):
                      for frame in _qwp_data_frames(stats)],
                     [[('events', {'value': ['p' * 3700]})],
                      [('events', {'value': ['a' * 2000]})]])
+
+    def _qwp_row_publish_times_out(self, kind, extra_conf, fill_rows,
+                                   failing_row, resend_rows):
+        """Two queue segments and an ack delay longer than the append
+        deadline: `fill_rows` take both segments, so the publish that
+        `failing_row` triggers times out. Returns the frames delivered once
+        the acks drain and `resend_rows` are written and published."""
+        conf = (
+            'auto_flush_interval=off;'
+            'sf_max_segment_bytes=4096;sf_max_total_bytes=8192;'
+            'sf_append_deadline_millis=100;' + extra_conf)
+        with QwpAckServer(ack_delay_s=1.0, record_payloads=True) as server:
+            sender, client = self._qwp_row_split_sender(kind, server, conf)
+            try:
+                for value in fill_rows:
+                    sender.row(
+                        'events', columns={'value': value},
+                        at=qi.ServerTimestamp)
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    sender.row(
+                        'events', columns={'value': failing_row},
+                        at=qi.ServerTimestamp)
+                self.assertNotEqual(
+                    raised.exception.code,
+                    qi.QuestDBErrorCode.BatchTooLarge)
+                self.assertIn('The row was not added.', str(raised.exception))
+                self.assertNotIn('were published', str(raised.exception))
+                # A pooled lease keeps the rows buffered before it; a
+                # standalone sender clears them, as its `flush()` does.
+                if kind == 'pooled':
+                    self.assertEqual(len(sender), 1)
+                else:
+                    self.assertFalse(
+                        self._qwp_row_split_buffered(kind, sender))
+                self._qwp_row_split_wait_acked(kind, sender)
+                for value in resend_rows:
+                    sender.row(
+                        'events', columns={'value': value},
+                        at=qi.ServerTimestamp)
+                self._qwp_row_split_publish_rest(kind, sender)
+            finally:
+                self._qwp_row_split_close(sender, client)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        return [qwp_wire.table_values(frame)
+                for frame in _qwp_data_frames(stats)]
+
+    def test_qwp_row_split_failed_earlier_rows_publish_does_not_add_row(self):
+        # The new row makes the buffer too large for one frame, and the
+        # frame of the rows before it times out. A pooled lease keeps those
+        # rows, which fit, so re-sending the row publishes both.
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                frames = self._qwp_row_publish_times_out(
+                    kind, 'auto_flush_rows=off;',
+                    ['p' * 3700, 'q' * 3700, 'a' * 2000],
+                    'b' * 3700,
+                    ['b' * 3700])
+                kept = [[('events', {'value': ['a' * 2000]})]]
+                self.assertEqual(
+                    frames,
+                    [[('events', {'value': ['p' * 3700]})],
+                     [('events', {'value': ['q' * 3700]})]]
+                    + (kept if kind == 'pooled' else [])
+                    + [[('events', {'value': ['b' * 3700]})]])
+
+    def test_qwp_row_failed_whole_buffer_publish_does_not_add_row(self):
+        # The row trigger publishes the whole buffer, which fits in a frame
+        # but not in what the second segment has left, so it times out.
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                frames = self._qwp_row_publish_times_out(
+                    kind, 'auto_flush_rows=2;',
+                    ['p' * 3700, 'q' * 3700, 'a' * 1000],
+                    'b' * 1000,
+                    ['b' * 1000])
+                self.assertEqual(
+                    frames,
+                    [[('events', {'value': ['p' * 3700]})],
+                     [('events', {'value': ['q' * 3700]})],
+                     [('events', {
+                         'value': (['a' * 1000] if kind == 'pooled' else [])
+                         + ['b' * 1000]})]])
+
+    def test_qwp_row_split_lazy_lease_rows_fit_once_the_cap_is_known(self):
+        # The lease buffers rows before its first connection has advertised
+        # the server's cap, which is the cap a server has by default. Until
+        # then it plans frames for that cap rather than for its local limit,
+        # so what it buffered still fits once the cap is known.
+        gate = threading.Event()
+        connected = threading.Event()
+
+        def on_event(event):
+            if event.kind is qi.ConnectionEventKind.Connected:
+                connected.set()
+
+        value = 'x' * 100_000
+        with QwpAckServer(
+                max_batch_size=2 * 1024 * 1024 - 14, record_payloads=True,
+                upgrade_gate=gate) as server:
+            client = qi.QuestDB.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                'auto_flush_rows=off;auto_flush_interval=off;',
+                connection_listener=on_event)
+            sender = client.sender()
+            try:
+                for seq in range(25):
+                    sender.row(
+                        'events', columns={'seq': seq, 'value': value},
+                        at=qi.ServerTimestamp)
+                self.assertFalse(connected.is_set())
+                gate.set()
+                self.assertTrue(connected.wait(10))
+                for seq in range(25, 30):
+                    sender.row(
+                        'events', columns={'seq': seq, 'value': value},
+                        at=qi.ServerTimestamp)
+                sender.flush(wait=True)
+            finally:
+                gate.set()
+                self._qwp_row_split_close(sender, client)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        seqs = []
+        for frame in _qwp_data_frames(stats):
+            for table, columns in qwp_wire.table_values(frame):
+                seqs.extend(columns['seq'])
+        self.assertEqual(seqs, list(range(30)))
 
     def test_qwp_row_split_standalone_manual_flush_too_large(self):
         with QwpAckServer(max_batch_size=1024) as server:
@@ -1725,7 +1868,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
                         sender.row(
                             'events', columns={'value': 2},
                             at=qi.ServerTimestamp)
-                    self.assertEqual(len(sender), 1)
+                    # A row whose auto-flush fails is not added.
+                    self.assertEqual(len(sender), 0)
                     sender.close(flush=False)
 
             stats = server.snapshot()
@@ -1733,6 +1877,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertIsInstance(
             raised.exception, qi.QuestDBServerRejectionError)
+        self.assertIn('The row was not added.', str(raised.exception))
 
     def test_pooled_sender_await_acked_fsn_validates_timeout(self):
         # Regression: timeout_millis must be validated and converted while

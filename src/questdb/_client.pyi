@@ -1180,11 +1180,12 @@ class PooledSender:
         cap, the rows buffered before this one go out on their own and this
         row starts the next batch.
 
-        ``BatchTooLarge`` from this method means the row was not added:
-        either it does not fit in a frame on its own, or the rows buffered
-        before it do not fit even without it, as after the frame cap
-        shrinks, and those rows are discarded.
-        Any other publish error propagates and leaves every row buffered.
+        Whatever this method raises, the row was not added.
+        ``BatchTooLarge`` means either it does not fit in a frame on its
+        own, or the rows buffered before it do not fit even without it, as
+        after the frame cap shrinks, and those rows are discarded. Any other
+        publish error propagates and leaves the rows buffered before it in
+        place.
 
         See :func:`Buffer.row` for supported column types, protocol
         restrictions, server requirements, and ``NULL``-sentinel behavior.
@@ -1963,7 +1964,9 @@ class Sender:
         Over ``ws`` and ``wss`` the threshold is at most 90% of the
         connection's frame cap, and by default it is 90% of that cap. The
         cap is known once :func:`Sender.establish` has connected, so before
-        that the default reports ``None``.
+        that the default reports ``None``. A server that does not advertise
+        a cap counts as having QuestDB's default, 2 MiB less 14 bytes,
+        unless the local limit is lower.
         """
 
     @property
@@ -2066,12 +2069,12 @@ class Sender:
         size estimate reaches the connection's frame cap, and every published
         frame fits that cap: when the whole buffer does not, or its size
         estimate is past the cap, the rows buffered before this one go out
-        on their own and this row starts the next batch. ``BatchTooLarge``
-        from this method means the row was not added: either it does not
-        fit in a frame on its own, or the rows buffered before it do not
-        fit even without it, as after the frame cap shrinks, and those rows
-        are discarded. Any other publish error clears the internal buffer,
-        as :func:`Sender.flush` does.
+        on their own and this row starts the next batch. Whatever this
+        method raises, the row was not added. ``BatchTooLarge`` means either
+        it does not fit in a frame on its own, or the rows buffered before
+        it do not fit even without it, as after the frame cap shrinks, and
+        those rows are discarded. Any other publish error also clears the
+        rows buffered before it, as :func:`Sender.flush` does.
         """
 
     def dataframe(

@@ -2775,25 +2775,42 @@ cdef void_int _parse_pooled_auto_flush(
     c_auto_flush_bytes_dynamic[0] = default_auto_flush_bytes
 
 
+# The frame cap a QuestDB server advertises with its default settings:
+# 2 MiB less 14 bytes.
+cdef size_t _QWP_DEFAULT_SERVER_FRAME_CAP = 2 * 1024 * 1024 - 14
+
+
+cdef inline size_t _qwp_row_planning_cap(
+        size_t hard_cap, bint server_cap_known) noexcept:
+    """
+    The frame cap a QWP/WebSocket row buffer plans its frames for.
+
+    Until the server advertises its cap, `hard_cap` is only the local
+    limit, and rows buffered up to it would not fit a server running the
+    default cap once that cap is known. So the buffer plans for the default
+    cap until then, or for the local limit if that is lower. Only planning
+    uses it: a publish refuses a frame by the local limit alone.
+    """
+    if not server_cap_known and hard_cap > _QWP_DEFAULT_SERVER_FRAME_CAP:
+        return _QWP_DEFAULT_SERVER_FRAME_CAP
+    return hard_cap
+
+
 cdef size_t _qwp_row_byte_limit(
         const auto_flush_mode_t* mode,
         bint bytes_dynamic,
-        size_t hard_cap,
-        bint server_cap_known) noexcept:
+        size_t hard_cap) noexcept:
     """
     The `auto_flush_bytes` threshold of a QWP/WebSocket row buffer whose
-    byte trigger is on.
+    byte trigger is on, for the frame cap `hard_cap` it plans for.
 
-    A threshold derived from the frame cap is 90% of it, and at most 8 MiB
-    while the server has not advertised its cap. An explicit threshold
-    above 90% of the cap is lowered to it.
+    A threshold derived from the frame cap is 90% of it. An explicit
+    threshold above 90% of the cap is lowered to it.
     """
     # floor(hard_cap * 0.9) without overflowing size_t.
     cdef size_t soft_cap = ((hard_cap // 10) * 9
                             + ((hard_cap % 10) * 9) // 10)
     if bytes_dynamic:
-        if not server_cap_known and soft_cap > 8 * 1024 * 1024:
-            return 8 * 1024 * 1024
         return soft_cap
     if soft_cap < <size_t>mode.byte_count:
         return soft_cap
@@ -2805,7 +2822,6 @@ cdef bint _qwp_row_should_auto_flush(
         bint bytes_dynamic,
         line_sender_buffer* buf,
         size_t hard_cap,
-        bint server_cap_known,
         int64_t interval_start_ms) noexcept:
     """
     Whether a QWP/WebSocket row buffer is due for auto-flush.
@@ -2827,7 +2843,7 @@ cdef bint _qwp_row_should_auto_flush(
         return True
     if (mode.byte_count != -1 and
             buffer_size >= _qwp_row_byte_limit(
-                mode, bytes_dynamic, hard_cap, server_cap_known)):
+                mode, bytes_dynamic, hard_cap)):
         return True
     if (mode.interval != -1 and
             ((line_sender_now_micros() // 1000) - interval_start_ms)
@@ -9114,8 +9130,8 @@ cdef class QuestDB:
         Pooled row auto-flush is enabled by default at 1,000 rows, 100
         milliseconds, or an estimated encoded size at 90% of the effective
         frame cap. Before a server cap is known, or when the server omits it,
-        the byte threshold is the lower of 8 MiB and 90% of the local
-        store-and-forward frame cap. Set
+        the byte threshold is 90% of the lower of QuestDB's default cap, 2 MiB
+        less 14 bytes, and the local store-and-forward frame cap. Set
         ``auto_flush_bytes=off`` to disable only the byte trigger, or
         ``auto_flush=off`` to disable all automatic publishing.
         The mode is immutable and shared by every lease; the interval starts
@@ -11389,7 +11405,9 @@ cdef class Sender:
         Over ``ws`` and ``wss`` the threshold is at most 90% of the
         connection's frame cap, and by default it is 90% of that cap. The
         cap is known once :func:`Sender.establish` has connected, so before
-        that the default reports ``None``.
+        that the default reports ``None``. A server that does not advertise
+        a cap counts as having QuestDB's default, 2 MiB less 14 bytes,
+        unless the local limit is lower.
         """
         cdef size_t hard_cap = 0
         cdef cbool server_cap_known = False
@@ -11411,8 +11429,7 @@ cdef class Sender:
         return _qwp_row_byte_limit(
             &self._auto_flush_mode,
             self._auto_flush_bytes_dynamic,
-            hard_cap,
-            server_cap_known)
+            _qwp_row_planning_cap(hard_cap, server_cap_known))
     
     @property
     def auto_flush_interval(self) -> Optional[datetime.timedelta]:
@@ -11606,18 +11623,20 @@ cdef class Sender:
         Over ``ws`` and ``wss``, auto-flush also publishes a buffer whose size
         estimate reaches the connection's frame cap, even with
         ``auto_flush_bytes=off``. Every published frame fits the frame cap:
-        when the whole buffer does not, the rows buffered before this one go
-        out as a frame of their own and this row starts the next batch, so
-        one call publishes at most two frames. Re-adding the row converts its
-        values a second time.
+        when the whole buffer does not, or its size estimate is past the
+        cap, the rows buffered before this one go out as a frame of their
+        own and this row starts the next batch, so one call publishes at
+        most two frames. Re-adding the row converts its values a second
+        time.
 
-        Over ``ws`` and ``wss``, :class:`QuestDBError <questdb.QuestDBError>`
-        (``BatchTooLarge``) from this method means the row was not added.
-        Either it does not fit in a frame on its own, or the rows buffered
-        before it do not fit even without it, which can happen after the
-        frame cap shrinks on reconnect; those rows are then discarded, and
-        the error says how many. Any other error raised by a publish clears
-        the internal buffer, as :func:`Sender.flush` does.
+        Over ``ws`` and ``wss``, whatever this method raises, the row was not
+        added. :class:`QuestDBError <questdb.QuestDBError>`
+        (``BatchTooLarge``) means either it does not fit in a frame on its
+        own, or the rows buffered before it do not fit even without it,
+        which can happen after the frame cap shrinks, for example on
+        reconnect; those rows are then discarded, and the error says how
+        many. Any other error raised by a publish also clears the rows
+        buffered before it, as :func:`Sender.flush` does.
         """
         if self._in_txn:
             raise QuestDBError(
@@ -12376,8 +12395,8 @@ cdef bint _qwp_row_due(
         Buffer buf,
         size_t* hard_cap) except -1:
     """
-    Whether the row buffer is due for auto-flush, reporting the
-    connection's current frame cap through `hard_cap`.
+    Whether the row buffer is due for auto-flush, reporting the frame cap
+    it plans for through `hard_cap` (see `_qwp_row_planning_cap`).
     """
     cdef auto_flush_mode_t* mode
     cdef bint bytes_dynamic
@@ -12407,12 +12426,12 @@ cdef bint _qwp_row_due(
             sender._impl, hard_cap, &server_cap_known, &err)
     if not ok:
         raise c_err_to_py(err)
+    hard_cap[0] = _qwp_row_planning_cap(hard_cap[0], server_cap_known)
     return _qwp_row_should_auto_flush(
         mode,
         bytes_dynamic,
         buf._impl,
         hard_cap[0],
-        server_cap_known,
         interval_start_ms)
 
 
@@ -12448,6 +12467,21 @@ cdef void_int _qwp_row_reject(
         + str(exc)) from exc
 
 
+cdef object _qwp_row_not_added(object exc, bint earlier_rows_published):
+    """
+    `exc`, a publish failure other than `BatchTooLarge`, with its message
+    saying that the row was not added.
+    """
+    return type(exc)(
+        exc.code,
+        'The row was not added. '
+        + ('The rows buffered before it were published. '
+           if earlier_rows_published else '')
+        + str(exc),
+        exc.sender_error,
+        in_doubt=exc.in_doubt)
+
+
 cdef void_int _qwp_row_split(
         Sender sender,
         PooledSender pooled,
@@ -12481,14 +12515,13 @@ cdef void_int _qwp_row_split(
                 + ' discarded and the row was not added: the buffered rows '
                 'do not fit in one QWP/WebSocket frame even without it. '
                 'This can happen when the frame cap shrinks, for example '
-                'on reconnect or when a lazily connected sender first '
-                "learns the server's cap. " + str(exc)) from exc
-        if pooled is not None:
-            # A pooled lease keeps its rows when a publish fails, so the
-            # new row goes back in with them.
-            _qwp_row_add(
-                sender, pooled, buf, table_name, symbols, columns, at)
-        raise
+                'on reconnect, or when a lazily connected sender learns '
+                "that the server's cap is below the default. "
+                + str(exc)) from exc
+        # The rows before the newest one are as the sender's `flush()`
+        # leaves them, and the newest one stays out, so a pooled lease
+        # keeps only rows that fit in one frame.
+        raise _qwp_row_not_added(exc, False) from exc
     # Converts the row's values a second time.
     _qwp_row_add(sender, pooled, buf, table_name, symbols, columns, at)
     if _qwp_row_due(sender, pooled, buf, &hard_cap):
@@ -12497,7 +12530,7 @@ cdef void_int _qwp_row_split(
         except QuestDBError as exc:
             if exc.code == QuestDBErrorCode.BatchTooLarge:
                 _qwp_row_reject(pooled, buf, exc, True)
-            raise
+            raise _qwp_row_not_added(exc, True) from exc
 
 
 cdef void_int _qwp_row_append(
@@ -12517,11 +12550,12 @@ cdef void_int _qwp_row_append(
     the new one go out on their own and the new row starts the next batch,
     so a single call publishes at most two frames.
 
-    A `BatchTooLarge` from here always means the new row is not in the
-    buffer: either it does not fit in a frame on its own, or the rows
-    before it do not fit even without it, as after the frame cap shrinks,
-    and those rows are discarded. Other publish failures leave the buffer
-    as the sender's `flush()` does.
+    Whatever this raises, the new row is not in the buffer. A
+    `BatchTooLarge` means either it does not fit in a frame on its own, or
+    the rows before it do not fit even without it, as after the frame cap
+    shrinks, and those rows are discarded. After any other failure the rows
+    before it are as the sender's `flush()` leaves them: a pooled lease
+    keeps them and a standalone sender has cleared them.
     """
     cdef size_t hard_cap = 0
     cdef size_t row_count
@@ -12532,12 +12566,11 @@ cdef void_int _qwp_row_append(
             return 0
         row_count = line_sender_buffer_row_count(buf._impl)
         # Past the cap, the estimate cannot tell whether the whole buffer
-        # fits. The rows before the newest one fit unless the cap shrank or
-        # a failed pooled publish kept them: they were under the threshold
-        # when the previous row was checked, and the estimate does not
-        # undercount a frame (see `line_sender_buffer_size`). So they go
-        # out on their own, without first encoding the whole buffer to
-        # find out.
+        # fits. The rows before the newest one fit unless the cap shrank:
+        # they were under the threshold when the previous row was checked,
+        # and the estimate does not undercount a frame (see
+        # `line_sender_buffer_size`). So they go out on their own, without
+        # first encoding the whole buffer to find out.
         split = (row_count > 1 and
                  line_sender_buffer_size(buf._impl) > hard_cap)
         if not split:
@@ -12546,10 +12579,21 @@ cdef void_int _qwp_row_append(
                 return 0
             except QuestDBError as exc:
                 if exc.code != QuestDBErrorCode.BatchTooLarge:
-                    raise
+                    raise _qwp_row_not_added(exc, False) from exc
                 if row_count == 1:
                     _qwp_row_reject(pooled, buf, exc, False)
         _qwp_row_split(sender, pooled, buf, table_name, symbols, columns, at)
+    except:
+        # A path that removed the new row itself has spent the rewind
+        # point, and a failed standalone publish has cleared the buffer,
+        # rewind point included. Otherwise the row is still buffered, since
+        # a failed publish leaves a pooled lease's rows in place, and it
+        # comes out here.
+        buf._rewind_after_failure()
+        if (pooled is not None and
+                line_sender_buffer_row_count(buf._impl) == 0):
+            pooled._batch_started_ms = 0
+        raise
     finally:
         buf._clear_marker()
 
@@ -12802,18 +12846,19 @@ cdef class PooledSender:
         threshold publishes the buffer without waiting for an acknowledgement.
         A buffer whose size estimate reaches the connection's frame cap is
         published too, even with ``auto_flush_bytes=off``. Every published
-        frame fits the frame cap: when the whole buffer does not, the rows
-        buffered before this one go out as a frame of their own and this row
-        starts the next batch, so one call publishes at most two frames.
-        Re-adding the row converts its values a second time.
+        frame fits the frame cap: when the whole buffer does not, or its
+        size estimate is past the cap, the rows buffered before this one go
+        out as a frame of their own and this row starts the next batch, so
+        one call publishes at most two frames. Re-adding the row converts its
+        values a second time.
 
-        :class:`QuestDBErrorCode.BatchTooLarge` from this method means the row
-        was not added. Either it does not fit in a frame on its own, or the
-        rows buffered before it do not fit even without it, which can happen
-        after the frame cap shrinks on reconnect; those rows are then
-        discarded, and the error says how many. Any other error raised by a
-        publish propagates from this method and leaves every row buffered,
-        this one included.
+        Whatever this method raises, the row was not added.
+        :class:`QuestDBErrorCode.BatchTooLarge` means either it does not fit
+        in a frame on its own, or the rows buffered before it do not fit
+        even without it, which can happen after the frame cap shrinks, for
+        example on reconnect; those rows are then discarded, and the error
+        says how many. Any other error raised by a publish propagates from
+        this method and leaves the rows buffered before it in place.
 
         See :func:`Buffer.row <questdb.ingress.Buffer.row>` for supported
         column types, protocol restrictions, server requirements, and

@@ -386,11 +386,22 @@ Fixed
   unless store-and-forward has fallen back to sending full symbol
   dictionaries. ``len()`` of a QWP/WebSocket ``Buffer`` or standalone
   ``Sender`` with symbol columns therefore reads higher than before, and
-  frames that the byte trigger publishes carry fewer rows.
-  ``BatchTooLarge`` from ``row()`` now always means the row was
-  not added: it does not fit in a frame on its own, or the rows before it
-  no longer fit, for example after the frame limit shrank on reconnect, in
-  which case those rows are discarded and the error says how many.
+  frames that the byte trigger publishes carry fewer rows. Until the server
+  advertises its frame limit, as while a lazily connected lease is still
+  connecting, both senders plan for the limit a QuestDB server has by
+  default, 2 MiB less 14 bytes, instead of the local queue limit, so the
+  rows buffered meanwhile still fit a default server once its limit is
+  known.
+
+  Whatever a QWP/WebSocket ``row()`` raises, the row was not added.
+  ``BatchTooLarge`` means
+  it does not fit in a frame on its own, or the rows before it no longer
+  fit, for example after the frame limit shrank on reconnect, in which case
+  those rows are discarded and the error says how many. After any other
+  auto-publish error a pooled lease keeps the rows before it and a
+  standalone sender clears them. In 5.0 a pooled lease also kept the row
+  itself. It now leaves it out, as on every other error, so a failed split
+  no longer leaves the lease holding a batch too large for one frame.
 
 - **Python ``True`` in an object-dtype DataFrame column was written as
   ``False``** by ``QuestDB.dataframe()``, ``PooledSender.dataframe()`` and

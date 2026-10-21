@@ -534,9 +534,12 @@ Their defaults reflect the different protocols:
   pooled sender does.
 
 * A pooled QWP sender publishes at 1,000 rows, after 100 milliseconds, or when
-  its estimated encoded size reaches 90% of the current frame limit. Before a
-  server limit is known, it uses the lower of 8 MiB and 90% of the local queue
-  limit. Explicit byte thresholds above that 90% limit are clamped. The
+  its estimated encoded size reaches 90% of the current frame limit. Until the
+  server advertises its limit, both senders plan for the limit a QuestDB
+  server has by default, 2 MiB less 14 bytes, or for the local queue limit if
+  that is lower, so rows buffered meanwhile still fit a default server once
+  its limit is known. Explicit byte thresholds above that 90% limit are
+  clamped. The
   estimate counts each symbol value at its largest encoded size, so it is
   not below the size of the encoded frame, unless store-and-forward has
   fallen back to sending full symbol dictionaries. The exact encoded size is
@@ -574,14 +577,14 @@ not wait for an acknowledgement. Keep acknowledgement barriers explicit with
 ``sender.flush(wait=True)`` or ``sender.wait()``. Errors encountered while
 auto-publishing propagate from ``PooledSender.row()``.
 
-On both QWP/WebSocket senders, ``BatchTooLarge`` from ``row()`` means the row
-was not added. Either it does not fit in a frame on its own, or the rows
-buffered before it do not fit even without it, which can happen when the frame
-limit shrinks, for example on reconnect or when a lazily connected sender
-first learns the server's limit; those rows are then discarded, and the error
-says how many. Any other auto-publish error leaves every row buffered on a
-pooled sender, and clears the buffer on a standalone one, as its ``flush()``
-does.
+On both QWP/WebSocket senders, whatever ``row()`` raises, the row was not
+added. ``BatchTooLarge`` means either it does not fit in a frame on its own,
+or the rows buffered before it do not fit even without it, which can happen
+when the frame limit shrinks, for example on reconnect, or when a lazily
+connected sender learns that the server's limit is below the default; those
+rows are then discarded, and the error says how many. After any other
+auto-publish error a pooled sender keeps the rows buffered before it, and a
+standalone one clears them, as its ``flush()`` does.
 
 If every explicit
 ``flush_and_get_fsn()`` must return the receipt for one complete application

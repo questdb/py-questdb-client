@@ -452,8 +452,9 @@ auto-flush by default, with the API-specific thresholds below. Set
 
   *Default when auto-flush is enabled: off (TCP, HTTP) | max_datagram_size
   (QWP/UDP, 1400 by default) | 90% of the effective frame cap (QWP/WebSocket,
-  standalone and pooled; before a server cap is known, the lower of 8 MiB and
-  90% of the local queue cap). Explicit QWP/WebSocket thresholds above 90% of
+  standalone and pooled; until the server advertises its cap, 90% of the lower
+  of QuestDB's default cap, 2 MiB less 14 bytes, and the local queue cap).
+  Explicit QWP/WebSocket thresholds above 90% of
   the effective cap are clamped. The QWP/WebSocket byte count is a local
   encoded-size estimate. Over QWP/WebSocket, ``off`` disables only this
   threshold: a buffer whose estimate reaches the full frame cap is still
