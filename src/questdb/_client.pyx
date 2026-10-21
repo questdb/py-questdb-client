@@ -11382,6 +11382,11 @@ cdef class Sender:
         
         Consult the `.auto_flush_rows`, `.auto_flush_bytes` and
         `.auto_flush_interval` properties for the current active thresholds.
+
+        Over ``ws`` and ``wss`` the byte threshold is on by default, so
+        auto-flush stays on with ``auto_flush_rows`` and
+        ``auto_flush_interval`` both off. Pass ``auto_flush=off`` to batch
+        by hand.
         """
         return self._auto_flush_mode.enabled
 
@@ -11407,7 +11412,13 @@ cdef class Sender:
         cap is known once :func:`Sender.establish` has connected, so before
         that the default reports ``None``. A server that does not advertise
         a cap counts as having QuestDB's default, 2 MiB less 14 bytes,
-        unless the local limit is lower.
+        unless the local limit is lower. An explicit threshold reads as
+        configured before :func:`Sender.establish` and after
+        :func:`Sender.close`; the cap lowers it only between the two.
+
+        Raises :class:`QuestDBError <questdb.QuestDBError>`
+        (``InvalidApiCall``) when read over ``ws`` or ``wss`` from this
+        sender's own ``error_handler`` or ``connection_listener``.
         """
         cdef size_t hard_cap = 0
         cdef cbool server_cap_known = False
@@ -11619,6 +11630,13 @@ cdef class Sender:
         it runs could not be flushed until it returned. Over ``ws`` and
         ``wss`` the frame goes out on a connection of its own, so a row
         written from inside it is accepted and flushed as usual.
+
+        Over ``ws`` and ``wss`` with auto-flush on, it also raises
+        ``InvalidApiCall``, without adding the row, when called from this
+        sender's own ``error_handler`` or ``connection_listener``. That
+        includes a logging handler that writes the ``questdb`` logger's
+        records through this sender while no ``error_handler`` is set, since
+        server rejections are then logged from inside that callback.
 
         Over ``ws`` and ``wss``, auto-flush also publishes a buffer whose size
         estimate reaches the connection's frame cap, even with

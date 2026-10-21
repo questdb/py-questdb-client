@@ -17,6 +17,31 @@ Breaking changes
   standalone sender now also checks. Code that caught ``InvalidApiCall`` for
   this case must catch ``BatchTooLarge``.
 
+- **A standalone QWP/WebSocket ``Sender`` keeps auto-flushing with
+  ``auto_flush_rows=off`` and ``auto_flush_interval=off``.** Its byte
+  trigger is now on by default (see the ``row()`` auto-flush entry under
+  *Fixed*), so turning off the other two triggers leaves auto-flush on:
+  ``Sender.auto_flush`` is ``True``, a batch that reaches 90% of the frame
+  limit is published in parts, and ``flush_and_get_fsn()`` covers only the
+  rows after the last of those parts. To batch by hand, set
+  ``auto_flush=off``. ``Sender.auto_flush_bytes`` reports the threshold in
+  effect: between ``establish()`` and ``close()`` that is 90% of the frame
+  limit, or an explicit threshold lowered to it. Outside them the default
+  reads ``None`` and an explicit threshold reads as configured.
+
+- **A standalone QWP/WebSocket ``Sender`` refuses ``row()`` from its own
+  ``error_handler`` or ``connection_listener`` while auto-flush is on**,
+  raising ``InvalidApiCall`` before adding the row, as it already did for
+  ``flush()`` and ``close()``. Reading ``auto_flush_bytes`` there is
+  refused too. Such a callback runs while the native sender is borrowed,
+  and auto-flush reads the frame limit from it on every row. An exception
+  that escapes the callback is only logged through the ``questdb`` logger,
+  so the row is lost unless the callback catches the error. This includes
+  a handler on the ``questdb`` logger that writes its records through the
+  same sender while no ``error_handler`` is set, because the sender then
+  logs server rejections from inside that callback. Give such code a
+  sender of its own.
+
 - **UUID raw bytes are now RFC 4122 byte order** (big-endian, the same bytes
   as ``uuid.UUID.bytes``) everywhere they cross the API. This affects Arrow
   and binary DataFrame columns you write, and the bytes you read back from a

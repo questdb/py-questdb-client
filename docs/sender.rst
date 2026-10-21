@@ -589,7 +589,9 @@ standalone one clears them, as its ``flush()`` does.
 If every explicit
 ``flush_and_get_fsn()`` must return the receipt for one complete application
 batch, configure ``auto_flush=off``; otherwise an earlier auto-flush may have
-already published and cleared some or all of that batch.
+already published and cleared some or all of that batch. On a standalone
+QWP/WebSocket sender, turning off ``auto_flush_rows`` and
+``auto_flush_interval`` is not enough: its byte trigger stays on.
 
 Here is a configuration string with auto-flushing
 completely disabled:
@@ -1194,6 +1196,12 @@ it durably applies them, so the client can confirm delivery.
   sender call raises :class:`QuestDBServerRejectionError <questdb.QuestDBServerRejectionError>`. The handler must
   not call back into the same sender, must be cheap and non-blocking, and —
   under ``qwp_ws_progress=background`` — may run on a background thread.
+  Most such calls, from this handler or the sender's
+  ``connection_listener``, raise ``InvalidApiCall``, ``row()`` among them
+  while auto-flush is on.
+  Without an ``error_handler`` the sender logs rejections to the
+  ``questdb`` logger from the same callback, so a logging handler must not
+  write through this sender either.
   The pooled :class:`QuestDB <questdb.QuestDB>` handle delivers the same
   diagnostics through the ``error_handler`` passed to
   :func:`questdb.connect`, on a dedicated dispatcher thread.
