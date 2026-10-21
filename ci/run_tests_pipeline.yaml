@@ -38,6 +38,15 @@ stages:
               pandasVersion: "2.3.3"
               questdbVersion: "9.4.3"
               requireQwpRowTypes: ""
+            linux-min-deps:
+              # The oldest dependency versions that the docs promise
+              # (see MIN_VERSIONS in ci/pip_install_deps.py).
+              imageName: "ubuntu-latest"
+              poolName: "Azure Pipelines"
+              pythonVersion: "3.10"
+              minDeps: true
+              questdbVersion: ""
+              requireQwpRowTypes: ""
             linux-qdb-master:
               imageName: "ubuntu-latest"
               poolName: "Azure Pipelines"
@@ -96,15 +105,20 @@ stages:
               python3 ci/pip_install_deps.py
               --pyarrow-version=$(pyarrowVersion)
               --polars-version=$(polarsVersion)
+              --with-duckdb
             displayName: "Install pandas 3.x"
-            condition: eq(variables.pandasVersion, '')
+            condition: and(eq(variables.pandasVersion, ''), ne(variables.minDeps, true))
           - script: >-
               python3 ci/pip_install_deps.py
               --pandas-version=$(pandasVersion)
               --pyarrow-version=$(pyarrowVersion)
               --polars-version=$(polarsVersion)
+              --with-duckdb
             displayName: "Install pandas $(pandasVersion)"
             condition: ne(variables.pandasVersion, '')
+          - script: python3 ci/pip_install_deps.py --min-versions --with-duckdb
+            displayName: "Install minimum dependency versions"
+            condition: eq(variables.minDeps, true)
           - script: python3 proj.py build
             displayName: "Build"
           # `proj.py doc` runs Sphinx with `-nW`, so an unresolvable

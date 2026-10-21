@@ -91,13 +91,14 @@ GUARDED_CLASSES = guarded_classes()
 #: Dunders that are part of the callable surface rather than protocol
 #: plumbing. ``__enter__`` / ``__exit__`` because a ``with`` block is how
 #: most callers close things; ``__len__`` / ``__bytes__`` because they
-#: read live native state; ``__arrow_c_stream__`` because it hands a
-#: live cursor to a consumer that runs its own code against it.
+#: read live native state; the Arrow protocols because they read from
+#: a live cursor or hand it to a consumer that runs its own code.
 PUBLIC_DUNDERS = frozenset({
     '__enter__',
     '__exit__',
     '__len__',
     '__bytes__',
+    '__arrow_c_schema__',
     '__arrow_c_stream__',
 })
 

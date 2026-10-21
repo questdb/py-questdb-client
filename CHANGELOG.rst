@@ -276,6 +276,47 @@ Breaking changes
   one of its leases. 5.0 waited instead. Call ``close()`` once in-flight
   work has finished, or call it again after the refusal.
 
+- To read a ``QueryResult`` into polars without pyarrow, use
+  ``polars.DataFrame(result)`` (polars 1.32 or later). The 5.0.0 notes said to
+  use ``polars.from_arrow(result)``, but on Polars 2.0 that call returns a
+  struct ``Series``, not a ``DataFrame``. On Polars 1.21 and older, it raises
+  an error. On Polars 1.22 to 1.31, it returned wrong ``SYMBOL`` values
+  without an error, so when a polars before 1.32 reads the result directly
+  (``polars.DataFrame(result)``, ``polars.from_arrow(result)``), the call
+  now raises ``InvalidApiCall``; use ``to_polars()`` there. A stream that
+  reaches polars through another library is not checked. Ingesting polars
+  frames is tested with polars 1.32 or later.
+
+- The ``dataframe`` extra now requires ``pandas>=2.2.0`` and
+  ``pyarrow>=14.0.1``, the oldest versions that CI tests. The old minimums did
+  not work: with pyarrow before 14, pyarrow sources, ``iter_polars()`` and
+  ``pa.table(result)`` failed. With pandas before 1.5, every DataFrame load
+  failed with an ``AttributeError``; it now raises a clear error. Reading
+  ``DECIMAL`` columns with a precision of 18 or less through pyarrow needs
+  pyarrow 20 or later. See :doc:`installation`.
+
+  If the extra moves you from pandas 2.0 or 2.1 to 2.2 or later,
+  ``QuestDB.dataframe()`` writes a pyarrow-backed pandas frame differently.
+  On pandas 2.0 and 2.1 the frame goes through the NumPy path; the client
+  does not check the pandas version, so this still happens when you install
+  pandas yourself. On pandas 2.2 and later it takes the Arrow path, where:
+
+  * an index other than a ``RangeIndex`` is written as columns, an unnamed
+    level as ``__index_level_0__``. A filtered or sorted frame has such an
+    index; ``reset_index(drop=True)`` drops it.
+  * ``symbols=False``, or a ``symbols`` list that leaves a dictionary column
+    out, sends that column as ``VARCHAR``, not ``SYMBOL``. A ``symbols``
+    list may name a dictionary column.
+  * ``table_name`` is required; the index name is not used.
+  * ``schema_overrides`` is accepted.
+
+- A second read of a ``QueryResult`` now names the method that read it first,
+  for example "QueryResult was already read by to_pandas()". A read after
+  ``close()`` now says that the result is closed.
+  Code that matched the old texts ("QueryResult already consumed",
+  "QueryResult cursor was closed") should check
+  ``err.code == QuestDBErrorCode.InvalidApiCall`` instead.
+
 New
 ~~~
 
@@ -449,6 +490,21 @@ New
   standalone senders should call ``close_drain()`` and reconnect. Before
   retrying, check ``err.in_doubt``; when it is true, some rows may already be
   stored.
+
+- ``duckdb.from_arrow(result)`` now works on duckdb 1.5. Before, it failed
+  with "QueryResult already consumed", because duckdb 1.5 requested the
+  stream more than once. ``QueryResult`` now has ``__arrow_c_schema__``,
+  which duckdb 1.5 uses for the schema. ``pa.schema(result)`` and
+  ``polars.Schema(result)`` call it too. It reads the first batch, so after
+  it, read the result only through the Arrow stream (``pa.table(result)``,
+  ``polars.DataFrame(result)``, duckdb). ``to_pandas()``, ``to_polars()``
+  and the other readers then raise ``InvalidApiCall``; run the query again
+  to use them.
+
+- New ``polars`` and ``duckdb`` extras install the oldest tested versions or
+  newer: ``pip install questdb[polars]`` installs ``polars>=1.32.0`` and
+  ``pyarrow>=14.0.1`` (``to_polars()`` and ``iter_polars()`` need pyarrow), and
+  ``pip install questdb[duckdb]`` installs ``duckdb>=1.2.0``.
 
 Fixed
 ~~~~~
@@ -882,6 +938,51 @@ Fixed
 
 - When ``sf_dir`` enables disk-backed delivery, shutdown now obeys its configured
   timeout and recovery is safer after a crash or an incomplete final write.
+
+- A result read through the Arrow stream (``polars.DataFrame(result)``,
+  ``pa.table(result)``, duckdb) now releases its connection when the consumer
+  reads the last batch, not when it releases the stream. A reader lease from
+  ``QuestDB.reader()`` can run its next query as soon as the stream is
+  drained.
+
+- ``to_pandas(dtype_backend=...)`` now checks its arguments before it reads
+  the result. Before, an invalid value consumed the result.
+
+- ``QueryResult.__arrow_c_stream__`` now ignores ``requested_schema``, also
+  one that does not match the result. ``pa.table(result, schema=...)`` casts
+  the result; ``pa.RecordBatchReader.from_stream(result, schema=...)``
+  (pyarrow 15 or later) returns the result's own schema, so check the schema
+  you get. Before, any ``requested_schema`` raised ``NotImplementedError``.
+
+- If the polars ``Categorical`` fast path of ``to_polars()`` or
+  ``iter_polars()`` fails, the client now issues a ``RuntimeWarning``. It still
+  builds the frame with ``polars.from_arrow``, but it no longer hides the
+  failure. ``iter_polars()`` warns once and builds the remaining frames the
+  same way, cast to the ``Categories`` of the frames before, so
+  ``polars.concat`` still stitches them. If that cast fails too, the warning
+  says so: those frames have a plain ``Categorical`` dtype, and
+  ``polars.concat`` with the frames before fails.
+
+- The docs said that a failover during a ``__arrow_c_stream__`` read raises
+  ``FailoverWouldDuplicate``. The consumer raises its own exception type, and
+  only the message contains ``[FailoverWouldDuplicate]``. polars before 1.37.1
+  raises a ``PanicException``, which ``except Exception`` does not catch.
+
+- When an Arrow stream read of a ``QueryResult`` fails, the consumer now
+  raises the stream's error. Before, ``pa.table(result)`` raised
+  ``SystemError`` instead, a later ``close()`` from another thread could
+  hang, and ``QuestDB.dataframe(result)`` could crash the process.
+
+- With duckdb before 1.5, ``duckdb.from_arrow(result)`` no longer crashes
+  the process when the query fails on its first fetch, for example on a
+  missing table. duckdb raises its own error, which does not contain the
+  query's error; duckdb 1.5 raises the query's error.
+
+- Under ``-W error`` (or pytest's ``filterwarnings = error``), a
+  ``QueryResult`` that is dropped without ``close()`` is now closed before its
+  ``ResourceWarning`` raises. Before, a ``QuestDB.reader()`` lease then said
+  that the previous result was still open, not that its connection was
+  terminal.
 
 Faster
 ~~~~~~

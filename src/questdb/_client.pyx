@@ -129,6 +129,7 @@ import decimal
 import operator
 import numbers as _numbers
 import os
+import sys
 import threading
 import time
 import uuid
@@ -169,11 +170,11 @@ VERSION = '5.0.0'
 WARN_HIGH_RECONNECTS = True
 
 
-cdef bint _has_gil(PyThreadState** gs):
+cdef bint _has_gil(PyThreadState** gs) noexcept:
     return gs[0] == NULL
 
 
-cdef bint _ensure_doesnt_have_gil(PyThreadState** gs):
+cdef bint _ensure_doesnt_have_gil(PyThreadState** gs) noexcept:
     """Returns True if previously had the GIL, False otherwise."""
     if _has_gil(gs):
         gs[0] = PyEval_SaveThread()
@@ -181,7 +182,7 @@ cdef bint _ensure_doesnt_have_gil(PyThreadState** gs):
     return False
 
 
-cdef void _ensure_has_gil(PyThreadState** gs):
+cdef void _ensure_has_gil(PyThreadState** gs) noexcept:
     if not _has_gil(gs):
         PyEval_RestoreThread(gs[0])
         gs[0] = NULL
@@ -8301,16 +8302,13 @@ cdef bint _dataframe_client_try_capsule_path(
     if _pandas_dataframe_is_timestamp_only_at(df, at):
         return False
 
-    # LazyFrame: prefer the streaming engine (polars 1.0+) for lower
-    # peak memory. `LazyFrame.collect_batches()` would stream natively
-    # but upstream marks it unstable and "much slower than native sinks",
-    # so we materialize and slice downstream.
+    # LazyFrame: use the streaming engine (polars 1.32+) for lower peak
+    # memory. `LazyFrame.collect_batches()` would stream natively but
+    # upstream marks it unstable and "much slower than native sinks", so
+    # we materialize and slice downstream.
     if _is_polars_dataframe_or_lazy(df) and isinstance(
             df, _POLARS_LAZYFRAME_T):
-        try:
-            sliceable = df.collect(engine='streaming')
-        except TypeError:
-            sliceable = df.collect()
+        sliceable = df.collect(engine='streaming')
     elif hasattr(df, '__arrow_c_stream__'):
         sliceable = df
     elif hasattr(df, '__arrow_c_array__'):
@@ -9301,14 +9299,13 @@ cdef class QuestDB:
         - **pandas** ``pandas.DataFrame``. NumPy-backed columns route
           through the legacy planner; pyarrow-backed columns route
           through the Arrow C Stream capsule path below.
-        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``.
-          ``LazyFrame`` is materialised via
-          ``.collect(engine='streaming')`` (eager ``.collect()`` on
-          polars < 1.0).
+        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``
+          (polars 1.32 or later). ``LazyFrame`` is materialised via
+          ``.collect(engine='streaming')``.
         - **pyarrow** ``pa.Table``, ``pa.RecordBatch``, and
           ``pa.RecordBatchReader``.
         - Any object exposing the Arrow C Data Interface — i.e. with
-          ``__arrow_c_stream__`` (duckdb / cudf / modin / pyarrow-backed
+          ``__arrow_c_stream__`` (duckdb / cudf / pyarrow-backed
           pandas 2.2+) or ``__arrow_c_array__`` (single Arrow array
           exporters, wrapped into a one-batch ``pa.Table``).
 
@@ -9363,7 +9360,7 @@ cdef class QuestDB:
           The *designated* timestamp column (``at=``) must be non-null
           and at or after the epoch.
         - **Decimal**: Arrow-backed ``pa.decimal{32,64,128,256}`` columns
-          (``pa.decimal32``/``pa.decimal64`` require pyarrow >= 18), or
+          (``pa.decimal32``/``pa.decimal64`` require pyarrow >= 19), or
           object-dtype columns of ``decimal.Decimal`` (re-exported through
           Arrow; the decimal width and scale are inferred from the values).
         - **Array**: Arrow ``pa.list_`` / ``pa.large_list`` /
@@ -9511,7 +9508,8 @@ cdef class QuestDB:
         ``pa.uuid()`` type or a ``uuid`` / ``long256`` field label, and
         is refused on such a column. It requires the
         Arrow columnar path (fully Arrow-backed input without
-        ``table_name_col``); on input that falls back to the NumPy planner
+        ``table_name_col``; pandas input needs pandas 2.2 or later); on
+        input that falls back to the NumPy planner
         it raises :class:`UnsupportedDataFrameShapeError`.
 
         A pandas frame that came out of :meth:`QueryResult.to_pandas`

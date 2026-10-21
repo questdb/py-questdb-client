@@ -39,6 +39,7 @@ questdb
 .. autoclass:: questdb.QueryResult
    :members:
    :undoc-members:
+   :special-members: __arrow_c_schema__, __arrow_c_stream__
    :show-inheritance:
 
 .. autoclass:: questdb.ExecDone

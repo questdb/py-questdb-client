@@ -612,6 +612,30 @@ class TestRowEgressLive(_LiveCase):
             with self.assertRaises(qdb.QuestDBError):
                 list(result.iter_rows())
 
+    def test_row_read_blocks_arrow_schema_and_stream(self):
+        for first in ('columns', 'iter_rows'):
+            with self.subTest(first=first), \
+                    self.db.query('select x from long_sequence(3)') as result:
+                getattr(result, first)()
+                for read in (result.__arrow_c_schema__, result.__arrow_c_stream__):
+                    with self.assertRaises(qdb.QuestDBError) as cm:
+                        read()
+                    self.assertEqual(
+                        cm.exception.code, qdb.QuestDBErrorCode.InvalidApiCall)
+                    self.assertIn(f'already read by {first}()', str(cm.exception))
+                self.assertEqual(list(result.iter_rows()), [(1,), (2,), (3,)])
+
+    def test_cancel_before_read_blocks_arrow_schema_and_stream(self):
+        with self.db.query('select x from long_sequence(3)') as result:
+            result.cancel()
+            for read in (result.__arrow_c_schema__, result.__arrow_c_stream__,
+                         result.columns, result.iter_rows):
+                with self.assertRaises(qdb.QuestDBError) as cm:
+                    read()
+                self.assertEqual(
+                    cm.exception.code, qdb.QuestDBErrorCode.InvalidApiCall)
+                self.assertIn('cancelled before it was read', str(cm.exception))
+
     def test_iter_rows_streams_many_batches(self):
         # Enough rows to cross batch boundaries, with a symbol whose
         # dictionary keeps growing past the first batch, so the per-batch
@@ -856,7 +880,8 @@ class TestRowEgressLive(_LiveCase):
         self.assertEqual(result.columns(), [('a', 'INT')])
         with self.assertRaises(qdb.QuestDBError) as ctx:
             result.iter_rows()
-        self.assertIn('closed', str(ctx.exception))
+        self.assertEqual(ctx.exception.code, qdb.QuestDBErrorCode.InvalidApiCall)
+        self.assertIn('already read by columns()', str(ctx.exception))
 
     def test_server_error_recycles_the_connection(self):
         # A parse error ends at a terminal frame on a healthy connection,
