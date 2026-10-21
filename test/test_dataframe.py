@@ -31,7 +31,22 @@ import pyarrow as pa
 # Pandas 3.x defaults tz-aware timestamps to microsecond resolution.
 # Pin to nanoseconds where tests expect nanosecond precision.
 _NS_TZ_DTYPE = pd.DatetimeTZDtype(tz=_TZ, unit='ns')
+# pandas 2.0 ignores the unit of `pd.array(..., dtype=_US_TZ_DTYPE)` and
+# keeps nanoseconds. Build microsecond arrays with
+# `pd.array(..., dtype=_NS_TZ_DTYPE).astype(_US_TZ_DTYPE)` instead.
 _US_TZ_DTYPE = pd.DatetimeTZDtype(tz=_TZ, unit='us')
+
+
+def _string_series_with_chunks(chunks):
+    """A ``string[pyarrow]`` Series that keeps each list in ``chunks`` as
+    its own Arrow chunk, empty chunks included. ``pd.concat`` drops empty
+    chunks on pandas 2.0, and the ``ArrowStringArray`` constructor combines
+    chunks from pandas 2.2, so try both."""
+    ser = pd.concat([pd.Series(c, dtype='string[pyarrow]') for c in chunks])
+    if ser.array.__arrow_array__().num_chunks != len(chunks):
+        ser = pd.Series(pd.arrays.ArrowStringArray(
+            pa.chunked_array(chunks, pa.string())))
+    return ser
 
 try:
     import fastparquet
@@ -173,17 +188,20 @@ class TestPandasBase:
         def test_row_path_rejects_columnar_only_object_columns(self):
             import uuid
             import ipaddress
-            cases = {
-                'bytes': b'\x00\x01',
-                'UUID': uuid.uuid4(),
-                'IPv4Address': ipaddress.IPv4Address('1.2.3.4'),
-            }
-            for descr, value in cases.items():
+            cases = (
+                ('bytes/bytearray/memoryview', b'\x00\x01'),
+                ('bytes/bytearray/memoryview', bytearray(b'\x00\x01')),
+                ('bytes/bytearray/memoryview', memoryview(b'\x00\x01')),
+                ('UUID', uuid.uuid4()),
+                ('IPv4Address', ipaddress.IPv4Address('1.2.3.4')),
+            )
+            for descr, value in cases:
                 df = pd.DataFrame({'a': [value]})
                 with self.assertRaisesRegex(
                         qi.QuestDBError,
-                        f'{descr} objects, which are only supported on the '
-                        'columnar QuestDB.dataframe'):
+                        f'{descr} objects, which the row-serializing '
+                        'Sender.dataframe\\(\\) cannot write on any '
+                        'protocol'):
                     _dataframe(self.version, df, table_name='t',
                                at=qi.ServerTimestamp)
 
@@ -549,6 +567,49 @@ class TestPandasBase:
             self.assertEqual(result['populated_rows_total'], 2)
             self.assertEqual(result['row_path_cell_emissions'], 0)
 
+        def test_columnar_plan_delegates_mixed_arrow_list_layouts(self):
+            cases = (
+                ('list', pa.list_(pa.float64()),
+                 [[1.0], None, [3.0, 4.0]]),
+                ('large_list', pa.large_list(pa.float64()),
+                 [[1.0], None, [3.0, 4.0]]),
+                ('fixed_size_list', pa.list_(pa.float64(), 2),
+                 [[1.0, 2.0], None, [5.0, 6.0]]),
+            )
+            for name, arrow_type, values in cases:
+                arrow_values = pd.Series(
+                    pd.array(
+                        pa.array(values, type=arrow_type),
+                        dtype=pd.ArrowDtype(arrow_type)))
+                base = pd.DataFrame({
+                    'array_value': arrow_values,
+                    # Either NumPy column routes the frame through the manual
+                    # planner instead of the all-Arrow capsule path.
+                    'seq': np.arange(3, dtype=np.int64),
+                    'ts': pd.date_range(
+                        '2024-01-01', periods=3, freq='s'),
+                })
+                for sliced in (False, True):
+                    with self.subTest(layout=name, sliced=sliced):
+                        frame = (base.iloc[1:].reset_index(drop=True)
+                                 if sliced else base)
+                        exported = frame['array_value'].array.__arrow_array__()
+                        self.assertEqual(exported.num_chunks, 1)
+                        self.assertEqual(exported.chunk(0).offset,
+                                         1 if sliced else 0)
+
+                        plan = qi._debug_dataframe_columnar_plan(
+                            frame, table_name='array_layouts', at='ts')
+                        self.assertTrue(plan['supported'], plan['failures'])
+                        result = (
+                            qi._bench_dataframe_plan_and_populate_column_chunks(
+                                frame,
+                                table_name='array_layouts',
+                                at='ts'))
+                        self.assertEqual(
+                            result['populated_rows_total'], len(frame))
+                        self.assertEqual(result['row_path_cell_emissions'], 0)
+
         def test_columnar_plan_accepts_arrow_wide_numeric_sources(self):
             df = pd.DataFrame({
                 'ts': pd.Series([
@@ -809,9 +870,7 @@ class TestPandasBase:
             # A zero-length leading chunk must be stepped over: the
             # values from the following chunk must serialize, not come
             # out as empty strings.
-            ser = pd.concat([
-                pd.Series([], dtype='string[pyarrow]'),
-                pd.Series(['a', 'b'], dtype='string[pyarrow]')])
+            ser = _string_series_with_chunks([[], ['a', 'b']])
             self.assertEqual(ser.array.__arrow_array__().num_chunks, 2)
             df = pd.DataFrame({'x': ser})
             buf = _dataframe(
@@ -820,10 +879,7 @@ class TestPandasBase:
             self.assertNotIn(b'x=""', buf)
 
         def test_arrow_backed_column_empty_mid_frame_chunk(self):
-            ser = pd.concat([
-                pd.Series(['a'], dtype='string[pyarrow]'),
-                pd.Series([], dtype='string[pyarrow]'),
-                pd.Series(['b'], dtype='string[pyarrow]')])
+            ser = _string_series_with_chunks([['a'], [], ['b']])
             self.assertEqual(ser.array.__arrow_array__().num_chunks, 3)
             df = pd.DataFrame({'x': ser})
             buf = _dataframe(
@@ -1484,9 +1540,13 @@ class TestPandasBase:
                     _dataframe(self.version, df, table_name='tbl', at=qi.ServerTimestamp)
                 return
 
-            arrow_cases = [
-                (pa.decimal32(7, 2), [12345, -6789]),
-                (pa.decimal64(14, 4), [123456789, -987654321]),
+            arrow_cases = []
+            if hasattr(pa, 'decimal32'):  # pyarrow 19 or later
+                arrow_cases += [
+                    (pa.decimal32(7, 2), [12345, -6789]),
+                    (pa.decimal64(14, 4), [123456789, -987654321]),
+                ]
+            arrow_cases += [
                 (pa.decimal128(38, 6), [123456789012345, -987654321012345, None]),
                 (pa.decimal256(76, 10), [1234567890123456789012345, -987654321098765432109876, None]),
             ]
@@ -1970,7 +2030,7 @@ class TestPandasBase:
                     pd.Timestamp(
                         year=2024, month=1, day=1,
                         hour=0, minute=0, second=3, microsecond=111111, tz=_TZ)],
-                    dtype=_US_TZ_DTYPE),
+                    dtype=_NS_TZ_DTYPE).astype(_US_TZ_DTYPE),
                 'b': ['sym1', 'sym2', 'sym3', 'sym4']})
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at=qi.ServerTimestamp)
             e = self.enc_ts_t
@@ -2090,7 +2150,7 @@ class TestPandasBase:
                     pd.Timestamp(
                         year=2024, month=1, day=1,
                         hour=0, minute=0, second=3, microsecond=111111, tz=_TZ)],
-                    dtype=_US_TZ_DTYPE),
+                    dtype=_NS_TZ_DTYPE).astype(_US_TZ_DTYPE),
                 'b': ['sym1', 'sym2', 'sym3', 'sym4']})
             buf = _dataframe(self.version, df, table_name='tbl1', symbols=['b'], at='a')
             e = self.enc_des_ts_t
@@ -2107,7 +2167,7 @@ class TestPandasBase:
                     pd.Timestamp(
                         year=1900, month=1, day=1,
                         hour=0, minute=0, second=0, microsecond=123456, tz=_TZ)],
-                    dtype=_US_TZ_DTYPE),
+                    dtype=_NS_TZ_DTYPE).astype(_US_TZ_DTYPE),
                 'b': ['sym1']})
             with self.assertRaisesRegex(
                     qi.QuestDBError, "Failed.*'a'.*-220897.* is neg"):
@@ -3138,6 +3198,241 @@ print('OK')
             capture_output=True, text=True, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('OK', result.stdout)
+
+
+class TestPandasTooOld(unittest.TestCase):
+    """pandas < 1.5 has no ``ArrowDtype``. The client must raise a clear
+    error, not an ``AttributeError``. A subprocess removes
+    ``pandas.ArrowDtype`` before it imports the client."""
+
+    _SCRIPT = """
+import pandas
+del pandas.ArrowDtype
+import pandas as pd
+import questdb._client as qi
+
+df = pd.DataFrame({
+    'x': [1],
+    'ts': pd.Series([pd.Timestamp('2024-01-01')], dtype='datetime64[ns]'),
+})
+
+
+def expect(exc_type, fn):
+    try:
+        fn()
+    except exc_type as e:
+        msg = str(e)
+        assert 'is too old' in msg and 'pandas 2.2 or later' in msg, repr(e)
+        return e
+    raise AssertionError(f'{fn} did not raise {exc_type.__name__}')
+
+
+# Legacy row path: the ImportError arrives as InvalidApiCall.
+err = expect(qi.QuestDBError, lambda: qi.Buffer(protocol_version=2).dataframe(
+    df, table_name='t', at='ts'))
+assert err.code == qi.QuestDBErrorCode.InvalidApiCall, err.code
+
+# Columnar planner, as used by QuestDB.dataframe. A second call checks again.
+for _ in range(2):
+    expect(ImportError, lambda: qi._debug_dataframe_columnar_plan(
+        df, table_name='t', at='ts'))
+
+# Egress: to_pandas checks its arguments before it takes the cursor.
+result = qi.QueryResult(qi._CursorHandle())
+expect(ImportError, lambda: result.to_pandas(dtype_backend='pyarrow'))
+result.close()
+print('OK')
+"""
+
+    def test_old_pandas_raises_clear_error(self):
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [str(pathlib.Path(qi.__file__).parent.parent)]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        result = subprocess.run(
+            [sys.executable, '-c', self._SCRIPT],
+            capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('OK', result.stdout)
+
+
+class TestDecimalWithoutCAccelerator(unittest.TestCase):
+    """`Decimal` cells are read through CPython's `_decimal` object layout, so
+    the pure-Python `decimal` module has to be turned away rather than punned."""
+
+    _SCRIPT = """
+import sys
+
+# `decimal` falls back to its pure-Python implementation when the accelerator
+# cannot be imported, and keeps the `Decimal` name.
+sys.modules['_decimal'] = None
+
+from decimal import Decimal
+import questdb.ingress as qi
+
+assert hasattr(Decimal, '_int'), 'expected the pure-Python Decimal'
+
+buf = qi.Buffer._new_qwp()
+try:
+    buf.row('t', columns={'d': Decimal('1.25')}, at=qi.ServerTimestamp)
+except ValueError as ve:
+    assert '_decimal' in str(ve), ve
+else:
+    raise AssertionError('a punned Decimal was accepted')
+print('OK')
+"""
+
+    _FOREIGN_INTERPRETER_SCRIPT = """
+import sys, types
+
+# Stand in for an interpreter that is not CPython but does ship a
+# module named `_decimal`, so `Decimal is _decimal.Decimal` holds and
+# the module check alone would let the reinterpretation through.
+sys.implementation = types.SimpleNamespace(
+    name='pypy', version=sys.implementation.version,
+    hexversion=sys.implementation.hexversion,
+    cache_tag=sys.implementation.cache_tag)
+
+from decimal import Decimal
+import _decimal
+import questdb.ingress as qi
+
+assert Decimal is _decimal.Decimal, 'expected the accelerated Decimal'
+
+buf = qi.Buffer._new_qwp()
+try:
+    buf.row('t', columns={'d': Decimal('1.25')}, at=qi.ServerTimestamp)
+except ValueError as ve:
+    message = str(ve)
+    assert 'pypy' in message, message
+    assert 'float' in message and 'string' in message, message
+else:
+    raise AssertionError('a non-CPython Decimal layout was assumed')
+print('OK')
+"""
+
+    def test_a_non_cpython_interpreter_is_refused(self):
+        """`Decimal is _decimal.Decimal` only says the `decimal` module
+        is backed by something called `_decimal`. An interpreter that
+        ships its own under that name passes the module check while
+        laying its objects out differently -- which is the case the
+        guard exists for -- so the interpreter is checked too."""
+        self._run_script(self._FOREIGN_INTERPRETER_SCRIPT)
+
+    def test_pure_python_decimal_is_refused(self):
+        self._run_script(self._SCRIPT)
+
+    def _run_script(self, script):
+        _run_decimal_script(self, script)
+
+
+def _run_decimal_script(case, script):
+    """Run `script` in a fresh interpreter and require it to print OK.
+
+    A subprocess rather than this one: the behaviour under test is a
+    guard in front of code that reads an object's raw memory, so a
+    regression takes the interpreter down. In a child that reads as a
+    failed assertion on the return code instead of killing the suite.
+    """
+    env = dict(os.environ)
+    env['PYTHONPATH'] = os.pathsep.join(
+        [str(pathlib.Path(qi.__file__).parent.parent)]
+        + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+    env['PYTHONWARNINGS'] = 'ignore'
+    result = subprocess.run(
+        [sys.executable, '-c', script],
+        capture_output=True, text=True, env=env)
+    case.assertEqual(result.returncode, 0, result.stderr)
+    case.assertIn('OK', result.stdout)
+
+
+class TestDecimalImpostorRefused(unittest.TestCase):
+    """An object that only claims to be a `Decimal` must be turned away.
+
+    `isinstance` asks an object for its `__class__`, which any object can
+    set to whatever it likes, so it cannot gate code that reads the
+    object's raw memory with CPython's `Decimal` struct layout. Fed an
+    impostor, that code takes `mpd.len` limbs from whatever the
+    `mpd.data` slot happens to hold: a short object segfaults the
+    interpreter with no traceback, and a longer one reads unrelated heap
+    memory into the mantissa -- a heap address once arrived as
+    ``Decimal exponent 4416345488 exceeds the maximum supported value of
+    76``.
+    """
+
+    _IMPOSTOR_SCRIPT = """
+from decimal import Decimal
+import questdb.ingress as qi
+import pandas as pd
+
+class SlotlessImpostor:
+    # No slots and no dict: the shortest object that can claim to be a
+    # `Decimal`, and the one the encoder used to walk off the end of.
+    __slots__ = ()
+    __class__ = Decimal
+
+class PaddedImpostor:
+    __slots__ = tuple('s%d' % i for i in range(8))
+    __class__ = Decimal
+
+for impostor in (SlotlessImpostor(), PaddedImpostor()):
+    buf = qi.Buffer._new_qwp()
+    try:
+        buf.row('t', columns={'d': impostor}, at=qi.ServerTimestamp)
+    except TypeError as te:
+        message = str(te)
+        assert 'Impostor' in message, message
+        assert 'decimal.Decimal' in message, message
+    else:
+        raise AssertionError('an object claiming to be a Decimal was accepted')
+
+frame = pd.DataFrame({
+    'd': pd.array([SlotlessImpostor()], dtype=object),
+    'ts': pd.to_datetime(['2025-01-01']),
+})
+buf = qi.Buffer._new_qwp()
+try:
+    buf.dataframe(frame, table_name='t', at='ts')
+except qi.QuestDBError as qe:
+    message = str(qe)
+    assert 'Unsupported object column' in message, message
+    assert 'Impostor' in message, message
+else:
+    raise AssertionError('an object claiming to be a Decimal was accepted')
+print('OK')
+"""
+
+    def test_an_object_claiming_to_be_a_decimal_is_refused(self):
+        # The error names the object's real type, on both the row path
+        # and the object-column sniffer.
+        _run_decimal_script(self, self._IMPOSTOR_SCRIPT)
+
+    def test_a_real_decimal_subclass_is_still_accepted(self):
+        """The check reads `Py_TYPE` and admits subtypes, so a genuine
+        `Decimal` subclass still works. Its own fields sit after the base
+        struct, leaving the ones the encoder reads where it expects."""
+        class MyDecimal(Decimal):
+            pass
+
+        plain = qi.Buffer._new_qwp()
+        plain.row('t', columns={'d': Decimal('-12.345')},
+                  at=qi.ServerTimestamp)
+        subclassed = qi.Buffer._new_qwp()
+        subclassed.row('t', columns={'d': MyDecimal('-12.345')},
+                       at=qi.ServerTimestamp)
+        self.assertEqual(bytes(plain), bytes(subclassed))
+
+        frame = pd.DataFrame({
+            'd': pd.array([MyDecimal('-12.345')], dtype=object),
+            'ts': pd.to_datetime(['2025-01-01']),
+        })
+        base = frame.copy()
+        base['d'] = pd.array([Decimal('-12.345')], dtype=object)
+        from_subclass = qi.Buffer._new_qwp()
+        from_subclass.dataframe(frame, table_name='t', at='ts')
+        from_base = qi.Buffer._new_qwp()
+        from_base.dataframe(base, table_name='t', at='ts')
+        self.assertEqual(bytes(from_subclass), bytes(from_base))
 
 
 if __name__ == '__main__':

@@ -29,7 +29,14 @@ email = "vlad@questdb.com"
 [project.optional-dependencies]
 publish = ["twine", "wheel"]
 ci = ["cibuildwheel"]
-dataframe = ["pandas>=1.3.5", "pyarrow>=10.0.1"]
+# The floors are the oldest tested versions. Keep them in sync with
+# `dev_requirements.txt`, `docs/installation.rst` and `MIN_VERSIONS` /
+# `MIN_DUCKDB_VERSION` in `ci/pip_install_deps.py`. `TestDependencyFloors`
+# in `test/test.py` checks all of these except `docs/installation.rst`.
+dataframe = ["pandas>=2.2.0", "pyarrow>=14.0.1"]
+# pyarrow, because `to_polars()` and `iter_polars()` need it.
+polars = ["polars>=1.32.0", "pyarrow>=14.0.1"]
+duckdb = ["duckdb>=1.2.0"]
 
 [project.urls]
 Homepage = "https://questdb.com/"

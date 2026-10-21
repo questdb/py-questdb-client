@@ -29,6 +29,7 @@ import math
 import os
 import time
 import unittest
+import warnings
 
 import patch_path
 patch_path.patch()
@@ -660,8 +661,14 @@ class TestClientPolarsDataframeRoundTrip(unittest.TestCase):
                 df_in = df.select(cols).sort('id')
                 sql = (f"SELECT {','.join(cols)} FROM {table_name} "
                        f"ORDER BY id")
-                with qi.QuestDB.from_conf(self.conf) as client:
-                    df_out = client.query(sql).to_polars().sort('id')
+                # A fallback gives the same values, so only its warning
+                # shows that the Categories path failed.
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        'error', 'The polars Categorical fast path failed',
+                        RuntimeWarning)
+                    with qi.QuestDB.from_conf(self.conf) as client:
+                        df_out = client.query(sql).to_polars().sort('id')
 
                 mismatch = None
                 for c in sorted(cols):
