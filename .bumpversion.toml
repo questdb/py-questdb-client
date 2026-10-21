@@ -24,6 +24,11 @@ search = "version = release = '{current_version}'"
 replace = "version = release = '{new_version}'"
 
 [[tool.bumpversion.files]]
+filename = "docs/installation.rst"
+search = ">>> questdb.__version__\n    '{current_version}'"
+replace = ">>> questdb.__version__\n    '{new_version}'"
+
+[[tool.bumpversion.files]]
 filename = "src/questdb/__init__.py"
 search = "__version__ = '{current_version}'"
 replace = "__version__ = '{new_version}'"
