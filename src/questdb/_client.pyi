@@ -596,7 +596,11 @@ class Buffer:
         """
         The current number of bytes currently in the buffer.
 
-        Equivalent (but cheaper) to ``len(bytes(buffer))``.
+        For ILP buffers this is exact, and equivalent (but cheaper) to
+        ``len(bytes(buffer))``. For QWP buffers it is an estimate of the
+        encoded size. Over QWP/WebSocket it is never below the size of the
+        frame a flush encodes, unless store-and-forward has fallen back to
+        sending full symbol dictionaries.
         """
 
     def  __bytes__(self) -> bytes:
@@ -1170,8 +1174,19 @@ class PooledSender:
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> PooledSender:
         """Append one row to this sender's QWP buffer. If a configured
-        auto-flush threshold is breached, this publishes without waiting for
-        an acknowledgement; a publish error propagates from ``row()``.
+        auto-flush threshold is breached, or the buffer's size estimate
+        reaches the connection's frame cap, this publishes without waiting
+        for an acknowledgement. Every published frame fits the frame cap:
+        when the whole buffer does not, or its size estimate is past the
+        cap, the rows buffered before this one go out on their own and this
+        row starts the next batch.
+
+        Whatever this method raises, the row was not added.
+        ``BatchTooLarge`` means either it does not fit in a frame on its
+        own, or the rows buffered before it do not fit even without it, as
+        after the frame cap shrinks, and those rows are discarded. Any other
+        publish error propagates and leaves the rows buffered before it in
+        place.
 
         See :func:`Buffer.row` for supported column types, protocol
         restrictions, server requirements, and ``NULL``-sentinel behavior.
@@ -2058,6 +2073,11 @@ class Sender:
 
         Consult the `.auto_flush_rows`, `.auto_flush_bytes` and
         `.auto_flush_interval` properties for the current active thresholds.
+
+        Over ``ws`` and ``wss`` the byte threshold is on by default, so
+        auto-flush stays on with ``auto_flush_rows`` and
+        ``auto_flush_interval`` both off. Pass ``auto_flush=off`` to batch
+        by hand.
         """
 
     @property
@@ -2069,7 +2089,21 @@ class Sender:
     @property
     def auto_flush_bytes(self) -> Optional[int]:
         """
-        Byte-count threshold for the auto-flush logic, or None if disabled.
+        Byte-count threshold for the auto-flush logic, or None if disabled or
+        not yet known.
+
+        Over ``ws`` and ``wss`` the threshold is at most 90% of the
+        connection's frame cap, and by default it is 90% of that cap. The
+        cap is known once :func:`Sender.establish` has connected, so before
+        that the default reports ``None``. A server that does not advertise
+        a cap counts as having QuestDB's default, 2 MiB less 14 bytes,
+        unless the local limit is lower. An explicit threshold reads as
+        configured before :func:`Sender.establish` and after
+        :func:`Sender.close`; the cap lowers it only between the two.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when read over
+        ``ws`` or ``wss`` from this sender's own ``error_handler`` or
+        ``connection_listener``.
         """
 
     @property
@@ -2117,7 +2151,13 @@ class Sender:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(bytes(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(sender))`` over ILP.
+
+        For QWP/UDP senders this returns an estimated size hint, not the
+        exact serialized byte count. For QWP/WebSocket senders it is an
+        estimate that is never below the size of the frame a flush
+        encodes, unless store-and-forward has fallen back to sending full
+        symbol dictionaries.
         """
 
     def __bytes__(self) -> bytes:
@@ -2161,6 +2201,24 @@ class Sender:
         returned. Over ``ws`` and ``wss`` the frame goes out on a connection
         of its own, so a row written from inside it is accepted and flushed
         as usual.
+
+        Over ``ws`` and ``wss`` with auto-flush on, it also raises
+        ``InvalidApiCall``, without adding the row, when called from this
+        sender's own ``error_handler`` or ``connection_listener``. That
+        includes a logging handler that writes the ``questdb`` logger's
+        records through this sender while no ``error_handler`` is set, since
+        server rejections are then logged from inside that callback.
+
+        Over ``ws`` and ``wss``, auto-flush also publishes a buffer whose
+        size estimate reaches the connection's frame cap, and every published
+        frame fits that cap: when the whole buffer does not, or its size
+        estimate is past the cap, the rows buffered before this one go out
+        on their own and this row starts the next batch. Whatever this
+        method raises, the row was not added. ``BatchTooLarge`` means either
+        it does not fit in a frame on its own, or the rows buffered before
+        it do not fit even without it, as after the frame cap shrinks, and
+        those rows are discarded. Any other publish error also clears the
+        rows buffered before it, as :func:`Sender.flush` does.
         """
 
     def dataframe(
@@ -2268,6 +2326,12 @@ class Sender:
             contains row for a single table, ensuring all data can be written
             transactionally. This feature requires ILP/HTTP and is not available
             when connecting over TCP. *Default: False.*
+
+        If the flush fails, the internal buffer is cleared, rows and all; a
+        buffer passed as ``buffer`` is left as it is. Over QWP/WebSocket a
+        buffer is published as one frame, and one whose encoded frame
+        exceeds the connection's frame cap raises :class:`QuestDBError`
+        (``BatchTooLarge``) without publishing anything.
 
         The Python GIL is released during the network IO operation.
         """

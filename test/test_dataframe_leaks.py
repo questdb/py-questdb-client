@@ -916,8 +916,9 @@ def _nested_rows(leases, raise_at_bottom=False):
 
 
 class TestCallTableMemory(unittest.TestCase):
-    """Each thread keeps a native table of the calls it has in progress
-    on each `QuestDB` handle (`_scoped_table_ensure`). The table starts
+    """Each thread keeps a native table of the calls and callback
+    dispatches it has in progress on each owner, such as a `QuestDB`
+    handle (`_scoped_table_ensure`). The table starts
     with four slots and doubles when a fifth handle has a call in
     progress on the same thread, and it is freed when the thread's
     Python state ends (`_scoped_table_free`)."""

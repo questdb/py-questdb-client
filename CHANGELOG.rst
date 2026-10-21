@@ -10,6 +10,38 @@ Changelog
 Breaking changes
 ~~~~~~~~~~~~~~~~
 
+- **A standalone QWP/WebSocket flush too large for one frame raises
+  ``BatchTooLarge``**, as a pooled one does, instead of ``InvalidApiCall``.
+  The message names the limit that applies: ``max_buf_size``, the server's
+  advertised limit, or the store-and-forward segment capacity, which the
+  standalone sender now also checks. Code that caught ``InvalidApiCall`` for
+  this case must catch ``BatchTooLarge``.
+
+- **A standalone QWP/WebSocket ``Sender`` keeps auto-flushing with
+  ``auto_flush_rows=off`` and ``auto_flush_interval=off``.** Its byte
+  trigger is now on by default (see the ``row()`` auto-flush entry under
+  *Fixed*), so turning off the other two triggers leaves auto-flush on:
+  ``Sender.auto_flush`` is ``True``, a batch that reaches 90% of the frame
+  limit is published in parts, and ``flush_and_get_fsn()`` covers only the
+  rows after the last of those parts. To batch by hand, set
+  ``auto_flush=off``. ``Sender.auto_flush_bytes`` reports the threshold in
+  effect: between ``establish()`` and ``close()`` that is 90% of the frame
+  limit, or an explicit threshold lowered to it. Outside them the default
+  reads ``None`` and an explicit threshold reads as configured.
+
+- **A standalone QWP/WebSocket ``Sender`` refuses ``row()`` from its own
+  ``error_handler`` or ``connection_listener`` while auto-flush is on**,
+  raising ``InvalidApiCall`` before adding the row, as it already did for
+  ``flush()`` and ``close()``. Reading ``auto_flush_bytes`` there is
+  refused too. Such a callback runs while the native sender is borrowed,
+  and auto-flush reads the frame limit from it on every row. An exception
+  that escapes the callback is only logged through the ``questdb`` logger,
+  so the row is lost unless the callback catches the error. This includes
+  a handler on the ``questdb`` logger that writes its records through the
+  same sender while no ``error_handler`` is set, because the sender then
+  logs server rejections from inside that callback. Give such code a
+  sender of its own.
+
 - :meth:`QuestDB.execute <questdb.QuestDB.execute>` and
   :meth:`PooledReader.execute <questdb.PooledReader.execute>` return the
   statement's ``EXEC_DONE`` report as an
@@ -508,6 +540,40 @@ New
 
 Fixed
 ~~~~~
+
+- **QWP/WebSocket ``row()`` auto-flush no longer fails on rows that each fit
+  a frame** (`#161 <https://github.com/questdb/py-questdb-client/issues/161>`_).
+  In 5.0 a standalone ``ws::`` / ``wss::`` ``Sender`` had no byte trigger, so
+  600 rows of 4 KiB already exceeded the server's default 2 MiB frame limit,
+  and a pooled lease checked its byte trigger only after appending, so one
+  large row could push a batch past the limit. Either way the whole batch
+  failed: the standalone sender discarded it, and a pooled lease kept it
+  but could never publish it. Now both senders auto-flush at 90% of the
+  frame limit, and publish as soon as the size estimate reaches the full
+  limit, even with ``auto_flush_bytes=off``. When the estimate is past the
+  limit or the whole buffer does not fit in one frame, the rows buffered
+  before the newest one go out as a frame of their own and the newest row
+  starts the next batch. The estimate counts each symbol value at its
+  largest encoded size, so it is not below the size of the encoded frame
+  unless store-and-forward has fallen back to sending full symbol
+  dictionaries. ``len()`` of a QWP/WebSocket ``Buffer`` or standalone
+  ``Sender`` with symbol columns therefore reads higher than before, and
+  frames that the byte trigger publishes carry fewer rows. Until the server
+  advertises its frame limit, as while a lazily connected lease is still
+  connecting, both senders plan for the limit a QuestDB server has by
+  default, 2 MiB less 14 bytes, instead of the local queue limit, so the
+  rows buffered meanwhile still fit a default server once its limit is
+  known.
+
+  Whatever a QWP/WebSocket ``row()`` raises, the row was not added.
+  ``BatchTooLarge`` means
+  it does not fit in a frame on its own, or the rows before it no longer
+  fit, for example after the frame limit shrank on reconnect, in which case
+  those rows are discarded and the error says how many. After any other
+  auto-publish error a pooled lease keeps the rows before it and a
+  standalone sender clears them. In 5.0 a pooled lease also kept the row
+  itself. It now leaves it out, as on every other error, so a failed split
+  no longer leaves the lease holding a batch too large for one frame.
 
 - A :class:`PooledReader <questdb.PooledReader>` that had become reachable
   only through a reference cycle could be collected by the cyclic garbage

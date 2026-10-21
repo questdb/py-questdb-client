@@ -97,6 +97,14 @@ except ImportError:
     polars = None
 
 
+def _qwp_data_frames(stats):
+    """The captured QWP1 frames that carry at least one table."""
+    return [
+        payload for payload in stats['binary_payloads']
+        if (payload[:4] == b'QWP1'
+            and int.from_bytes(payload[6:8], 'little') > 0)]
+
+
 # The QWP frame decoder lives in `qwp_wire` so the claim grid and these
 # tests read a captured frame the same way. A test that asks what the
 # client sent has to read the bytes, not the client's opinion of them.
@@ -930,6 +938,53 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['binary_frames'], 0)
 
+    def test_pooled_sender_auto_flush_bytes_off_publishes_at_full_cap(self):
+        cap = 4096
+        connected = threading.Event()
+
+        def on_event(event):
+            if event.kind is qi.ConnectionEventKind.Connected:
+                connected.set()
+
+        with QwpAckServer(
+                max_batch_size=cap, record_payloads=True) as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;'
+                'sender_pool_max=1;'
+                'pool_reap=manual;'
+                # A row trigger keeps auto-flush on; it never fires here.
+                'auto_flush_rows=1000;'
+                'auto_flush_bytes=off;'
+                'auto_flush_interval=off;')
+            with qi.QuestDB.from_conf(
+                    conf, connection_listener=on_event) as client:
+                with client.sender() as sender:
+                    self.assertTrue(connected.wait(5))
+                    for row_count in range(1, 33):
+                        sender.row(
+                            'events', columns={'value': 'x' * 300},
+                            at=qi.ServerTimestamp)
+                        if len(sender) < row_count:
+                            break
+                    else:
+                        self.fail('the full-cap trigger did not fire')
+                    # Only the full cap publishes: the rows before the one
+                    # that reached it go out, and that row stays buffered.
+                    self.assertEqual(len(sender), 1)
+                    sender.wait(5000)
+                    sender.close(flush=False)
+
+            stats = server.snapshot()
+
+        self.assertEqual(stats['errors'], [])
+        data_frames = _qwp_data_frames(stats)
+        self.assertEqual(len(data_frames), 1)
+        self.assertLessEqual(len(data_frames[0]), cap)
+        self.assertGreater(len(data_frames[0]), cap * 9 // 10)
+        self.assertEqual(
+            _first_qwp_table_row_count(data_frames[0]), row_count - 1)
+
     def test_pooled_sender_auto_flush_bytes_is_clamped_to_server_cap(self):
         cap = 4096
         connected = threading.Event()
@@ -974,7 +1029,11 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(
             _first_qwp_table_row_count(data_frames[0]), row_count)
 
-    def test_pooled_sender_auto_flush_default_bytes_falls_back_to_8_mib(self):
+    def test_pooled_sender_plans_for_default_cap_without_server_cap(self):
+        # The server advertises no cap, so the lease plans its frames for the
+        # cap a server has by default rather than for its local 16 MiB limit.
+        # A row above that cap still goes out: only the local limit refuses
+        # a frame.
         with QwpAckServer() as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
@@ -987,7 +1046,16 @@ class TestQwpWebSocketApi(unittest.TestCase):
             with qi.QuestDB.from_conf(conf) as client:
                 with client.sender() as sender:
                     sender.row(
-                        'events', columns={'value': 'x' * (8 * 1024 * 1024)},
+                        'events', columns={'value': 'x' * 1_200_000},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 1)
+                    # Past 90% of the default cap: the first row goes out.
+                    sender.row(
+                        'events', columns={'value': 'y' * 1_200_000},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 1)
+                    sender.row(
+                        'events', columns={'value': 'z' * (8 * 1024 * 1024)},
                         at=qi.ServerTimestamp)
                     self.assertEqual(len(sender), 0)
                     sender.wait(30000)
@@ -995,7 +1063,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
             stats = server.snapshot()
 
         self.assertEqual(stats['errors'], [])
-        self.assertEqual(stats['binary_frames'], 1)
+        self.assertEqual(stats['binary_frames'], 3)
 
     def test_pooled_sender_auto_flush_oversize_row_error_propagates(self):
         connected = threading.Event()
@@ -1035,14 +1103,16 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['binary_frames'], 0)
 
-    def test_pooled_sender_auto_flush_multirow_overshoot_keeps_batch(self):
+    def test_pooled_sender_auto_flush_multirow_overshoot_splits(self):
+        cap = 4096
         connected = threading.Event()
 
         def on_event(event):
             if event.kind is qi.ConnectionEventKind.Connected:
                 connected.set()
 
-        with QwpAckServer(max_batch_size=4096) as server:
+        with QwpAckServer(
+                max_batch_size=cap, record_payloads=True) as server:
             conf = (
                 f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
                 'sender_pool_min=1;'
@@ -1060,23 +1130,710 @@ class TestQwpWebSocketApi(unittest.TestCase):
                         at=qi.ServerTimestamp)
                     self.assertEqual(len(sender), 1)
 
-                    with self.assertRaises(qi.QuestDBError) as raised:
-                        sender.row(
-                            'events', columns={'value': 'y' * 1500},
-                            at=qi.ServerTimestamp)
+                    # Together the two rows exceed the cap: the first goes
+                    # out on its own and the second starts the next batch.
+                    sender.row(
+                        'events', columns={'value': 'y' * 1500},
+                        at=qi.ServerTimestamp)
+                    self.assertEqual(len(sender), 1)
+                    sender.wait(5000)
                     self.assertEqual(
-                        raised.exception.code,
-                        qi.QuestDBErrorCode.BatchTooLarge)
-                    self.assertEqual(
-                        len(sender), 2,
-                        'a failed multi-row publish must retain the full batch')
+                        len(_qwp_data_frames(server.snapshot())), 1)
+
+                    sender.flush(wait=True)
                 finally:
                     sender.close(flush=False)
 
             stats = server.snapshot()
 
         self.assertEqual(stats['errors'], [])
+        data_frames = _qwp_data_frames(stats)
+        self.assertTrue(all(len(frame) <= cap for frame in data_frames))
+        self.assertEqual(
+            [qwp_wire.table_values(frame) for frame in data_frames],
+            [[('events', {'value': ['x' * 3000]})],
+             [('events', {'value': ['y' * 1500]})]])
+
+    def _qwp_row_split_sender(self, kind, server, extra_conf='',
+                              connection_listener=None):
+        """A connected standalone `Sender` or pooled lease, with the
+        server's advertised cap known before the first row. Returns the
+        sender and, for a lease, its `QuestDB` handle."""
+        if kind == 'standalone':
+            sender = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};' + extra_conf,
+                connection_listener=connection_listener)
+            sender.establish()
+            return sender, None
+        connected = threading.Event()
+
+        def on_event(event):
+            if event.kind is qi.ConnectionEventKind.Connected:
+                connected.set()
+            if connection_listener is not None:
+                connection_listener(event)
+
+        client = qi.QuestDB.from_conf(
+            f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+            'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+            + extra_conf,
+            connection_listener=on_event)
+        sender = client.sender()
+        self.assertTrue(connected.wait(5))
+        return sender, client
+
+    def _qwp_row_split_buffered(self, kind, sender):
+        """Whether the sender's row buffer holds any rows. A standalone
+        sender's `len()` is a byte estimate, which is not zero even for an
+        empty QWP buffer."""
+        if kind == 'standalone':
+            return len(sender) > len(sender.new_buffer())
+        return len(sender) > 0
+
+    def _qwp_row_split_publish_rest(self, kind, sender):
+        """Publish what is buffered and wait for every frame's ack."""
+        if kind == 'standalone':
+            sender.flush()
+            fsn = sender.published_fsn()
+            if fsn is not None:
+                self.assertTrue(sender.await_acked_fsn(fsn, 5000))
+        else:
+            sender.flush(wait=True)
+
+    def _qwp_row_split_wait_acked(self, kind, sender):
+        if kind == 'standalone':
+            fsn = sender.published_fsn()
+            if fsn is not None:
+                self.assertTrue(sender.await_acked_fsn(fsn, 5000))
+        else:
+            sender.wait(5000)
+
+    def _qwp_row_split_close(self, sender, client):
+        try:
+            sender.close(flush=False)
+        finally:
+            if client is not None:
+                client.close()
+
+    def test_qwp_row_split_overshoot_splits_before_new_row(self):
+        cap = 4096
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                with QwpAckServer(
+                        max_batch_size=cap, record_payloads=True) as server:
+                    sender, client = self._qwp_row_split_sender(
+                        kind, server,
+                        'auto_flush_rows=off;auto_flush_interval=off;')
+                    try:
+                        sender.row(
+                            'events', columns={'value': 'x' * 3000},
+                            at=qi.ServerTimestamp)
+                        sender.row(
+                            'events', columns={'value': 'y' * 1500},
+                            at=qi.ServerTimestamp)
+                        self.assertTrue(
+                            self._qwp_row_split_buffered(kind, sender))
+                        self._qwp_row_split_wait_acked(kind, sender)
+                        self.assertEqual(
+                            len(_qwp_data_frames(server.snapshot())), 1)
+                        self._qwp_row_split_publish_rest(kind, sender)
+                    finally:
+                        self._qwp_row_split_close(sender, client)
+                    stats = server.snapshot()
+                self.assertEqual(stats['errors'], [])
+                self.assertEqual(
+                    [qwp_wire.table_values(frame)
+                     for frame in _qwp_data_frames(stats)],
+                    [[('events', {'value': ['x' * 3000]})],
+                     [('events', {'value': ['y' * 1500]})]])
+
+    def test_qwp_row_split_standalone_default_trigger_stays_within_cap(self):
+        # The standalone defaults without the interval trigger, which
+        # would otherwise make the frame boundaries depend on timing.
+        cap = 4096
+        with QwpAckServer(
+                max_batch_size=cap, record_payloads=True) as server:
+            sender, client = self._qwp_row_split_sender(
+                'standalone', server, 'auto_flush_interval=off;')
+            try:
+                for seq in range(40):
+                    sender.row(
+                        'events',
+                        columns={'seq': seq, 'value': 'x' * 300},
+                        at=qi.ServerTimestamp)
+                self._qwp_row_split_publish_rest('standalone', sender)
+            finally:
+                self._qwp_row_split_close(sender, client)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        frames = _qwp_data_frames(stats)
+        self.assertGreater(len(frames), 1)
+        self.assertTrue(all(len(frame) <= cap for frame in frames))
+        seqs = []
+        for frame in frames:
+            for table, columns in qwp_wire.table_values(frame):
+                self.assertEqual(table, 'events')
+                self.assertEqual(
+                    columns['value'], ['x' * 300] * len(columns['seq']))
+                seqs.extend(columns['seq'])
+        self.assertEqual(seqs, list(range(40)))
+
+    def test_qwp_row_split_interleaved_tables_keep_order_and_values(self):
+        cap = 4096
+        sizes = [700, 1500, 2600, 400, 3300, 100]
+        rows = [
+            ('ab'[seq % 2], seq, chr(ord('a') + seq % 26) * sizes[seq % 6])
+            for seq in range(30)]
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                with QwpAckServer(
+                        max_batch_size=cap, record_payloads=True) as server:
+                    sender, client = self._qwp_row_split_sender(
+                        kind, server,
+                        'auto_flush_rows=off;auto_flush_interval=off;')
+                    try:
+                        for table, seq, value in rows:
+                            sender.row(
+                                table,
+                                columns={'seq': seq, 'value': value},
+                                at=qi.ServerTimestamp)
+                        self._qwp_row_split_publish_rest(kind, sender)
+                    finally:
+                        self._qwp_row_split_close(sender, client)
+                    stats = server.snapshot()
+                self.assertEqual(stats['errors'], [])
+                frames = _qwp_data_frames(stats)
+                self.assertTrue(all(len(frame) <= cap for frame in frames))
+                received = {'a': [], 'b': []}
+                for frame in frames:
+                    for table, columns in qwp_wire.table_values(frame):
+                        received[table].extend(
+                            zip(columns['seq'], columns['value']))
+                for table in 'ab':
+                    self.assertEqual(
+                        received[table],
+                        [(seq, value) for t, seq, value in rows
+                         if t == table])
+
+    # The 500-value column comes first, so the other columns' values get
+    # connection-wide ids past 127, which take more bytes on the wire than
+    # their ids in the buffer's own per-column dictionaries.
+    _QWP_SPLIT_SYMBOL_COLUMNS = ('ticker', 'exchange', 'side', 'ccy', 'venue')
+
+    @staticmethod
+    def _qwp_row_split_symbols(seq):
+        return {
+            'ticker': f'T{(seq * 7919) % 500:03d}',
+            'exchange': ('NYSE', 'NASDAQ', 'ARCA', 'BATS')[seq % 4],
+            'side': ('buy', 'sell')[(seq // 3) % 2],
+            'ccy': ('USD', 'EUR', 'GBP')[(seq // 5) % 3],
+            'venue': f'V{(seq // 7) % 8}'}
+
+    def _qwp_row_split_symbol_rows_arrive(self, kind, conf, warm):
+        """Write rows of five symbols and a `seq` through `row()` at a
+        16 KiB cap, and check that each row arrives once, in order, with
+        its symbols. With `warm`, the connection first sends that many
+        distinct symbols in another table, in explicitly flushed batches
+        well under the byte threshold, so every later symbol id takes
+        three bytes on the wire."""
+        cap = 16 * 1024
+        rows = 6000
+        with QwpAckServer(
+                max_batch_size=cap, record_payloads=True) as server:
+            sender, client = self._qwp_row_split_sender(kind, server, conf)
+            try:
+                for start in range(0, warm, 400):
+                    for i in range(start, min(warm, start + 400)):
+                        sender.row(
+                            'warm', symbols={'k': f'w{i:05d}'},
+                            at=qi.ServerTimestamp)
+                    self._qwp_row_split_publish_rest(kind, sender)
+                for seq in range(rows):
+                    try:
+                        sender.row(
+                            'trades',
+                            symbols=self._qwp_row_split_symbols(seq),
+                            columns={'seq': seq},
+                            at=qi.ServerTimestamp)
+                    except qi.QuestDBError as exc:
+                        self.fail(f'row {seq} raised {exc.code.name}: {exc}')
+                self._qwp_row_split_publish_rest(kind, sender)
+            finally:
+                self._qwp_row_split_close(sender, client)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        symbol_dict = []
+        received = []
+        trade_frames = 0
+        for frame in stats['binary_payloads']:
+            if frame[:4] != b'QWP1':
+                continue
+            qwp_wire.extend_symbol_dict(symbol_dict, frame)
+            if int.from_bytes(frame[6:8], 'little') == 0:
+                continue
+            for table, columns in qwp_wire.table_values(frame, symbol_dict):
+                if table != 'trades':
+                    continue
+                trade_frames += 1
+                received.extend(zip(
+                    columns['seq'],
+                    *(columns[name]
+                      for name in self._QWP_SPLIT_SYMBOL_COLUMNS)))
+        # Each row takes at least 13 bytes on the wire, an 8-byte `seq` and a
+        # byte per symbol, and every frame is within the cap.
+        self.assertGreaterEqual(trade_frames, -(-rows * 13 // cap))
+        self.assertEqual(
+            received,
+            [(seq, *(self._qwp_row_split_symbols(seq)[name]
+                     for name in self._QWP_SPLIT_SYMBOL_COLUMNS))
+             for seq in range(rows)])
+
+    def test_qwp_row_split_symbol_rows_arrive_with_bytes_off(self):
+        # Published when the estimate reaches the cap, so an estimate below
+        # the encoded size by more than one row would leave the rows before
+        # the newest one over the cap.
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                self._qwp_row_split_symbol_rows_arrive(
+                    kind,
+                    'auto_flush_rows=100000;auto_flush_bytes=off;'
+                    'auto_flush_interval=off;',
+                    0)
+
+    def test_qwp_row_split_symbol_rows_arrive_after_many_symbols(self):
+        # Published at 90% of the cap. The connection has already used
+        # more than 16,384 symbol ids, so each of these rows' symbols takes
+        # three bytes on the wire.
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                self._qwp_row_split_symbol_rows_arrive(
+                    kind,
+                    'auto_flush_rows=100000;auto_flush_interval=off;',
+                    16500)
+
+    def test_qwp_row_split_new_row_too_large_after_buffered_rows(self):
+        cap = 4096
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                with QwpAckServer(
+                        max_batch_size=cap, record_payloads=True) as server:
+                    sender, client = self._qwp_row_split_sender(
+                        kind, server,
+                        'auto_flush_rows=off;auto_flush_interval=off;')
+                    try:
+                        sender.row(
+                            'events', columns={'value': 'x' * 1000},
+                            at=qi.ServerTimestamp)
+                        with self.assertRaises(qi.QuestDBError) as raised:
+                            sender.row(
+                                'events', columns={'value': 'y' * 5000},
+                                at=qi.ServerTimestamp)
+                        self.assertEqual(
+                            raised.exception.code,
+                            qi.QuestDBErrorCode.BatchTooLarge)
+                        self.assertFalse(raised.exception.in_doubt)
+                        self.assertIn(
+                            'The row was not added',
+                            str(raised.exception))
+                        self.assertIn(
+                            'The rows buffered before it were published',
+                            str(raised.exception))
+                        self.assertFalse(
+                            self._qwp_row_split_buffered(kind, sender))
+                        self._qwp_row_split_wait_acked(kind, sender)
+                    finally:
+                        self._qwp_row_split_close(sender, client)
+                    stats = server.snapshot()
+                self.assertEqual(stats['errors'], [])
+                self.assertEqual(
+                    [qwp_wire.table_values(frame)
+                     for frame in _qwp_data_frames(stats)],
+                    [[('events', {'value': ['x' * 1000]})]])
+
+    def test_qwp_row_split_new_row_over_threshold_goes_out_alone(self):
+        cap = 4096
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                with QwpAckServer(
+                        max_batch_size=cap, record_payloads=True) as server:
+                    sender, client = self._qwp_row_split_sender(
+                        kind, server,
+                        'auto_flush_rows=off;auto_flush_interval=off;')
+                    try:
+                        sender.row(
+                            'events', columns={'value': 'x' * 2000},
+                            at=qi.ServerTimestamp)
+                        # Past 90% of the cap on its own, but it fits: one
+                        # call publishes the earlier row, then this one.
+                        sender.row(
+                            'events', columns={'value': 'y' * 3800},
+                            at=qi.ServerTimestamp)
+                        self.assertFalse(
+                            self._qwp_row_split_buffered(kind, sender))
+                        self._qwp_row_split_wait_acked(kind, sender)
+                    finally:
+                        self._qwp_row_split_close(sender, client)
+                    stats = server.snapshot()
+                self.assertEqual(stats['errors'], [])
+                self.assertEqual(
+                    [qwp_wire.table_values(frame)
+                     for frame in _qwp_data_frames(stats)],
+                    [[('events', {'value': ['x' * 2000]})],
+                     [('events', {'value': ['y' * 3800]})]])
+
+    def test_qwp_row_split_bytes_off_rejects_oversize_row_at_its_call(self):
+        cap = 4096
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                with QwpAckServer(
+                        max_batch_size=cap, record_payloads=True) as server:
+                    # A row trigger keeps auto-flush on; it never fires.
+                    sender, client = self._qwp_row_split_sender(
+                        kind, server,
+                        'auto_flush_rows=1000;auto_flush_bytes=off;'
+                        'auto_flush_interval=off;')
+                    try:
+                        sender.row(
+                            'events', columns={'value': 'x' * 500},
+                            at=qi.ServerTimestamp)
+                        with self.assertRaises(qi.QuestDBError) as raised:
+                            sender.row(
+                                'events', columns={'value': 'y' * 5000},
+                                at=qi.ServerTimestamp)
+                        self.assertEqual(
+                            raised.exception.code,
+                            qi.QuestDBErrorCode.BatchTooLarge)
+                        self.assertFalse(
+                            self._qwp_row_split_buffered(kind, sender))
+                        self._qwp_row_split_wait_acked(kind, sender)
+                    finally:
+                        self._qwp_row_split_close(sender, client)
+                    stats = server.snapshot()
+                self.assertEqual(stats['errors'], [])
+                self.assertEqual(
+                    [qwp_wire.table_values(frame)
+                     for frame in _qwp_data_frames(stats)],
+                    [[('events', {'value': ['x' * 500]})]])
+
+    def test_qwp_row_split_rows_that_no_longer_fit_are_discarded(self):
+        # The cap shrinks on reconnect while two rows are buffered under the
+        # old one. The client reconnects only when it next publishes, so a
+        # second buffer publishes on the same connection: the server drops
+        # the connection after the first of those frames, and the second
+        # one reconnects. A pooled lease has no second buffer to do that
+        # with; the discard it shares is covered here.
+        reconnected = threading.Event()
+
+        def on_event(event):
+            if event.kind is qi.ConnectionEventKind.Reconnected:
+                reconnected.set()
+
+        with QwpAckServer(
+                max_batch_size=8192, record_payloads=True,
+                close_plan=[1]) as server:
+            sender, client = self._qwp_row_split_sender(
+                'standalone', server,
+                'auto_flush_rows=off;auto_flush_interval=off;',
+                connection_listener=on_event)
+            try:
+                for value in ('a' * 3000, 'b' * 3000):
+                    sender.row(
+                        'events', columns={'value': value},
+                        at=qi.ServerTimestamp)
+                server.max_batch_size = 2048
+                for _ in range(2):
+                    probe = sender.new_buffer()
+                    probe.row(
+                        'probe', columns={'value': 'p'},
+                        at=qi.ServerTimestamp)
+                    sender.flush(probe)
+                self.assertTrue(
+                    reconnected.wait(10),
+                    'the second probe must reconnect')
+                self._qwp_row_split_wait_acked('standalone', sender)
+
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    sender.row(
+                        'events', columns={'value': 'c' * 100},
+                        at=qi.ServerTimestamp)
+                self.assertEqual(
+                    raised.exception.code,
+                    qi.QuestDBErrorCode.BatchTooLarge)
+                self.assertIn(
+                    '2 buffered rows were discarded', str(raised.exception))
+                self.assertFalse(
+                    self._qwp_row_split_buffered('standalone', sender))
+
+                # The sender carries on normally afterwards.
+                sender.row(
+                    'events', columns={'value': 'd' * 100},
+                    at=qi.ServerTimestamp)
+                self._qwp_row_split_publish_rest('standalone', sender)
+            finally:
+                self._qwp_row_split_close(sender, client)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(
+            [tables for tables in (
+                qwp_wire.table_values(frame)
+                for frame in _qwp_data_frames(stats))
+             if tables[0][0] == 'events'],
+            [[('events', {'value': ['d' * 100]})]])
+
+    def test_qwp_row_split_failure_after_partial_publish(self):
+        # Two queue segments and an ack delay longer than the append
+        # deadline: the frame of earlier rows takes the second segment,
+        # and the new row's own frame then has nowhere to go.
+        conf = (
+            'auto_flush_rows=off;auto_flush_interval=off;'
+            'sf_max_segment_bytes=4096;sf_max_total_bytes=8192;'
+            'sf_append_deadline_millis=100;')
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                with QwpAckServer(
+                        ack_delay_s=1.0, record_payloads=True) as server:
+                    sender, client = self._qwp_row_split_sender(
+                        kind, server, conf)
+                    try:
+                        # Past 90% of the segment cap: goes out alone and
+                        # fills most of the first segment.
+                        sender.row(
+                            'events', columns={'value': 'p' * 3700},
+                            at=qi.ServerTimestamp)
+                        self.assertFalse(
+                            self._qwp_row_split_buffered(kind, sender))
+                        sender.row(
+                            'events', columns={'value': 'a' * 2000},
+                            at=qi.ServerTimestamp)
+                        with self.assertRaises(qi.QuestDBError) as raised:
+                            sender.row(
+                                'events', columns={'value': 'b' * 3700},
+                                at=qi.ServerTimestamp)
+                        self.assertNotEqual(
+                            raised.exception.code,
+                            qi.QuestDBErrorCode.BatchTooLarge)
+                        self.assertIn(
+                            'The row was not added. The rows buffered '
+                            'before it were published.',
+                            str(raised.exception))
+                        self.assertFalse(
+                            self._qwp_row_split_buffered(kind, sender))
+                        self._qwp_row_split_wait_acked(kind, sender)
+                    finally:
+                        self._qwp_row_split_close(sender, client)
+                    stats = server.snapshot()
+                self.assertEqual(stats['errors'], [])
+                self.assertEqual(
+                    [qwp_wire.table_values(frame)
+                     for frame in _qwp_data_frames(stats)],
+                    [[('events', {'value': ['p' * 3700]})],
+                     [('events', {'value': ['a' * 2000]})]])
+
+    def _qwp_row_publish_times_out(self, kind, extra_conf, fill_rows,
+                                   failing_row, resend_rows):
+        """Two queue segments and an ack delay longer than the append
+        deadline: `fill_rows` take both segments, so the publish that
+        `failing_row` triggers times out. Returns the frames delivered once
+        the acks drain and `resend_rows` are written and published."""
+        conf = (
+            'auto_flush_interval=off;'
+            'sf_max_segment_bytes=4096;sf_max_total_bytes=8192;'
+            'sf_append_deadline_millis=100;' + extra_conf)
+        with QwpAckServer(ack_delay_s=1.0, record_payloads=True) as server:
+            sender, client = self._qwp_row_split_sender(kind, server, conf)
+            try:
+                for value in fill_rows:
+                    sender.row(
+                        'events', columns={'value': value},
+                        at=qi.ServerTimestamp)
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    sender.row(
+                        'events', columns={'value': failing_row},
+                        at=qi.ServerTimestamp)
+                self.assertNotEqual(
+                    raised.exception.code,
+                    qi.QuestDBErrorCode.BatchTooLarge)
+                self.assertIn('The row was not added.', str(raised.exception))
+                self.assertNotIn('were published', str(raised.exception))
+                # A pooled lease keeps the rows buffered before it; a
+                # standalone sender clears them, as its `flush()` does.
+                if kind == 'pooled':
+                    self.assertEqual(len(sender), 1)
+                else:
+                    self.assertFalse(
+                        self._qwp_row_split_buffered(kind, sender))
+                self._qwp_row_split_wait_acked(kind, sender)
+                for value in resend_rows:
+                    sender.row(
+                        'events', columns={'value': value},
+                        at=qi.ServerTimestamp)
+                self._qwp_row_split_publish_rest(kind, sender)
+            finally:
+                self._qwp_row_split_close(sender, client)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        return [qwp_wire.table_values(frame)
+                for frame in _qwp_data_frames(stats)]
+
+    def test_qwp_row_split_failed_earlier_rows_publish_does_not_add_row(self):
+        # The new row makes the buffer too large for one frame, and the
+        # frame of the rows before it times out. A pooled lease keeps those
+        # rows, which fit, so re-sending the row publishes both.
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                frames = self._qwp_row_publish_times_out(
+                    kind, 'auto_flush_rows=off;',
+                    ['p' * 3700, 'q' * 3700, 'a' * 2000],
+                    'b' * 3700,
+                    ['b' * 3700])
+                kept = [[('events', {'value': ['a' * 2000]})]]
+                self.assertEqual(
+                    frames,
+                    [[('events', {'value': ['p' * 3700]})],
+                     [('events', {'value': ['q' * 3700]})]]
+                    + (kept if kind == 'pooled' else [])
+                    + [[('events', {'value': ['b' * 3700]})]])
+
+    def test_qwp_row_failed_whole_buffer_publish_does_not_add_row(self):
+        # The row trigger publishes the whole buffer, which fits in a frame
+        # but not in what the second segment has left, so it times out.
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                frames = self._qwp_row_publish_times_out(
+                    kind, 'auto_flush_rows=2;',
+                    ['p' * 3700, 'q' * 3700, 'a' * 1000],
+                    'b' * 1000,
+                    ['b' * 1000])
+                self.assertEqual(
+                    frames,
+                    [[('events', {'value': ['p' * 3700]})],
+                     [('events', {'value': ['q' * 3700]})],
+                     [('events', {
+                         'value': (['a' * 1000] if kind == 'pooled' else [])
+                         + ['b' * 1000]})]])
+
+    def test_qwp_row_split_lazy_lease_rows_fit_once_the_cap_is_known(self):
+        # The lease buffers rows before its first connection has advertised
+        # the server's cap, which is the cap a server has by default. Until
+        # then it plans frames for that cap rather than for its local limit,
+        # so what it buffered still fits once the cap is known.
+        gate = threading.Event()
+        connected = threading.Event()
+
+        def on_event(event):
+            if event.kind is qi.ConnectionEventKind.Connected:
+                connected.set()
+
+        value = 'x' * 100_000
+        with QwpAckServer(
+                max_batch_size=2 * 1024 * 1024 - 14, record_payloads=True,
+                upgrade_gate=gate) as server:
+            client = qi.QuestDB.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                'auto_flush_rows=off;auto_flush_interval=off;',
+                connection_listener=on_event)
+            sender = client.sender()
+            try:
+                for seq in range(25):
+                    sender.row(
+                        'events', columns={'seq': seq, 'value': value},
+                        at=qi.ServerTimestamp)
+                self.assertFalse(connected.is_set())
+                gate.set()
+                self.assertTrue(connected.wait(10))
+                for seq in range(25, 30):
+                    sender.row(
+                        'events', columns={'seq': seq, 'value': value},
+                        at=qi.ServerTimestamp)
+                sender.flush(wait=True)
+            finally:
+                gate.set()
+                self._qwp_row_split_close(sender, client)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        seqs = []
+        for frame in _qwp_data_frames(stats):
+            for table, columns in qwp_wire.table_values(frame):
+                seqs.extend(columns['seq'])
+        self.assertEqual(seqs, list(range(30)))
+
+    def test_qwp_row_with_only_none_values_leaves_a_due_buffer_alone(self):
+        # The lease buffers two rows that fit the default cap, then
+        # connects to a server with a much smaller one, so the buffer is
+        # due and too large for a frame. A row with nothing to write
+        # leaves it as it is.
+        gate = threading.Event()
+        connected = threading.Event()
+
+        def on_event(event):
+            if event.kind is qi.ConnectionEventKind.Connected:
+                connected.set()
+
+        with QwpAckServer(max_batch_size=8192, upgrade_gate=gate) as server:
+            client = qi.QuestDB.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                'auto_flush_rows=off;auto_flush_interval=off;',
+                connection_listener=on_event)
+            sender = client.sender()
+            try:
+                for _ in range(2):
+                    sender.row(
+                        'events', columns={'value': 'x' * 5000},
+                        at=qi.ServerTimestamp)
+                gate.set()
+                self.assertTrue(connected.wait(10))
+                sender.row(
+                    'events', symbols={'s': None}, columns={'value': None},
+                    at=qi.ServerTimestamp)
+                self.assertEqual(len(sender), 2)
+            finally:
+                gate.set()
+                self._qwp_row_split_close(sender, client)
+
+    def test_qwp_row_split_standalone_manual_flush_too_large(self):
+        with QwpAckServer(max_batch_size=1024) as server:
+            sender, client = self._qwp_row_split_sender(
+                'standalone', server, 'auto_flush=off;')
+            try:
+                sender.row(
+                    'events', columns={'value': 'x' * 2000},
+                    at=qi.ServerTimestamp)
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    sender.flush()
+                self.assertEqual(
+                    raised.exception.code, qi.QuestDBErrorCode.BatchTooLarge)
+                self.assertIn(
+                    "The cap is set by the server's advertised "
+                    'X-QWP-Max-Batch-Size.',
+                    str(raised.exception))
+                self.assertFalse(
+                    self._qwp_row_split_buffered('standalone', sender))
+            finally:
+                self._qwp_row_split_close(sender, client)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
         self.assertEqual(stats['binary_frames'], 0)
+
+    def test_qwp_row_split_standalone_auto_flush_bytes_property(self):
+        cases = [
+            ('', None, 3686),
+            ('auto_flush_bytes=1000;', 1000, 1000),
+            ('auto_flush_bytes=100000;', 100000, 3686),
+            ('auto_flush_bytes=off;', None, None),
+        ]
+        with QwpAckServer(max_batch_size=4096) as server:
+            for extra, before, after in cases:
+                with self.subTest(conf=extra):
+                    sender = qi.Sender.from_conf(
+                        f'ws::addr=127.0.0.1:{server.port};' + extra)
+                    try:
+                        self.assertEqual(sender.auto_flush_bytes, before)
+                        sender.establish()
+                        self.assertEqual(sender.auto_flush_bytes, after)
+                    finally:
+                        sender.close(flush=False)
 
     def test_pooled_sender_auto_flush_can_be_disabled(self):
         with QwpAckServer() as server:
@@ -1161,7 +1918,8 @@ class TestQwpWebSocketApi(unittest.TestCase):
                         sender.row(
                             'events', columns={'value': 2},
                             at=qi.ServerTimestamp)
-                    self.assertEqual(len(sender), 1)
+                    # A row whose auto-flush fails is not added.
+                    self.assertEqual(len(sender), 0)
                     sender.close(flush=False)
 
             stats = server.snapshot()
@@ -1169,6 +1927,7 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertIsInstance(
             raised.exception, qi.QuestDBServerRejectionError)
+        self.assertIn('The row was not added.', str(raised.exception))
 
     def test_pooled_sender_await_acked_fsn_validates_timeout(self):
         # Regression: timeout_millis must be validated and converted while
@@ -1676,6 +2435,9 @@ class TestQwpWebSocketApi(unittest.TestCase):
                     sender.acked_fsn,
                     sender.drive_once,
                     sender.flush,
+                    lambda: sender.row(
+                        'events', columns={'value': 2},
+                        at=qi.ServerTimestamp),
                     sender.close):
                 try:
                     call()
@@ -1708,6 +2470,17 @@ class TestQwpWebSocketApi(unittest.TestCase):
                     except qi.QuestDBError:
                         pass
                     time.sleep(0.01)
+                # The handler has returned, so this thread is no longer
+                # dispatching for the sender.
+                for call in (
+                        sender.published_fsn,
+                        lambda: sender.row(
+                            'events', columns={'value': 3},
+                            at=qi.ServerTimestamp)):
+                    try:
+                        call()
+                    except qi.QuestDBError as exc:
+                        self.assertNotIn('own error_handler', str(exc))
             finally:
                 sender.close(False)
 
@@ -1716,6 +2489,54 @@ class TestQwpWebSocketApi(unittest.TestCase):
             all(code is qi.QuestDBErrorCode.InvalidApiCall
                 for code in captured),
             captured)
+
+    def test_standalone_sender_row_from_listener_is_refused(self):
+        """A standalone ws sender's connection listener runs on a native
+        dispatcher thread, whose call table is built for that callback.
+        `row()` from inside it is refused while auto-flush is on and
+        leaves the buffer as it was."""
+        established = threading.Event()
+        done = threading.Event()
+        outcome = {}
+
+        def on_event(event):
+            if (event.kind is not qi.ConnectionEventKind.Connected
+                    or done.is_set()):
+                return
+            try:
+                established.wait(5)
+                before = len(sender)
+                try:
+                    sender.row(
+                        'from_cb', columns={'v': 1}, at=qi.ServerTimestamp)
+                except qi.QuestDBError as exc:
+                    outcome['code'] = exc.code
+                else:
+                    outcome['code'] = None
+                outcome['len_unchanged'] = len(sender) == before
+            except BaseException as exc:
+                outcome['unexpected'] = repr(exc)
+            finally:
+                done.set()
+
+        with QwpAckServer() as server:
+            sender = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};',
+                connection_listener=on_event)
+            try:
+                sender.establish()
+                established.set()
+                self.assertTrue(done.wait(5), 'the listener must fire')
+                self.assertNotIn(
+                    'unexpected', outcome, outcome.get('unexpected'))
+                self.assertIs(
+                    outcome['code'], qi.QuestDBErrorCode.InvalidApiCall)
+                self.assertTrue(outcome['len_unchanged'])
+                sender.row(
+                    'events', columns={'v': 2}, at=qi.ServerTimestamp)
+                sender.flush()
+            finally:
+                sender.close(flush=False)
 
     def test_standalone_senders_sharing_handler_have_distinct_ownership(self):
         """Callback identity is not sender identity: a handler dispatched by
@@ -8891,6 +9712,55 @@ print('OK')
                 with self.assertRaises(qi.QuestDBError) as closed:
                     db.sender()
                 self.assertIn('closed', str(closed.exception))
+
+    def test_handle_listener_lease_shares_the_dispatch_slot(self):
+        """A handle's own connection listener that writes through a lease
+        has a scoped call and a dispatch in progress for the same handle
+        on one thread. Both counts unwind without an underflow."""
+        box = {'done': threading.Event()}
+        unraisable = []
+
+        def listener(event):
+            if (event.kind is not qi.ConnectionEventKind.Connected
+                    or 'res' in box):
+                return
+            try:
+                lease = box['db'].sender()
+                try:
+                    lease.row('cb', columns={'v': 1},
+                              at=qi.TimestampNanos(2))
+                finally:
+                    lease.close(flush=False)
+                box['res'] = 'ok'
+            except BaseException as exc:
+                box['res'] = repr(exc)
+            finally:
+                box['done'].set()
+
+        old_hook = sys.unraisablehook
+        sys.unraisablehook = unraisable.append
+        try:
+            with QwpAckServer() as server:
+                conf = (f'ws::addr=127.0.0.1:{server.port};'
+                        'lazy_connect=true;'
+                        'sender_pool_min=1;sender_pool_max=2;')
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    db = qi.QuestDB.from_conf(
+                        conf, connection_listener=listener)
+                    box['db'] = db
+                    lease = db.sender()
+                    lease.row('t', columns={'v': 1},
+                              at=qi.TimestampNanos(1))
+                    lease.flush()
+                    self.assertTrue(
+                        box['done'].wait(10), 'the listener must run')
+                    self.assertEqual(box['res'], 'ok')
+                    lease.close()
+                    db.close()
+        finally:
+            sys.unraisablehook = old_hook
+        self.assertEqual(unraisable, [])
 
     def test_no_column_helper_takes_a_pre_encoded_name(self):
         """A `line_sender_column_name` borrows the string arena, which
