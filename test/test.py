@@ -1742,6 +1742,40 @@ class TestQwpWebSocketApi(unittest.TestCase):
                 seqs.extend(columns['seq'])
         self.assertEqual(seqs, list(range(30)))
 
+    def test_qwp_row_with_only_none_values_leaves_a_due_buffer_alone(self):
+        # The lease buffers two rows that fit the default cap, then
+        # connects to a server with a much smaller one, so the buffer is
+        # due and too large for a frame. A row with nothing to write
+        # leaves it as it is.
+        gate = threading.Event()
+        connected = threading.Event()
+
+        def on_event(event):
+            if event.kind is qi.ConnectionEventKind.Connected:
+                connected.set()
+
+        with QwpAckServer(max_batch_size=8192, upgrade_gate=gate) as server:
+            client = qi.QuestDB.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
+                'auto_flush_rows=off;auto_flush_interval=off;',
+                connection_listener=on_event)
+            sender = client.sender()
+            try:
+                for _ in range(2):
+                    sender.row(
+                        'events', columns={'value': 'x' * 5000},
+                        at=qi.ServerTimestamp)
+                gate.set()
+                self.assertTrue(connected.wait(10))
+                sender.row(
+                    'events', symbols={'s': None}, columns={'value': None},
+                    at=qi.ServerTimestamp)
+                self.assertEqual(len(sender), 2)
+            finally:
+                gate.set()
+                self._qwp_row_split_close(sender, client)
+
     def test_qwp_row_split_standalone_manual_flush_too_large(self):
         with QwpAckServer(max_batch_size=1024) as server:
             sender, client = self._qwp_row_split_sender(

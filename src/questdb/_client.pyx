@@ -12382,7 +12382,10 @@ cdef void_int _qwp_row_add(
         dict symbols,
         dict columns,
         object at) except -1:
-    """Append a row, holding the rewind point just before it."""
+    """
+    Append a row, holding the rewind point just before it. A row whose
+    values are all `None` writes nothing and leaves no rewind point.
+    """
     cdef bint starts_batch = line_sender_buffer_row_count(buf._impl) == 0
     buf._row(False, table_name, symbols, columns, at, True)
     if pooled is not None and starts_batch:
@@ -12561,6 +12564,11 @@ cdef void_int _qwp_row_append(
     cdef size_t row_count
     cdef bint split
     _qwp_row_add(sender, pooled, buf, table_name, symbols, columns, at)
+    if not buf._marker_set:
+        # Nothing was written, and the split and reject paths below need
+        # the rewind point. Such a row triggers no auto-flush, as in
+        # `Buffer._row`.
+        return 0
     try:
         if not _qwp_row_due(sender, pooled, buf, &hard_cap):
             return 0
