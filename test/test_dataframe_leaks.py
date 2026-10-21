@@ -3,6 +3,7 @@ sys.dont_write_bytecode = True
 import ctypes
 import gc
 import ipaddress
+import sysconfig
 import threading
 import unittest
 import uuid
@@ -58,6 +59,12 @@ def _malloc_trim():
 def _rss():
     _malloc_trim()
     return _PROCESS.memory_info().rss
+
+
+_FREE_THREADED = bool(sysconfig.get_config_var('Py_GIL_DISABLED'))
+_NO_RSS_ON_FREE_THREADED = (
+    'RSS is not a leak signal on a free-threaded build: mimalloc pages '
+    'are not returned by malloc_trim')
 
 
 def _assert_no_leak(test, work, warmup, measure):
@@ -265,6 +272,7 @@ class TestCategoricalArrowLeak(unittest.TestCase):
 
         self._assert_stable(work, warmup=200, measure=4000)
 
+    @unittest.skipIf(_FREE_THREADED, _NO_RSS_ON_FREE_THREADED)
     def test_columnar_path_no_leak(self):
         from qwp_ws_ack_server import QwpAckServer
         frames = self._frames()
@@ -407,6 +415,7 @@ class TestPyobjColumnarLeak(unittest.TestCase):
     def _assert_stable(self, work, warmup, measure):
         _assert_no_leak(self, work, warmup, measure)
 
+    @unittest.skipIf(_FREE_THREADED, _NO_RSS_ON_FREE_THREADED)
     def test_pyobj_columnar_path_no_leak(self):
         from qwp_ws_ack_server import QwpAckServer
         frames = self._frames()
