@@ -314,7 +314,9 @@ cdef tuple _tp_result_parts(object result):
 
 
 cdef bint _tp_on_main_thread():
-    return threading.get_ident() == _OIDC_MAIN_THREAD_IDENT
+    # The native ident, like every other main-thread check: under gevent,
+    # `threading.get_ident()` is a greenlet id.
+    return questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
 
 
 cdef void _tp_sink_text_error(

@@ -237,12 +237,41 @@ cdef int _OIDC_MAIN_TOKEN_DEPTH = 0
 # Row serialization wraps ordinary exceptions as dataframe errors. Deliver saved
 # signals only after leaving that region, at Sender.dataframe's outer boundary.
 cdef int _OIDC_MAIN_DATAFRAME_DEPTH = 0
-# `threading.main_thread()` is the interpreter's main thread whichever thread
-# imports this module. `_oidc_after_fork_in_child` re-reads it in a child forked
-# from another thread, where the forking thread becomes the main thread: a stale
+
+
+cdef unsigned long _oidc_main_thread_ident() except? 0:
+    """The interpreter's main thread, as ``questdb_thread_ident`` reports it.
+
+    ``threading.main_thread()`` names that thread whichever thread imports this
+    module, but its ``ident`` is the threading module's view, and gevent's
+    monkey-patching makes that a greenlet id. A greenlet id never equals the
+    native ident the main-thread checks compare against, and on 64-bit Windows
+    it does not fit an ``unsigned long``, so importing questdb after
+    ``monkey.patch_all()`` failed there with OverflowError. gevent leaves
+    ``get_native_id()`` alone: it tells whether this is the main OS thread,
+    whichever greenlet runs, and there the native ident is at hand.
+    """
+    cdef unsigned long ident
+    main = threading.main_thread()
+    get_native_id = getattr(threading, 'get_native_id', None)
+    if (get_native_id is not None and main.native_id is not None
+            and main.native_id == get_native_id()):
+        return questdb_thread_ident()
+    # Imported from another OS thread, where `ident` is native -- unless gevent
+    # patched it, and then no native ident is to be had. Match no thread rather
+    # than fail the import over a greenlet id that does not fit.
+    try:
+        ident = main.ident
+    except OverflowError:
+        return 0
+    return ident
+
+
+# `_oidc_after_fork_in_child` re-reads the main thread in a child forked from
+# another thread, where the forking thread becomes the main thread: a stale
 # value there made every diagnostic on the child's real main thread look like a
 # worker's, so an exception it parked was never scheduled and was lost.
-cdef unsigned long _OIDC_MAIN_THREAD_IDENT = threading.main_thread().ident
+cdef unsigned long _OIDC_MAIN_THREAD_IDENT = _oidc_main_thread_ident()
 
 
 def _oidc_after_fork_in_child():

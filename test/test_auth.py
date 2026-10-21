@@ -29,6 +29,7 @@ import dataclasses
 from decimal import Decimal
 from fractions import Fraction
 import gc
+import importlib.util
 import io
 import logging
 import os
@@ -9465,6 +9466,29 @@ class OidcDiagnosticSignalTest(_IsolatedReentry, unittest.TestCase):
             'print("CHILD", result["child"].decode())\n')
         out = self._run_child(script)
         self.assertIn('CHILD 1', out, out)
+
+    @unittest.skipIf(
+        importlib.util.find_spec('gevent') is None, 'gevent not installed')
+    def test_main_thread_is_the_native_one_under_gevent(self):
+        # Regression: the main-thread identity was read from
+        # `threading.main_thread().ident`, which gevent's monkey-patching
+        # makes a greenlet id. It never matched the native ident it is
+        # compared with, and on 64-bit Windows it overflowed an
+        # `unsigned long`, so importing questdb after `monkey.patch_all()`
+        # failed. Importing from a spawned greenlet is the harder case:
+        # `current_thread()` is not the main thread there, but the OS
+        # thread is.
+        script = (
+            'from gevent import monkey\n'
+            'monkey.patch_all()\n'
+            'import gevent\n'
+            'native = monkey.get_original("_thread", "get_ident")()\n'
+            'def load():\n'
+            '    from questdb import _client\n'
+            '    return _client._debug_oidc_main_thread_ident()\n'
+            'print("NATIVE", gevent.spawn(load).get() == native)\n')
+        out = self._run_child(script)
+        self.assertIn('NATIVE True', out, out)
 
 
 class OidcTestServerFixtureTest(unittest.TestCase):
