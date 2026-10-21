@@ -107,7 +107,7 @@ class TestPinnedCiDependencies(unittest.TestCase):
                 mock.patch.object(self.deps, 'pip_install'), \
                 mock.patch.object(self.deps, 'pip_install_required'), \
                 mock.patch.object(
-                    self.deps, 'install_default_pandas_and_numpy'), \
+                    self.deps, 'install_default_dataframe_dependencies'), \
                 mock.patch.object(
                     self.deps, 'try_pip_install') as try_install, \
                 mock.patch.object(
@@ -126,7 +126,7 @@ class TestPinnedCiDependencies(unittest.TestCase):
                 mock.patch.object(self.deps, 'pip_install'), \
                 mock.patch.object(self.deps, 'pip_install_required'), \
                 mock.patch.object(
-                    self.deps, 'install_default_pandas_and_numpy'), \
+                    self.deps, 'install_default_dataframe_dependencies'), \
                 mock.patch.object(
                     self.deps, 'try_pip_install') as try_install, \
                 mock.patch.object(

@@ -3,6 +3,7 @@
 import sys
 sys.dont_write_bytecode = True
 import os
+import contextlib
 import datetime
 import importlib.util
 import random
@@ -13,6 +14,7 @@ import threading
 import time
 import unittest
 import uuid
+import warnings
 import pathlib
 import numpy as np
 import decimal
@@ -31,6 +33,15 @@ try:
 except ImportError:
     pd = None
     pyarrow = None
+
+# pyarrow-backed pandas frames take the Arrow path only from pandas 2.2,
+# which adds `DataFrame.__arrow_c_stream__`.
+PANDAS_HAS_ARROW_STREAM = (
+    pd is not None and hasattr(pd.DataFrame, '__arrow_c_stream__'))
+# pyarrow reads QuestDB DECIMAL(<=18) columns (decimal32/64) from 19, the
+# version that also adds `pa.decimal64`.
+PYARROW_READS_DECIMAL64 = (
+    pyarrow is not None and hasattr(pyarrow, 'decimal64'))
 
 
 import questdb._client as qi
@@ -71,6 +82,37 @@ FIRST_QWP_GAP_HALT_RELEASE = (9, 4, 4)
 #: support boundary rather than a capability one, so lowering it to see
 #: what breaks shows nothing breaking.
 FIRST_QWP_ROW_TYPES_RELEASE = (10, 0, 0)
+
+
+_POLARS_FALLBACK_WARNING = 'The polars Categorical fast path failed'
+
+
+@contextlib.contextmanager
+def _polars_fallback_warnings():
+    """Record the polars fast-path fallback warnings issued in the block."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        fallbacks = []
+        yield fallbacks
+    fallbacks.extend(
+        w for w in caught
+        if issubclass(w.category, RuntimeWarning)
+        and str(w.message).startswith(_POLARS_FALLBACK_WARNING))
+
+
+def _assert_long_list_equal(test, got, exp, what='values'):
+    """Compare two long lists and report the first wrong rows.
+
+    A plain ``assertEqual`` builds a ``difflib`` diff of both lists. For
+    long, mostly different lists, that diff runs for minutes."""
+    got = list(got)
+    test.assertEqual(
+        len(got), len(exp), f'{what}: got {len(got)} rows, want {len(exp)}')
+    bad = [i for i, (g, e) in enumerate(zip(got, exp)) if g != e]
+    test.assertEqual(
+        [(i, got[i], exp[i]) for i in bad[:5]], [],
+        f'{len(bad)} of {len(exp)} {what} are wrong; first (row, got, want)')
+
 
 def may_install_questdb():
     global QUESTDB_PLAIN_INSTALL_PATH
@@ -2500,6 +2542,162 @@ class TestEgressWithDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def _multi_batch_conf(self):
+        return self._conf() + 'max_batch_rows=1000;'
+
+    def _seed_multi_batch_symbols(self, n=10000):
+        """Create a table with a new SYMBOL value every 100 rows, and
+        return ``(sql, expected_symbols)``. Read through
+        ``_multi_batch_conf()``, no two 1000-row batches share a symbol,
+        so each batch carries its own compact SYMBOL dictionary. The
+        table is dropped at cleanup."""
+        import numpy as np
+        table_name = 't_egress_multi_sym_' + uuid.uuid4().hex[:8]
+
+        def drop():
+            try:
+                self._exec(f'DROP TABLE IF EXISTS {table_name}')
+            except Exception:
+                pass
+
+        self.addCleanup(drop)
+        exp = [None if i % 11 == 0 else f'sym_{i // 100}' for i in range(n)]
+        self._exec(
+            f'CREATE TABLE {table_name} '
+            '(ts TIMESTAMP, sym SYMBOL, v LONG) '
+            'TIMESTAMP(ts) PARTITION BY DAY WAL')
+        df = pd.DataFrame({
+            'ts': pd.to_datetime(np.arange(n), unit='s', utc=True),
+            'sym': pd.Series(exp, dtype='string[pyarrow]'),
+            'v': np.arange(n, dtype=np.int64),
+        })
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            client.dataframe(
+                df, table_name=table_name, at='ts', symbols=['sym'])
+        self.qdb_plain.retry_check_table(table_name, min_rows=n)
+        sql = f'SELECT sym, v FROM {table_name} ORDER BY v'
+        # The data must span several batches, and a later batch must hold
+        # symbols that the first batch's dictionary lacks.
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            batch_syms = [
+                set(batch.column('sym').to_pylist()) - {None}
+                for batch in client.query(sql).iter_arrow()]
+        self.assertGreater(len(batch_syms), 1)
+        self.assertTrue(any(s - batch_syms[0] for s in batch_syms[1:]))
+        return sql, exp
+
+    def test_polars_dataframe_multi_batch_symbol(self):
+        """``polars.DataFrame(result)`` reads every batch of a multi-batch
+        result. Each batch carries its own compact SYMBOL dictionary and the
+        batches hold different symbols, so a consumer that keeps only the
+        first batch, or decodes every batch with the first batch's
+        dictionary, fails here. polars before 1.32 does both."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            with client.query(sql) as result:
+                out = pl.DataFrame(result)
+        self.assertEqual(out.shape, (n, 2))
+        _assert_long_list_equal(
+            self, out['v'].to_list(), list(range(n)), 'v values')
+        _assert_long_list_equal(
+            self, out['sym'].cast(pl.Utf8).to_list(), exp, 'SYMBOL values')
+
+    def test_duckdb_reads_multi_batch_symbol(self):
+        """``duckdb.from_arrow(result)`` and
+        ``duckdb.from_arrow(result.__arrow_c_stream__())`` read every
+        batch and decode each batch's compact SYMBOL dictionary. duckdb
+        1.5 reads the schema of ``result`` through ``__arrow_c_schema__``,
+        so it opens the single-use stream only once. A projection that
+        drops a column fails on duckdb 1.1, the reason for the 1.2
+        floor."""
+        try:
+            import duckdb
+        except ImportError:
+            self.skipTest('duckdb not installed')
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        for form in ('object', 'capsule'):
+            with self.subTest(form=form):
+                with qi.QuestDB.from_conf(
+                        self._multi_batch_conf()) as client:
+                    with client.query(sql) as result:
+                        source = (result if form == 'object'
+                                  else result.__arrow_c_stream__())
+                        # duckdb reads at fetch time, so fetch before
+                        # the result is closed.
+                        rows = duckdb.from_arrow(
+                            source).order('v').fetchall()
+                _assert_long_list_equal(
+                    self, [row[1] for row in rows], list(range(n)),
+                    'v values')
+                _assert_long_list_equal(
+                    self, [row[0] for row in rows], exp, 'SYMBOL values')
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            with client.query(sql) as result:
+                rows = duckdb.from_arrow(result).project('v').order(
+                    'v').fetchall()
+        _assert_long_list_equal(
+            self, [row[0] for row in rows], list(range(n)),
+            'projected v values')
+
+    _DUCKDB_WITHOUT_PYARROW_SCRIPT = """
+import json
+import sys
+
+
+class _BlockPyarrow:
+    def find_spec(self, name, path=None, target=None):
+        if name == 'pyarrow' or name.startswith('pyarrow.'):
+            raise ImportError('pyarrow blocked for this test')
+
+
+sys.meta_path.insert(0, _BlockPyarrow())
+import duckdb
+import questdb._client as qi
+
+conf, sql, form = sys.argv[1], sys.argv[2], sys.argv[3]
+with qi.QuestDB.from_conf(conf) as client:
+    with client.query(sql) as result:
+        source = result if form == 'object' else result.__arrow_c_stream__()
+        rows = duckdb.from_arrow(source).order('v').fetchall()
+print(json.dumps({'rows': rows}))
+"""
+
+    def test_duckdb_reads_without_pyarrow(self):
+        """The docs say that duckdb reads a ``QueryResult`` without
+        pyarrow. Run the duckdb read, with ``result`` and with the
+        capsule, in a subprocess that blocks the pyarrow import."""
+        import json
+        import subprocess
+        if importlib.util.find_spec('duckdb') is None:
+            self.skipTest('duckdb not installed')
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [str(pathlib.Path(qi.__file__).parent.parent)]
+            + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p])
+        for form in ('object', 'capsule'):
+            with self.subTest(form=form):
+                proc = subprocess.run(
+                    [sys.executable, '-c',
+                     self._DUCKDB_WITHOUT_PYARROW_SCRIPT,
+                     self._multi_batch_conf(), sql, form],
+                    capture_output=True, text=True, env=env, timeout=120)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                out = json.loads(proc.stdout.strip().splitlines()[-1])
+                rows = out['rows']
+                _assert_long_list_equal(
+                    self, [row[1] for row in rows], list(range(n)),
+                    'v values')
+                _assert_long_list_equal(
+                    self, [row[0] for row in rows], exp, 'SYMBOL values')
+
     def test_to_polars_and_iter_polars_symbol_categorical(self):
         """SYMBOL egresses as a polars ``Categorical`` (codes + dict via the
         registry, no per-row remap), nulls preserved. ``iter_polars`` over a
@@ -2528,25 +2726,211 @@ class TestEgressWithDatabase(unittest.TestCase):
                     df, table_name=table_name, at='ts', symbols=['sym'])
             self.qdb_plain.retry_check_table(table_name, min_rows=n)
             sql = f'SELECT sym, v FROM {table_name} ORDER BY v'
+            # Both reads must use the Categories path. A fallback gives
+            # the same values, so only its warning shows it.
             with qi.QuestDB.from_conf(self._conf()) as client:
-                full = client.query(sql).to_polars()
+                with _polars_fallback_warnings() as caught:
+                    full = client.query(sql).to_polars()
+            self.assertEqual(caught, [])
             self.assertEqual(full.shape, (n, 2))
             self.assertIsInstance(full.schema['sym'], pl.Categorical)
             self.assertGreater(full['sym'].null_count(), 0)
-            self.assertEqual(full['v'].to_list(), list(range(n)))
-            self.assertEqual(full['sym'].cast(pl.Utf8).to_list(), exp)
+            _assert_long_list_equal(
+                self, full['v'].to_list(), list(range(n)), 'v values')
+            _assert_long_list_equal(
+                self, full['sym'].cast(pl.Utf8).to_list(), exp,
+                'SYMBOL values')
             with qi.QuestDB.from_conf(self._conf()) as client:
-                frames = list(client.query(sql).iter_polars())
+                with _polars_fallback_warnings() as caught:
+                    frames = list(client.query(sql).iter_polars())
+            self.assertEqual(caught, [])
             self.assertGreater(len(frames), 1)
             stitched = pl.concat(frames, how='vertical')
             self.assertIsInstance(stitched.schema['sym'], pl.Categorical)
-            self.assertEqual(stitched['v'].to_list(), list(range(n)))
-            self.assertEqual(stitched['sym'].cast(pl.Utf8).to_list(), exp)
+            _assert_long_list_equal(
+                self, stitched['v'].to_list(), list(range(n)), 'v values')
+            _assert_long_list_equal(
+                self, stitched['sym'].cast(pl.Utf8).to_list(), exp,
+                'SYMBOL values')
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
             except Exception:
                 pass
+
+    def test_to_polars_and_iter_polars_fallback_warns(self):
+        """If the polars ``Categories`` path fails, ``to_polars`` and
+        ``iter_polars`` build each frame with ``polars.from_arrow``. The
+        values stay correct. ``to_polars`` issues one ``RuntimeWarning``;
+        ``iter_polars`` issues one and falls back for every frame."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        from unittest import mock
+
+        def broken_random(*args, **kwargs):
+            raise RuntimeError('broken Categories')
+
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        # Only the fast path calls `Categories.random`. Do not replace
+        # `pl.Categories`: `pl.from_arrow` uses it too.
+        with mock.patch.object(pl.Categories, 'random', broken_random):
+            with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+                with _polars_fallback_warnings() as caught:
+                    full = client.query(sql).to_polars()
+            self.assertEqual(len(caught), 1)
+            self.assertIn('broken Categories', str(caught[0].message))
+            with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+                with _polars_fallback_warnings() as caught:
+                    frames = list(client.query(sql).iter_polars())
+            self.assertGreater(len(frames), 1)
+            # The iterator warns once and keeps the fallback.
+            self.assertEqual(len(caught), 1)
+        for out in (full, pl.concat(frames, how='vertical')):
+            _assert_long_list_equal(
+                self, out['v'].to_list(), list(range(n)), 'v values')
+            _assert_long_list_equal(
+                self, out['sym'].cast(pl.Utf8).to_list(), exp,
+                'SYMBOL values')
+
+    def test_iter_polars_fallback_mid_stream_frames_concat(self):
+        """If the ``Categories`` path fails after ``iter_polars`` yielded
+        frames, the remaining frames come from ``polars.from_arrow``, cast
+        to the same ``Categories``, so ``polars.concat`` still stitches.
+        One warning."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        import contextlib
+        from unittest import mock
+
+        armed = [False]
+
+        def fail_when_armed(orig):
+            # The registry casts codes to `Categorical(cats)` through
+            # `Series.cast` (`Series.cat.to` on polars >= 1.43). The
+            # fallback casts with an expression, which stays untouched.
+            def wrapper(series, dtype, *args, **kwargs):
+                if armed[0] and isinstance(dtype, pl.Categorical):
+                    raise RuntimeError('broken Categories')
+                return orig(series, dtype, *args, **kwargs)
+            return wrapper
+
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                pl.Series, 'cast', fail_when_armed(pl.Series.cast)))
+            cat_ns = type(pl.Series([], dtype=pl.UInt32).cat)
+            if hasattr(cat_ns, 'to'):
+                stack.enter_context(mock.patch.object(
+                    cat_ns, 'to', fail_when_armed(cat_ns.to)))
+            with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+                frames = client.query(sql).iter_polars()
+                first = next(frames)
+                armed[0] = True
+                with _polars_fallback_warnings() as caught:
+                    rest = list(frames)
+        self.assertGreater(len(rest), 0)
+        self.assertEqual(len(caught), 1)
+        self.assertIn('broken Categories', str(caught[0].message))
+        for frame in rest:
+            self.assertEqual(frame.schema['sym'], first.schema['sym'])
+        out = pl.concat([first] + rest, how='vertical')
+        _assert_long_list_equal(
+            self, out['v'].to_list(), list(range(n)), 'v values')
+        _assert_long_list_equal(
+            self, out['sym'].cast(pl.Utf8).to_list(), exp, 'SYMBOL values')
+
+    def test_iter_polars_fallback_survives_broken_categorical(self):
+        """The fallback casts to the registries' ``Categories`` with
+        ``pl.Categorical(cats)``. If that constructor itself breaks, the
+        fallback must still give every frame with the right values, from
+        the first batch and from the middle of the stream."""
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest('polars not installed')
+        import warnings
+        orig = pl.Categorical
+        armed = [False]
+
+        def broken_categorical(*args, **kwargs):
+            # Break only the client's own `Categories`: `pl.from_arrow`
+            # builds its Categoricals through this constructor too. (A
+            # subclass would not do: polars rejects it as a dtype, which
+            # breaks the fast path before the hook arms.)
+            cats = args[0] if args else kwargs.get('categories')
+            if (armed[0] and isinstance(cats, pl.Categories)
+                    and cats.namespace() == 'questdb_symbol'):
+                raise RuntimeError('broken Categorical')
+            return orig(*args, **kwargs)
+
+        self.addCleanup(setattr, pl, 'Categorical', orig)
+        pl.Categorical = broken_categorical
+        sql, exp = self._seed_multi_batch_symbols()
+        n = len(exp)
+        for mid_stream in (False, True):
+            with self.subTest(mid_stream=mid_stream):
+                armed[0] = not mid_stream
+                with qi.QuestDB.from_conf(
+                        self._multi_batch_conf()) as client:
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter('always')
+                        frames = client.query(sql).iter_polars()
+                        out = [next(frames)]
+                        armed[0] = True
+                        out.extend(frames)
+                # polars builds a `Categorical` through the hook when it
+                # reports dtypes: disarm before inspecting the frames.
+                armed[0] = False
+                self.assertGreater(len(out), 1)
+                # Mid-stream, the cast to the first frame's `Categories`
+                # fails too: the one warning says that `pl.concat` with
+                # the frames before fails, and the dtypes differ.
+                runtime = [str(w.message) for w in caught
+                           if issubclass(w.category, RuntimeWarning)]
+                self.assertEqual(len(runtime), 1, runtime)
+                self.assertEqual(
+                    '`polars.concat` with the frames before fails'
+                    in runtime[0], mid_stream, runtime)
+                if mid_stream:
+                    self.assertNotEqual(
+                        out[1].schema['sym'], out[0].schema['sym'])
+                _assert_long_list_equal(
+                    self, [v for f in out for v in f['v'].to_list()],
+                    list(range(n)), 'v values')
+                _assert_long_list_equal(
+                    self,
+                    [s for f in out
+                     for s in f['sym'].cast(pl.Utf8).to_list()],
+                    exp, 'SYMBOL values')
+
+        # Under `-W error` the warning raises out of `next()`. The frame it
+        # belongs to is returned by the next call, so no batch is lost.
+        armed[0] = False
+        with qi.QuestDB.from_conf(self._multi_batch_conf()) as client:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', RuntimeWarning)
+                frames = client.query(sql).iter_polars()
+                out = [next(frames)]
+                armed[0] = True
+                raised = 0
+                while True:
+                    try:
+                        out.append(next(frames))
+                    except RuntimeWarning:
+                        raised += 1
+                    except StopIteration:
+                        break
+        armed[0] = False
+        self.assertEqual(raised, 1)
+        _assert_long_list_equal(
+            self, [v for f in out for v in f['v'].to_list()],
+            list(range(n)), 'v values')
 
     def test_to_polars_multi_batch_symbol_long_varchar(self):
         """``to_polars`` over a multi-batch result keeps every value. The
@@ -2857,8 +3241,8 @@ class TestEgressWithDatabase(unittest.TestCase):
     def test_query_result_single_use(self):
         """A ``QueryResult`` is single-use: a second materialisation, or
         any materialisation after ``close()``, raises ``InvalidApiCall``.
-        Also pins the ``__arrow_c_stream__`` ``requested_schema``
-        rejection."""
+        Also checks that ``__arrow_c_stream__`` ignores
+        ``requested_schema``, so that pyarrow casts the result."""
         table_name = 't_egress_single_' + uuid.uuid4().hex[:8]
         try:
             self._make_table(table_name, 1)
@@ -2876,10 +3260,24 @@ class TestEgressWithDatabase(unittest.TestCase):
                 with self.assertRaises(qi.QuestDBError):
                     closed.to_pandas()
 
+                # The spec lets a producer ignore `requested_schema`.
+                # Ignoring it still takes the stream.
                 stream = client.query(sql)
-                with self.assertRaises(NotImplementedError):
-                    stream.__arrow_c_stream__(requested_schema=object())
+                stream.__arrow_c_stream__(requested_schema=object())
+                with self.assertRaises(qi.QuestDBError) as cm:
+                    stream.__arrow_c_stream__()
+                self.assertEqual(
+                    cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
                 stream.close()
+
+                # pyarrow passes `schema` as `requested_schema`, gets the
+                # native schema back and casts it.
+                import pyarrow as pa
+                cast = pa.table(
+                    client.query(sql),
+                    schema=pa.schema([('lg', pa.float64())]))
+                self.assertEqual(cast.schema.field('lg').type, pa.float64())
+                self.assertEqual(cast.column('lg').to_pylist(), [0.0])
         finally:
             try:
                 self._exec(f'DROP TABLE IF EXISTS {table_name}')
@@ -5166,6 +5564,300 @@ class TestEgressPool(unittest.TestCase):
                 f'pool did not retain any idle reader; '
                 f'in_use={in_use}, idle={idle}')
 
+    # ------------------------------------------------------------------
+    # QueryResult.__arrow_c_schema__: it pulls the first batch and keeps
+    # it, with the cursor, for __arrow_c_stream__.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _schema_of(result):
+        import pyarrow as pa
+        return pa.Schema._import_from_c_capsule(result.__arrow_c_schema__())
+
+    def _require_pyarrow(self):
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+
+    def test_arrow_schema_then_stream_reads_every_row(self):
+        """The schema call keeps the first batch: the stream gives every
+        row once. Later schema calls work, also after the stream was
+        taken, and the reader goes back to the pool."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT x FROM {table} ORDER BY x'
+        # 16-row batches, so that the result has 4 batches.
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            with client.query(sql) as result:
+                schema = self._schema_of(result)
+                self.assertEqual(schema.names, ['x'])
+                self.assertEqual(self._schema_of(result), schema)
+                out = pa.table(result)
+                self.assertEqual(out.schema, schema)
+                self.assertEqual(
+                    out.column('x').to_pylist(), list(range(64)))
+                self.assertEqual(self._schema_of(result), schema)
+                with self.assertRaises(qi.QuestDBError) as cm:
+                    result.__arrow_c_stream__()
+                self.assertIn(
+                    'already read by __arrow_c_stream__()',
+                    str(cm.exception))
+            # The schema stays readable after close().
+            self.assertEqual(self._schema_of(result), schema)
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_arrow_schema_blocks_other_readers(self):
+        """After the schema call, the first batch lives in the Arrow
+        producer, so the other readers raise. The stream still works.
+        ``pa.schema(result)`` is one such schema call."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with client.query(f'SELECT x FROM {table} ORDER BY x') as result:
+                self.assertEqual(pa.schema(result).names, ['x'])
+                readers = {
+                    'to_arrow': result.to_arrow,
+                    'to_pandas': result.to_pandas,
+                    'to_pandas(pyarrow)': lambda: result.to_pandas(
+                        dtype_backend='pyarrow'),
+                    'iter_arrow': lambda: next(result.iter_arrow()),
+                    'iter_pandas': result.iter_pandas,
+                    'iter_pandas(pyarrow)': lambda: next(result.iter_pandas(
+                        dtype_backend='pyarrow')),
+                }
+                for name, read in readers.items():
+                    with self.subTest(reader=name):
+                        with self.assertRaises(qi.QuestDBError) as cm:
+                            read()
+                        self.assertEqual(
+                            cm.exception.code,
+                            qi.QuestDBErrorCode.InvalidApiCall)
+                        self.assertIn(
+                            '__arrow_c_schema__() read the first batch '
+                            '(pa.schema(result)', str(cm.exception))
+                        self.assertIn('pa.table(result)', str(cm.exception))
+                self.assertEqual(pa.table(result).num_rows, 64)
+
+    def test_arrow_schema_then_close_or_cancel_releases_reader(self):
+        """``close()`` and ``cancel()`` drop the buffered first batch: a
+        later stream raises instead of giving a truncated result."""
+        self._require_pyarrow()
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT x FROM {table} ORDER BY x'
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            result = client.query(sql)
+            result.__arrow_c_schema__()
+            self.assertEqual(qi._debug_egress_pool_stats(client)[0], 1)
+            result.close()
+            # The cursor was not at its end, so the reader is dropped.
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 0))
+            # Nothing was read, so the error says "closed", not "read by".
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_stream__()
+            self.assertIn('QueryResult is closed', str(cm.exception))
+            # close() also drops the saved schema.
+            with self.assertRaises(qi.QuestDBError):
+                result.__arrow_c_schema__()
+
+            result = client.query(sql)
+            result.__arrow_c_schema__()
+            result.cancel()
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_stream__()
+            self.assertEqual(
+                cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+            # The cursor stays open until close(), so the error does not
+            # say "closed".
+            self.assertIn('QueryResult was cancelled', str(cm.exception))
+            # cancel() also drops the saved schema, so a schema read and a
+            # stream read agree.
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_schema__()
+            self.assertIn('QueryResult was cancelled', str(cm.exception))
+            result.close()
+            # cancel() drained the cursor, so close() recycles the reader.
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_drained_stream_frees_lease_before_release(self):
+        """A stream releases its connection when the consumer reads the
+        last batch, not when it releases the stream: the lease can run
+        its next query while the reader is still alive."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            with client.reader() as lease:
+                reader = pa.RecordBatchReader._import_from_c_capsule(
+                    lease.query(
+                        f'SELECT x FROM {table} ORDER BY x'
+                    ).__arrow_c_stream__())
+                self.assertEqual(reader.read_all().num_rows, 64)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [64])
+                reader.close()
+
+    def test_drained_stream_returns_reader_before_release(self):
+        """A one-shot ``query()`` returns its pooled reader when the
+        consumer reads the last batch, before the stream is released."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            result = client.query(f'SELECT x FROM {table} ORDER BY x')
+            reader = pa.RecordBatchReader._import_from_c_capsule(
+                result.__arrow_c_stream__())
+            first = reader.read_next_batch()
+            self.assertEqual(qi._debug_egress_pool_stats(client), (1, 0))
+            rest = reader.read_all()
+            self.assertEqual(first.num_rows + rest.num_rows, 64)
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+            reader.close()
+            result.close()
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_arrow_schema_keeps_lease_busy(self):
+        """``__arrow_c_schema__()`` of a SELECT holds the cursor with its
+        first batch: the lease cannot run its next query until the stream
+        is drained."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            with client.reader() as lease:
+                result = lease.query(f'SELECT x FROM {table} ORDER BY x')
+                self.assertEqual(self._schema_of(result).names, ['x'])
+                with self.assertRaises(qi.QuestDBError) as cm:
+                    lease.query(f'SELECT count() FROM {table}')
+                self.assertIn('still open', str(cm.exception))
+                self.assertEqual(pa.table(result).num_rows, 64)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [64])
+
+    def test_arrow_schema_cancel_then_gc_frees_lease(self):
+        """After ``__arrow_c_schema__()`` and ``cancel()``, dropping the
+        result without ``close()`` still frees the cursor, so the lease
+        can run its next query."""
+        self._require_pyarrow()
+        import gc
+        table = self._seed_table(n_rows=64)
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            with client.reader() as lease:
+                result = lease.query(f'SELECT x FROM {table} ORDER BY x')
+                result.__arrow_c_schema__()
+                result.cancel()
+                del result
+                gc.collect()
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [64])
+
+    def test_arrow_schema_query_error_raises_reader_error(self):
+        """A query error in the first pull raises the same exception
+        type and code as ``to_arrow()``, and releases the reader."""
+        self._require_pyarrow()
+        sql = 'SELECT * FROM t_egress_no_such_' + uuid.uuid4().hex[:8]
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with self.assertRaises(qi.QuestDBError) as ref:
+                client.query(sql).to_arrow()
+            result = client.query(sql)
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_schema__()
+            self.assertIs(type(cm.exception), type(ref.exception))
+            self.assertEqual(cm.exception.code, ref.exception.code)
+            self.assertEqual(str(cm.exception), str(ref.exception))
+            self.assertEqual(qi._debug_egress_pool_stats(client)[0], 0)
+            # Nothing was read, so a later read says "closed".
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.__arrow_c_schema__()
+            self.assertIn('QueryResult is closed', str(cm.exception))
+            with self.assertRaises(qi.QuestDBError) as cm:
+                result.to_pandas()
+            self.assertIn('QueryResult is closed', str(cm.exception))
+
+    def test_arrow_schema_of_empty_results_frees_lease(self):
+        """A non-SELECT has no batch: the schema is an empty struct. A
+        ``SELECT ... WHERE false`` has a zero-row batch with the columns.
+        A lease can run its next query without reading the stream."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        table = self._seed_table(n_rows=3)
+        with qi.QuestDB.from_conf(self._conf()) as client:
+            with client.reader() as lease:
+                result = lease.query(
+                    f'CREATE TABLE IF NOT EXISTS {table} '
+                    '(ts TIMESTAMP, x LONG) '
+                    'TIMESTAMP(ts) PARTITION BY DAY WAL')
+                self.assertEqual(len(self._schema_of(result)), 0)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [3])
+                self.assertEqual(pa.table(result).num_rows, 0)
+
+                result = lease.query(f'SELECT x FROM {table} WHERE false')
+                self.assertEqual(self._schema_of(result).names, ['x'])
+                self.assertEqual(pa.table(result).num_rows, 0)
+                after = lease.query(
+                    f'SELECT count() FROM {table}').to_arrow()
+                self.assertEqual(after.column(0).to_pylist(), [3])
+
+    def test_arrow_schema_abandoned_result_warns(self):
+        """A result with only a schema call is not read: dropping it
+        warns and releases the reader. After a full stream read, there
+        is no warning."""
+        self._require_pyarrow()
+        import pyarrow as pa
+        import warnings
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT x FROM {table} ORDER BY x'
+
+        def resource_warnings(caught):
+            return [w for w in caught
+                    if issubclass(w.category, ResourceWarning)]
+
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            result = client.query(sql)
+            result.__arrow_c_schema__()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                del result
+            self.assertEqual(len(resource_warnings(caught)), 1, caught)
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 0))
+
+            result = client.query(sql)
+            result.__arrow_c_schema__()
+            self.assertEqual(pa.table(result).num_rows, 64)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                del result
+            self.assertEqual(resource_warnings(caught), [])
+            self.assertEqual(qi._debug_egress_pool_stats(client), (0, 1))
+
+    def test_abandoned_result_closes_under_warnings_as_errors(self):
+        """Under ``-W error`` the abandonment warning raises inside
+        ``__del__``. The result closes first, so a lease reports its
+        terminal connection, not a result that is still open."""
+        import warnings
+        table = self._seed_table(n_rows=64)
+        sql = f'SELECT x FROM {table} ORDER BY x'
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=16)) as client:
+            for read_schema in (False, True):
+                with self.subTest(read_schema=read_schema), \
+                        client.reader() as lease:
+                    result = lease.query(sql)
+                    if read_schema:
+                        result.__arrow_c_schema__()
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('error', ResourceWarning)
+                        del result
+                    with self.assertRaises(qi.QuestDBError) as cm:
+                        lease.query(sql)
+                    self.assertIn('terminal', str(cm.exception))
+
 
 class TestEgressLeaks(unittest.TestCase):
     """RSS-plateau leak checks for the query/egress path.
@@ -5225,12 +5917,32 @@ class TestEgressLeaks(unittest.TestCase):
     def test_query_consumption_routes_do_not_leak(self):
         from test_dataframe_leaks import _assert_no_leak
         import pyarrow as pa
-        # 64 rows span multiple Arrow batches (see the lease tests), so
-        # the partial-drain route genuinely abandons a live cursor.
+        # `max_batch_rows=16` splits the 64 rows into 4 batches, so the
+        # partial-drain route abandons a cursor with batches still unread.
+        # With the server default (16,384 rows), 64 rows are one batch.
         table = self._seed_table(n_rows=64)
         sql = f'SELECT * FROM {table}'
-        with qi.QuestDB.from_conf(self._conf()) as client:
+        # 200 columns with long names: a leaked schema copy, schema box or
+        # buffered first batch costs tens of KB, above what the harness
+        # can see per call.
+        wide_sql = 'SELECT ' + ', '.join(
+            f'x AS {"wide_column_name_" * 3}{i}' for i in range(200)
+        ) + ' FROM long_sequence(16)'
+        bad_sql = 'SELECT * FROM t_egress_no_such_' + uuid.uuid4().hex[:8]
+        with qi.QuestDB.from_conf(
+                self._conf(max_batch_rows=16)) as client:
             def work():
+                for _ in range(4):
+                    result = client.query(wide_sql)
+                    for _ in range(25):
+                        result.__arrow_c_schema__()
+                        pa.schema(result)
+                    result.close()
+                # A failed schema read keeps the error until it raises it.
+                try:
+                    client.query(bad_sql).__arrow_c_schema__()
+                except qi.QuestDBError:
+                    pass
                 client.query(sql).to_arrow()
                 client.query(sql).to_pandas()
                 result = client.query(sql)
@@ -5241,8 +5953,55 @@ class TestEgressLeaks(unittest.TestCase):
                 next(result.iter_arrow())
                 result.close()
                 client.query(sql).close()
+                # The schema call buffers a batch and keeps a schema copy.
+                result = client.query(sql)
+                result.__arrow_c_schema__()
+                result.close()
+                result = client.query(sql)
+                result.__arrow_c_schema__()
+                result.__arrow_c_schema__()
+                pa.table(result)
 
             _assert_no_leak(self, work, warmup=40, measure=240)
+            self._assert_no_live_streams(client)
+
+    def _assert_no_live_streams(self, client):
+        # A leaked stream producer is too small for the RSS check, and it
+        # no longer pins a pooled reader: a drained stream frees its cursor.
+        import gc
+        gc.collect()
+        self.assertEqual(
+            [o for o in gc.get_objects()
+             if type(o).__name__ == '_QueryStreamProducer'], [])
+        self.assertEqual(qi._debug_egress_pool_stats(client)[0], 0)
+
+    def test_stream_error_does_not_pin_its_connection(self):
+        """A stream keeps the exception behind its error. If that
+        exception was raised, its traceback reaches the frame that holds
+        the stream: a cycle through the stream's C reference, which the GC
+        cannot collect, so the cursor and its connection stay in use."""
+        import pyarrow as pa
+        from unittest import mock
+
+        def raise_runtime_error(*args, **kwargs):
+            raise RuntimeError('injected')
+
+        # Fails on the server after 5000 rows, once the reader exists.
+        sql = ("SELECT x FROM long_sequence(10000) WHERE 1 > "
+               "CASE WHEN x > 5000 THEN 'abc' ELSE '0' END")
+
+        def read(client):
+            reader = pa.RecordBatchReader._import_from_c_capsule(
+                client.query(sql).__arrow_c_stream__())
+            # Building the server's error raises, so the stream keeps a
+            # raised exception.
+            with mock.patch.object(qi, 'QuestDBError', raise_runtime_error):
+                with self.assertRaisesRegex(OSError, 'injected'):
+                    reader.read_all()
+
+        with qi.QuestDB.from_conf(self._conf(max_batch_rows=1000)) as client:
+            read(client)
+            self._assert_no_live_streams(client)
 
 
 class TestColumnIngressNarrowTypes(unittest.TestCase):
@@ -5344,6 +6103,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self._require_qwp_ws()
         if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
             self.skipTest('old server does not support decimal')
+        if not PYARROW_READS_DECIMAL64:
+            self.skipTest('reading DECIMAL(18,2) needs pyarrow 19 or later')
         table = self._table()
         self._create_table(table, 'x LONG, amt DECIMAL(18,2)')
         ts = pa.array(
@@ -5415,6 +6176,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
         self._require_qwp_ws()
         if self.qdb_plain.version < FIRST_DECIMAL_RELEASE:
             self.skipTest('old server does not support decimal')
+        if not PYARROW_READS_DECIMAL64:
+            self.skipTest('reading DECIMAL(18,3) needs pyarrow 19 or later')
         table = self._table()
         self._create_table(table, 'x LONG, amt DECIMAL(18,3)')
         df = pd.DataFrame({
@@ -6216,6 +6979,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     def test_arrow_symbols_false_forces_dict_columns_to_varchar(self):
         import pyarrow as pa
         self._require_qwp_ws()
+        if not PANDAS_HAS_ARROW_STREAM:
+            self.skipTest('the pandas Arrow path needs pandas 2.2 or later')
         table = self._table()
         dict_type = pa.dictionary(pa.int32(), pa.string())
         df = pd.DataFrame({
@@ -6238,6 +7003,8 @@ class TestColumnIngressNarrowTypes(unittest.TestCase):
     def test_arrow_partial_symbol_list_demotes_unlisted_dict_to_varchar(self):
         import pyarrow as pa
         self._require_qwp_ws()
+        if not PANDAS_HAS_ARROW_STREAM:
+            self.skipTest('the pandas Arrow path needs pandas 2.2 or later')
         table = self._table()
         dict_type = pa.dictionary(pa.int32(), pa.string())
         df = pd.DataFrame({
@@ -6743,6 +7510,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         store-and-forward spool."""
         if pyarrow is None:
             self.skipTest('pyarrow not installed')
+        if not PANDAS_HAS_ARROW_STREAM:
+            self.skipTest('the pandas Arrow path needs pandas 2.2 or later')
 
         table = self._table('t_sf_conf_df_arrow_')
         sender_id = 'py-df-arrow-' + uuid.uuid4().hex[:8]
@@ -6843,7 +7612,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         with qi.QuestDB.from_conf(conf) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=2000)
-        self.assertEqual(self._read_back_v(table), list(range(2000)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(2000)), 'v values')
 
     def test_dead_then_live_endpoint_arrow_route(self):
         """Same, via the Arrow capsule (pyarrow-backed) route."""
@@ -6859,7 +7629,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         with qi.QuestDB.from_conf(conf) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=2000)
-        self.assertEqual(self._read_back_v(table), list(range(2000)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(2000)), 'v values')
 
     def test_polars_dataframe_round_trip(self):
         """``pl.DataFrame`` (the Arrow capsule route) lands every row;
@@ -6881,7 +7652,8 @@ class TestColumnIngressFailover(unittest.TestCase):
         with qi.QuestDB.from_conf(self._conf()) as client:
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=1500)
-        self.assertEqual(self._read_back_v(table), list(range(1500)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(1500)), 'v values')
 
     def test_mid_stream_bounce_resends_whole_df_numpy(self):
         """Bounce the server mid-call: the transient ``FailoverRetry``
@@ -6902,7 +7674,8 @@ class TestColumnIngressFailover(unittest.TestCase):
             self.qdb_plain.start()
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=20000)
-        self.assertEqual(self._read_back_v(table), list(range(20000)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(20000)), 'v values')
 
     def test_mid_stream_bounce_resends_whole_df_arrow(self):
         """Same bounce, Arrow capsule route."""
@@ -6916,7 +7689,8 @@ class TestColumnIngressFailover(unittest.TestCase):
             self.qdb_plain.start()
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=20000)
-        self.assertEqual(self._read_back_v(table), list(range(20000)))
+        _assert_long_list_equal(
+            self, self._read_back_v(table), list(range(20000)), 'v values')
 
     def test_bounce_without_dedup_is_at_least_once(self):
         """Mid-stream bounce on a table WITHOUT dedup keys: the whole-df
@@ -6939,8 +7713,9 @@ class TestColumnIngressFailover(unittest.TestCase):
             client.dataframe(df, table_name=table, at='ts')
         self.qdb_plain.retry_check_table(table, min_rows=20000)
         rows = self._read_back_v(table)
-        self.assertEqual(
-            sorted(set(rows)), list(range(20000)), 'no row may be lost')
+        _assert_long_list_equal(
+            self, sorted(set(rows)), list(range(20000)),
+            'distinct v values (no row may be lost)')
         self.assertLessEqual(
             len(rows), 2 * 20000, 'duplication must stay bounded')
 
@@ -7035,9 +7810,12 @@ class TestEgressFailover(unittest.TestCase):
             pass
 
     def _seed(self, n_rows):
-        """A multi-batch result: enough rows that QuestDB streams more
-        than one record batch, so a mid-stream bounce lands after the
-        first batch is delivered."""
+        """Create a table with ``n_rows`` rows (``v`` = 0..n_rows-1).
+
+        The result is multi-batch only when ``n_rows`` is larger than one
+        server batch (16,384 rows by default). The bounce tests pass
+        200,000 rows, so that a mid-stream bounce lands after the first
+        batch is delivered. The 2,048-row callers get one batch."""
         table = 't_egress_fo_' + uuid.uuid4().hex[:8]
         self.addCleanup(lambda: self._drop_quietly(table))
         self._exec(
@@ -7071,7 +7849,8 @@ class TestEgressFailover(unittest.TestCase):
             self.qdb_plain.stop()
             self.qdb_plain.start()
             table_out = result.to_arrow()
-        self.assertEqual(table_out.column('v').to_pylist(), expected)
+        _assert_long_list_equal(
+            self, table_out.column('v').to_pylist(), expected, 'v values')
 
     def test_to_pandas_numpy_transparent_across_bounce(self):
         """Default ``to_pandas`` (the numpy accumulator we own) is
@@ -7085,7 +7864,7 @@ class TestEgressFailover(unittest.TestCase):
             self.qdb_plain.stop()
             self.qdb_plain.start()
             df = result.to_pandas()
-        self.assertEqual(df['v'].tolist(), expected)
+        _assert_long_list_equal(self, df['v'].tolist(), expected, 'v values')
 
     def test_to_polars_transparent_across_bounce(self):
         try:
@@ -7101,7 +7880,7 @@ class TestEgressFailover(unittest.TestCase):
             self.qdb_plain.stop()
             self.qdb_plain.start()
             df = result.to_polars()
-        self.assertEqual(df['v'].to_list(), expected)
+        _assert_long_list_equal(self, df['v'].to_list(), expected, 'v values')
 
     def test_to_polars_dead_then_live_endpoint(self):
         """Polars materialisation uses the same reader failover walk as
@@ -7121,7 +7900,8 @@ class TestEgressFailover(unittest.TestCase):
                            target='primary',
                            failover_max_duration_ms='60000')) as client:
             df = client.query(f'SELECT v FROM {table} ORDER BY ts').to_polars()
-        self.assertEqual(df['v'].to_list(), list(range(n)))
+        _assert_long_list_equal(
+            self, df['v'].to_list(), list(range(n)), 'v values')
 
     def test_polars_dataframe_dead_then_live_endpoint(self):
         """The pyarrow-free Polars capsule path also borrows through the
@@ -7142,7 +7922,8 @@ class TestEgressFailover(unittest.TestCase):
                            failover_max_duration_ms='60000')) as client:
             with client.query(f'SELECT v FROM {table} ORDER BY ts') as result:
                 df = pl.DataFrame(result)
-        self.assertEqual(df['v'].to_list(), list(range(n)))
+        _assert_long_list_equal(
+            self, df['v'].to_list(), list(range(n)), 'v values')
 
     def test_iter_arrow_surfaces_failover_would_duplicate(self):
         """Streaming ``iter_arrow`` installs no reset: a mid-stream
@@ -7170,6 +7951,101 @@ class TestEgressFailover(unittest.TestCase):
             self.assertEqual(
                 cm.exception.code,
                 qi.QuestDBErrorCode.FailoverWouldDuplicate)
+
+    def test_arrow_stream_failover_error_names_failover_would_duplicate(
+            self):
+        """A ``__arrow_c_stream__`` consumer raises its own exception
+        type, not ``QuestDBError``. A failover after the first batch must
+        still end the stream with an error whose message contains
+        ``[FailoverWouldDuplicate]``."""
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        n = 100000000
+        with qi.QuestDB.from_conf(
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
+            with client.query(
+                    f'SELECT x - 1 AS v FROM long_sequence({n})') as result:
+                # `from_stream` exists since pyarrow 15.
+                if hasattr(pa.RecordBatchReader, 'from_stream'):
+                    reader = pa.RecordBatchReader.from_stream(result)
+                else:
+                    reader = pa.RecordBatchReader._import_from_c_capsule(
+                        result.__arrow_c_stream__())
+                first = reader.read_next_batch()
+                self.assertGreater(first.num_rows, 0)
+                self.qdb_plain.stop()
+                self.qdb_plain.start()
+                with self.assertRaisesRegex(
+                        Exception, r'\[FailoverWouldDuplicate\]'):
+                    for _ in reader:
+                        pass
+                # Release the stream, so that the client can close.
+                reader.close()
+                del reader
+
+    def test_arrow_schema_then_failover_names_failover_would_duplicate(
+            self):
+        """``__arrow_c_schema__`` buffers the first batch, and the stream
+        delivers it. A failover after that batch still ends the stream
+        with ``[FailoverWouldDuplicate]``, not with duplicate rows."""
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        n = 100000000
+        with qi.QuestDB.from_conf(
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
+            with client.query(
+                    f'SELECT x - 1 AS v FROM long_sequence({n})') as result:
+                schema = pa.Schema._import_from_c_capsule(
+                    result.__arrow_c_schema__())
+                self.assertEqual(schema.names, ['v'])
+                reader = pa.RecordBatchReader._import_from_c_capsule(
+                    result.__arrow_c_stream__())
+                first = reader.read_next_batch()
+                self.assertGreater(first.num_rows, 0)
+                self.assertEqual(first.column(0)[0].as_py(), 0)
+                self.qdb_plain.stop()
+                self.qdb_plain.start()
+                with self.assertRaisesRegex(
+                        Exception, r'\[FailoverWouldDuplicate\]'):
+                    for _ in reader:
+                        pass
+                # Release the stream, so that the client can close.
+                reader.close()
+                del reader
+
+    def test_pa_table_failover_keeps_error_and_releases_lock(self):
+        """``pa.table(result)`` drops its reader while the stream error is
+        pending, so the stream is released during the unwind. The user
+        must still get the ``[FailoverWouldDuplicate]`` error, and the
+        release must not leave the cursor lock held for other threads."""
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        import threading
+        n = 100000000
+        with qi.QuestDB.from_conf(
+                self._conf(failover_max_duration_ms='60000',
+                           max_batch_rows='1024')) as client:
+            result = client.query(f'SELECT x - 1 AS v FROM long_sequence({n})')
+            # The schema call buffers batch 0, so the failover is hit
+            # after the stream delivered it.
+            pa.schema(result)
+            self.qdb_plain.stop()
+            self.qdb_plain.start()
+            with self.assertRaisesRegex(
+                    Exception, r'\[FailoverWouldDuplicate\]'):
+                pa.table(result)
+            closer = threading.Thread(target=result.close, daemon=True)
+            closer.start()
+            closer.join(10)
+            self.assertFalse(closer.is_alive(), 'close() blocked on the lock')
 
     def test_iter_pandas_surfaces_failover_would_duplicate(self):
         """Same contract for the numpy streaming ``iter_pandas``."""
