@@ -56,7 +56,14 @@ import qwp_wire
 
 import questdb._client as qi
 
+from test_client_row_egress import TestTimeoutArgument
+
 if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
+    from test_client_row_egress import (
+        TestRowEgressLive,
+        TestQueryTimeoutLive,
+        TestQueryTimeoutWithoutCapability,
+        TestUuidByteOrder)
     from system_test import (
         TestWithDatabase,
         TestEgressWithDatabase,
@@ -112,6 +119,7 @@ from test_client_capsule_path import (
     TestSchemaOverrides,
     TestPyArrowRecordBatchDirect,
     TestSchemaOverridesPandas,
+    TestPolarsWithoutPyarrow,
     TestBenchFlushArrowBatch,
     TestCapsulePathPolarsMissing,
     TestWriterMixingInOneChunk,
@@ -139,6 +147,7 @@ from test_ci_wiring import (
 )
 from test_dataframe_leaks import (
     TestCategoricalArrowLeak,
+    TestFixedSizeBinaryClaimLeak,
     TestPyobjColumnarLeak,
     TestBinaryBufferRelease,
     TestCapsuleOverridesLeak,
@@ -2343,7 +2352,19 @@ class TestQwpWebSocketApi(unittest.TestCase):
             qi.Protocol.Http,
             '127.0.0.1',
             9000,
-            auth_timeout=datetime.timedelta(microseconds=500))
+            request_timeout=datetime.timedelta(microseconds=500))
+        sender.close(False)
+
+    def test_sub_microsecond_pandas_timedelta_is_not_truncated_to_zero(self):
+        try:
+            import pandas as pd
+        except ImportError:
+            self.skipTest('needs pandas')
+        sender = qi.Sender(
+            qi.Protocol.Http,
+            '127.0.0.1',
+            9000,
+            request_timeout=pd.Timedelta(500, 'ns'))
         sender.close(False)
 
     def test_from_conf_preserves_escaped_semicolon_in_c_only_qwpws_key(self):
@@ -7264,13 +7285,17 @@ print('OK')
             '`TestEgressWithDatabase.'
             'test_reentering_the_client_from_a_types_mapper` drives it '
             'in system_test.py against a real server.'),
+        'QueryResult.__arrow_c_schema__': 'as QueryResult.__arrow_c_stream__',
         'QueryResult.__enter__': 'as QueryResult.__arrow_c_stream__',
         'QueryResult.__exit__': 'as QueryResult.__arrow_c_stream__',
         'QueryResult.cancel': 'as QueryResult.__arrow_c_stream__',
         'QueryResult.close': 'as QueryResult.__arrow_c_stream__',
+        'QueryResult.columns': 'as QueryResult.__arrow_c_stream__',
+        'QueryResult.exec_done': 'as QueryResult.__arrow_c_stream__',
         'QueryResult.iter_arrow': 'as QueryResult.__arrow_c_stream__',
         'QueryResult.iter_pandas': 'as QueryResult.__arrow_c_stream__',
         'QueryResult.iter_polars': 'as QueryResult.__arrow_c_stream__',
+        'QueryResult.iter_rows': 'as QueryResult.__arrow_c_stream__',
         'QueryResult.to_arrow': 'as QueryResult.__arrow_c_stream__',
         'QueryResult.to_pandas': 'as QueryResult.__arrow_c_stream__',
         'QueryResult.to_polars': 'as QueryResult.__arrow_c_stream__',
@@ -7538,8 +7563,8 @@ print('OK')
 
     def test_every_integration_test_that_writes_a_qwp_only_type_is_gated(self):
         """A test that puts UUID, IPV4, BINARY, CHAR, DATE, LONG256 or
-        GEOHASH on the wire needs QuestDB 10, and five of the
-        integration legs run the 9.4.3 QWP beta.
+        GEOHASH on the wire needs QuestDB 10, and the legacy-server
+        integration leg runs the 9.4.3 QWP beta.
 
         The gate is class membership, so what this holds is the other
         half: a test that writes one of these types from a class with
@@ -7624,7 +7649,7 @@ print('OK')
             ungated, [],
             'these integration tests can put a QWP-only column type on '
             'the wire from a class that does not require QuestDB 10, so '
-            'they run against the 9.4.3 QWP beta on five legs. Move each '
+            'they run against the 9.4.3 QWP beta on the legacy leg. Move each '
             f'into one of {sorted(gated_names)}, or add it to '
             'QWP_ROW_TYPE_EXEMPT with the reason it writes no such '
             'type:\n  ' + '\n  '.join(ungated))
@@ -13431,6 +13456,14 @@ class TestQueryResultFinalizer(unittest.TestCase):
         finally:
             sys.unraisablehook = original_hook
         self.assertEqual(unraisable, [])
+
+
+class TestQueryResultCopy(unittest.TestCase):
+    def test_copy_is_refused(self):
+        import copy
+        result = qi.QueryResult(qi._CursorHandle())
+        with self.assertRaisesRegex(TypeError, 'cannot be copied'):
+            copy.copy(result)
 
 
 class TestQueryResultReuseErrors(unittest.TestCase):

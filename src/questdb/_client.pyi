@@ -27,6 +27,7 @@ __all__ = [
     "ConnectionEvent",
     "ConnectionEventKind",
     "DateMillis",
+    "ExecDone",
     "Geohash",
     "Long256",
     "PooledReader",
@@ -59,7 +60,7 @@ from enum import Enum
 from dataclasses import dataclass
 from ipaddress import IPv4Address
 from typing import (
-    Any, Callable, Dict, Iterator, List, Optional, SupportsIndex, Tuple,
+    Any, Callable, Dict, Iterator, List, NamedTuple, Optional, SupportsIndex, Tuple,
     Union)
 from uuid import UUID
 
@@ -1256,8 +1257,9 @@ class PooledReader:
     :meth:`QuestDB.reader`; it holds one pooled reader connection for
     its lifetime and runs queries on it sequentially via :meth:`query`.
     ``close()`` (or leaving the ``with`` block) releases the
-    connection: back to the pool if the last query was drained cleanly,
-    dropped otherwise.
+    connection: back to the pool if the last query reached its terminal
+    on a live connection (a clean drain, a successful ``cancel()``, or a
+    server-side error), dropped otherwise.
 
     Queries are strictly sequential. Closing an undrained result
     terminates the lease; call ``cancel()`` before ``close()`` to
@@ -1273,6 +1275,7 @@ class PooledReader:
         binds: Optional[Union[list, tuple]] = None,
         *,
         reset_symbol_dict: bool = True,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
     ) -> QueryResult:
         """
         Execute a SQL query on the lease's connection and return a
@@ -1288,11 +1291,14 @@ class PooledReader:
         self,
         sql: str,
         binds: Optional[Union[list, tuple]] = None,
-    ) -> None:
+        *,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
+    ) -> Optional[ExecDone]:
         """
         Run a statement on the lease's connection and discard whatever
-        it returns. Mirrors :meth:`QuestDB.execute`; the lease stays
-        usable for the next call.
+        it returns. Mirrors :meth:`QuestDB.execute`, including the
+        :class:`ExecDone` ``(op_type, rows_affected)`` return value; the
+        lease stays usable for the next call.
         """
 
     def close(self) -> None:
@@ -1511,6 +1517,7 @@ class QuestDB:
         binds: Optional[Union[list, tuple]] = None,
         *,
         reset_symbol_dict: bool = True,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
     ) -> QueryResult:
         """
         Execute a SQL query and return a :class:`QueryResult`.
@@ -1522,13 +1529,33 @@ class QuestDB:
         ``to_pandas()``. Set ``False`` to keep the dictionary warm across
         repeated identical queries. No-op against servers that predate the
         capability.
+
+        ``timeout`` runs this query under its own budget instead of the
+        server-wide ``query.timeout``, overriding the connect string's
+        ``query_timeout_ms``. An ``int`` is milliseconds; a
+        ``datetime.timedelta`` works too, with a positive value below one
+        millisecond rounded *up* to 1 ms. ``None`` (the default) keeps the
+        connect string's ``query_timeout_ms``; ``0`` clears it, so the query
+        runs under the server-wide ``query.timeout``.
+
+        Requires a server advertising ``CAP_QUERY_TIMEOUT``: against an older
+        one a non-zero timeout is refused before anything is sent, with
+        ``QuestDBErrorCode.UnsupportedServer``, rather than silently running
+        under the server default; the connection is untouched. On expiry the
+        error carries ``QuestDBErrorCode.QueryTimeout`` and the connection
+        stays usable — but do not retry a write on it, because a statement
+        that outlives its timeout is reported as done instead, and a DDL /
+        INSERT / UPDATE that timed out waiting for the table writer may still
+        be applied.
         """
 
     def execute(
         self,
         sql: str,
         binds: Optional[Union[list, tuple]] = None,
-    ) -> None:
+        *,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
+    ) -> Optional[ExecDone]:
         """
         Run a statement and discard whatever it returns.
 
@@ -1536,8 +1563,13 @@ class QuestDB:
         clean end and returns the pooled connection. Statement output
         (a ``COPY`` status row, admin-function rows, a stray
         ``SELECT``) is discarded; use :meth:`query` when you want the
-        result. Returns ``None``: the protocol carries no
-        rows-affected count.
+        result. ``timeout`` behaves as on :meth:`query`.
+
+        Returns the statement's ``EXEC_DONE`` report as an
+        :class:`ExecDone` named tuple ``(op_type, rows_affected)``, or
+        ``None`` for a statement that streamed a result set instead. See
+        :attr:`QueryResult.exec_done` for the caveats on
+        ``rows_affected``.
         """
 
     def reader(self) -> PooledReader:
@@ -1687,6 +1719,18 @@ class QuestDB:
         """
 
 
+class ExecDone(NamedTuple):
+    """A non-SELECT statement's terminal ``EXEC_DONE`` report, as returned
+    by :meth:`QuestDB.execute` / :meth:`PooledReader.execute` and carried on
+    :attr:`QueryResult.exec_done`. ``rows_affected`` is the number of rows
+    an ``INSERT`` or ``UPDATE`` touched, and ``0`` for a statement that
+    carries no count (one executed at parse time). ``op_type`` is the server's
+    QWP operation-type byte, carried through as an opaque ``int``."""
+
+    op_type: int
+    rows_affected: int
+
+
 class QueryResult:
     """
     Result of :meth:`QuestDB.query`. Single-use: each materialisation
@@ -1809,10 +1853,37 @@ class QueryResult:
         A ``GEOHASH`` column gets the signed integer type
         :meth:`to_pandas` gives it."""
 
+    def columns(self) -> List[Tuple[str, str]]:
+        """Column names and QuestDB DDL type names, as
+        ``[(name, type_name), ...]``. Does not consume the rows —
+        :meth:`iter_rows` continues from the same stream — but rules out the
+        other materialisation methods. Empty for a non-SELECT. A ``DECIMAL``
+        is reported at its storage width's precision (18, 38 or 76), because
+        the wire carries only the scale, and an array column as ``DOUBLE[]``
+        / ``LONG[]`` whatever its dimensionality. A result with unread rows
+        is not at its terminal: call :meth:`cancel` before :meth:`close` to
+        keep its connection."""
+
+    def iter_rows(self) -> Iterator[Tuple[Any, ...]]:
+        """Iterate the result as tuples of Python objects, one batch at a
+        time, with ``None`` for SQL NULL. Needs neither pyarrow nor pandas.
+        Every call returns the same iterator; after :meth:`cancel` no
+        further rows are yielded, after :meth:`close` it raises. A fresh
+        call raises once the stream ended with an error or its iterator was
+        closed."""
+
+    @property
+    def exec_done(self) -> Optional[ExecDone]:
+        """A non-SELECT's terminal ``EXEC_DONE`` as an :class:`ExecDone`
+        ``(op_type, rows_affected)`` once the result has been drained, else
+        ``None``. ``rows_affected`` is ``0`` for a statement that carries no
+        count. Still available after :meth:`close`."""
+
     def cancel(self) -> None:
         """Cancel the query and drain to terminal. The result remains
         open until :meth:`close` or context exit. On failure, it is
-        closed. Idempotent after success."""
+        closed. Idempotent after success. A result not yet read cannot be
+        read afterwards: every read method raises."""
 
     def close(self) -> None:
         """Release the cursor and reader. Terminal connections return
@@ -1849,7 +1920,7 @@ class Sender:
         token: Optional[str] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,
+        auth_timeout: Union[int, timedelta] = 15000,
         tls_verify: bool = True,
         tls_ca: Optional[TlsCa] = None,
         tls_roots=None,
@@ -1883,7 +1954,7 @@ class Sender:
         token: Optional[str] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,
+        auth_timeout: Union[int, timedelta] = 15000,
         tls_verify: bool = True,
         tls_ca: Optional[TlsCa] = None,
         tls_roots=None,
@@ -1927,7 +1998,7 @@ class Sender:
         token: Optional[str] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,
+        auth_timeout: Union[int, timedelta] = 15000,
         tls_verify: bool = True,
         tls_ca: Optional[TlsCa] = None,
         tls_roots=None,
