@@ -537,15 +537,18 @@ Their defaults reflect the different protocols:
   its estimated encoded size reaches 90% of the current frame limit. Before a
   server limit is known, it uses the lower of 8 MiB and 90% of the local queue
   limit. Explicit byte thresholds above that 90% limit are clamped. The
-  estimate is a batching heuristic; the exact encoded size is checked when
-  publishing, particularly for symbol dictionaries.
+  estimate counts each symbol value at its largest encoded size, so it is
+  not below the size of the encoded frame, unless store-and-forward has
+  fallen back to sending full symbol dictionaries. The exact encoded size is
+  still checked when publishing.
 
 Over QWP/WebSocket the frame limit is the smallest of ``max_buf_size``, the
 server's advertised limit and the store-and-forward segment payload capacity.
 Every auto-flushed frame fits it. A buffer whose estimate reaches the full
-limit is published even with ``auto_flush_bytes=off``, and when the whole
-buffer does not fit in one frame, the rows buffered before the newest one go
-out as a frame of their own and the newest row starts the next batch.
+limit is published even with ``auto_flush_bytes=off``, and when its estimate
+is past the limit or the whole buffer does not fit in one frame, the rows
+buffered before the newest one go out as a frame of their own and the newest
+row starts the next batch.
 
 Auto-flushing is triggered when:
 
@@ -574,9 +577,11 @@ auto-publishing propagate from ``PooledSender.row()``.
 On both QWP/WebSocket senders, ``BatchTooLarge`` from ``row()`` means the row
 was not added. Either it does not fit in a frame on its own, or the rows
 buffered before it do not fit even without it, which can happen when the frame
-limit shrinks on reconnect; those rows are then discarded, and the error says
-how many. Any other auto-publish error leaves every row buffered on a pooled
-sender, and clears the buffer on a standalone one, as its ``flush()`` does.
+limit shrinks, for example on reconnect or when a lazily connected sender
+first learns the server's limit; those rows are then discarded, and the error
+says how many. Any other auto-publish error leaves every row buffered on a
+pooled sender, and clears the buffer on a standalone one, as its ``flush()``
+does.
 
 If every explicit
 ``flush_and_get_fsn()`` must return the receipt for one complete application

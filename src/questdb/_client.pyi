@@ -595,7 +595,11 @@ class Buffer:
         """
         The current number of bytes currently in the buffer.
 
-        Equivalent (but cheaper) to ``len(bytes(buffer))``.
+        For ILP buffers this is exact, and equivalent (but cheaper) to
+        ``len(bytes(buffer))``. For QWP buffers it is an estimate of the
+        encoded size. Over QWP/WebSocket it is never below the size of the
+        frame a flush encodes, unless store-and-forward has fallen back to
+        sending full symbol dictionaries.
         """
 
     def  __bytes__(self) -> bytes:
@@ -1172,12 +1176,14 @@ class PooledSender:
         auto-flush threshold is breached, or the buffer's size estimate
         reaches the connection's frame cap, this publishes without waiting
         for an acknowledgement. Every published frame fits the frame cap:
-        when the whole buffer does not, the rows buffered before this one go
-        out on their own and this row starts the next batch.
+        when the whole buffer does not, or its size estimate is past the
+        cap, the rows buffered before this one go out on their own and this
+        row starts the next batch.
 
         ``BatchTooLarge`` from this method means the row was not added:
         either it does not fit in a frame on its own, or the rows buffered
-        before it do not fit even without it, and those rows are discarded.
+        before it do not fit even without it, as after the frame cap
+        shrinks, and those rows are discarded.
         Any other publish error propagates and leaves every row buffered.
 
         See :func:`Buffer.row` for supported column types, protocol
@@ -2005,7 +2011,13 @@ class Sender:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(bytes(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(sender))`` over ILP.
+
+        For QWP/UDP senders this returns an estimated size hint, not the
+        exact serialized byte count. For QWP/WebSocket senders it is an
+        estimate that is never below the size of the frame a flush
+        encodes, unless store-and-forward has fallen back to sending full
+        symbol dictionaries.
         """
 
     def __bytes__(self) -> bytes:
@@ -2052,13 +2064,14 @@ class Sender:
 
         Over ``ws`` and ``wss``, auto-flush also publishes a buffer whose
         size estimate reaches the connection's frame cap, and every published
-        frame fits that cap: when the whole buffer does not, the rows buffered
-        before this one go out on their own and this row starts the next
-        batch. ``BatchTooLarge`` from this method means the row was not
-        added: either it does not fit in a frame on its own, or the rows
-        buffered before it do not fit even without it, and those rows are
-        discarded. Any other publish error clears the internal buffer, as
-        :func:`Sender.flush` does.
+        frame fits that cap: when the whole buffer does not, or its size
+        estimate is past the cap, the rows buffered before this one go out
+        on their own and this row starts the next batch. ``BatchTooLarge``
+        from this method means the row was not added: either it does not
+        fit in a frame on its own, or the rows buffered before it do not
+        fit even without it, as after the frame cap shrinks, and those rows
+        are discarded. Any other publish error clears the internal buffer,
+        as :func:`Sender.flush` does.
         """
 
     def dataframe(

@@ -59,6 +59,27 @@ def read_varint(payload, pos):
 QWP_FLAG_DELTA_SYMBOL_DICT = 0x08
 
 
+def _read_symbol_dict_delta(payload):
+    """``(delta_start, entries, end)`` of a QWP1 frame's delta symbol
+    dictionary, with ``end`` the position just past it, or
+    ``(0, [], 12)`` when the header's flag announces none."""
+    if len(payload) < 12 or payload[:4] != b'QWP1':
+        raise AssertionError('not a QWP1 frame')
+    pos = 12
+    if not payload[5] & QWP_FLAG_DELTA_SYMBOL_DICT:
+        return 0, [], pos
+    delta_start, pos = read_varint(payload, pos)
+    delta_count, pos = read_varint(payload, pos)
+    entries = []
+    for _ in range(delta_count):
+        entry_len, pos = read_varint(payload, pos)
+        if pos + entry_len > len(payload):
+            raise AssertionError('truncated QWP symbol dictionary')
+        entries.append(bytes(payload[pos:pos + entry_len]))
+        pos += entry_len
+    return delta_start, entries, pos
+
+
 def _first_table_start(payload):
     """Position of the first table block, past the frame header and, when
     the header's flag announces one, the delta symbol dictionary."""
@@ -66,17 +87,33 @@ def _first_table_start(payload):
         raise AssertionError('not a QWP1 frame')
     if int.from_bytes(payload[6:8], 'little') < 1:
         raise AssertionError('QWP1 frame contains no table')
-    pos = 12
-    if not payload[5] & QWP_FLAG_DELTA_SYMBOL_DICT:
-        return pos
-    _delta_start, pos = read_varint(payload, pos)
-    delta_count, pos = read_varint(payload, pos)
-    for _ in range(delta_count):
-        entry_len, pos = read_varint(payload, pos)
-        pos += entry_len
-        if pos > len(payload):
-            raise AssertionError('truncated QWP symbol dictionary')
-    return pos
+    return _read_symbol_dict_delta(payload)[2]
+
+
+def extend_symbol_dict(dictionary, payload):
+    """Add a QWP1 frame's delta symbol dictionary to `dictionary`, the
+    connection's symbol values in id order.
+
+    A frame refers to ids that earlier frames on the same connection
+    introduced, so call this on every frame of the connection in order,
+    before decoding the frame's tables. An entry for an id already in
+    `dictionary`, as a reconnect's catch-up frame re-sends, must match it.
+    """
+    delta_start, entries, _ = _read_symbol_dict_delta(payload)
+    for offset, entry in enumerate(entries):
+        symbol_id = delta_start + offset
+        value = entry.decode('utf-8')
+        if symbol_id < len(dictionary):
+            if dictionary[symbol_id] != value:
+                raise AssertionError(
+                    f'QWP symbol id {symbol_id} re-sent as {value!r}, '
+                    f'was {dictionary[symbol_id]!r}')
+        elif symbol_id == len(dictionary):
+            dictionary.append(value)
+        else:
+            raise AssertionError(
+                f'QWP symbol id {symbol_id} skips the ids from '
+                f'{len(dictionary)}')
 
 
 def first_table_row_count(payload):
@@ -106,12 +143,14 @@ def only_table_column_data(payload):
     return payload[_first_table_schema(payload)[1]:]
 
 
-def table_values(payload):
+def table_values(payload, symbol_dict=None):
     """Every table block of a QWP1 frame, in frame order, as
     ``(table name, {column name: [values]})``.
 
-    Decodes only LONG and VARCHAR columns without a null bitmap, which is
-    what the row-splitting tests send.
+    Decodes only LONG, VARCHAR and SYMBOL columns without a null bitmap,
+    which is what the row-splitting tests send. SYMBOL values resolve
+    through `symbol_dict`, the connection's dictionary as
+    `extend_symbol_dict` builds it.
     """
     pos = _first_table_start(payload)
     tables = []
@@ -151,6 +190,19 @@ def table_values(payload):
                     data[offsets[i]:offsets[i + 1]].decode('utf-8')
                     for i in range(row_count)]
                 pos += offsets[-1]
+            elif tag == 0x09:
+                if symbol_dict is None:
+                    raise AssertionError(
+                        f'column {name!r} is a SYMBOL column; pass the '
+                        'connection symbol dictionary')
+                values = []
+                for _ in range(row_count):
+                    symbol_id, pos = read_varint(payload, pos)
+                    if symbol_id >= len(symbol_dict):
+                        raise AssertionError(
+                            f'QWP symbol id {symbol_id} is not in the '
+                            'connection symbol dictionary')
+                    values.append(symbol_dict[symbol_id])
             else:
                 raise AssertionError(
                     f'column {name!r} of type {type_name(tag)} is not decoded')

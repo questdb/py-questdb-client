@@ -378,13 +378,19 @@ Fixed
   failed: the standalone sender discarded it, and a pooled lease kept it
   but could never publish it. Now both senders auto-flush at 90% of the
   frame limit, and publish as soon as the size estimate reaches the full
-  limit, even with ``auto_flush_bytes=off``. When the whole buffer still
-  does not fit in one frame, the rows buffered before the newest one go out
-  as a frame of their own and the newest row starts the next batch.
-  ``BatchTooLarge`` from ``row()`` now always means the row was not added:
-  it does not fit in a frame on its own, or the rows before it no longer fit
-  after the frame limit shrank on reconnect, in which case those rows are
-  discarded and the error says how many.
+  limit, even with ``auto_flush_bytes=off``. When the estimate is past the
+  limit or the whole buffer does not fit in one frame, the rows buffered
+  before the newest one go out as a frame of their own and the newest row
+  starts the next batch. The estimate counts each symbol value at its
+  largest encoded size, so it is not below the size of the encoded frame
+  unless store-and-forward has fallen back to sending full symbol
+  dictionaries. ``len()`` of a QWP/WebSocket ``Buffer`` or standalone
+  ``Sender`` with symbol columns therefore reads higher than before, and
+  frames that the byte trigger publishes carry fewer rows.
+  ``BatchTooLarge`` from ``row()`` now always means the row was
+  not added: it does not fit in a frame on its own, or the rows before it
+  no longer fit, for example after the frame limit shrank on reconnect, in
+  which case those rows are discarded and the error says how many.
 
 - **Python ``True`` in an object-dtype DataFrame column was written as
   ``False``** by ``QuestDB.dataframe()``, ``PooledSender.dataframe()`` and

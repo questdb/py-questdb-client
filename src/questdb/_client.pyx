@@ -1518,10 +1518,14 @@ cdef class Buffer:
 
     def __len__(self) -> int:
         """
-        The current number of bytes currently in the buffer.
+        The current number of bytes currently in the buffer, read mid-row
+        on the same terms as :func:`Buffer.__bytes__`.
 
-        Equivalent (but cheaper) to ``len(bytes(buffer))``, and read
-        mid-row on the same terms -- see :func:`Buffer.__bytes__`.
+        For ILP buffers this is exact, and equivalent (but cheaper) to
+        ``len(bytes(buffer))``. For QWP buffers it is an estimate of the
+        encoded size. Over QWP/WebSocket it is never below the size of the
+        frame a flush encodes, unless store-and-forward has fallen back to
+        sending full symbol dictionaries.
         """
         self._check_impl()
         return line_sender_buffer_size(self._impl)
@@ -2807,8 +2811,8 @@ cdef bint _qwp_row_should_auto_flush(
     Whether a QWP/WebSocket row buffer is due for auto-flush.
 
     Besides the configured row, byte and interval triggers, a buffer whose
-    size estimate reaches the full frame cap is always due: it cannot go out
-    as one frame, and publishing now lets the rows before the newest one go
+    size estimate reaches the full frame cap is always due: it may not fit
+    in one frame, and publishing now lets the rows before the newest one go
     out on their own. `auto_flush_bytes=off` therefore turns off only the
     configured byte trigger.
     """
@@ -11540,10 +11544,13 @@ cdef class Sender:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(bytes(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(sender))`` over ILP.
 
         For QWP/UDP senders this returns an estimated size hint, not the
-        exact serialized byte count.
+        exact serialized byte count. For QWP/WebSocket senders it is an
+        estimate that is never below the size of the frame a flush
+        encodes, unless store-and-forward has fallen back to sending full
+        symbol dictionaries.
         """
         if self._buffer is None:
             return 0
@@ -12473,9 +12480,9 @@ cdef void_int _qwp_row_split(
                 + ('row was' if discarded == 1 else 'rows were')
                 + ' discarded and the row was not added: the buffered rows '
                 'do not fit in one QWP/WebSocket frame even without it. '
-                'This happens when the frame cap shrinks on reconnect, or '
-                'when the size estimate behind the auto-flush threshold is '
-                'too low. ' + str(exc)) from exc
+                'This can happen when the frame cap shrinks, for example '
+                'on reconnect or when a lazily connected sender first '
+                "learns the server's cap. " + str(exc)) from exc
         if pooled is not None:
             # A pooled lease keeps its rows when a publish fails, so the
             # new row goes back in with them.
@@ -12506,14 +12513,15 @@ cdef void_int _qwp_row_append(
     every published frame within the connection's frame cap.
 
     The whole buffer goes out as one frame when it fits. When it does not,
-    the rows buffered before the new one go out on their own and the new
-    row starts the next batch, so a single call publishes at most two
-    frames.
+    or its size estimate is already past the cap, the rows buffered before
+    the new one go out on their own and the new row starts the next batch,
+    so a single call publishes at most two frames.
 
     A `BatchTooLarge` from here always means the new row is not in the
     buffer: either it does not fit in a frame on its own, or the rows
-    before it do not fit even without it, and those rows are discarded.
-    Other publish failures leave the buffer as the sender's `flush()` does.
+    before it do not fit even without it, as after the frame cap shrinks,
+    and those rows are discarded. Other publish failures leave the buffer
+    as the sender's `flush()` does.
     """
     cdef size_t hard_cap = 0
     cdef size_t row_count
@@ -12523,8 +12531,13 @@ cdef void_int _qwp_row_append(
         if not _qwp_row_due(sender, pooled, buf, &hard_cap):
             return 0
         row_count = line_sender_buffer_row_count(buf._impl)
-        # An estimate already past the cap rules the whole buffer out, so
-        # the encode that would only confirm it is skipped.
+        # Past the cap, the estimate cannot tell whether the whole buffer
+        # fits. The rows before the newest one fit unless the cap shrank or
+        # a failed pooled publish kept them: they were under the threshold
+        # when the previous row was checked, and the estimate does not
+        # undercount a frame (see `line_sender_buffer_size`). So they go
+        # out on their own, without first encoding the whole buffer to
+        # find out.
         split = (row_count > 1 and
                  line_sender_buffer_size(buf._impl) > hard_cap)
         if not split:

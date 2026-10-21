@@ -1286,6 +1286,102 @@ class TestQwpWebSocketApi(unittest.TestCase):
                         [(seq, value) for t, seq, value in rows
                          if t == table])
 
+    # The 500-value column comes first, so the other columns' values get
+    # connection-wide ids past 127, which take more bytes on the wire than
+    # their ids in the buffer's own per-column dictionaries.
+    _QWP_SPLIT_SYMBOL_COLUMNS = ('ticker', 'exchange', 'side', 'ccy', 'venue')
+
+    @staticmethod
+    def _qwp_row_split_symbols(seq):
+        return {
+            'ticker': f'T{(seq * 7919) % 500:03d}',
+            'exchange': ('NYSE', 'NASDAQ', 'ARCA', 'BATS')[seq % 4],
+            'side': ('buy', 'sell')[(seq // 3) % 2],
+            'ccy': ('USD', 'EUR', 'GBP')[(seq // 5) % 3],
+            'venue': f'V{(seq // 7) % 8}'}
+
+    def _qwp_row_split_symbol_rows_arrive(self, kind, conf, warm):
+        """Write rows of five symbols and a `seq` through `row()` at a
+        16 KiB cap, and check that each row arrives once, in order, with
+        its symbols. With `warm`, the connection first sends that many
+        distinct symbols in another table, in explicitly flushed batches
+        well under the byte threshold, so every later symbol id takes
+        three bytes on the wire."""
+        cap = 16 * 1024
+        rows = 6000
+        with QwpAckServer(
+                max_batch_size=cap, record_payloads=True) as server:
+            sender, client = self._qwp_row_split_sender(kind, server, conf)
+            try:
+                for start in range(0, warm, 400):
+                    for i in range(start, min(warm, start + 400)):
+                        sender.row(
+                            'warm', symbols={'k': f'w{i:05d}'},
+                            at=qi.ServerTimestamp)
+                    self._qwp_row_split_publish_rest(kind, sender)
+                for seq in range(rows):
+                    try:
+                        sender.row(
+                            'trades',
+                            symbols=self._qwp_row_split_symbols(seq),
+                            columns={'seq': seq},
+                            at=qi.ServerTimestamp)
+                    except qi.QuestDBError as exc:
+                        self.fail(f'row {seq} raised {exc.code.name}: {exc}')
+                self._qwp_row_split_publish_rest(kind, sender)
+            finally:
+                self._qwp_row_split_close(sender, client)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        symbol_dict = []
+        received = []
+        trade_frames = 0
+        for frame in stats['binary_payloads']:
+            if frame[:4] != b'QWP1':
+                continue
+            qwp_wire.extend_symbol_dict(symbol_dict, frame)
+            if int.from_bytes(frame[6:8], 'little') == 0:
+                continue
+            for table, columns in qwp_wire.table_values(frame, symbol_dict):
+                if table != 'trades':
+                    continue
+                trade_frames += 1
+                received.extend(zip(
+                    columns['seq'],
+                    *(columns[name]
+                      for name in self._QWP_SPLIT_SYMBOL_COLUMNS)))
+        # Each row takes at least 13 bytes on the wire, an 8-byte `seq` and a
+        # byte per symbol, and every frame is within the cap.
+        self.assertGreaterEqual(trade_frames, -(-rows * 13 // cap))
+        self.assertEqual(
+            received,
+            [(seq, *(self._qwp_row_split_symbols(seq)[name]
+                     for name in self._QWP_SPLIT_SYMBOL_COLUMNS))
+             for seq in range(rows)])
+
+    def test_qwp_row_split_symbol_rows_arrive_with_bytes_off(self):
+        # Published when the estimate reaches the cap, so an estimate below
+        # the encoded size by more than one row would leave the rows before
+        # the newest one over the cap.
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                self._qwp_row_split_symbol_rows_arrive(
+                    kind,
+                    'auto_flush_rows=100000;auto_flush_bytes=off;'
+                    'auto_flush_interval=off;',
+                    0)
+
+    def test_qwp_row_split_symbol_rows_arrive_after_many_symbols(self):
+        # Published at 90% of the cap. The connection has already used
+        # more than 16,384 symbol ids, so each of these rows' symbols takes
+        # three bytes on the wire.
+        for kind in ('standalone', 'pooled'):
+            with self.subTest(kind=kind):
+                self._qwp_row_split_symbol_rows_arrive(
+                    kind,
+                    'auto_flush_rows=100000;auto_flush_interval=off;',
+                    16500)
+
     def test_qwp_row_split_new_row_too_large_after_buffered_rows(self):
         cap = 4096
         for kind in ('standalone', 'pooled'):
