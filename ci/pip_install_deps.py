@@ -164,9 +164,10 @@ def check_versions(pins):
 def main(args):
     has_pandas_version = (
         args.pandas_version is not None and args.pandas_version != '')
-    if args.min_versions and has_pandas_version:
-        arg_parser.error('--min-versions and --pandas-version exclude '
-                         'each other')
+    if args.min_versions and (
+            has_pandas_version or args.pyarrow_version or args.polars_version):
+        arg_parser.error('--min-versions excludes --pandas-version, '
+                         '--pyarrow-version and --polars-version')
     ensure_timezone()
     pip_install('pip')
     pip_install('setuptools')

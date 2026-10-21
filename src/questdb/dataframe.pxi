@@ -2384,7 +2384,7 @@ cdef void_int _refuse_unlabelled_fsb_pandas_columns(
                 or arrowtype.byte_width not in (16, 32)
                 or (arrowtype.byte_width == 16
                     and ext_name == _ARROW_EXT_UUID)
-                or str(name).encode('utf-8') in labelled):
+                or _arrow_export_name(name).encode('utf-8') in labelled):
             continue
         raise QuestDBError(
             QuestDBErrorCode.BadDataFrame,
@@ -4012,17 +4012,17 @@ cdef void_int _dataframe_serialize_cell_column_ts__datetime_pyobj(
             _days_from_civil(
                 PyDateTime_GET_YEAR(dt),
                 PyDateTime_GET_MONTH(dt),
-                PyDateTime_GET_DAY(dt)) * 86_400_000_000
-            + <int64_t>PyDateTime_DATE_GET_HOUR(dt) * 3_600_000_000
+                PyDateTime_GET_DAY(dt)) * <int64_t>86_400_000_000
+            + <int64_t>PyDateTime_DATE_GET_HOUR(dt) * <int64_t>3_600_000_000
             + <int64_t>PyDateTime_DATE_GET_MINUTE(dt) * 60_000_000
             + <int64_t>PyDateTime_DATE_GET_SECOND(dt) * 1_000_000
             + <int64_t>PyDateTime_DATE_GET_MICROSECOND(dt))
     else:
         delta = dt - _EPOCH_AWARE_UTC
-        micros = <int64_t>(
-            delta.days * 86_400_000_000
-            + delta.seconds * 1_000_000
-            + delta.microseconds)
+        micros = (
+            <int64_t>delta.days * <int64_t>86_400_000_000
+            + <int64_t>delta.seconds * 1_000_000
+            + <int64_t>delta.microseconds)
     if not line_sender_buffer_column_ts_micros(ls_buf, col.name, micros, &err):
         raise c_err_to_py(err)
     return 0
