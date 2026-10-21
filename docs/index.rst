@@ -14,6 +14,8 @@ Contents
    installation
    sender
    conf
+   auth
+   token_providers
    examples
    migration
    api

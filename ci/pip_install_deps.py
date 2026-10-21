@@ -194,6 +194,34 @@ def main(args):
             # which would hide a missing wheel.
             pip_install('duckdb')
 
+    # Optional OIDC extra. Without it `_qr_ascii` / `_qr_data_uri` return None,
+    # so every `qr=True` path in the renderers -- and every test that exercises
+    # one -- silently does nothing. Installing it here is what makes that
+    # coverage real rather than notional.
+    #
+    # Pillow matters for the same reason: bare `qrcode` gives the terminal
+    # renderer's ASCII art, but `_qr_data_uri` needs Pillow to encode a PNG, so
+    # the JUPYTER renderer's QR path stays notional without it.
+    #
+    # Two calls, deliberately. `qrcode[pil]` is ONE pip resolution: on a target
+    # with no Pillow wheel it fails as a unit, so `try_pip_install` swallowed it
+    # and `qrcode` itself was never installed -- losing BOTH QR tests, not the
+    # one the old comment claimed. Worse, a Pillow source build that fails any
+    # other way does not match `pip_install`'s "unsupported" patterns, so it
+    # calls `sys.exit()` and hard-fails the whole dependency step. Installing
+    # them separately degrades the way the comment always said it did: no
+    # Pillow costs the Jupyter QR test only.
+    try_pip_install('qrcode')
+    try_pip_install('pillow')
+    # The PG-wire OIDC adapters (`questdb.auth.sqlalchemy_engine` /
+    # `psycopg_connect`). Without a real SQLAlchemy and driver their tests can
+    # only inject stand-in modules, which never runs SQLAlchemy's actual
+    # `do_connect` contract or libpq's handshake; `AdapterRealDriverTest`
+    # skips itself when either is missing. `psycopg[binary]` bundles libpq, so
+    # a platform without a binary wheel (PyPy, 32-bit) fails the install as a
+    # unit and is skipped rather than left with a driver that cannot import.
+    try_pip_install('sqlalchemy>=2')
+    try_pip_install('psycopg[binary]')
     # The greenlet scoped-call test skips without it.
     try_pip_install('gevent')
     # `TestManifest` reads `examples.manifest.yaml` and skips without it.

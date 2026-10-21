@@ -29,6 +29,7 @@ __all__ = [
     "DateMillis",
     "Geohash",
     "Long256",
+    "OidcDeviceAuth",
     "PooledReader",
     "PooledSender",
     "Protocol",
@@ -54,18 +55,96 @@ __all__ = [
     "WARN_HIGH_RECONNECTS",
 ]
 
+import os
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
 from ipaddress import IPv4Address
 from typing import (
-    Any, Callable, Dict, Iterator, List, Optional, SupportsIndex, Tuple,
-    Union)
+    Any, Callable, Dict, Iterator, List, Literal, Optional,
+    SupportsIndex, Tuple, Union)
 from uuid import UUID
 
 import numpy as np
 import pandas as pd
 from decimal import Decimal
+
+from .auth._config import OidcConfig
+from .auth._render import Renderer
+from .auth._store import FileTokenStore
+from .auth._token_provider import TokenSource
+
+
+class OidcDeviceAuth:
+    """Native-backed OAuth 2.0 device-flow token provider."""
+
+    def __init__(
+        self,
+        client_id: str,
+        *,
+        device_authorization_endpoint: str,
+        token_endpoint: str,
+        scope: str = "openid",
+        groups_in_token: bool = False,
+        audience: Optional[str] = None,
+        issuer: Optional[str] = None,
+        insecure: bool = False,
+        ca_bundle: Optional[Union[str, bytes, os.PathLike]] = None,
+        open_browser: Optional[bool] = None,
+        interactive: Optional[bool] = None,
+        qr: bool = False,
+        renderer: Optional[Renderer] = None,
+        default_interval: int = 5,
+        timeout: float = 30,
+        token_store: Optional[FileTokenStore] = None,
+    ) -> None: ...
+
+    @classmethod
+    def from_questdb(
+        cls,
+        url: str,
+        *,
+        client_id: Optional[str] = None,
+        scope: Optional[str] = None,
+        audience: Optional[str] = None,
+        groups_in_token: Optional[bool] = None,
+        issuer: Optional[str] = None,
+        token_endpoint: Optional[str] = None,
+        device_authorization_endpoint: Optional[str] = None,
+        insecure: bool = False,
+        ca_bundle: Optional[Union[str, bytes, os.PathLike]] = None,
+        open_browser: Optional[bool] = None,
+        interactive: Optional[bool] = None,
+        qr: bool = False,
+        renderer: Optional[Renderer] = None,
+        default_interval: int = 5,
+        timeout: float = 30,
+        token_store: Optional[FileTokenStore] = None,
+    ) -> OidcDeviceAuth: ...
+
+    def sign_in(self) -> None:
+        """Run the interactive device flow when sign-in is required."""
+
+    def cancel_sign_in(self) -> None:
+        """Cancel the current sign-in attempt without closing the provider."""
+
+    def token(self) -> str:
+        """Return a cached or silently refreshed token; never prompt."""
+
+    def headers(self) -> Dict[str, str]: ...
+
+    def clear(self) -> None: ...
+
+    def close(self) -> None:
+        """Close the provider and cancel device-poll or token-store lock waits."""
+
+    def __enter__(self) -> OidcDeviceAuth: ...
+
+    def __exit__(self, exc_type: object, exc_value: object,
+                 traceback: object) -> Literal[False]: ...
+
+    @property
+    def config(self) -> OidcConfig: ...
 
 class QuestDBErrorCode(Enum):
     """Category of Error."""
@@ -159,6 +238,137 @@ class UnsupportedDataFrameShapeError(QuestDBError):
     column_failures: tuple
 
 
+class ExpiringToken:
+    """A token and when it expires: the result of one token-source fetch."""
+
+    token: str
+    expires_at: float
+    refresh_at: Optional[float]
+
+    def __init__(
+        self,
+        token: str,
+        expires_at: Union[datetime, float],
+        refresh_at: Optional[Union[datetime, float]] = None,
+    ) -> None: ...
+
+    @classmethod
+    def expires_in(
+        cls,
+        token: str,
+        lifetime: Union[float, timedelta],
+        refresh_at: Optional[Union[datetime, float]] = None,
+    ) -> "ExpiringToken":
+        """A token that expires ``lifetime`` from now."""
+
+
+class TokenUnavailableError(QuestDBError):
+    """A token source or provider could not supply a token."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        retry_after: Optional[Union[float, timedelta]] = None,
+        code: Optional[QuestDBErrorCode] = None,
+    ) -> None: ...
+
+    @property
+    def retryable(self) -> bool:
+        """Whether retrying can succeed."""
+
+    @property
+    def retry_after(self) -> Optional[float]:
+        """The suggested wait before retrying, in seconds, or ``None``."""
+
+
+class FetchFailure:
+    """A failed fetch of a :class:`RefreshingTokenProvider`."""
+
+    retryable: bool
+    retry_after: Optional[float]
+    message: str
+    at: Optional[datetime]
+
+    def __init__(
+        self,
+        retryable: bool,
+        retry_after: Optional[float],
+        message: str,
+        at: Optional[datetime],
+    ) -> None: ...
+
+
+class TokenProviderStatus:
+    """A snapshot of a :class:`RefreshingTokenProvider`."""
+
+    closed: bool
+    token_expires_at: Optional[datetime]
+    last_success_at: Optional[datetime]
+    consecutive_failures: int
+    last_failure: Optional[FetchFailure]
+
+    def __init__(
+        self,
+        closed: bool,
+        token_expires_at: Optional[datetime],
+        last_success_at: Optional[datetime],
+        consecutive_failures: int,
+        last_failure: Optional[FetchFailure],
+    ) -> None: ...
+
+
+class RefreshingTokenProvider:
+    """A proactively refreshing token cache in front of a token source."""
+
+    def __init__(
+        self,
+        source: Union[TokenSource, Callable[[], Any]],
+        *,
+        name: Optional[str] = None,
+        refresh_margin: Optional[Union[float, timedelta]] = None,
+        min_refresh_interval: Optional[Union[float, timedelta]] = None,
+        handout_floor: Optional[Union[float, timedelta]] = None,
+        cold_wait: Optional[Union[float, timedelta]] = None,
+        backoff_initial: Optional[Union[float, timedelta]] = None,
+        backoff_max: Optional[Union[float, timedelta]] = None,
+        retry_after_max: Optional[Union[float, timedelta]] = None,
+        forced_min_interval: Optional[Union[float, timedelta]] = None,
+        forced_wait: Optional[Union[float, timedelta]] = None,
+    ) -> None: ...
+
+    def token(self) -> str:
+        """A usable token, waiting up to ``cold_wait`` for one."""
+
+    def headers(self) -> Dict[str, str]:
+        """``{"Authorization": "Bearer <token>"}``."""
+
+    def on_rejected(self, token: str, http_status: int = 401) -> None:
+        """A server rejected ``token`` with ``http_status``."""
+
+    def await_ready(self, timeout: Union[float, timedelta] = 30.0) -> bool:
+        """Wait for a usable token."""
+
+    def close(
+        self, *, wait: bool = False, timeout: Union[float, timedelta] = 30.0,
+    ) -> None:
+        """Stop refreshing; optionally drain the active source, or raise TimeoutError."""
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def closed(self) -> bool: ...
+
+    @property
+    def status(self) -> TokenProviderStatus: ...
+
+    def __enter__(self) -> "RefreshingTokenProvider": ...
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool: ...
+
+
 class ConnectionEventKind(Enum):
     """Connection-state transitions observed by the ingress pool."""
 
@@ -169,6 +379,7 @@ class ConnectionEventKind(Enum):
     EndpointAttemptFailed = ...
     AllEndpointsUnreachable = ...
     AuthFailed = ...
+    CredentialUnavailable = ...
 
     @property
     def tag(self) -> str: ...
@@ -1209,7 +1420,14 @@ class PooledSender:
         """Wait for everything published through this lease to receive an
         OK ack; returns immediately if the lease published nothing. Only a
         terminal connection failure raises; server rejections go to the
-        pool's ``error_handler``."""
+        pool's ``error_handler``.
+
+        ``timeout_millis`` is a no-progress timeout (``0`` waits
+        indefinitely); when it expires this raises ``QuestDBError`` with
+        ``code`` set to ``QuestDBErrorCode.FailoverRetry`` and the rows stay
+        queued. While the lease cannot reconnect because an attached OIDC
+        provider needs a new sign-in, that error is
+        :class:`~questdb.auth.OidcInteractionRequired`."""
 
     def flush_and_get_fsn(self) -> Optional[int]:
         """Publish and clear buffered rows, returning the published
@@ -1227,7 +1445,11 @@ class PooledSender:
 
     def await_acked_fsn(self, fsn: int, timeout_millis: int = 0) -> bool:
         """Wait until the ack watermark reaches ``fsn``; ``False`` on
-        no-progress timeout. Only a terminal connection failure raises."""
+        no-progress timeout. Terminal connection failures raise. An OIDC
+        persistence callback can also receive retryable
+        :class:`~questdb.auth.OidcInteractionRequired` when reconnecting depends
+        on its return. The publication stays queued: return from the callback
+        and retry the ACK wait, not the publication."""
 
     def flush_and_keep_and_get_fsn(self) -> Optional[int]:
         """Publish without clearing the buffer; returns the frame's FSN."""
@@ -1315,6 +1537,8 @@ class QuestDB:
     def from_conf(
         conf_str: str,
         *,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
+        bearer_token_provider: Optional[Any] = None,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
         error_handler: Optional[Callable[[SenderError], None]] = None,
@@ -1668,6 +1892,20 @@ class QuestDB:
         without waiting when a concurrent ``close()`` is already
         running -- possibly before that close finishes. The handle
         only moves toward closed, never back to open.
+
+        A persistence-warning handler for this handle's OIDC provider may
+        not close it: called from the handler, ``close()`` raises
+        ``QuestDBError(InvalidApiCall)`` instead of waiting for the worker
+        delivering the warning or for its leases. A close on any other
+        thread first waits for such a handler to return, and gives up
+        with the same error after two seconds without starting to close
+        -- which is how a close that the handler delegated to another
+        thread, and waits for, is released. Called from any other OIDC
+        callback -- a renderer callback, or a persistence-warning handler
+        of another provider -- each wait above is limited to two seconds,
+        after which it raises the same error and leaves the handle
+        closing: a lease or call on another thread may be blocked on a
+        token the provider cannot supply until the callback returns.
         """
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -1847,6 +2085,8 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
+        bearer_token_provider: Optional[Any] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,
@@ -1881,6 +2121,8 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
+        bearer_token_provider: Optional[Any] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,
@@ -1925,6 +2167,8 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
+        bearer_token_provider: Optional[Any] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: int = 15000,

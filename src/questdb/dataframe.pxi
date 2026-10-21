@@ -4477,6 +4477,14 @@ cdef void_int _dataframe_handle_auto_flush(
     if flush_ok:
         af.last_flush_ms[0] = line_sender_now_micros() // 1000
     else:
+        # Cleared for every failure, including a retryable OIDC provider
+        # failure. `af.last_flush_ms` is not bumped on a failure, so
+        # `should_auto_flush` stays true on a retained buffer and every
+        # subsequent row or frame re-attempts the flush; the buffer then grows
+        # one row per raise, with the caller unable to see how much is held,
+        # until it breaches `max_buf_size` -- at which point the error becomes
+        # InvalidApiCall and the whole accumulation is discarded behind a
+        # message that says nothing about authentication.
         # To avoid flush reattempt on Sender.__exit__.
         line_sender_buffer_clear(ls_buf)
 
@@ -4539,6 +4547,10 @@ cdef void_int _dataframe(
     cdef bint was_serializing_cell = False
     cdef bint was_auto_flush = False
     cdef bint plan_has_content
+    cdef bint defer_signals = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
+    global _OIDC_MAIN_DATAFRAME_DEPTH
+    if defer_signals:
+        _OIDC_MAIN_DATAFRAME_DEPTH += 1
 
     # Refused, not counted, when a row or another frame is already
     # part-way through this buffer: the plan below clears the marker
@@ -4679,6 +4691,8 @@ cdef void_int _dataframe(
                 raise c_err_to_py(err)
             raise
     except Exception as e:
+        # OidcError is a QuestDBError subclass, so it takes the ``else: raise``
+        # branch and propagates un-wrapped -- no OIDC special-case needed.
         if not isinstance(e, QuestDBError):
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
@@ -4687,6 +4701,8 @@ cdef void_int _dataframe(
             raise
     finally:
         _ensure_has_gil(&gs)  # Note: We need the GIL for cleanup.
+        if defer_signals:
+            _OIDC_MAIN_DATAFRAME_DEPTH -= 1
         plan_has_content = (plan.col_count != 0) and (plan.row_count != 0)
         if plan_has_content:
             line_sender_buffer_clear_marker(ls_buf)

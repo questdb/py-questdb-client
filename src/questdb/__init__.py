@@ -12,6 +12,7 @@ from questdb._client import (
     DateMillis,
     Geohash,
     Long256,
+    OidcDeviceAuth as _OidcDeviceAuth,
     PooledReader,
     PooledSender,
     Protocol,
@@ -86,6 +87,8 @@ def connect(
         host: _Optional[str] = None,
         port: _Union[int, str, None] = None,
         tls: _Optional[bool] = None,
+        oidc_auth: _Optional[_OidcDeviceAuth] = None,
+        bearer_token_provider=None,
         connection_listener: _Optional[
             _Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
@@ -118,6 +121,20 @@ def connect(
     :meth:`Sender.from_conf`. One configuration addresses the whole
     deployment; list every cluster node in a single ``addr`` server
     list.
+
+    ``oidc_auth`` accepts :class:`questdb.auth.OidcDeviceAuth`. Call
+    ``oidc_auth.sign_in()`` before ``connect``; pooled connections and
+    reconnects only load or silently refresh tokens and never prompt.
+    Use ``wss::``: over plain ``ws::`` to a non-loopback host the token is
+    sent in cleartext.
+
+    ``bearer_token_provider`` attaches a rotating Bearer-token provider that
+    every pooled connection shares: a
+    :class:`questdb.auth.RefreshingTokenProvider` around a token source of
+    your own (Azure Identity, an OAuth2 flow, ...), a callable returning a
+    token, or an object with ``token()`` and an optional ``on_rejected()``.
+    It is mutually exclusive with ``oidc_auth`` and with ``username``,
+    ``password`` and ``token``. See :ref:`refreshing_token_provider`.
 
     By default ``connect()`` opens the warm minimums up front and fails
     fast when the server is unreachable or rejects the credentials. Set
@@ -203,11 +220,30 @@ def connect(
     try:
         return QuestDB.from_conf(
             conf_str,
+            oidc_auth=oidc_auth,
+            bearer_token_provider=bearer_token_provider,
             connection_listener=connection_listener,
             connection_event_inbox_capacity=connection_event_inbox_capacity,
             error_handler=error_handler,
             error_event_inbox_capacity=error_event_inbox_capacity)
     except QuestDBError as e:
+        # Preserve structured OIDC failures even if untrusted IdP text happens
+        # to resemble the native config parser's duplicate-key diagnostic.
+        #
+        # An OidcError cannot exist unless `questdb.auth._errors` is already
+        # imported, so resolve the class from `sys.modules` rather than
+        # importing it here. This runs while a failure is already being
+        # reported, and an import that raises -- during interpreter
+        # finalization, through a blocked or poisoned `sys.modules` entry, or
+        # via a shadowed stdlib name on the `questdb.auth` import chain --
+        # would replace the connect error the caller actually needs. It also
+        # keeps `questdb.auth`, and the `unicodedata` / `re` / `ipaddress` /
+        # `urllib.parse` behind it, out of every failed connect.
+        _errs = _sys.modules.get('questdb.auth._errors')
+        if _errs is not None:
+            _oidc_error_cls = getattr(_errs, 'OidcError', None)
+            if _oidc_error_cls is not None and isinstance(e, _oidc_error_cls):
+                raise
         # The native parser reports a keyword/string conflict as a
         # duplicate key at a position in the merged string the caller
         # never wrote; rephrase it like Sender.from_conf does.
