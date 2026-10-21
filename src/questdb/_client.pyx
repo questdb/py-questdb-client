@@ -165,7 +165,7 @@ DEFAULT_MAX_CHUNK_ROWS = 16384
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
 # .bumpversion.cfg.
-VERSION = '5.0.0'
+VERSION = '6.0.0'
 
 WARN_HIGH_RECONNECTS = True
 

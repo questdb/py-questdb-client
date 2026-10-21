@@ -4,8 +4,26 @@
 Changelog
 =========
 
-6.0.0 (unreleased)
+6.0.0 (2026-10-21)
 ------------------
+
+Highlights
+~~~~~~~~~~
+
+- Query results as Python rows, without pyarrow or pandas:
+  :meth:`QueryResult.iter_rows <questdb.QueryResult.iter_rows>` yields a
+  tuple per row, and :meth:`QueryResult.columns <questdb.QueryResult.columns>`
+  gives the column names and QuestDB types.
+- Per-query timeouts through the ``query_timeout_ms`` configuration key, for
+  servers that support them.
+- :meth:`QuestDB.execute <questdb.QuestDB.execute>` returns the statement's
+  ``EXEC_DONE`` report, including ``rows_affected``.
+- ``row()`` on QWP senders writes UUID, IPV4, BINARY, CHAR, DATE, LONG256 and
+  GEOHASH columns.
+- UUID raw bytes use RFC 4122 byte order, the bytes of ``uuid.UUID.bytes``,
+  everywhere they cross the API. This is a breaking change; see below.
+- ``duckdb.from_arrow(result)`` works on duckdb 1.5.
+- Requires QuestDB server version 10 or later.
 
 Breaking changes
 ~~~~~~~~~~~~~~~~
@@ -1105,6 +1123,11 @@ Faster
   before ``uuid.UUID`` and IPV4. A ``Geohash`` cell is about 33% cheaper and
   an ``IPv4Address`` cell about 15%, and the common ``int`` / ``float`` /
   ``str`` path no longer has that code laid out around it.
+
+Build & dependencies
+~~~~~~~~~~~~~~~~~~~~
+
+- The bundled ``c-questdb-client`` native library is upgraded to 7.2.0.
 
 5.0.0 (2026-07-27)
 ------------------
