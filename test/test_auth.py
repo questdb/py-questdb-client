@@ -7225,6 +7225,18 @@ except ImportError:
     _pa = None
 
 
+def _arrow_stream_reader(source):
+    """``pa.RecordBatchReader.from_stream(source)``, which pyarrow 15 added.
+
+    The oldest supported pyarrow (14.0.1) imports the same Arrow C stream
+    through ``_import_from_c_capsule``, as ``system_test.py`` does.
+    """
+    if hasattr(_pa.RecordBatchReader, 'from_stream'):
+        return _pa.RecordBatchReader.from_stream(source)
+    return _pa.RecordBatchReader._import_from_c_capsule(
+        source.__arrow_c_stream__())
+
+
 class _RolePolicyServer(QwpAckServer):
     """QWP/WS server answering each upgrade per ``policy(index, t)``:
     ``'503'``, ``'401'``, ``'421'`` (with ``X-QuestDB-Role: REPLICA``),
@@ -7304,7 +7316,8 @@ class OidcPoolDataframeFailoverTest(unittest.TestCase):
     def _run(self, policy, server_out=None, wait_for_event_on_error=None,
              *, durable_ack=False, conf_suffix='', **connect_kwargs):
         frame = _CountingArrowArray(
-            _pa.record_batch({'v': _pa.array([1, 2, 3], _pa.int64())}))
+            _pa.record_batch([_pa.array([1, 2, 3], _pa.int64())],
+                             names=['v']))
         with OidcTestServer() as idp:
             auth = make_discovered_auth(idp)
             auth.sign_in()
@@ -7497,7 +7510,7 @@ class OidcReaderMidStreamErrorTest(unittest.TestCase):
             self.skipTest('pyarrow required to consume Arrow C streams')
 
         def consume(result, auth, qdb):
-            reader = pa.RecordBatchReader.from_stream(result)
+            reader = _arrow_stream_reader(result)
             try:
                 self.assertEqual(
                     reader.read_next_batch().column(0).to_pylist(),
@@ -7710,8 +7723,7 @@ class OidcDiagnosticReentryTest(_IsolatedReentry, unittest.TestCase):
                     values = [value for frame in iterator
                               for value in frame['v'].tolist()]
                 elif consumer == 'stream':
-                    import pyarrow as pa
-                    reader = pa.RecordBatchReader.from_stream(result)
+                    reader = _arrow_stream_reader(result)
                     try:
                         values = reader.read_all().column(0).to_pylist()
                     finally:
@@ -8961,7 +8973,7 @@ class OidcDiagnosticSignalTest(_IsolatedReentry, unittest.TestCase):
                     with self.assertRaisesRegex(
                             (pa.ArrowException, OSError),
                             'deadline during Arrow stream pull'):
-                        reader = pa.RecordBatchReader.from_stream(result)
+                        reader = _arrow_stream_reader(result)
                         reader.read_all()
                     self.assertTrue(sabotaged.is_set())
                     self.assertEqual(calls, [signal.SIGALRM])
