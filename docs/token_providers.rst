@@ -88,7 +88,8 @@ established reconnects in the background and keeps retrying either kind, so
 store-and-forward data is never abandoned because a token could not be
 fetched for a while. A failure surfaces as a
 :class:`~questdb.auth.TokenUnavailableError`, which is a
-:class:`~questdb.QuestDBError`.
+:class:`~questdb.QuestDBError`. A source cannot stop those reconnects: to
+end them, close the provider (see `Closing`_).
 
 Inspect the provider with :attr:`~questdb.auth.RefreshingTokenProvider.status`:
 the token's expiry, the last successful fetch, and the last failure. Nothing
@@ -125,12 +126,46 @@ If you already cache tokens, pass ``bearer_token_provider=`` a function that
 returns the current token, or an object with a ``token()`` method and an
 optional ``on_rejected(token, http_status)`` (see
 :class:`~questdb.auth.BearerTokenProvider`). It runs on every connection
-attempt, possibly on a native thread, so it must be quick.
+attempt of a QWP/WebSocket sender, query or pool, possibly on a native
+thread, and on every flush of an ILP/HTTP sender, on the flushing thread, so
+it must be quick.
 
 When a server answers HTTP 401, the client calls ``on_rejected`` with the
 rejected token, asks for a token again, and retries the same endpoint once if
 the token changed -- unless the server's ``WWW-Authenticate`` challenge names
-an error other than ``invalid_token``, which a new token cannot fix.
+an error other than ``invalid_token``, which a new token cannot fix. A
+:class:`~questdb.auth.RefreshingTokenProvider` that your provider calls --
+``bearer_token_provider=lambda: tokens.token()`` -- refreshes early on such a
+401 too, as it does when attached directly.
+
+A provider reports failures as a source does: raise
+:class:`~questdb.auth.TokenUnavailableError` to classify one; any other
+exception counts as retryable. Clients keep retrying either kind in the
+background. When retrying can never succeed -- the provider is misconfigured
+beyond repair, or your application has retired it -- raise
+:class:`~questdb.QuestDBError` with ``code`` ``QuestDBErrorCode.InvalidApiCall``
+instead, as a Rust provider returns ``InvalidApiCall``:
+
+.. code-block:: python
+
+    import questdb
+
+    class VaultTokens:
+        def token(self):
+            if self.revoked:
+                raise questdb.QuestDBError(
+                    questdb.QuestDBErrorCode.InvalidApiCall,
+                    'the vault revoked this service credential')
+            return self.cached_token
+
+A QWP/WebSocket sender, query or pool that gets it stops reconnecting and
+fails with ``QuestDBErrorCode.ConfigError``, which a connection listener sees
+as a :attr:`ConnectionEventKind.CredentialUnavailable
+<questdb.ConnectionEventKind.CredentialUnavailable>` event; an ILP/HTTP flush
+fails with it at once. Queued store-and-forward rows are not deleted, and a
+disk-backed slot stays drainable by a later process. Raised from the source of
+a :class:`~questdb.auth.RefreshingTokenProvider`, it counts as retryable like
+any other exception.
 
 .. _token_rejections:
 
@@ -147,8 +182,10 @@ happens then depends on where the client is:
 * A QWP/WebSocket sender that has connected keeps reconnecting in the
   background with capped backoff, keeps its unacknowledged rows, and reports
   each failed attempt as a :attr:`ConnectionEventKind.AuthFailed
-  <questdb.ConnectionEventKind.AuthFailed>` event; a wait that times out
-  meanwhile names the rejection. The same applies to a fixed ``token=`` or
+  <questdb.ConnectionEventKind.AuthFailed>` event. A wait, a ``close()``
+  draining the queue, or a ``flush()`` blocked on a full store-and-forward
+  queue (``sf_append_deadline_millis``) that times out meanwhile names the
+  rejection. The same applies to a fixed ``token=`` or
   ``username=`` / ``password=``. To give up instead, close the sender from
   your own code -- not from its connection listener, which cannot close its
   own sender.

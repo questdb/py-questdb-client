@@ -1322,6 +1322,12 @@ cdef extern from "questdb/token_provider.h":
         size_t msg_len
         ) noexcept nogil
 
+    bint questdb_token_sink_set_terminal_error(
+        questdb_token_sink* sink,
+        const char* msg,
+        size_t msg_len
+        ) noexcept nogil
+
     void questdb_refreshing_token_provider_options_init(
         questdb_refreshing_token_provider_options* options,
         size_t struct_size

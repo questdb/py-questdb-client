@@ -340,9 +340,10 @@ Once a QWP/WebSocket sender -- a :class:`Sender <questdb.Sender>` over
 answers its reconnect with HTTP 401 or 403 no longer stops it. The sender
 keeps reconnecting with capped backoff, keeps its unacknowledged rows, and
 reports each failed attempt as a :attr:`ConnectionEventKind.AuthFailed
-<questdb.ConnectionEventKind.AuthFailed>` event; a wait that times out
-meanwhile names the rejection. In 5.0 the first such rejection made the
-sender terminal, and its next call raised ``AuthError``.
+<questdb.ConnectionEventKind.AuthFailed>` event. A wait, a ``close()``
+draining the queue, or a ``flush()`` blocked on a full store-and-forward
+queue that times out meanwhile names the rejection. In 5.0 the first such
+rejection made the sender terminal, and its next call raised ``AuthError``.
 
 This applies to a fixed ``token=`` or ``username=`` / ``password=`` as well
 as to token providers. While an identity platform or its signing keys are
@@ -496,7 +497,16 @@ tokens from a secrets vault.
 * Any callable returning a token, or an object with ``token()`` and an
   optional ``on_rejected()``, works as a provider too. Reusing the same Python
   provider across clients shares its native single-flight acquisition, including
-  when passing repeated bound-method lookups.
+  when passing repeated bound-method lookups. A ``RefreshingTokenProvider``
+  such a provider calls -- ``bearer_token_provider=lambda: tokens.token()`` --
+  still refreshes early when a server rejects its token with HTTP 401.
+* Such a provider that knows retrying can never succeed raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.InvalidApiCall``, as a Rust provider returns
+  ``InvalidApiCall``. Its clients then stop: a QWP/WebSocket sender, query or
+  pool fails with ``ConfigError`` and stops reconnecting, and an ILP/HTTP
+  flush fails at once. A token source cannot do this; close its
+  ``RefreshingTokenProvider`` instead.
 * ``RefreshingTokenProvider.close(wait=True, timeout=30)`` optionally drains an
   active source with a deadline. A timeout leaves the provider closed and raises
   ``TimeoutError``. Sources must bound their own I/O: interpreter exit cannot
@@ -572,9 +582,13 @@ Highlights:
   access/ID token remains usable until expiry. Cached tokens also remain on the
   non-blocking fast path until their actual expiry instead of making every
   shared transport wait through a refresh during the 30-second skew window.
-* Manual-progress QWP/WebSocket close observes
-  ``close_flush_timeout_millis`` while reconnect is waiting and returns the
-  latest reconnect/OIDC cause instead of spinning indefinitely.
+* A QWP/WebSocket close whose drain times out while reconnecting keeps
+  failing returns the latest reconnect/OIDC cause, in either progress mode;
+  manual progress observes ``close_flush_timeout_millis`` meanwhile instead of
+  spinning indefinitely. A ``flush()`` that times out on a full
+  store-and-forward queue (``sf_append_deadline_millis``) names that cause
+  too, instead of advising a larger ``sf_max_total_bytes``, which cannot help
+  while nothing is acknowledged.
 * Auth failures are typed :class:`~questdb.auth.OidcError` subclasses of
   :class:`~questdb.QuestDBError`. Their ``code`` reports the failing call's
   native error category, not a recovery instruction: a flush with no usable
@@ -1237,7 +1251,10 @@ Other changes
   is retried only when the provider classified it retryable with
   :class:`~questdb.auth.TokenUnavailableError`; any other failure, an
   ``oidc_auth`` network error included, fails the connection at once.
-  Background reconnects keep retrying every provider failure.
+  Background reconnects keep retrying every provider failure, except
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.InvalidApiCall`` from an application provider, which
+  stops them.
 
 - A 401 is retried with a refreshed token only when the server's
   ``WWW-Authenticate`` challenge allows it: no Bearer ``error``, or

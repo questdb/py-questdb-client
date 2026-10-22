@@ -3165,7 +3165,8 @@ class ConnectionEventKind(TaggedEnum):
     #: :attr:`CredentialUnavailable`, which preserves the rejected endpoint
     #: and retains the provider error's retry/stop classification.
     AuthFailed = ('auth_failed', 6)
-    #: An ``oidc_auth=`` token provider failed while acquiring a credential.
+    #: A token provider -- ``oidc_auth=`` or ``bearer_token_provider=`` --
+    #: failed while acquiring a credential.
     #:
     #: Before the first dial, :attr:`ConnectionEvent.host` and
     #: :attr:`ConnectionEvent.port` are ``None``. If the provider fails when
@@ -3183,10 +3184,13 @@ class ConnectionEventKind(TaggedEnum):
     #:   this process, so the reconnect is **terminal** and the sender stops.
     #:   Reached by a permanently closed provider
     #:   (:meth:`~questdb.auth.OidcDeviceAuth.close` is one-way; cancelling one
-    #:   :meth:`~questdb.auth.OidcDeviceAuth.sign_in` attempt does not close it)
-    #:   and by a scope that cannot yield the required token kind, such as
+    #:   :meth:`~questdb.auth.OidcDeviceAuth.sign_in` attempt does not close it),
+    #:   by a scope that cannot yield the required token kind, such as
     #:   ``groups_in_token=True`` against an identity provider that returns no
-    #:   ID token. Queued rows are not deleted — a disk-backed
+    #:   ID token, and by a ``bearer_token_provider=`` that raised
+    #:   :class:`QuestDBError` with ``code`` ``InvalidApiCall`` (see
+    #:   :class:`~questdb.auth.BearerTokenProvider`), which reports
+    #:   ``ConfigError``. Queued rows are not deleted — a disk-backed
     #:   store-and-forward slot stays drainable by a later process — but this
     #:   process will not send them.
     #:

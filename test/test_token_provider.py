@@ -56,6 +56,7 @@ from questdb.auth import (
     TokenUnavailableError,
 )
 
+from mock_server import HttpServer
 from qwp_ws_ack_server import QwpAckServer
 from qwp_egress_failover_server import EgressFailoverServer
 
@@ -240,6 +241,26 @@ class RefreshingTokenProviderTest(unittest.TestCase):
             with self.assertRaises(TokenUnavailableError):
                 provider.token()
             self.assertIn('ExpiringToken', _last_failure(provider).message)
+
+    def test_a_sources_invalid_api_call_stays_retryable(self):
+        # Only an application provider can stop its clients with
+        # InvalidApiCall. A source's sink refuses the terminal failure, so it
+        # counts as retryable like any other exception: closing the provider
+        # is what stops its clients.
+        def source():
+            raise questdb.QuestDBError(
+                questdb.QuestDBErrorCode.InvalidApiCall, 'source retired')
+
+        with RefreshingTokenProvider(
+                source, cold_wait=0.2, backoff_initial=0.01,
+                backoff_max=0.02) as provider:
+            with self.assertRaises(TokenUnavailableError) as caught:
+                provider.token()
+            self.assertTrue(caught.exception.retryable)
+            failure = _last_failure(provider)
+            self.assertTrue(failure.retryable)
+            self.assertIn('QuestDBError: source retired', failure.message)
+            self.assertFalse(provider.closed)
 
     def test_on_rejected_forces_a_refresh(self):
         source, calls = _counting_source()
@@ -500,6 +521,31 @@ class _RecordingProvider:
         self.rejected.append((token, http_status))
 
 
+class _RetiredProvider:
+    """An application provider that knows retrying can never succeed: the
+    counterpart of a Rust provider returning ``InvalidApiCall``."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def token(self):
+        self.calls += 1
+        raise questdb.QuestDBError(
+            questdb.QuestDBErrorCode.InvalidApiCall, 'provider retired')
+
+
+class _WrappedTokens:
+    """An application provider of one's own around a refreshing provider: it
+    has no ``on_rejected``, so a 401 reaches the refreshing provider only
+    through its ``token()``."""
+
+    def __init__(self, tokens):
+        self._tokens = tokens
+
+    def token(self):
+        return self._tokens.token()
+
+
 class BearerTokenProviderAttachTest(unittest.TestCase):
     def _send_one_row(self, server, provider, extra=''):
         conf = (
@@ -542,6 +588,64 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
             seen = self._send_one_row(server, provider)
         self.assertEqual(seen, ['Bearer T1', 'Bearer T2'])
         self.assertEqual(len(calls), 2)
+
+    # How an application wraps a refreshing provider in a provider of its own.
+    # None of these has an `on_rejected` that forwards the rejection.
+    _WRAPPINGS = (
+        ('lambda', lambda tokens: lambda: tokens.token()),
+        ('bound method', lambda tokens: tokens.token),
+        ('object', _WrappedTokens),
+    )
+
+    def test_a_wrapped_refreshing_provider_refreshes_a_rejected_token(self):
+        # Wrapped, the provider never hears `on_rejected`; it used to hand
+        # the rejected token straight back, so the 401 stood until the
+        # scheduled refresh. Its token() now refreshes early when the calling
+        # thread is replacing a token a server rejected with 401.
+        for name, wrap in self._WRAPPINGS:
+            with self.subTest(wrapping=name):
+                source, calls = _counting_source()
+                with RefreshingTokenProvider(source) as tokens, \
+                        QwpAckServer(
+                            required_authorization='Bearer T2') as server:
+                    self.assertEqual(tokens.token(), 'T1')
+                    seen = self._send_one_row(server, wrap(tokens))
+                self.assertEqual(seen, ['Bearer T1', 'Bearer T2'])
+                self.assertEqual(len(calls), 2)
+
+    def test_a_wrapped_refreshing_provider_refreshes_on_an_http_401(self):
+        # ILP/HTTP pulls the token on the flushing thread, and on a 401
+        # pulls it again there, once.
+        for name, wrap in self._WRAPPINGS:
+            with self.subTest(wrapping=name):
+                source, calls = _counting_source()
+                with RefreshingTokenProvider(source) as tokens, \
+                        HttpServer() as server:
+                    self.assertEqual(tokens.token(), 'T1')
+                    # A body, so the client need not wait for the kept-alive
+                    # connection to close to know where the 401 ends.
+                    server.responses.extend([
+                        (0, 401, 'text/plain', b'Unauthorized'),
+                        (0, 204, None, None)])
+                    sender = questdb.Sender(
+                        questdb.Protocol.Http, '127.0.0.1', server.port,
+                        bearer_token_provider=wrap(tokens),
+                        auto_flush=False, retry_timeout=1000,
+                        protocol_version=2)
+                    sender.establish()
+                    try:
+                        sender.row(
+                            't', columns={'v': 1},
+                            at=questdb.ServerTimestamp)
+                        sender.flush()
+                    finally:
+                        sender.close(flush=False)
+                    seen = [
+                        value for headers in server.headers
+                        for key, value in headers.items()
+                        if key.lower() == 'authorization']
+                self.assertEqual(seen, ['Bearer T1', 'Bearer T2'])
+                self.assertEqual(len(calls), 2)
 
     def test_a_pool_shares_the_provider(self):
         source, calls = _counting_source()
@@ -608,6 +712,152 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
             seen = server.snapshot()['upgrade_authorizations']
         self.assertEqual(len(calls), 3)
         self.assertEqual(seen, ['Bearer recovered'])
+
+    def test_invalid_api_call_ends_a_synchronous_connect(self):
+        # Carried as ConfigError, which no connect retries, however much of
+        # its budget remains. It is not a token-unavailable failure.
+        provider = _RetiredProvider()
+        with QwpAckServer() as server:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'initial_connect_retry=sync;'
+                'reconnect_initial_backoff_millis=10;'
+                'reconnect_max_backoff_millis=10;'
+                'reconnect_max_duration_millis=2000;')
+            started = time.monotonic()
+            with self.assertRaises(questdb.QuestDBError) as caught:
+                # Entering the block establishes the connection.
+                with questdb.Sender.from_conf(
+                        conf, bearer_token_provider=provider):
+                    pass
+            self.assertLess(time.monotonic() - started, 1.5)
+        self.assertNotIsInstance(caught.exception, TokenUnavailableError)
+        self.assertIs(
+            caught.exception.code, questdb.QuestDBErrorCode.ConfigError)
+        self.assertIn('provider retired', str(caught.exception))
+        self.assertEqual(provider.calls, 1)
+
+    def test_only_invalid_api_call_stops_a_background_connect(self):
+        def unassigned():
+            # Classified permanent, even with the terminal code: still a
+            # token-unavailable failure, which background connects retry.
+            raise TokenUnavailableError(
+                'identity not assigned', retryable=False,
+                code=questdb.QuestDBErrorCode.InvalidApiCall)
+
+        for provider, terminal in (
+                (_RetiredProvider(), True), (unassigned, False)):
+            with self.subTest(terminal=terminal), QwpAckServer() as server:
+                sender = questdb.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};'
+                    'initial_connect_retry=async;'
+                    'reconnect_initial_backoff_millis=5;'
+                    'reconnect_max_backoff_millis=5;'
+                    'close_flush_timeout_millis=0;',
+                    bearer_token_provider=provider, auto_flush=False)
+                # The background connect pulls the token every few
+                # milliseconds: a terminal failure must stop it well within
+                # the window, and any other must leave the sender accepting
+                # rows throughout.
+                deadline = time.monotonic() + (10.0 if terminal else 0.5)
+                failure = None
+                try:
+                    sender.establish()
+                    while failure is None and time.monotonic() < deadline:
+                        try:
+                            sender.row(
+                                't', columns={'v': 1},
+                                at=questdb.ServerTimestamp)
+                            sender.flush()
+                        except questdb.QuestDBError as exc:
+                            failure = exc
+                        time.sleep(0.005)
+                finally:
+                    sender.close(flush=False)
+                if terminal:
+                    self.assertIsNotNone(
+                        failure, 'the background connect never stopped')
+                    self.assertIs(
+                        failure.code, questdb.QuestDBErrorCode.ConfigError)
+                    self.assertIn('provider retired', str(failure))
+                    self.assertEqual(provider.calls, 1)
+                else:
+                    self.assertIsNone(failure)
+
+    def test_invalid_api_call_fails_an_http_flush_at_once(self):
+        provider = _RetiredProvider()
+        with HttpServer() as server:
+            sender = questdb.Sender(
+                questdb.Protocol.Http, '127.0.0.1', server.port,
+                bearer_token_provider=provider, auto_flush=False,
+                retry_timeout=5000, protocol_version=2)
+            sender.establish()
+            try:
+                sender.row('t', columns={'v': 1}, at=questdb.ServerTimestamp)
+                started = time.monotonic()
+                with self.assertRaises(questdb.QuestDBError) as caught:
+                    sender.flush()
+                self.assertLess(time.monotonic() - started, 2.5)
+            finally:
+                sender.close(flush=False)
+            self.assertEqual(server.requests, [])
+        self.assertNotIsInstance(caught.exception, TokenUnavailableError)
+        self.assertIs(
+            caught.exception.code, questdb.QuestDBErrorCode.ConfigError)
+        self.assertIn('provider retired', str(caught.exception))
+        self.assertEqual(provider.calls, 1)
+
+    def test_invalid_api_call_stops_a_pool_and_is_narrated(self):
+        provider = _RetiredProvider()
+        with QwpAckServer() as server:
+            # An eager connect fails at once.
+            with self.assertRaises(questdb.QuestDBError) as caught:
+                questdb.connect(
+                    f'ws::addr=127.0.0.1:{server.port};',
+                    bearer_token_provider=provider)
+            self.assertIs(
+                caught.exception.code, questdb.QuestDBErrorCode.ConfigError)
+            self.assertIn('provider retired', str(caught.exception))
+
+            provider = _RetiredProvider()
+            events = []
+            with questdb.connect(
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                    'reconnect_initial_backoff_millis=10;'
+                    'reconnect_max_backoff_millis=10;',
+                    bearer_token_provider=provider,
+                    connection_listener=events.append,
+                    connection_event_inbox_capacity=32) as db:
+                sender = db.sender()
+                try:
+                    _await(lambda: events, timeout=5)
+                    # A runner that kept retrying at the 10 ms backoff would
+                    # narrate more events, and pull more tokens, meanwhile.
+                    time.sleep(0.5)
+                    self.assertEqual(
+                        [event.kind for event in events],
+                        [questdb.ConnectionEventKind.CredentialUnavailable])
+                    event = events[0]
+                    self.assertIs(
+                        event.cause_code, questdb.QuestDBErrorCode.ConfigError)
+                    self.assertIn('provider retired', event.cause_msg)
+                    self.assertIsNone(event.host)
+                    self.assertEqual(provider.calls, 1)
+                    with self.assertRaises(questdb.QuestDBError) as caught:
+                        sender.row(
+                            't', columns={'v': 1},
+                            at=questdb.ServerTimestamp)
+                        sender.flush()
+                    self.assertIs(
+                        caught.exception.code,
+                        questdb.QuestDBErrorCode.ConfigError)
+                finally:
+                    sender.close(flush=False)
+                with self.assertRaises(questdb.QuestDBError) as caught:
+                    db.query('select 1')
+                self.assertIs(
+                    caught.exception.code, questdb.QuestDBErrorCode.ConfigError)
+            self.assertEqual(server.accept_count, 0)
 
     def test_http_callback_interrupt_is_delivered_once_after_sending(self):
         # Use a subprocess so a deferred pending-call interrupt cannot escape

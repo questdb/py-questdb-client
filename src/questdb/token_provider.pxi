@@ -128,7 +128,11 @@ class TokenUnavailableError(QuestDBError):
 
     A connection the caller waits for -- an eager :func:`questdb.connect`, a
     sender's synchronous initial connect -- retries only a retryable failure.
-    Background reconnects retry either kind.
+    Background reconnects retry either kind. To stop them on a failure that
+    retrying can never clear, an application provider raises
+    :class:`~questdb.QuestDBError` with ``code``
+    ``QuestDBErrorCode.InvalidApiCall`` instead; a
+    :class:`RefreshingTokenProvider` is stopped by closing it.
 
     The client raises it too, when a provider failed to supply a token; then
     ``code`` is the failing operation's error code. Never put a token in the
@@ -334,6 +338,17 @@ cdef void _tp_sink_text_error(
             sink, True, -1, b'the token callback failed', 25)
 
 
+cdef bint _tp_sink_terminal_error(
+        questdb_token_sink* sink, str message) except -1:
+    """Report a failure that retrying can never clear, which also stops
+    background reconnects. False, recording nothing, when the sink refuses
+    one: a refreshing provider's source cannot report it."""
+    cdef bytes encoded = message[:_TOKEN_ERROR_MSG_MAX].encode(
+        'utf-8', 'replace')
+    return questdb_token_sink_set_terminal_error(
+        sink, encoded, len(encoded))
+
+
 cdef void _tp_sink_exception(
         questdb_token_sink* sink, object exc, object signal_codes) noexcept:
     """Report provider failures; preserve main-thread interruptions separately.
@@ -355,6 +370,16 @@ cdef void _tp_sink_exception(
             if exc.retry_after is not None:
                 retry_after_ms = <int64_t>(exc.retry_after * 1000.0)
             _tp_sink_text_error(sink, exc.retryable, retry_after_ms, str(exc))
+            return
+        # `InvalidApiCall` is the failure retrying can never clear, as for a
+        # Rust provider or a C++ one throwing `invalid_api_call`: clients stop
+        # reconnecting. A source's sink refuses it, and the exception then
+        # counts as retryable like any other. A TokenUnavailableError, handled
+        # above, keeps its classification whatever its code.
+        if (isinstance(exc, QuestDBError)
+                and getattr(exc, 'code', None)
+                    is QuestDBErrorCode.InvalidApiCall
+                and _tp_sink_terminal_error(sink, str(exc))):
             return
         _tp_sink_text_error(
             sink, True, -1, f'{type(exc).__qualname__}: {exc}')
@@ -701,7 +726,8 @@ cdef class RefreshingTokenProvider:
             ...
 
     To classify a failure, raise :class:`TokenUnavailableError`; any other
-    exception counts as retryable.
+    exception counts as retryable. A source cannot stop the provider's
+    clients from reconnecting: :meth:`close` the provider instead.
 
     The provider calls ``source`` only on its own thread, never concurrently,
     starting at once. It refreshes the token in the background at about half
