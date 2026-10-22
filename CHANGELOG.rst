@@ -74,6 +74,19 @@ sender (``drain_orphans=on``) whose fixed credential is rejected is now left on
 disk for the next session at once, rather than retried for the rest of this
 one. See :ref:`token_rejections`.
 
+Token-provider keys in a configuration string are rejected
+**********************************************************
+
+The configuration-string keys ``token_provider``, ``azure_resource``,
+``azure_client_id`` and ``azure_credential`` now fail with
+:class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+``QuestDBErrorCode.ConfigError`` on every protocol. In 6.0 an ILP/HTTP or
+ILP/TCP :meth:`Sender.from_conf <questdb.Sender.from_conf>` or
+:meth:`Sender.from_env <questdb.Sender.from_env>` ignored them silently, so a
+configuration string shared with another client that reads them stops
+working. Remove them and pass ``bearer_token_provider=`` instead; see
+:ref:`refreshing_token_provider`.
+
 New
 ~~~
 
@@ -414,10 +427,6 @@ Other changes
 - A 401 is retried with a refreshed token only when the server's
   ``WWW-Authenticate`` challenge allows it: no Bearer ``error``, or
   ``invalid_token``.
-
-- The configuration-string keys ``token_provider``, ``azure_resource``,
-  ``azure_client_id`` and ``azure_credential`` are rejected on every protocol.
-  ILP/HTTP and ILP/TCP previously ignored them silently.
 
 - Finalizers and garbage collection no longer block on, or free, a query
   cursor that another operation is using: an abandoned ``QueryResult``,

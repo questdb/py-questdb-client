@@ -5893,6 +5893,36 @@ print('OK')
             str(seen[0]))
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_refused_dataframe_does_not_hold_back_parked_signals(self):
+        """A `dataframe()` refused before its frame starts must not leave
+        the main thread deferring the signal exceptions a token callback
+        parks: one refusal used to swallow them for the rest of the
+        process."""
+        buffer = qi.Buffer._new_qwp()
+        refused = []
+
+        class HostileAddr(ipaddress.IPv4Address):
+            def __int__(self):
+                frame = pd.DataFrame({
+                    'x': [1],
+                    'ts': pd.to_datetime([0], unit='s')})
+                try:
+                    buffer.dataframe(frame, table_name='inner', at='ts')
+                except qi.QuestDBError as e:
+                    refused.append(e)
+                return 0x01020304
+
+        buffer.row(
+            'hostile', columns={'addr': HostileAddr('192.0.2.1')},
+            at=qi.ServerTimestamp)
+        self.assertEqual(len(refused), 1)
+        # Parks the exception and fails its pending call on purpose, so it
+        # is delivered right here -- unless delivery is deferred.
+        with self.assertRaises(KeyboardInterrupt):
+            qi._debug_oidc_deliver_test_exceptions(
+                (KeyboardInterrupt(),), True)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_clear_is_refused_while_a_dataframe_is_being_written(self):
         """The row-serializing `dataframe()` path drives the same
         native buffer as `row()`, rewind point and all. Anything it
@@ -15182,6 +15212,43 @@ class TestReinitRejected(unittest.TestCase):
             sender.__init__('tcp', '127.0.0.1', 9009)
         self.assertEqual(
             cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+
+
+class TestNoNewAttributes(unittest.TestCase):
+    """`Sender` and `QuestDB` have an instance dictionary only to hold their
+    bearer-token holder. Every other new name is refused, as before they had
+    one, so a misspelt or invented setting cannot be stored and read back
+    while configuring nothing."""
+
+    def test_sender(self):
+        sender = qi.Sender('http', '127.0.0.1', 9000)
+        for name in ('request_timeout', 'retry_timeout', 'max_buf_size'):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(
+                        AttributeError, 'has no attribute'):
+                    setattr(sender, name, 1)
+                self.assertFalse(hasattr(sender, name))
+        with self.assertRaisesRegex(AttributeError, 'not writable'):
+            sender.auto_flush_rows = 10
+        with self.assertRaisesRegex(AttributeError, 'read-only'):
+            sender.flush = None
+
+    def test_questdb(self):
+        db = questdb.connect('ws::addr=127.0.0.1:1;lazy_connect=true;')
+        try:
+            with self.assertRaisesRegex(AttributeError, 'has no attribute'):
+                db.sender_pool_max = 1
+            self.assertFalse(hasattr(db, 'sender_pool_max'))
+        finally:
+            db.close()
+
+    def test_subclasses_keep_their_dictionary(self):
+        class MySender(qi.Sender):
+            pass
+
+        sender = MySender('http', '127.0.0.1', 9000)
+        sender.request_timeout = 1
+        self.assertEqual(sender.request_timeout, 1)
 
 
 class TestTypeStub(unittest.TestCase):

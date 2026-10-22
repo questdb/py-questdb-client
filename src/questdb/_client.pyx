@@ -578,6 +578,25 @@ cdef inline object c_err_to_py_fmt(line_sender_error* err, str fmt):
     return exc
 
 
+cdef object _error_with_message(object exc, str msg):
+    """A new exception of `exc`'s class carrying every field of `exc` and
+    `msg` as its message, for `raise ... from exc`.
+
+    Calling the class with `QuestDBError`'s positional signature does not
+    work for every class `c_err_to_py` returns: `TokenUnavailableError`,
+    `OidcDeviceFlowError` and `OidcTimeoutError` take one positional message
+    and raise `TypeError`, and the other `OidcError` classes take the code as
+    a message and fall back to their default code. Copying the instance
+    keeps the class, `code`, `in_doubt`, `sender_error` and the subclass
+    fields (`status`, `retry_after`, `retryable`, ...).
+    """
+    cdef object cls = type(exc)
+    cdef object out = cls.__new__(cls)
+    out.__dict__.update(exc.__dict__)
+    out.args = (msg,)
+    return out
+
+
 cdef inline void_int reserve_buffer(
         line_sender_buffer* buffer,
         size_t additional) except -1:
@@ -681,6 +700,39 @@ cdef str _fqn(type obj):
         return obj.__qualname__
     else:
         return f'{obj.__module__}.{obj.__qualname__}'
+
+
+# The only names `Sender` and `QuestDB` keep in their instance dictionary.
+cdef tuple _DICT_ONLY_ATTRS = ('_bearer_token_provider',)
+cdef object _NO_SUCH_ATTR = object()
+
+
+cdef void_int _setattr_without_dict(
+        object obj, type cls, object name, object value) except -1:
+    """Set `name` on `obj` as if `cls` had no instance dictionary.
+
+    `Sender` and `QuestDB` have a `__dict__` only to hold the bearer-token
+    holder where PyPy's collector can see it. Any other new name -- a
+    misspelt or invented setting such as `sender.request_timeout = 5000` --
+    would otherwise be stored and read back while configuring nothing, where
+    it used to raise `AttributeError`. Python subclasses keep the dictionary
+    every subclass of an extension type has always had.
+    """
+    cdef object descr = _NO_SUCH_ATTR
+    if (type(obj) is cls and isinstance(name, str)
+            and name not in _DICT_ONLY_ATTRS):
+        for klass in cls.__mro__:
+            descr = klass.__dict__.get(name, _NO_SUCH_ATTR)
+            if descr is not _NO_SUCH_ATTR:
+                break
+        if descr is _NO_SUCH_ATTR:
+            raise AttributeError(
+                f"'{_fqn(cls)}' object has no attribute {name!r}")
+        if not hasattr(type(descr), '__set__'):
+            raise AttributeError(
+                f"'{_fqn(cls)}' object attribute {name!r} is read-only")
+    object.__setattr__(obj, name, value)
+    return 0
 
 
 cdef inline void_int _encode_utf8(
@@ -9142,10 +9194,7 @@ cdef object _dataframe_call_error(object exc, str msg, bint in_doubt):
     `except` and keeps `.sender_error`, `.status`, `.retry_after` and the rest,
     which rebuilding it as a plain `QuestDBError` would drop.
     """
-    cdef object cls = type(exc)
-    cdef object out = cls.__new__(cls)
-    out.__dict__.update(exc.__dict__)
-    out.args = (msg,)
+    cdef object out = _error_with_message(exc, msg)
     out._in_doubt = bool(in_doubt)
     return out
 
@@ -9511,10 +9560,14 @@ cdef class QuestDB:
     cdef object _oidc_auth
     # Store _bearer_token_provider in __dict__ so PyPy can collect a
     # provider that owns this client; cpyext object fields hide that cycle.
+    # `__setattr__` keeps every other name out of it.
     cdef dict __dict__
     cdef size_t _cb_refs_key
     cdef auto_flush_mode_t _auto_flush_mode
     cdef bint _auto_flush_bytes_dynamic
+
+    def __setattr__(self, name, value):
+        _setattr_without_dict(self, QuestDB, name, value)
 
     def __cinit__(self):
         self._db = NULL
@@ -11309,7 +11362,8 @@ cdef class Sender:
     cdef object _connection_listener
     cdef object _oidc_auth
     # The bearer holder lives in __dict__, not an opaque cpyext field, so
-    # PyPy can also collect a provider that owns this sender.
+    # PyPy can also collect a provider that owns this sender. `__setattr__`
+    # keeps every other name out of it.
     cdef dict __dict__
     cdef auto_flush_mode_t _auto_flush_mode
     cdef bint _auto_flush_bytes_dynamic
@@ -11760,6 +11814,9 @@ cdef class Sender:
         if _is_qwp_ws_protocol(self._c_protocol) and self._opts != NULL:
             self._qwp_ws_opts = line_sender_opts_clone(self._opts)
 
+    def __setattr__(self, name, value):
+        _setattr_without_dict(self, Sender, name, value)
+
     def __cinit__(self):
         self._c_protocol = line_sender_protocol_tcp
         self._opts = NULL
@@ -12134,9 +12191,14 @@ cdef class Sender:
 
         ``oidc_auth`` attaches a native rotating OIDC token provider — see
         :class:`questdb.auth.OidcDeviceAuth` and the :ref:`oidc_auth` guide.
-        Because it has no configuration-string equivalent, it is the one
-        credential that must be supplied here rather than through
-        ``QDB_CLIENT_CONF``, and it is mutually exclusive with ``token``,
+        ``bearer_token_provider`` attaches a rotating Bearer-token provider
+        instead: a :class:`questdb.auth.RefreshingTokenProvider` around a token
+        source of your own, a callable returning a token, or an object with
+        ``token()`` and an optional ``on_rejected()`` -- see
+        :ref:`refreshing_token_provider`.
+        Neither has a configuration-string equivalent, so a token provider
+        must be supplied here rather than through ``QDB_CLIENT_CONF``. They
+        are mutually exclusive with each other and with ``token``,
         ``username`` and ``password``.
         Use ``https::`` or ``wss::``: over plain ``http::`` or ``ws::`` to a
         non-loopback host the token is sent in cleartext.
@@ -13460,14 +13522,18 @@ cdef object _qwp_row_not_added(object exc, bint earlier_rows_published):
     `exc`, a publish failure other than `BatchTooLarge`, with its message
     saying that the row was not added.
     """
-    return type(exc)(
-        exc.code,
+    return _error_with_message(
+        exc,
         'The row was not added. '
         + ('The rows buffered before it were published. '
            if earlier_rows_published else '')
-        + str(exc),
-        exc.sender_error,
-        in_doubt=exc.in_doubt)
+        + str(exc))
+
+
+def _debug_qwp_row_not_added(object exc, bint earlier_rows_published):
+    """Internal test seam: the exception `row()` raises for publish failure
+    `exc`."""
+    return _qwp_row_not_added(exc, earlier_rows_published)
 
 
 cdef void_int _qwp_row_split(

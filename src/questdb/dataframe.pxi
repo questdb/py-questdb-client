@@ -4549,8 +4549,6 @@ cdef void_int _dataframe(
     cdef bint plan_has_content
     cdef bint defer_signals = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
     global _OIDC_MAIN_DATAFRAME_DEPTH
-    if defer_signals:
-        _OIDC_MAIN_DATAFRAME_DEPTH += 1
 
     # Refused, not counted, when a row or another frame is already
     # part-way through this buffer: the plan below clears the marker
@@ -4572,6 +4570,11 @@ cdef void_int _dataframe(
     if b == NULL:
         raise MemoryError()
     owner._row_depth += 1
+    # Raised only here, with nothing between it and the `try` whose
+    # `finally` lowers it: a refusal above that left it raised would defer
+    # every parked main-thread signal for the rest of the process.
+    if defer_signals:
+        _OIDC_MAIN_DATAFRAME_DEPTH += 1
     try:
         df = _dataframe_freeze_claim(df)
         # Said before the plan is built, so a frame refused for its

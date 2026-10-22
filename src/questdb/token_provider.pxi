@@ -409,6 +409,14 @@ cdef void _token_source_dispatch(
             _tp_sink_text_error(
                 sink, True, -1, 'the token source was released')
             return
+        # Native serializes source calls. Mark this one in progress BEFORE
+        # checking `_source_closed`, which `close()` sets before it waits on
+        # `_source_done`: either that wait sees the event cleared and waits
+        # for this call, or this check sees the flag and the source never
+        # runs. Checked first, a thread switch inside `clear()` -- Python
+        # code -- let `close(wait=True)` return before the source ran.
+        entered = True
+        handle._source_done.clear()
         if handle._source_closed:
             _tp_sink_text_error(sink, False, -1, 'the token provider is closed')
             return
@@ -417,11 +425,7 @@ cdef void _token_source_dispatch(
             _tp_sink_text_error(
                 sink, True, -1, 'the token source was released')
             return
-        # Native serializes source calls. Close sets _source_closed under
-        # the GIL before native close, so late calls cannot start user code.
-        handle._source_done.clear()
         handle._source_thread = questdb_thread_ident()
-        entered = True
         result = source()
         token, expires_ms, refresh_ms = _tp_result_parts(result)
         encoded = token.encode('utf-8')
@@ -430,7 +434,7 @@ cdef void _token_source_dispatch(
             _tp_sink_text_error(
                 sink, True, -1, 'the token source returned an unusable token')
     except BaseException as exc:
-        _tp_sink_exception(sink, exc, ())
+        _tp_sink_exception(sink, exc, {})
     finally:
         if entered:
             # Drop user result/source locals before signalling the drain: their
@@ -467,7 +471,9 @@ cdef void _token_get_dispatch(
     cdef object provider
     cdef _TokenProviderHandle handle
     cdef bytes encoded
-    cdef object signal_codes = ()
+    # A mapping like `_oidc_signal_handler_codes()` returns, even before that
+    # snapshot is taken: the error path below looks codes up in it.
+    cdef object signal_codes = {}
     cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
     if on_main:
         _OIDC_MAIN_TOKEN_DEPTH += 1
@@ -491,7 +497,7 @@ cdef void _token_get_dispatch(
             _tp_sink_text_error(
                 sink, True, -1, 'the token provider was released')
             return
-        signal_codes = _oidc_signal_handler_codes() if on_main else ()
+        signal_codes = _oidc_signal_handler_codes() if on_main else {}
         token = provider.token()
         if not isinstance(token, str):
             raise TypeError(
@@ -538,7 +544,9 @@ cdef void _token_rejected_dispatch(
     global _OIDC_MAIN_TOKEN_DEPTH
     cdef object provider
     cdef _TokenProviderHandle handle
-    cdef object signal_codes = ()
+    # A mapping even before the snapshot below: the error path looks codes
+    # up in it, and `on_rejected` can raise before the snapshot is taken.
+    cdef object signal_codes = {}
     cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
     if on_main:
         _OIDC_MAIN_TOKEN_DEPTH += 1
@@ -557,7 +565,7 @@ cdef void _token_rejected_dispatch(
         on_rejected = getattr(provider, 'on_rejected', None)
         if on_rejected is None:
             return
-        signal_codes = _oidc_signal_handler_codes() if on_main else ()
+        signal_codes = _oidc_signal_handler_codes() if on_main else {}
         on_rejected(
             PyUnicode_FromStringAndSize(token, <Py_ssize_t>token_len),
             http_status)

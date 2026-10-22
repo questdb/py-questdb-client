@@ -294,6 +294,48 @@ class RefreshingTokenProviderTest(unittest.TestCase):
             release.set()
             provider.close(wait=True, timeout=datetime.timedelta(seconds=5))
 
+    def test_close_waits_for_a_source_call_that_has_begun(self):
+        # Hold the refresher inside `Event.clear()` -- Python code, so a
+        # thread switch can land there -- on its way into the source, and
+        # close meanwhile. Either close waits for the call, or the call sees
+        # the close and never runs the source; it used to run it after
+        # `close(wait=True)` had already returned.
+        at_clear = threading.Event()
+        resume = threading.Event()
+        finished = threading.Event()
+        calls = []
+        Event = threading.Event
+
+        class HeldEvent(Event):
+            def clear(self):
+                if (threading.current_thread() is not threading.main_thread()
+                        and not at_clear.is_set()):
+                    at_clear.set()
+                    resume.wait(10)
+                super().clear()
+
+            def set(self):
+                super().set()
+                if threading.current_thread() is not threading.main_thread():
+                    finished.set()
+
+        def source():
+            calls.append(1)
+            return ExpiringToken.expires_in('valid', 3600)
+
+        threading.Event = HeldEvent
+        try:
+            provider = RefreshingTokenProvider(source)
+        finally:
+            threading.Event = Event
+        try:
+            self.assertTrue(at_clear.wait(5))
+            provider.close(wait=True, timeout=5)
+        finally:
+            resume.set()
+        self.assertTrue(finished.wait(5))
+        self.assertEqual(calls, [])
+
     def test_source_cannot_wait_for_its_own_close(self):
         ready = threading.Event()
         completed = threading.Event()
@@ -937,6 +979,100 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                     [sys.executable, '-c', script], env=env,
                     capture_output=True, text=True, timeout=20)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_failing_on_rejected_lookup_is_ignored(self):
+        # Looking `on_rejected` up can itself raise. That failure is ignored
+        # like one from the call, not reported as an internal error.
+        class Provider:
+            calls = 0
+
+            def token(self):
+                Provider.calls += 1
+                return 'stale' if Provider.calls == 1 else 'fresh'
+
+            @property
+            def on_rejected(self):
+                raise RuntimeError('on_rejected is unavailable')
+
+        unraisable = []
+        previous_hook = sys.unraisablehook
+        sys.unraisablehook = unraisable.append
+        try:
+            with HttpServer() as server:
+                server.responses.extend(
+                    [(0, 401, None, None), (0, 204, None, None)])
+                sender = questdb.Sender(
+                    questdb.Protocol.Http, '127.0.0.1', server.port,
+                    bearer_token_provider=Provider(), auto_flush=False,
+                    retry_timeout=1000, protocol_version=2)
+                try:
+                    sender.establish()
+                    sender.row(
+                        't', columns={'v': 1}, at=questdb.ServerTimestamp)
+                    sender.flush()
+                finally:
+                    sender.close(flush=False)
+                self.assertEqual(len(server.requests), 2)
+        finally:
+            sys.unraisablehook = previous_hook
+        self.assertEqual(
+            [(u.exc_type, str(u.exc_value)) for u in unraisable], [])
+
+    # A lease whose provider keeps failing fills store-and-forward, and the
+    # publish that then waits out `sf_append_deadline_millis` fails `row()`.
+    # The provider fails before anything is dialled.
+    _OUTAGE_CONF = (
+        'ws::addr=127.0.0.1:1;lazy_connect=true;'
+        'reconnect_initial_backoff_millis=10;'
+        'reconnect_max_backoff_millis=50;'
+        'sf_max_segment_bytes=65536;sf_max_total_bytes=131072;'
+        'sf_append_deadline_millis=300;'
+        'auto_flush_rows=1;auto_flush_bytes=off;auto_flush_interval=off;')
+
+    def _row_until_refused(self, provider, before_rows=None):
+        db = questdb.connect(self._OUTAGE_CONF, bearer_token_provider=provider)
+        try:
+            if before_rows is not None:
+                before_rows()
+            lease = db.sender()
+            try:
+                for index in range(10_000):
+                    try:
+                        lease.row(
+                            't', columns={'v': index, 's': 'x' * 200},
+                            at=questdb.ServerTimestamp)
+                    except questdb.QuestDBError as exc:
+                        return exc
+                self.fail('row() never reported the failing provider')
+            finally:
+                lease.close(flush=False)
+        finally:
+            db.close()
+
+    def test_row_reports_a_provider_outage_with_its_own_class(self):
+        # `row()` rewords the publish failure it raises. Rebuilt through
+        # QuestDBError's positional signature, a TokenUnavailableError
+        # raised TypeError instead, which `except QuestDBError` misses.
+        def outage():
+            raise TokenUnavailableError('IdP unavailable', retryable=True)
+
+        exc = self._row_until_refused(outage)
+        self.assertIsInstance(exc, TokenUnavailableError)
+        self.assertTrue(exc.retryable)
+        self.assertIs(exc.code, questdb.QuestDBErrorCode.SocketError)
+        self.assertTrue(
+            str(exc).startswith('The row was not added. '), str(exc))
+        self.assertIsInstance(exc.__cause__, TokenUnavailableError)
+
+    def test_row_reports_a_closed_refreshing_provider_with_its_own_class(self):
+        source, _ = _counting_source()
+        provider = RefreshingTokenProvider(source)
+        self.assertTrue(provider.await_ready(10))
+        exc = self._row_until_refused(provider, before_rows=provider.close)
+        self.assertIsInstance(exc, TokenUnavailableError)
+        self.assertIs(exc.code, questdb.QuestDBErrorCode.AuthError)
+        self.assertTrue(
+            str(exc).startswith('The row was not added. '), str(exc))
 
     def test_shared_application_provider_has_one_native_identity(self):
         class Provider:

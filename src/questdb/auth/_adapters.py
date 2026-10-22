@@ -514,8 +514,12 @@ def sqlalchemy_engine(
         ``connect_args`` sets the login or database; or if ``connect_args``
         (or a foreign ``do_connect`` listener) sets a connection destination
         other than the validated one; or a listener changes the login/database.
-    :raises OidcError: if token acquisition fails while SQLAlchemy opens a
-        connection.
+    :raises questdb.QuestDBError: if token acquisition fails while
+        SQLAlchemy opens a connection: whatever ``auth.token()`` raises,
+        unchanged -- :class:`OidcError` from an :class:`OidcDeviceAuth`,
+        :class:`TokenUnavailableError` from a
+        :class:`RefreshingTokenProvider`. Catch
+        :class:`~questdb.QuestDBError` to handle both.
     :raises ImportError: if SQLAlchemy or a PostgreSQL driver is unavailable.
         SQLAlchemy and DBAPI construction/connection exceptions otherwise
         propagate unchanged.
@@ -647,7 +651,11 @@ def psycopg_connect(
         has no host; if the resolved host carries connection-string
         metacharacters; if ``pg_port`` is not a valid TCP port; or if
         ``connect_kwargs`` sets a connection destination, login or database.
-    :raises OidcError: if token acquisition fails.
+    :raises questdb.QuestDBError: if token acquisition fails: whatever
+        ``auth.token()`` raises, unchanged -- :class:`OidcError` from an
+        :class:`OidcDeviceAuth`, :class:`TokenUnavailableError` from a
+        :class:`RefreshingTokenProvider`. Catch
+        :class:`~questdb.QuestDBError` to handle both.
     :raises ImportError: if neither psycopg nor psycopg2 is installed.
         Driver connection, TLS and server-authentication exceptions otherwise
         propagate unchanged.

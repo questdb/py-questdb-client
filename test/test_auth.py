@@ -4829,6 +4829,82 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_row_reports_a_closed_provider_with_its_own_class(self):
+        # `row()` rewords the publish failure it raises. Rebuilt through
+        # QuestDBError's positional signature, an OidcCancelledError's
+        # message became a tuple of strings and its code the class default.
+        auth = make_auth()
+        db = questdb.connect(
+            'ws::addr=127.0.0.1:19009;lazy_connect=true;'
+            'reconnect_initial_backoff_millis=10;'
+            'reconnect_max_backoff_millis=10;'
+            'auto_flush_rows=1;auto_flush_bytes=off;auto_flush_interval=off;',
+            oidc_auth=auth)
+        auth.close()
+        try:
+            sender = db.sender()
+            caught = None
+            try:
+                deadline = time.monotonic() + 5
+                while caught is None and time.monotonic() < deadline:
+                    try:
+                        sender.row(
+                            't', columns={'v': 1}, at=questdb.ServerTimestamp)
+                    except OidcCancelledError as exc:
+                        caught = exc
+                    else:
+                        time.sleep(0.01)
+            finally:
+                sender.close(flush=False)
+        finally:
+            db.close()
+        self.assertIsNotNone(caught, 'row() never reported the closed provider')
+        self.assertIs(caught.code, questdb.QuestDBErrorCode.AuthError)
+        self.assertEqual(len(caught.args), 1)
+        self.assertTrue(
+            str(caught).startswith('The row was not added. '), str(caught))
+        self.assertIsInstance(caught.__cause__, OidcCancelledError)
+
+    def test_row_not_added_keeps_every_error_class_and_field(self):
+        from questdb.auth import TokenUnavailableError
+        code = questdb.QuestDBErrorCode
+        cases = (
+            questdb.QuestDBError(code.SocketError, 'plain', in_doubt=True),
+            OidcInteractionRequired('sign in', code=code.SocketError),
+            OidcNetworkError(
+                'idp down', status=503, retry_after=7, code=code.SocketError),
+            OidcCancelledError('closed', code=code.AuthError),
+            OidcDeviceFlowError(
+                'denied', error='access_denied', error_description='no',
+                status=400, code=code.AuthError),
+            OidcTimeoutError(
+                'expired', error='expired_token', code=code.AuthError),
+            TokenUnavailableError(
+                'down', retryable=False, retry_after=7, code=code.ConfigError),
+        )
+        fields = (
+            'status', 'retry_after', 'error', 'error_description',
+            'retryable', 'acquisition_busy', 'sender_error')
+        for original in cases:
+            for earlier in (False, True):
+                with self.subTest(cls=type(original).__name__, earlier=earlier):
+                    reworded = _client._debug_qwp_row_not_added(
+                        original, earlier)
+                    expected = (
+                        'The row was not added. '
+                        + ('The rows buffered before it were published. '
+                           if earlier else '')
+                        + str(original))
+                    self.assertIs(type(reworded), type(original))
+                    self.assertEqual(reworded.args, (expected,))
+                    self.assertIs(reworded.code, original.code)
+                    self.assertEqual(reworded.in_doubt, original.in_doubt)
+                    for field in fields:
+                        if hasattr(original, field):
+                            self.assertEqual(
+                                getattr(reworded, field),
+                                getattr(original, field), field)
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_pool_dataframe_fails_fast_when_sign_in_is_required(self):
         # Regression: native classifies an OIDC token failure as a retryable
@@ -7011,6 +7087,33 @@ class AdapterRealDriverTest(unittest.TestCase):
         self.assertEqual(pg.logins[0]['password'], 'SECRET-BEARER')
         self.assertEqual(
             pg.logins[0]['params']['application_name'], 'late-listener')
+
+    def test_a_token_providers_failure_propagates_unchanged(self):
+        # Documented as whatever `auth.token()` raises: from a refreshing
+        # provider a TokenUnavailableError, a QuestDBError but no OidcError.
+        from questdb.auth import (
+            RefreshingTokenProvider, TokenUnavailableError)
+
+        def source():
+            raise TokenUnavailableError('vault unavailable', retryable=True)
+
+        with RefreshingTokenProvider(source, cold_wait=0.1) as provider, \
+                pg_capture_server.PgCaptureServer() as pg:
+            engine = sqlalchemy_engine(provider, self.URL, pg_port=pg.port)
+            try:
+                for name, connect in (
+                        ('psycopg_connect', lambda: psycopg_connect(
+                            provider, self.URL, pg_port=pg.port)),
+                        ('sqlalchemy_engine', engine.connect)):
+                    with self.subTest(adapter=name):
+                        with self.assertRaises(TokenUnavailableError) as ctx:
+                            connect()
+                        self.assertIsInstance(
+                            ctx.exception, questdb.QuestDBError)
+                        self.assertNotIsInstance(ctx.exception, OidcError)
+            finally:
+                engine.dispose()
+        self.assertEqual(pg.logins, [])
 
 
 class OidcReviewFixTest(unittest.TestCase):

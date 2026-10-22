@@ -484,9 +484,14 @@ Missing SQLAlchemy or PostgreSQL-driver dependencies raise ``ImportError``.
 SQLAlchemy 1.x has no psycopg (v3) dialect, so there ``sqlalchemy_engine()``
 needs psycopg2 and defaults to ``postgresql+psycopg2`` even when psycopg 3 is
 also installed.
-Token acquisition failures from either adapter raise ``OidcError``; SQLAlchemy,
-psycopg and psycopg2 construction, connection, TLS and server-authentication
-exceptions otherwise propagate with their original third-party types.
+Token acquisition failures from either adapter propagate whatever the
+provider's ``token()`` raises: ``OidcError`` from an ``OidcDeviceAuth``,
+:class:`~questdb.auth.TokenUnavailableError` from a
+:class:`~questdb.auth.RefreshingTokenProvider`. Both are
+:class:`~questdb.QuestDBError` subclasses, so ``except QuestDBError`` handles
+either. SQLAlchemy, psycopg and psycopg2 construction, connection, TLS and
+server-authentication exceptions otherwise propagate with their original
+third-party types.
 
 Rendering and non-interactive environments
 ==========================================

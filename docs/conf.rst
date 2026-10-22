@@ -379,27 +379,32 @@ the authentication process. The default is 15 seconds.
 
 See the :ref:`auth_and_tls_example` example for more details.
 
-OIDC (rotating Bearer token)
-----------------------------
+Token providers (rotating Bearer tokens)
+----------------------------------------
 
-OIDC is the one credential with **no configuration-string key**. A rotating
-token provider is a live object, so it is passed as the Python keyword
-argument ``oidc_auth=`` instead — to :func:`questdb.connect`,
-:class:`questdb.Sender`, :meth:`questdb.Sender.from_conf`,
-:meth:`questdb.Sender.from_env` or :meth:`questdb.QuestDB.from_conf`.
+Token providers are the credentials with **no configuration-string key**. A
+rotating token provider is a live object, so it is passed as a Python keyword
+argument instead — ``oidc_auth=`` for OIDC device-flow sign-in, or
+``bearer_token_provider=`` for any other rotating Bearer token — to
+:func:`questdb.connect`, :class:`questdb.Sender`,
+:meth:`questdb.Sender.from_conf`, :meth:`questdb.Sender.from_env` or
+:meth:`questdb.QuestDB.from_conf`. The configuration-string keys
+``token_provider``, ``azure_resource``, ``azure_client_id`` and
+``azure_credential`` are rejected.
 
-It is mutually exclusive with the fixed credentials above: passing it
-alongside ``token``, ``username`` or ``password`` raises
+The two are mutually exclusive with each other and with the fixed credentials
+above: passing one alongside ``token``, ``username`` or ``password`` raises
 :class:`~questdb.QuestDBError` with ``code`` set to
 ``QuestDBErrorCode.ConfigError``. Supported on HTTP(S) and QWP/WebSocket; TCP
 and UDP are rejected. Use ``https::`` or ``wss::``: over plain ``http::`` or
 ``ws::`` to a non-loopback host the token is sent in cleartext on every flush
 or (re)connect.
 
-Resolving a fresh token is bounded by the provider's own ``timeout``, not by
-``request_timeout`` or ``retry_timeout``: see :ref:`auth-token-wait`.
+For ``oidc_auth``, resolving a fresh token is bounded by the provider's own
+``timeout``, not by ``request_timeout`` or ``retry_timeout``: see
+:ref:`auth-token-wait`.
 
-See the :ref:`oidc_auth` guide.
+See the :ref:`oidc_auth` guide and :ref:`refreshing_token_provider`.
 
 .. _sender_conf_tls:
 
