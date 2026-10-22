@@ -184,8 +184,11 @@ background runner delivers them and reconnects on transient failures,
 walking the ``addr`` server list.
 
 * ``reconnect_max_duration_millis`` - ``int``: Total reconnect/failover
-  budget after a connection loss. Authentication and protocol-version
-  failures are terminal and are not retried.
+  budget after a connection loss. Protocol-version failures are terminal and
+  are not retried. A server that rejects the credential (HTTP 401 or 403)
+  stops a sender only before its first connection; once connected, the sender
+  keeps reconnecting with capped backoff and reports each rejected attempt
+  (see :ref:`token_rejections`).
 
   Default: 300000 (5 minutes).
 
@@ -375,6 +378,33 @@ control how long the client will wait for a response from the server during
 the authentication process. The default is 15 seconds.
 
 See the :ref:`auth_and_tls_example` example for more details.
+
+Token providers (rotating Bearer tokens)
+----------------------------------------
+
+Token providers are the credentials with **no configuration-string key**. A
+rotating token provider is a live object, so it is passed as a Python keyword
+argument instead — ``oidc_auth=`` for OIDC device-flow sign-in, or
+``bearer_token_provider=`` for any other rotating Bearer token — to
+:func:`questdb.connect`, :class:`questdb.Sender`,
+:meth:`questdb.Sender.from_conf`, :meth:`questdb.Sender.from_env` or
+:meth:`questdb.QuestDB.from_conf`. The configuration-string keys
+``token_provider``, ``azure_resource``, ``azure_client_id`` and
+``azure_credential`` are rejected.
+
+The two are mutually exclusive with each other and with the fixed credentials
+above: passing one alongside ``token``, ``username`` or ``password`` raises
+:class:`~questdb.QuestDBError` with ``code`` set to
+``QuestDBErrorCode.ConfigError``. Supported on HTTP(S) and QWP/WebSocket; TCP
+and UDP are rejected. Use ``https::`` or ``wss::``: over plain ``http::`` or
+``ws::`` to a non-loopback host the token is sent in cleartext on every flush
+or (re)connect.
+
+For ``oidc_auth``, resolving a fresh token is bounded by the provider's own
+``timeout``, not by ``request_timeout`` or ``retry_timeout``: see
+:ref:`auth-token-wait`.
+
+See the :ref:`oidc_auth` guide and :ref:`refreshing_token_provider`.
 
 .. _sender_conf_tls:
 

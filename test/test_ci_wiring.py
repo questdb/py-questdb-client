@@ -154,7 +154,10 @@ class TestPinnedCiDependencies(unittest.TestCase):
         ])
         check.assert_called_once_with(pins)
         required.assert_not_called()
+        # None of these depends on a pinned package, so none can upgrade one.
         self.assertEqual(optional.call_args_list, [
+            mock.call('qrcode'), mock.call('pillow'),
+            mock.call('sqlalchemy>=2'), mock.call('psycopg[binary]'),
             mock.call('gevent'), mock.call('pyyaml'),
         ])
 
