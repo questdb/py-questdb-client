@@ -22,7 +22,7 @@ class QwpAckServer:
                  close_plan=None, max_batch_size=0,
                  defer_aware_acks=False, record_payloads=False,
                  error_status=None, error_message=b"mock rejection",
-                 tls=False, idle_timeout_s=30):
+                 tls=False, idle_timeout_s=30, upgrade_gate=None):
         """
         `close_plan`: iterable consumed one value per accepted connection;
         a connection with value N is closed after handling its Nth binary
@@ -52,6 +52,10 @@ class QwpAckServer:
         `idle_timeout_s`: seconds an upgraded connection may remain idle;
         None waits indefinitely. The HTTP upgrade always retains its own
         bounded timeout.
+
+        `upgrade_gate`: when set to a `threading.Event`, every connection
+        waits for it (at most 30 s) before answering the upgrade, so the
+        client has not learned the advertised cap until the test sets it.
         """
         self.host = host
         self.ack_delay_s = ack_delay_s
@@ -62,6 +66,7 @@ class QwpAckServer:
         self.error_status = error_status
         self.error_message = error_message
         self.idle_timeout_s = idle_timeout_s
+        self.upgrade_gate = upgrade_gate
         self._tls_context = None
         if tls:
             self._tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -233,6 +238,8 @@ class QwpAckServer:
                     pass
                 return
         try:
+            if self.upgrade_gate is not None:
+                self.upgrade_gate.wait(30)
             conn.settimeout(30)
             request = _read_until(conn, b"\r\n\r\n")
             key = _header(request, "Sec-WebSocket-Key")

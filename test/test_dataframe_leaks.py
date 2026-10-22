@@ -3,6 +3,7 @@ sys.dont_write_bytecode = True
 import ctypes
 import gc
 import ipaddress
+import sysconfig
 import threading
 import unittest
 import uuid
@@ -58,6 +59,12 @@ def _malloc_trim():
 def _rss():
     _malloc_trim()
     return _PROCESS.memory_info().rss
+
+
+_FREE_THREADED = bool(sysconfig.get_config_var('Py_GIL_DISABLED'))
+_NO_RSS_ON_FREE_THREADED = (
+    'RSS is not a leak signal on a free-threaded build: mimalloc pages '
+    'are not returned by malloc_trim')
 
 
 def _assert_no_leak(test, work, warmup, measure):
@@ -265,6 +272,7 @@ class TestCategoricalArrowLeak(unittest.TestCase):
 
         self._assert_stable(work, warmup=200, measure=4000)
 
+    @unittest.skipIf(_FREE_THREADED, _NO_RSS_ON_FREE_THREADED)
     def test_columnar_path_no_leak(self):
         from qwp_ws_ack_server import QwpAckServer
         frames = self._frames()
@@ -281,6 +289,49 @@ class TestCategoricalArrowLeak(unittest.TestCase):
                             df, table_name='t', at='ts', symbols='auto')
 
                 self._assert_stable(work, warmup=150, measure=1800)
+
+
+@unittest.skipUnless(pd is not None, 'pandas not installed')
+@unittest.skipUnless(pa is not None, 'pyarrow not installed')
+class TestFixedSizeBinaryClaimLeak(unittest.TestCase):
+
+    def test_claimed_schema_is_released(self):
+        rows = 8
+        df = pd.DataFrame({
+            'u': pd.Series(
+                pa.array([bytes(16)] * rows, pa.binary(16)),
+                dtype=pd.ArrowDtype(pa.binary(16))),
+            'l': pd.Series(
+                pa.array([bytes(32)] * rows, pa.binary(32)),
+                dtype=pd.ArrowDtype(pa.binary(32))),
+            'n': np.arange(rows)})
+        # Width no longer implies a type; exercise the explicit-claim
+        # planner that supersedes the schema-replacement path.
+        df.attrs['questdb'] = {
+            'version': 1,
+            'columns': {'u': {'kind': 'uuid'}, 'l': {'kind': 'long256'}},
+        }
+
+        def plan(symbols):
+            qi._bench_dataframe_plan_and_populate_column_chunks(
+                df, table_name='t', at=qi.ServerTimestamp, symbols=symbols)
+
+        for symbols, error in (('auto', None), (['n'], qi.QuestDBError)):
+            with self.subTest(symbols=symbols):
+                def work():
+                    if error is None:
+                        plan(symbols)
+                    else:
+                        with self.assertRaises(error):
+                            plan(symbols)
+
+                work()
+                gc.collect()
+                before = pa.total_allocated_bytes()
+                for _ in range(100):
+                    work()
+                gc.collect()
+                self.assertEqual(pa.total_allocated_bytes(), before)
 
 
 @unittest.skipUnless(pd is not None, 'pandas not installed')
@@ -364,6 +415,7 @@ class TestPyobjColumnarLeak(unittest.TestCase):
     def _assert_stable(self, work, warmup, measure):
         _assert_no_leak(self, work, warmup, measure)
 
+    @unittest.skipIf(_FREE_THREADED, _NO_RSS_ON_FREE_THREADED)
     def test_pyobj_columnar_path_no_leak(self):
         from qwp_ws_ack_server import QwpAckServer
         frames = self._frames()
@@ -864,8 +916,9 @@ def _nested_rows(leases, raise_at_bottom=False):
 
 
 class TestCallTableMemory(unittest.TestCase):
-    """Each thread keeps a native table of the calls it has in progress
-    on each `QuestDB` handle (`_scoped_table_ensure`). The table starts
+    """Each thread keeps a native table of the calls and callback
+    dispatches it has in progress on each owner, such as a `QuestDB`
+    handle (`_scoped_table_ensure`). The table starts
     with four slots and doubles when a fifth handle has a call in
     progress on the same thread, and it is freed when the thread's
     Python state ends (`_scoped_table_free`)."""

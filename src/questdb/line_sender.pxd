@@ -77,7 +77,9 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error_batch_too_large,
         line_sender_error_store_resend_required,
         line_sender_error_symbol_dict_full,
-        # A query that ran past its per-query timeout (38).
+        # QWP/WebSocket reader: the per-query timeout expired (38). A timeout
+        # requested against a server without CAP_QUERY_TIMEOUT is refused
+        # with line_sender_error_unsupported_server instead.
         line_sender_error_query_timeout
 
     ctypedef line_sender_error_code questdb_error_code
@@ -741,6 +743,13 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint line_sender_qwpws_effective_frame_cap(
+        const line_sender* sender,
+        size_t* cap_out,
+        cbool* server_cap_known_out,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint line_sender_qwpws_close_drain(
         line_sender* sender,
         line_sender_error** err_out
@@ -1125,15 +1134,15 @@ cdef extern from "questdb/ingress/qwp_sender.h":
         qwp_numpy_f64_ndarray = 31
         qwp_numpy_datetime64_m = 32
         qwp_numpy_datetime64_h = 33
-        column_sender_numpy_datetime64_D = 34
-        column_sender_numpy_datetime64_M = 35
-        column_sender_numpy_datetime64_Y = 36
-        column_sender_numpy_datetime64_W = 37
+        qwp_numpy_datetime64_D = 34
+        qwp_numpy_datetime64_M = 35
+        qwp_numpy_datetime64_Y = 36
+        qwp_numpy_datetime64_W = 37
         qwp_numpy_timedelta64_m = 38
         qwp_numpy_timedelta64_h = 39
-        column_sender_numpy_timedelta64_D = 40
-        column_sender_numpy_timedelta64_M = 41
-        column_sender_numpy_timedelta64_Y = 42
+        qwp_numpy_timedelta64_D = 40
+        qwp_numpy_timedelta64_M = 41
+        qwp_numpy_timedelta64_Y = 42
 
     cdef struct qwp_numpy_extras:
         int8_t decimal_scale
@@ -1365,6 +1374,11 @@ cdef extern from "questdb/egress/qwp_reader.h":
         questdb_error** err_out
         ) noexcept nogil
 
+    void qwp_reader_query_set_timeout_ms(
+        qwp_reader_query* query,
+        uint64_t timeout_ms
+        ) noexcept nogil
+
     void qwp_reader_query_set_reset_symbol_dict(
         qwp_reader_query* query,
         cbool reset
@@ -1393,6 +1407,30 @@ cdef extern from "questdb/egress/qwp_reader.h":
     void qwp_reader_query_bind_timestamp_nanos(
         qwp_reader_query* query,
         int64_t v
+        ) noexcept nogil
+
+    void qwp_reader_query_bind_date_millis(
+        qwp_reader_query* query,
+        int64_t v
+        ) noexcept nogil
+
+    void qwp_reader_query_bind_decimal64(
+        qwp_reader_query* query,
+        int64_t v,
+        int8_t scale
+        ) noexcept nogil
+
+    void qwp_reader_query_bind_decimal128(
+        qwp_reader_query* query,
+        uint64_t mantissa_lo,
+        int64_t mantissa_hi,
+        int8_t scale
+        ) noexcept nogil
+
+    void qwp_reader_query_bind_decimal256(
+        qwp_reader_query* query,
+        const uint8_t* value,
+        int8_t scale
         ) noexcept nogil
 
     void qwp_reader_query_bind_varchar(
@@ -1482,6 +1520,14 @@ cdef extern from "questdb/egress/qwp_reader.h":
     bint qwp_reader_cursor_connection_reusable(
         const qwp_reader_cursor* cursor
         ) noexcept nogil
+
+    bint qwp_reader_cursor_terminal_exec_done(
+        const qwp_reader_cursor* cursor,
+        uint8_t* out_op_type,
+        uint64_t* out_rows_affected
+        ) noexcept nogil
+
+    const uint64_t QWP_READER_ROWS_AFFECTED_UNKNOWN
 
     qwp_reader_arrow_batch_result qwp_reader_cursor_next_arrow_batch(
         qwp_reader_cursor* cursor,

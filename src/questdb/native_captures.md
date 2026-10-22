@@ -21,7 +21,7 @@ that say `ownership` are the ones that stopped producing findings.
 
 ## Where the caller's Python runs
 
-Three windows, and they are the reason this table exists:
+Four windows, and they are the reason this table exists:
 
 - **The plan build** — `_dataframe_plan_build` and
   `_dataframe_client_try_capsule_path` read `df.attrs`, sniff object
@@ -32,6 +32,8 @@ Three windows, and they are the reason this table exists:
   `tzinfo.utcoffset`, `__index__`, `__buffer__`.
 - **Arrow production** — a stream's `get_next` runs between batches, for
   the whole length of the send.
+- **Result decoding** — allocating Python values can run cyclic-GC
+  finalizers or signal handlers while a native batch is still borrowed.
 
 Anything reachable from those can call `close()`, `clear()`, `flush()`,
 drop the last reference to a `Buffer`, or return a lease to its pool.
@@ -56,6 +58,7 @@ drop the last reference to a `Buffer`, or return a lease to its pool.
 | 14 | `Buffer._row` | the rewind marker | `_row_depth`, and the native buffer refuses a half-written row on its own | guard, no crash path — the worst case is a refused call |
 | 15 | `QueryResult.to_pandas` / `iter_pandas` with a `types_mapper`, and `__arrow_c_stream__` (`egress.pxi`) | `reader` — a `pyarrow.RecordBatchReader` over the `_CursorHandle` the read is streaming from | `_take_cursor_handle` moves the handle into the reader, so the reader owns it. `_CursorHandle._free` nulls `_cursor` inside the re-entrant lock that every `_fetch_one_batch` re-reads it under, so a `close()` or `cancel()` from inside the mapper makes the next fetch refuse rather than read freed memory | ownership (+ clean refusal) |
 | 16 | `SenderTransaction.row` | `buf = self._sender._buffer` | Strong local reference taken before the row starts, so a mid-row `close()` of the sender cannot free the buffer the row is writing into | ownership |
+| 17 | `QueryResult.columns` / `iter_rows` and default `to_pandas` / `iter_pandas` (`egress.pxi`) | `batch` — borrowed native batch and column buffers | A strong `_CursorHandle` reference and `_pin()` / `_unpin()` around decoding defer a re-entrant close until the borrowed data is no longer used. `cancel()` refuses while pinned; a pending row batch is cleared under the cursor lock on close or cancellation | ownership (+ cancellation guard) |
 
 ## What each guard is still for
 

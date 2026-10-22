@@ -4,11 +4,82 @@
 Changelog
 =========
 
-6.0.0 (unreleased)
+6.0.0 (2026-10-21)
 ------------------
+
+Highlights
+~~~~~~~~~~
+
+- Query results as Python rows, without pyarrow or pandas:
+  :meth:`QueryResult.iter_rows <questdb.QueryResult.iter_rows>` yields a
+  tuple per row, and :meth:`QueryResult.columns <questdb.QueryResult.columns>`
+  gives the column names and QuestDB types.
+- Per-query timeouts through the ``query_timeout_ms`` configuration key, for
+  servers that support them.
+- :meth:`QuestDB.execute <questdb.QuestDB.execute>` returns the statement's
+  ``EXEC_DONE`` report, including ``rows_affected``.
+- ``row()`` on QWP senders writes UUID, IPV4, BINARY, CHAR, DATE, LONG256 and
+  GEOHASH columns.
+- UUID raw bytes use RFC 4122 byte order, the bytes of ``uuid.UUID.bytes``,
+  everywhere they cross the API. This is a breaking change; see below.
+- ``duckdb.from_arrow(result)`` works on duckdb 1.5.
+- Requires QuestDB server version 10 or later.
 
 Breaking changes
 ~~~~~~~~~~~~~~~~
+
+- **A standalone QWP/WebSocket flush too large for one frame raises
+  ``BatchTooLarge``**, as a pooled one does, instead of ``InvalidApiCall``.
+  The message names the limit that applies: ``max_buf_size``, the server's
+  advertised limit, or the store-and-forward segment capacity, which the
+  standalone sender now also checks. Code that caught ``InvalidApiCall`` for
+  this case must catch ``BatchTooLarge``.
+
+- **A standalone QWP/WebSocket ``Sender`` keeps auto-flushing with
+  ``auto_flush_rows=off`` and ``auto_flush_interval=off``.** Its byte
+  trigger is now on by default (see the ``row()`` auto-flush entry under
+  *Fixed*), so turning off the other two triggers leaves auto-flush on:
+  ``Sender.auto_flush`` is ``True``, a batch that reaches 90% of the frame
+  limit is published in parts, and ``flush_and_get_fsn()`` covers only the
+  rows after the last of those parts. To batch by hand, set
+  ``auto_flush=off``. ``Sender.auto_flush_bytes`` reports the threshold in
+  effect: between ``establish()`` and ``close()`` that is 90% of the frame
+  limit, or an explicit threshold lowered to it. Outside them the default
+  reads ``None`` and an explicit threshold reads as configured.
+
+- **A standalone QWP/WebSocket ``Sender`` refuses ``row()`` from its own
+  ``error_handler`` or ``connection_listener`` while auto-flush is on**,
+  raising ``InvalidApiCall`` before adding the row, as it already did for
+  ``flush()`` and ``close()``. Reading ``auto_flush_bytes`` there is
+  refused too. Such a callback runs while the native sender is borrowed,
+  and auto-flush reads the frame limit from it on every row. An exception
+  that escapes the callback is only logged through the ``questdb`` logger,
+  so the row is lost unless the callback catches the error. This includes
+  a handler on the ``questdb`` logger that writes its records through the
+  same sender while no ``error_handler`` is set, because the sender then
+  logs server rejections from inside that callback. Give such code a
+  sender of its own.
+
+- :meth:`QuestDB.execute <questdb.QuestDB.execute>` and
+  :meth:`PooledReader.execute <questdb.PooledReader.execute>` return the
+  statement's ``EXEC_DONE`` report as an
+  :class:`ExecDone <questdb.ExecDone>` named tuple ``(op_type,
+  rows_affected)`` instead of ``None``; ``None`` is now returned only for a
+  statement that streamed a result set. The protocol does carry the count —
+  the previous documentation saying otherwise was wrong. ``rows_affected``
+  is meaningful for ``INSERT`` and ``UPDATE``, and ``0`` for a statement
+  that carries no count, such as one executed at parse time; ``op_type`` is
+  the server's operation-type byte, carried through as an opaque ``int``.
+  The same report is on
+  :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` once a
+  result has been drained, and stays there after the result is closed.
+
+- A :class:`QueryResult <questdb.QueryResult>` cancelled before it was read
+  can no longer be read: ``to_pandas()``, ``to_arrow()``, the ``iter_*``
+  methods and the Arrow PyCapsule stream raise
+  ``QuestDBErrorCode.InvalidApiCall`` instead of returning an empty result
+  with no columns, which was indistinguishable from a statement that has
+  no result set.
 
 - **UUID raw bytes are now RFC 4122 byte order** (big-endian, the same bytes
   as ``uuid.UUID.bytes``) everywhere they cross the API. This affects Arrow
@@ -299,6 +370,76 @@ Breaking changes
 New
 ~~~
 
+- :class:`QueryResult <questdb.QueryResult>` can now be read as rows of
+  Python objects, without pyarrow or pandas. :meth:`iter_rows
+  <questdb.QueryResult.iter_rows>` streams one batch at a time and yields a
+  tuple per row, with ``None`` for SQL NULL; :meth:`columns
+  <questdb.QueryResult.columns>` gives ``(name, type_name)`` pairs using the
+  QuestDB DDL spelling (``VARCHAR``, ``TIMESTAMP_NS``, ``IPv4``,
+  ``GEOHASH(8c)``, ``DECIMAL(18,2)``, ``DOUBLE[]``), so they can be compared
+  against ``tables()`` / ``information_schema.questdb_columns()`` without
+  normalising. Two things the wire does not carry: a ``DECIMAL`` is reported
+  at its storage width's precision (18, 38 or 76), and an array column as
+  ``DOUBLE[]`` / ``LONG[]`` whatever its dimensionality. Asking for the
+  columns does not consume the rows, so a DB-API-style caller can read its
+  ``description`` first; a ``LIMIT 0`` schema probe returns its connection
+  to the pool, while a result with unread rows needs ``cancel()`` before
+  ``close()`` to do the same. Intended for row-shaped consumers and small
+  result sets — metadata lookups, test rows, ``limit 0`` schema probes;
+  large analytical results still belong on ``to_pandas()`` / ``to_arrow()``,
+  which stay columnar.
+
+  Timestamps come back timezone-aware in UTC, matching what ``to_arrow()``
+  labels them. ``TIMESTAMP_NS`` is rounded down to microseconds, because
+  ``datetime`` has no nanosecond field. A ``CHAR`` whose code point is 0 is
+  ``None``, matching how the server's own text protocol renders it. A
+  ``DECIMAL`` keeps its scale. ``BOOLEAN``, ``BYTE`` and ``SHORT`` have no
+  NULL representation in QuestDB, so an inserted ``null`` reads back as
+  ``False`` / ``0``.
+
+  ``UUID`` columns come back as the canonical RFC-4122 value, agreeing with
+  ``to_arrow()``, with ``to_pandas()`` and with the server's own text output.
+
+- Queries can be given their own timeout instead of running under the
+  server-wide ``query.timeout``. ``query_timeout_ms`` in the connection
+  string sets a default for every query on that handle (``0``, the default,
+  means none), and ``timeout=`` on ``query()`` / ``execute()`` of both
+  :class:`QuestDB <questdb.QuestDB>` and
+  :class:`PooledReader <questdb.PooledReader>` overrides it per query, with
+  ``timeout=0`` clearing it. An ``int`` is milliseconds (any integer type);
+  a ``datetime.timedelta`` or ``pandas.Timedelta`` works too, with a
+  positive value below one millisecond rounded *up* to 1 ms. The server
+  applies no ceiling, so a value above ``query.timeout`` is honoured — which
+  is the point for a long transform.
+
+  Requires a server advertising ``CAP_QUERY_TIMEOUT``
+  (questdb/questdb#7768). Against an older one a non-zero timeout is refused
+  before anything is sent, with ``QuestDBErrorCode.UnsupportedServer``, rather
+  than silently running under the server default; the connection is
+  untouched by the refusal, so raise the server's ``query.timeout`` instead,
+  or pass ``timeout=0`` on the same handle or lease. On expiry the error
+  carries the new :class:`QuestDBErrorCode.QueryTimeout
+  <questdb.QuestDBErrorCode>` and the pooled connection stays open and
+  authenticated, so the next query runs on it without reconnecting. **Do
+  not retry a write after a timeout:** a
+  statement that completes past its timeout is reported as ``EXEC_DONE``
+  rather than a timeout, precisely so a retry cannot apply it twice, and a
+  DDL / ``INSERT`` / ``UPDATE`` that timed out waiting for the table writer
+  may still be applied afterwards.
+
+- A pooled connection whose query ended in a server-side error — a parse
+  error, a timeout — now goes back to the pool instead of being dropped, on
+  every path: the result reached a terminal frame, so the connection is as
+  healthy as after a clean drain. A :class:`PooledReader
+  <questdb.PooledReader>` lease likewise stays usable after such an error.
+  A result abandoned mid-stream still drops its connection.
+- ``datetime.date`` and ``decimal.Decimal`` are bind parameter types. A date
+  is bound as ``DATE``; a decimal as the narrowest ``DECIMAL`` that holds it
+  — 64, 128 or 256 bits for up to 18, 38 or 76 digits — with its fractional
+  digits as the scale, so it reaches a ``DECIMAL`` column exactly instead of
+  through a ``DOUBLE``. ``NaN``, infinities, and values needing more than 76
+  digits or a scale above 76 raise ``ValueError``.
+
 - **``QuestDB.close(timeout=...)`` sets how long closing may wait.** With
   no argument, ``close()`` waits for a call in progress until it returns
   and for an open lease up to 60 seconds. A number of seconds bounds both;
@@ -417,6 +558,74 @@ New
 
 Fixed
 ~~~~~
+
+- **QWP/WebSocket ``row()`` auto-flush no longer fails on rows that each fit
+  a frame** (`#161 <https://github.com/questdb/py-questdb-client/issues/161>`_).
+  In 5.0 a standalone ``ws::`` / ``wss::`` ``Sender`` had no byte trigger, so
+  600 rows of 4 KiB already exceeded the server's default 2 MiB frame limit,
+  and a pooled lease checked its byte trigger only after appending, so one
+  large row could push a batch past the limit. Either way the whole batch
+  failed: the standalone sender discarded it, and a pooled lease kept it
+  but could never publish it. Now both senders auto-flush at 90% of the
+  frame limit, and publish as soon as the size estimate reaches the full
+  limit, even with ``auto_flush_bytes=off``. When the estimate is past the
+  limit or the whole buffer does not fit in one frame, the rows buffered
+  before the newest one go out as a frame of their own and the newest row
+  starts the next batch. The estimate counts each symbol value at its
+  largest encoded size, so it is not below the size of the encoded frame
+  unless store-and-forward has fallen back to sending full symbol
+  dictionaries. ``len()`` of a QWP/WebSocket ``Buffer`` or standalone
+  ``Sender`` with symbol columns therefore reads higher than before, and
+  frames that the byte trigger publishes carry fewer rows. Until the server
+  advertises its frame limit, as while a lazily connected lease is still
+  connecting, both senders plan for the limit a QuestDB server has by
+  default, 2 MiB less 14 bytes, instead of the local queue limit, so the
+  rows buffered meanwhile still fit a default server once its limit is
+  known.
+
+  Whatever a QWP/WebSocket ``row()`` raises, the row was not added.
+  ``BatchTooLarge`` means
+  it does not fit in a frame on its own, or the rows before it no longer
+  fit, for example after the frame limit shrank on reconnect, in which case
+  those rows are discarded and the error says how many. After any other
+  auto-publish error a pooled lease keeps the rows before it and a
+  standalone sender clears them. In 5.0 a pooled lease also kept the row
+  itself. It now leaves it out, as on every other error, so a failed split
+  no longer leaves the lease holding a batch too large for one frame.
+
+- A :class:`PooledReader <questdb.PooledReader>` that had become reachable
+  only through a reference cycle could be collected by the cyclic garbage
+  collector while one of its results was being decoded, on the same
+  thread; its finaliser then freed the native cursor under the decoder and
+  the process crashed. ``to_pandas()`` and ``iter_pandas()`` were exposed.
+  The free is now deferred until the decoder
+  has let go of the batch, and the consumer sees a plain
+  ``QuestDBError('cursor is closed')``. For the same reason,
+  :meth:`QueryResult.cancel <questdb.QueryResult.cancel>` called from a
+  signal handler while a batch of that result is being decoded now raises
+  ``QuestDBErrorCode.InvalidApiCall`` instead of invalidating the batch.
+- On POSIX, a ``KeyboardInterrupt`` that arrived while
+  ``QueryResult.close()`` or ``PooledReader.close()`` waited for another
+  thread's in-flight batch (Ctrl-C while joining a worker, say) was lost,
+  and the connection leaked. The interrupt now propagates at once, and the
+  worker stops after its current batch and releases the connection.
+- The default ``iter_pandas()`` stopped as if the result were complete when
+  the result was closed underneath it; it now raises
+  ``QuestDBError('cursor is closed')``, like the other iterators.
+- A sub-microsecond ``pandas.Timedelta`` given as a sender timeout or
+  interval (``auth_timeout``, ``retry_timeout``, ...) became 0 ms instead of
+  rounding up to 1 ms.
+- ``copy.copy()`` of a :class:`QueryResult <questdb.QueryResult>` produced
+  a second result over the same cursor: reading from both lost rows, and
+  dropping the copy closed the original's stream. It now raises
+  ``TypeError``.
+- :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` did not count Arrow
+  ``string_view`` columns, plain or dictionary-encoded, as strings when
+  resolving ``symbols``. Naming one in ``symbols=[...]`` raised
+  ``Bad argument `symbols` ... is not a strings column``, ``symbols=True``
+  stored it as ``VARCHAR`` instead of ``SYMBOL``, and ``symbols=False`` left
+  a dictionary-encoded one as ``SYMBOL``. They now behave like ``string``
+  columns.
 
 - **Python ``True`` in an object-dtype DataFrame column was written as
   ``False``** by ``QuestDB.dataframe()``, ``PooledSender.dataframe()`` and
@@ -914,6 +1123,11 @@ Faster
   before ``uuid.UUID`` and IPV4. A ``Geohash`` cell is about 33% cheaper and
   an ``IPv4Address`` cell about 15%, and the common ``int`` / ``float`` /
   ``str`` path no longer has that code laid out around it.
+
+Build & dependencies
+~~~~~~~~~~~~~~~~~~~~
+
+- The bundled ``c-questdb-client`` native library is upgraded to 7.2.0.
 
 5.0.0 (2026-07-27)
 ------------------

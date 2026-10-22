@@ -42,6 +42,11 @@ questdb
    :special-members: __arrow_c_schema__, __arrow_c_stream__
    :show-inheritance:
 
+.. autoclass:: questdb.ExecDone
+   :members: op_type, rows_affected
+   :no-special-members:
+   :no-undoc-members:
+
 .. autoclass:: questdb.ConnectionEvent
    :members:
    :undoc-members:

@@ -278,6 +278,17 @@ Query egress (QWP/WebSocket)
 These keys shape :meth:`QuestDB.query <questdb.QuestDB.query>` /
 :meth:`QuestDB.reader <questdb.QuestDB.reader>` connections.
 
+* ``query_timeout_ms`` - ``int``: Default per-query timeout in milliseconds
+  for queries run through :class:`QuestDB <questdb.QuestDB>` and
+  :class:`PooledReader <questdb.PooledReader>`, replacing the server-wide
+  ``query.timeout``. ``timeout=`` on ``query()`` / ``execute()`` overrides it
+  per query, and ``timeout=0`` clears it. Requires a server advertising
+  ``CAP_QUERY_TIMEOUT``: against an older one every query is refused before
+  it is sent, with ``QuestDBErrorCode.UnsupportedServer``, while a non-zero
+  value is in effect; the connection is untouched by the refusal.
+
+  Default: 0 (no client-supplied timeout).
+
 * ``compression`` - ``'raw'`` | ``'zstd'`` | ``'auto'``: Result-set
   compression. ``auto`` accepts Zstandard when the server supports it;
   decompression is transparent.
@@ -450,12 +461,15 @@ auto-flush by default, with the API-specific thresholds below. Set
 * ``auto_flush_bytes`` - ``int > 0`` | ``'off'``: The number of bytes that will
   trigger a flush. Set to ``'off'`` to disable.
 
-  *Default when auto-flush is enabled: off (TCP, HTTP, standalone
-  QWP/WebSocket) | max_datagram_size (QWP/UDP, 1400 by default) | 90% of the
-  effective frame cap (pooled QWP/WebSocket; before a server cap is known, the
-  lower of 8 MiB and 90% of the local queue cap). Explicit pooled thresholds
-  above 90% of the effective cap are clamped. The pooled byte count is a local
-  encoded-size estimate.*
+  *Default when auto-flush is enabled: off (TCP, HTTP) | max_datagram_size
+  (QWP/UDP, 1400 by default) | 90% of the effective frame cap (QWP/WebSocket,
+  standalone and pooled; until the server advertises its cap, 90% of the lower
+  of QuestDB's default cap, 2 MiB less 14 bytes, and the local queue cap).
+  Explicit QWP/WebSocket thresholds above 90% of
+  the effective cap are clamped. The QWP/WebSocket byte count is a local
+  encoded-size estimate. Over QWP/WebSocket, ``off`` disables only this
+  threshold: a buffer whose estimate reaches the full frame cap is still
+  published.*
 
 * ``auto_flush_interval`` - ``int > 0`` | ``'off'``: The time in milliseconds
   that will trigger a flush. Set to ``'off'`` to disable.
