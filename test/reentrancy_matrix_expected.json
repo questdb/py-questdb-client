@@ -144,6 +144,11 @@
   "reason": "no PooledSender in this scenario",
   "outer_outcome": "completed"
  },
+ "Buffer.dataframe | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Buffer.dataframe | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -169,6 +174,16 @@
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
  },
+ "Buffer.dataframe | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Buffer.dataframe | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -180,6 +195,11 @@
   "outer_outcome": "completed"
  },
  "Buffer.dataframe | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.dataframe | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
@@ -589,6 +609,11 @@
   "reason": "no PooledSender in this scenario",
   "outer_outcome": "completed"
  },
+ "Buffer.row | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Buffer.row | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -614,6 +639,16 @@
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
  },
+ "Buffer.row | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Buffer.row | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -625,6 +660,11 @@
   "outer_outcome": "completed"
  },
  "Buffer.row | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
@@ -1034,6 +1074,11 @@
   "reason": "no PooledSender in this scenario",
   "outer_outcome": "completed"
  },
+ "Buffer.row/dt | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Buffer.row/dt | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -1059,6 +1104,16 @@
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
  },
+ "Buffer.row/dt | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Buffer.row/dt | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -1070,6 +1125,11 @@
   "outer_outcome": "completed"
  },
  "Buffer.row/dt | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/dt | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
@@ -1479,6 +1539,11 @@
   "reason": "no PooledSender in this scenario",
   "outer_outcome": "completed"
  },
+ "Buffer.row/uuid | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Buffer.row/uuid | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -1504,6 +1569,16 @@
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
  },
+ "Buffer.row/uuid | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Buffer.row/uuid | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -1515,6 +1590,11 @@
   "outer_outcome": "completed"
  },
  "Buffer.row/uuid | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Buffer.row/uuid | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
@@ -1924,6 +2004,11 @@
   "reason": "",
   "outer_outcome": "completed"
  },
+ "PooledSender.dataframe | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
  "PooledSender.dataframe | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -1949,6 +2034,16 @@
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "outer_outcome": "completed"
  },
+ "PooledSender.dataframe | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
  "PooledSender.dataframe | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -1960,6 +2055,11 @@
   "outer_outcome": "completed"
  },
  "PooledSender.dataframe | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.dataframe | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "outer_outcome": "completed"
@@ -2369,6 +2469,11 @@
   "reason": "",
   "outer_outcome": "completed"
  },
+ "PooledSender.row | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
  "PooledSender.row | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -2394,6 +2499,16 @@
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "outer_outcome": "completed"
  },
+ "PooledSender.row | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
  "PooledSender.row | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -2405,6 +2520,11 @@
   "outer_outcome": "completed"
  },
  "PooledSender.row | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "PooledSender.row | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "outer_outcome": "completed"
@@ -2814,6 +2934,11 @@
   "reason": "",
   "outer_outcome": "completed"
  },
+ "QuestDB.dataframe | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
  "QuestDB.dataframe | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -2839,6 +2964,16 @@
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "outer_outcome": "completed"
  },
+ "QuestDB.dataframe | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
  "QuestDB.dataframe | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -2850,6 +2985,11 @@
   "outer_outcome": "completed"
  },
  "QuestDB.dataframe | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "outer_outcome": "completed"
+ },
+ "QuestDB.dataframe | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "outer_outcome": "completed"
@@ -3259,6 +3399,11 @@
   "reason": "no PooledSender in this scenario",
   "outer_outcome": "completed"
  },
+ "Sender.dataframe/http | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Sender.dataframe/http | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -3284,6 +3429,16 @@
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
  },
+ "Sender.dataframe/http | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/http | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Sender.dataframe/http | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -3295,6 +3450,11 @@
   "outer_outcome": "completed"
  },
  "Sender.dataframe/http | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/http | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
@@ -3704,6 +3864,11 @@
   "reason": "no PooledSender in this scenario",
   "outer_outcome": "completed"
  },
+ "Sender.dataframe/ilp | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Sender.dataframe/ilp | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -3729,6 +3894,16 @@
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
  },
+ "Sender.dataframe/ilp | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Sender.dataframe/ilp | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -3740,6 +3915,11 @@
   "outer_outcome": "completed"
  },
  "Sender.dataframe/ilp | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ilp | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
@@ -4149,6 +4329,11 @@
   "reason": "no PooledSender in this scenario",
   "outer_outcome": "completed"
  },
+ "Sender.dataframe/ws-plan | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Sender.dataframe/ws-plan | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -4174,6 +4359,16 @@
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
  },
+ "Sender.dataframe/ws-plan | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Sender.dataframe/ws-plan | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -4185,6 +4380,11 @@
   "outer_outcome": "completed"
  },
  "Sender.dataframe/ws-plan | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-plan | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
@@ -4594,6 +4794,11 @@
   "reason": "no PooledSender in this scenario",
   "outer_outcome": "completed"
  },
+ "Sender.dataframe/ws-stream | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Sender.dataframe/ws-stream | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -4619,6 +4824,16 @@
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
  },
+ "Sender.dataframe/ws-stream | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Sender.dataframe/ws-stream | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -4630,6 +4845,11 @@
   "outer_outcome": "completed"
  },
  "Sender.dataframe/ws-stream | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.dataframe/ws-stream | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
@@ -5039,6 +5259,11 @@
   "reason": "no PooledSender in this scenario",
   "outer_outcome": "completed"
  },
+ "Sender.row/ilp | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Sender.row/ilp | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -5064,6 +5289,16 @@
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
  },
+ "Sender.row/ilp | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Sender.row/ilp | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -5075,6 +5310,11 @@
   "outer_outcome": "completed"
  },
  "Sender.row/ilp | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/ilp | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
@@ -5484,6 +5724,11 @@
   "reason": "no PooledSender in this scenario",
   "outer_outcome": "completed"
  },
+ "Sender.row/qwp | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Sender.row/qwp | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -5509,6 +5754,16 @@
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
  },
+ "Sender.row/qwp | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "Sender.row/qwp | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -5520,6 +5775,11 @@
   "outer_outcome": "completed"
  },
  "Sender.row/qwp | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "Sender.row/qwp | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
@@ -5929,6 +6189,11 @@
   "reason": "no PooledSender in this scenario",
   "outer_outcome": "completed"
  },
+ "SenderTransaction.dataframe | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "SenderTransaction.dataframe | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -5954,6 +6219,16 @@
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
  },
+ "SenderTransaction.dataframe | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "SenderTransaction.dataframe | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -5965,6 +6240,11 @@
   "outer_outcome": "completed"
  },
  "SenderTransaction.dataframe | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.dataframe | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
@@ -6374,6 +6654,11 @@
   "reason": "no PooledSender in this scenario",
   "outer_outcome": "completed"
  },
+ "SenderTransaction.row | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "SenderTransaction.row | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -6399,6 +6684,16 @@
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"
  },
+ "SenderTransaction.row | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
  "SenderTransaction.row | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
@@ -6410,6 +6705,11 @@
   "outer_outcome": "completed"
  },
  "SenderTransaction.row | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "no QuestDB in this scenario",
+  "outer_outcome": "completed"
+ },
+ "SenderTransaction.row | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "no QuestDB in this scenario",
   "outer_outcome": "completed"

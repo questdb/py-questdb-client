@@ -1,4 +1,4 @@
-__version__ = '5.0.0'
+__version__ = '6.0.0'
 
 import sys as _sys
 from types import ModuleType as _ModuleType
@@ -10,6 +10,7 @@ from questdb._client import (
     ConnectionEvent,
     ConnectionEventKind,
     DateMillis,
+    ExecDone,
     Geohash,
     Long256,
     OidcDeviceAuth as _OidcDeviceAuth,
@@ -42,6 +43,7 @@ __all__ = [
     'ConnectionEvent',
     'ConnectionEventKind',
     'DateMillis',
+    'ExecDone',
     'Geohash',
     'Long256',
     'PooledReader',

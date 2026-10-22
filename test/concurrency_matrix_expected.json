@@ -144,6 +144,11 @@
   "reason": "",
   "holder_outcome": "completed"
  },
+ "PooledSender.dataframe/in-flight | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
  "PooledSender.dataframe/in-flight | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -169,6 +174,16 @@
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "completed"
  },
+ "PooledSender.dataframe/in-flight | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
  "PooledSender.dataframe/in-flight | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -180,6 +195,11 @@
   "holder_outcome": "completed"
  },
  "PooledSender.dataframe/in-flight | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.dataframe/in-flight | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "completed"
@@ -589,6 +609,11 @@
   "reason": "",
   "holder_outcome": "completed"
  },
+ "PooledSender.row/in-flight | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
  "PooledSender.row/in-flight | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -614,6 +639,16 @@
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "completed"
  },
+ "PooledSender.row/in-flight | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
  "PooledSender.row/in-flight | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -625,6 +660,11 @@
   "holder_outcome": "completed"
  },
  "PooledSender.row/in-flight | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "PooledSender.row/in-flight | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "completed"
@@ -1034,6 +1074,11 @@
   "reason": "no PooledSender in this scenario",
   "holder_outcome": "close=completed; dataframe=completed"
  },
+ "QuestDB.close/call-wait | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
  "QuestDB.close/call-wait | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -1059,6 +1104,16 @@
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "close=completed; dataframe=completed"
  },
+ "QuestDB.close/call-wait | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
  "QuestDB.close/call-wait | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -1070,6 +1125,11 @@
   "holder_outcome": "close=completed; dataframe=completed"
  },
  "QuestDB.close/call-wait | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "close=completed; dataframe=completed"
+ },
+ "QuestDB.close/call-wait | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "close=completed; dataframe=completed"
@@ -1479,6 +1539,11 @@
   "reason": "no PooledSender in this scenario",
   "holder_outcome": "completed"
  },
+ "QuestDB.close/done | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
  "QuestDB.close/done | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -1504,6 +1569,16 @@
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "completed"
  },
+ "QuestDB.close/done | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
  "QuestDB.close/done | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -1515,6 +1590,11 @@
   "holder_outcome": "completed"
  },
  "QuestDB.close/done | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/done | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "completed"
@@ -1924,6 +2004,11 @@
   "reason": "",
   "holder_outcome": "completed"
  },
+ "QuestDB.close/lease-wait | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
  "QuestDB.close/lease-wait | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -1949,6 +2034,16 @@
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "completed"
  },
+ "QuestDB.close/lease-wait | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
  "QuestDB.close/lease-wait | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -1960,6 +2055,11 @@
   "holder_outcome": "completed"
  },
  "QuestDB.close/lease-wait | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.close/lease-wait | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "completed"
@@ -2369,6 +2469,11 @@
   "reason": "no PooledSender in this scenario",
   "holder_outcome": "completed"
  },
+ "QuestDB.dataframe/in-flight | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
  "QuestDB.dataframe/in-flight | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -2394,6 +2499,16 @@
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "completed"
  },
+ "QuestDB.dataframe/in-flight | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
  "QuestDB.dataframe/in-flight | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -2405,6 +2520,11 @@
   "holder_outcome": "completed"
  },
  "QuestDB.dataframe/in-flight | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/in-flight | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "completed"
@@ -2814,6 +2934,11 @@
   "reason": "no PooledSender in this scenario",
   "holder_outcome": "completed"
  },
+ "QuestDB.dataframe/mid-stream | QueryResult.__arrow_c_schema__": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
  "QuestDB.dataframe/mid-stream | QueryResult.__arrow_c_stream__": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -2839,6 +2964,16 @@
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "completed"
  },
+ "QuestDB.dataframe/mid-stream | QueryResult.columns": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.exec_done": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
  "QuestDB.dataframe/mid-stream | QueryResult.iter_arrow": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
@@ -2850,6 +2985,11 @@
   "holder_outcome": "completed"
  },
  "QuestDB.dataframe/mid-stream | QueryResult.iter_polars": {
+  "result": "unreachable",
+  "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
+  "holder_outcome": "completed"
+ },
+ "QuestDB.dataframe/mid-stream | QueryResult.iter_rows": {
   "result": "unreachable",
   "reason": "a query result needs a live read endpoint, and the offline fixture is a sender-side mock: QuestDBError",
   "holder_outcome": "completed"

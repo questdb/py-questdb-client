@@ -27,6 +27,7 @@ __all__ = [
     "ConnectionEvent",
     "ConnectionEventKind",
     "DateMillis",
+    "ExecDone",
     "Geohash",
     "Long256",
     "OidcDeviceAuth",
@@ -61,7 +62,7 @@ from enum import Enum
 from dataclasses import dataclass
 from ipaddress import IPv4Address
 from typing import (
-    Any, Callable, Dict, Iterator, List, Literal, Optional,
+    Any, Callable, Dict, Iterator, List, Literal, NamedTuple, Optional,
     SupportsIndex, Tuple, Union)
 from uuid import UUID
 
@@ -806,7 +807,11 @@ class Buffer:
         """
         The current number of bytes currently in the buffer.
 
-        Equivalent (but cheaper) to ``len(bytes(buffer))``.
+        For ILP buffers this is exact, and equivalent (but cheaper) to
+        ``len(bytes(buffer))``. For QWP buffers it is an estimate of the
+        encoded size. Over QWP/WebSocket it is never below the size of the
+        frame a flush encodes, unless store-and-forward has fallen back to
+        sending full symbol dictionaries.
         """
 
     def  __bytes__(self) -> bytes:
@@ -1380,8 +1385,19 @@ class PooledSender:
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> PooledSender:
         """Append one row to this sender's QWP buffer. If a configured
-        auto-flush threshold is breached, this publishes without waiting for
-        an acknowledgement; a publish error propagates from ``row()``.
+        auto-flush threshold is breached, or the buffer's size estimate
+        reaches the connection's frame cap, this publishes without waiting
+        for an acknowledgement. Every published frame fits the frame cap:
+        when the whole buffer does not, or its size estimate is past the
+        cap, the rows buffered before this one go out on their own and this
+        row starts the next batch.
+
+        Whatever this method raises, the row was not added.
+        ``BatchTooLarge`` means either it does not fit in a frame on its
+        own, or the rows buffered before it do not fit even without it, as
+        after the frame cap shrinks, and those rows are discarded. Any other
+        publish error propagates and leaves the rows buffered before it in
+        place.
 
         See :func:`Buffer.row` for supported column types, protocol
         restrictions, server requirements, and ``NULL``-sentinel behavior.
@@ -1478,8 +1494,9 @@ class PooledReader:
     :meth:`QuestDB.reader`; it holds one pooled reader connection for
     its lifetime and runs queries on it sequentially via :meth:`query`.
     ``close()`` (or leaving the ``with`` block) releases the
-    connection: back to the pool if the last query was drained cleanly,
-    dropped otherwise.
+    connection: back to the pool if the last query reached its terminal
+    on a live connection (a clean drain, a successful ``cancel()``, or a
+    server-side error), dropped otherwise.
 
     Queries are strictly sequential. Closing an undrained result
     terminates the lease; call ``cancel()`` before ``close()`` to
@@ -1495,6 +1512,7 @@ class PooledReader:
         binds: Optional[Union[list, tuple]] = None,
         *,
         reset_symbol_dict: bool = True,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
     ) -> QueryResult:
         """
         Execute a SQL query on the lease's connection and return a
@@ -1510,11 +1528,14 @@ class PooledReader:
         self,
         sql: str,
         binds: Optional[Union[list, tuple]] = None,
-    ) -> None:
+        *,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
+    ) -> Optional[ExecDone]:
         """
         Run a statement on the lease's connection and discard whatever
-        it returns. Mirrors :meth:`QuestDB.execute`; the lease stays
-        usable for the next call.
+        it returns. Mirrors :meth:`QuestDB.execute`, including the
+        :class:`ExecDone` ``(op_type, rows_affected)`` return value; the
+        lease stays usable for the next call.
         """
 
     def close(self) -> None:
@@ -1735,6 +1756,7 @@ class QuestDB:
         binds: Optional[Union[list, tuple]] = None,
         *,
         reset_symbol_dict: bool = True,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
     ) -> QueryResult:
         """
         Execute a SQL query and return a :class:`QueryResult`.
@@ -1746,13 +1768,33 @@ class QuestDB:
         ``to_pandas()``. Set ``False`` to keep the dictionary warm across
         repeated identical queries. No-op against servers that predate the
         capability.
+
+        ``timeout`` runs this query under its own budget instead of the
+        server-wide ``query.timeout``, overriding the connect string's
+        ``query_timeout_ms``. An ``int`` is milliseconds; a
+        ``datetime.timedelta`` works too, with a positive value below one
+        millisecond rounded *up* to 1 ms. ``None`` (the default) keeps the
+        connect string's ``query_timeout_ms``; ``0`` clears it, so the query
+        runs under the server-wide ``query.timeout``.
+
+        Requires a server advertising ``CAP_QUERY_TIMEOUT``: against an older
+        one a non-zero timeout is refused before anything is sent, with
+        ``QuestDBErrorCode.UnsupportedServer``, rather than silently running
+        under the server default; the connection is untouched. On expiry the
+        error carries ``QuestDBErrorCode.QueryTimeout`` and the connection
+        stays usable — but do not retry a write on it, because a statement
+        that outlives its timeout is reported as done instead, and a DDL /
+        INSERT / UPDATE that timed out waiting for the table writer may still
+        be applied.
         """
 
     def execute(
         self,
         sql: str,
         binds: Optional[Union[list, tuple]] = None,
-    ) -> None:
+        *,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
+    ) -> Optional[ExecDone]:
         """
         Run a statement and discard whatever it returns.
 
@@ -1760,8 +1802,13 @@ class QuestDB:
         clean end and returns the pooled connection. Statement output
         (a ``COPY`` status row, admin-function rows, a stray
         ``SELECT``) is discarded; use :meth:`query` when you want the
-        result. Returns ``None``: the protocol carries no
-        rows-affected count.
+        result. ``timeout`` behaves as on :meth:`query`.
+
+        Returns the statement's ``EXEC_DONE`` report as an
+        :class:`ExecDone` named tuple ``(op_type, rows_affected)``, or
+        ``None`` for a statement that streamed a result set instead. See
+        :attr:`QueryResult.exec_done` for the caveats on
+        ``rows_affected``.
         """
 
     def reader(self) -> PooledReader:
@@ -1925,6 +1972,18 @@ class QuestDB:
         """
 
 
+class ExecDone(NamedTuple):
+    """A non-SELECT statement's terminal ``EXEC_DONE`` report, as returned
+    by :meth:`QuestDB.execute` / :meth:`PooledReader.execute` and carried on
+    :attr:`QueryResult.exec_done`. ``rows_affected`` is the number of rows
+    an ``INSERT`` or ``UPDATE`` touched, and ``0`` for a statement that
+    carries no count (one executed at parse time). ``op_type`` is the server's
+    QWP operation-type byte, carried through as an opaque ``int``."""
+
+    op_type: int
+    rows_affected: int
+
+
 class QueryResult:
     """
     Result of :meth:`QuestDB.query`. Single-use: each materialisation
@@ -2047,10 +2106,37 @@ class QueryResult:
         A ``GEOHASH`` column gets the signed integer type
         :meth:`to_pandas` gives it."""
 
+    def columns(self) -> List[Tuple[str, str]]:
+        """Column names and QuestDB DDL type names, as
+        ``[(name, type_name), ...]``. Does not consume the rows —
+        :meth:`iter_rows` continues from the same stream — but rules out the
+        other materialisation methods. Empty for a non-SELECT. A ``DECIMAL``
+        is reported at its storage width's precision (18, 38 or 76), because
+        the wire carries only the scale, and an array column as ``DOUBLE[]``
+        / ``LONG[]`` whatever its dimensionality. A result with unread rows
+        is not at its terminal: call :meth:`cancel` before :meth:`close` to
+        keep its connection."""
+
+    def iter_rows(self) -> Iterator[Tuple[Any, ...]]:
+        """Iterate the result as tuples of Python objects, one batch at a
+        time, with ``None`` for SQL NULL. Needs neither pyarrow nor pandas.
+        Every call returns the same iterator; after :meth:`cancel` no
+        further rows are yielded, after :meth:`close` it raises. A fresh
+        call raises once the stream ended with an error or its iterator was
+        closed."""
+
+    @property
+    def exec_done(self) -> Optional[ExecDone]:
+        """A non-SELECT's terminal ``EXEC_DONE`` as an :class:`ExecDone`
+        ``(op_type, rows_affected)`` once the result has been drained, else
+        ``None``. ``rows_affected`` is ``0`` for a statement that carries no
+        count. Still available after :meth:`close`."""
+
     def cancel(self) -> None:
         """Cancel the query and drain to terminal. The result remains
         open until :meth:`close` or context exit. On failure, it is
-        closed. Idempotent after success."""
+        closed. Idempotent after success. A result not yet read cannot be
+        read afterwards: every read method raises."""
 
     def close(self) -> None:
         """Release the cursor and reader. Terminal connections return
@@ -2089,7 +2175,7 @@ class Sender:
         bearer_token_provider: Optional[Any] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,
+        auth_timeout: Union[int, timedelta] = 15000,
         tls_verify: bool = True,
         tls_ca: Optional[TlsCa] = None,
         tls_roots=None,
@@ -2125,7 +2211,7 @@ class Sender:
         bearer_token_provider: Optional[Any] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,
+        auth_timeout: Union[int, timedelta] = 15000,
         tls_verify: bool = True,
         tls_ca: Optional[TlsCa] = None,
         tls_roots=None,
@@ -2171,7 +2257,7 @@ class Sender:
         bearer_token_provider: Optional[Any] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,
+        auth_timeout: Union[int, timedelta] = 15000,
         tls_verify: bool = True,
         tls_ca: Optional[TlsCa] = None,
         tls_roots=None,
@@ -2231,6 +2317,11 @@ class Sender:
 
         Consult the `.auto_flush_rows`, `.auto_flush_bytes` and
         `.auto_flush_interval` properties for the current active thresholds.
+
+        Over ``ws`` and ``wss`` the byte threshold is on by default, so
+        auto-flush stays on with ``auto_flush_rows`` and
+        ``auto_flush_interval`` both off. Pass ``auto_flush=off`` to batch
+        by hand.
         """
 
     @property
@@ -2242,7 +2333,21 @@ class Sender:
     @property
     def auto_flush_bytes(self) -> Optional[int]:
         """
-        Byte-count threshold for the auto-flush logic, or None if disabled.
+        Byte-count threshold for the auto-flush logic, or None if disabled or
+        not yet known.
+
+        Over ``ws`` and ``wss`` the threshold is at most 90% of the
+        connection's frame cap, and by default it is 90% of that cap. The
+        cap is known once :func:`Sender.establish` has connected, so before
+        that the default reports ``None``. A server that does not advertise
+        a cap counts as having QuestDB's default, 2 MiB less 14 bytes,
+        unless the local limit is lower. An explicit threshold reads as
+        configured before :func:`Sender.establish` and after
+        :func:`Sender.close`; the cap lowers it only between the two.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when read over
+        ``ws`` or ``wss`` from this sender's own ``error_handler`` or
+        ``connection_listener``.
         """
 
     @property
@@ -2290,7 +2395,13 @@ class Sender:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(bytes(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(sender))`` over ILP.
+
+        For QWP/UDP senders this returns an estimated size hint, not the
+        exact serialized byte count. For QWP/WebSocket senders it is an
+        estimate that is never below the size of the frame a flush
+        encodes, unless store-and-forward has fallen back to sending full
+        symbol dictionaries.
         """
 
     def __bytes__(self) -> bytes:
@@ -2334,6 +2445,24 @@ class Sender:
         returned. Over ``ws`` and ``wss`` the frame goes out on a connection
         of its own, so a row written from inside it is accepted and flushed
         as usual.
+
+        Over ``ws`` and ``wss`` with auto-flush on, it also raises
+        ``InvalidApiCall``, without adding the row, when called from this
+        sender's own ``error_handler`` or ``connection_listener``. That
+        includes a logging handler that writes the ``questdb`` logger's
+        records through this sender while no ``error_handler`` is set, since
+        server rejections are then logged from inside that callback.
+
+        Over ``ws`` and ``wss``, auto-flush also publishes a buffer whose
+        size estimate reaches the connection's frame cap, and every published
+        frame fits that cap: when the whole buffer does not, or its size
+        estimate is past the cap, the rows buffered before this one go out
+        on their own and this row starts the next batch. Whatever this
+        method raises, the row was not added. ``BatchTooLarge`` means either
+        it does not fit in a frame on its own, or the rows buffered before
+        it do not fit even without it, as after the frame cap shrinks, and
+        those rows are discarded. Any other publish error also clears the
+        rows buffered before it, as :func:`Sender.flush` does.
         """
 
     def dataframe(
@@ -2441,6 +2570,12 @@ class Sender:
             contains row for a single table, ensuring all data can be written
             transactionally. This feature requires ILP/HTTP and is not available
             when connecting over TCP. *Default: False.*
+
+        If the flush fails, the internal buffer is cleared, rows and all; a
+        buffer passed as ``buffer`` is left as it is. Over QWP/WebSocket a
+        buffer is published as one frame, and one whose encoded frame
+        exceeds the connection's frame cap raises :class:`QuestDBError`
+        (``BatchTooLarge``) without publishing anything.
 
         The Python GIL is released during the network IO operation.
         """

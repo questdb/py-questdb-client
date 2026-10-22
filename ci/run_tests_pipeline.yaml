@@ -36,7 +36,7 @@ stages:
               poolName: "Azure Pipelines"
               pythonVersion: "3.10"
               pandasVersion: "2.3.3"
-              questdbVersion: ""
+              questdbVersion: "9.4.3"
               requireQwpRowTypes: ""
             linux-min-deps:
               # The oldest dependency versions that the docs promise
@@ -55,10 +55,10 @@ stages:
               questdbVersion: ""
               requireQwpRowTypes: ""
             # The QWP-only column types are supported from QuestDB 10,
-            # the first production QWP. The three legs that pin no
-            # version run the 9.4.3 beta and skip them;
-            # `linux-qdb-master` builds from the repo, which is past 10,
-            # and runs them. Every test that writes one of these types
+            # the first production QWP. linux-pandas310 keeps coverage
+            # of the 9.4.3 beta; unpinned legs use system_test.py's
+            # released-server default, and linux-qdb-master builds
+            # from the repo. Every test that writes one of these types
             # lives in a class whose `setUp` asks for
             # `FIRST_QWP_ROW_TYPES_RELEASE`, so the skip covers the
             # whole class rather than the calls somebody remembered to

@@ -30,8 +30,8 @@
 # declares `Py_MOD_GIL_USED`, so importing it on a free-threaded interpreter
 # re-enables the GIL -- and that is what currently makes parts of this
 # extension safe, notably the OIDC provider's `_renderer`, `_closed` and
-# `_interrupt` slots and the `_ACTIVE_DISPATCH_CALLBACKS` counter, which
-# native callback threads reach without free-threading synchronization.
+# `_interrupt` slots, which native callback threads reach without
+# free-threading synchronization.
 # `_OIDC_ERRORS_MOD` is another Python-object read/modify/write cache and
 # likewise relies on the enabled GIL. The paired OIDC registry dictionaries
 # are independently protected by `_OIDC_REGISTRY_LOCK`. Native OIDC raw
@@ -52,6 +52,7 @@ __all__ = [
     'ConnectionEvent',
     'ConnectionEventKind',
     'DateMillis',
+    'ExecDone',
     'Geohash',
     'Long256',
     'OidcDeviceAuth',
@@ -88,6 +89,7 @@ from libc.string cimport strncmp, memset, memcpy, memcmp, strlen
 from libc.math cimport isnan, floor
 from cpython.datetime cimport datetime as cp_datetime
 from cpython.datetime cimport timedelta as cp_timedelta
+from cpython.datetime cimport import_datetime, datetime_new
 from cpython.datetime cimport (
     PyDateTime_GET_YEAR, PyDateTime_GET_MONTH, PyDateTime_GET_DAY,
     PyDateTime_DATE_GET_HOUR, PyDateTime_DATE_GET_MINUTE,
@@ -152,6 +154,8 @@ from cpython.long cimport PyLong_AsLongLongAndOverflow
 from cpython.memoryview cimport PyMemoryView_Check
 
 import datetime
+import decimal
+import operator
 import numbers as _numbers
 import os
 import sys
@@ -167,6 +171,7 @@ from numpy cimport NPY_DOUBLE, PyArrayObject
 from .extra_numpy cimport *
 
 cnp.import_array()
+import_datetime()
 
 cdef bint _dataframe_columnar_count_io_stats = False
 cdef uint64_t _dataframe_columnar_flush_calls = 0
@@ -187,7 +192,7 @@ DEFAULT_MAX_CHUNK_ROWS = 16384
 # This value is automatically updated by the `bump2version` tool.
 # If you need to update it, also update the search definition in
 # .bumpversion.cfg.
-VERSION = '5.0.0'
+VERSION = '6.0.0'
 
 WARN_HIGH_RECONNECTS = True
 
@@ -831,8 +836,8 @@ cdef void_int str_to_column_name_copy(
         raise c_err_to_py(err)
 
 
-cdef object _UTC_EPOCH = datetime.datetime(
-    1970, 1, 1, tzinfo=datetime.timezone.utc)
+cdef object _UTC = datetime.timezone.utc
+cdef object _UTC_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=_UTC)
 
 
 _NAIVE_DATETIME_WARNED = False
@@ -1773,10 +1778,14 @@ cdef class Buffer:
 
     def __len__(self) -> int:
         """
-        The current number of bytes currently in the buffer.
+        The current number of bytes currently in the buffer, read mid-row
+        on the same terms as :func:`Buffer.__bytes__`.
 
-        Equivalent (but cheaper) to ``len(bytes(buffer))``, and read
-        mid-row on the same terms -- see :func:`Buffer.__bytes__`.
+        For ILP buffers this is exact, and equivalent (but cheaper) to
+        ``len(bytes(buffer))``. For QWP buffers it is an estimate of the
+        encoded size. Over QWP/WebSocket it is never below the size of the
+        frame a flush encodes, unless store-and-forward has fallen back to
+        sending full symbol dictionaries.
         """
         self._check_readable()
         return line_sender_buffer_size(self._impl)
@@ -2809,8 +2818,7 @@ cdef uint64_t _timedelta_to_millis(cp_timedelta timedelta):
     if millis < 0:
         raise ValueError(
             f'Negative timedelta not allowed: {timedelta!r}.')
-    if millis == 0 and (
-            timedelta.days or timedelta.seconds or timedelta.microseconds):
+    if millis == 0 and timedelta:
         # Never silently turn a positive finite duration into 0ms, which
         # several options interpret as "no deadline".
         return 1
@@ -3031,6 +3039,83 @@ cdef void_int _parse_pooled_auto_flush(
     c_auto_flush_bytes_dynamic[0] = default_auto_flush_bytes
 
 
+# The frame cap a QuestDB server advertises with its default settings:
+# 2 MiB less 14 bytes.
+cdef size_t _QWP_DEFAULT_SERVER_FRAME_CAP = 2 * 1024 * 1024 - 14
+
+
+cdef inline size_t _qwp_row_planning_cap(
+        size_t hard_cap, bint server_cap_known) noexcept:
+    """
+    The frame cap a QWP/WebSocket row buffer plans its frames for.
+
+    Until the server advertises its cap, `hard_cap` is only the local
+    limit, and rows buffered up to it would not fit a server running the
+    default cap once that cap is known. So the buffer plans for the default
+    cap until then, or for the local limit if that is lower. Only planning
+    uses it: a publish refuses a frame by the local limit alone.
+    """
+    if not server_cap_known and hard_cap > _QWP_DEFAULT_SERVER_FRAME_CAP:
+        return _QWP_DEFAULT_SERVER_FRAME_CAP
+    return hard_cap
+
+
+cdef size_t _qwp_row_byte_limit(
+        const auto_flush_mode_t* mode,
+        bint bytes_dynamic,
+        size_t hard_cap) noexcept:
+    """
+    The `auto_flush_bytes` threshold of a QWP/WebSocket row buffer whose
+    byte trigger is on, for the frame cap `hard_cap` it plans for.
+
+    A threshold derived from the frame cap is 90% of it. An explicit
+    threshold above 90% of the cap is lowered to it.
+    """
+    # floor(hard_cap * 0.9) without overflowing size_t.
+    cdef size_t soft_cap = ((hard_cap // 10) * 9
+                            + ((hard_cap % 10) * 9) // 10)
+    if bytes_dynamic:
+        return soft_cap
+    if soft_cap < <size_t>mode.byte_count:
+        return soft_cap
+    return <size_t>mode.byte_count
+
+
+cdef bint _qwp_row_should_auto_flush(
+        const auto_flush_mode_t* mode,
+        bint bytes_dynamic,
+        line_sender_buffer* buf,
+        size_t hard_cap,
+        int64_t interval_start_ms) noexcept:
+    """
+    Whether a QWP/WebSocket row buffer is due for auto-flush.
+
+    Besides the configured row, byte and interval triggers, a buffer whose
+    size estimate reaches the full frame cap is always due: it may not fit
+    in one frame, and publishing now lets the rows before the newest one go
+    out on their own. `auto_flush_bytes=off` therefore turns off only the
+    configured byte trigger.
+    """
+    cdef size_t buffer_size
+    if not mode.enabled:
+        return False
+    if (mode.row_count != -1 and
+            line_sender_buffer_row_count(buf) >= <size_t>mode.row_count):
+        return True
+    buffer_size = line_sender_buffer_size(buf)
+    if buffer_size >= hard_cap:
+        return True
+    if (mode.byte_count != -1 and
+            buffer_size >= _qwp_row_byte_limit(
+                mode, bytes_dynamic, hard_cap)):
+        return True
+    if (mode.interval != -1 and
+            ((line_sender_now_micros() // 1000) - interval_start_ms)
+            >= mode.interval):
+        return True
+    return False
+
+
 class TaggedEnum(Enum):
     """
     Base class for tagged enums.
@@ -3237,16 +3322,6 @@ cdef inline object _conn_event_str(const char* buf, size_t buf_len):
     return PyUnicode_FromStringAndSize(buf, <Py_ssize_t>buf_len)
 
 
-_THREAD_OWNER_STATE = threading.local()
-# The common row-building path must not look up the Python thread-local on
-# every row. Only a callback dispatch can make `_dispatching_for` true; this
-# GIL-protected C counter of dispatches in progress lets all other calls
-# bypass the Python lookup. It is deliberately global (not per owner): a
-# callback on another thread just takes the slow path, which still checks the
-# *current* thread's dispatch depths.
-cdef Py_ssize_t _ACTIVE_DISPATCH_CALLBACKS = 0
-
-
 cdef class _DispatchContext:
     """Python callback targets and the exact owner they dispatch for.
 
@@ -3294,57 +3369,16 @@ cdef _release_callback_refs(size_t key):
         _LIVE_CALLBACK_REFS.pop(key, None)
 
 
-cdef dict _dispatch_depths(bint create):
-    cdef object depths = getattr(
-        _THREAD_OWNER_STATE, 'dispatch_depths', None)
-    if depths is None and create:
-        depths = {}
-        _THREAD_OWNER_STATE.dispatch_depths = depths
-    return depths
-
-
-cdef void _enter_dispatch(object owner_token) except *:
-    global _ACTIVE_DISPATCH_CALLBACKS
-    cdef dict depths = _dispatch_depths(True)
-    depths[owner_token] = depths.get(owner_token, 0) + 1
-    _ACTIVE_DISPATCH_CALLBACKS += 1
-
-
-cdef void _exit_dispatch(object owner_token) except *:
-    global _ACTIVE_DISPATCH_CALLBACKS
-    cdef dict depths = _dispatch_depths(False)
-    cdef object depth
-    if depths is None:
-        raise RuntimeError('QuestDB callback-dispatch counter underflow.')
-    depth = depths.get(owner_token, 0)
-    if depth == 0:
-        raise RuntimeError('QuestDB callback-dispatch counter underflow.')
-    if depth == 1:
-        del depths[owner_token]
-    else:
-        depths[owner_token] = depth - 1
-    _ACTIVE_DISPATCH_CALLBACKS -= 1
-
-
-cdef bint _dispatching_for(object owner_token):
-    cdef dict depths
-    if _ACTIVE_DISPATCH_CALLBACKS == 0:
-        return False
-    # Check the current thread even when another thread is dispatching.
-    depths = _dispatch_depths(False)
-    if depths is None:
-        return False
-    return depths.get(owner_token, 0) != 0
-
-
-# Scoped call depths live in native thread-local storage, keyed by owner
-# token identity, because `row()` raises and lowers one on every row: the
+# Scoped call depths and callback-dispatch depths live in native
+# thread-local storage, keyed by owner token identity, because `row()`
+# raises and lowers a scoped depth on every pooled row and checks the
+# dispatch depth on every standalone ws row: the
 # whole table is reached through a single `PyThread_tss_get`, and the
 # per-owner entry through a scan of the handful of owners a thread has
-# calls in progress on. The key is process-wide -- OS TLS keys are a
-# capped process resource, so one per handle exhausts them -- and holds a
-# table per thread rather than a single count, which is what keeps the
-# per-handle identity the dispatch registry also needs.
+# calls or dispatches in progress on. The key is process-wide -- OS TLS
+# keys are a capped process resource, so one per handle exhausts them --
+# and holds a table per thread rather than a single count, so each count
+# belongs to one owner.
 cdef Py_tss_t _SCOPED_DEPTH_KEY
 
 if PyThread_tss_create(&_SCOPED_DEPTH_KEY) != 0:
@@ -3356,11 +3390,15 @@ cdef enum:
 
 ctypedef struct scoped_slot_t:
     # Borrowed identity only, never dereferenced: the owning handle keeps
-    # its token alive for as long as it can have calls in progress, and an
-    # entry is dropped the moment its depth reaches zero, so an address a
-    # later token reuses is never already in the table.
+    # its token alive for as long as it can have calls in progress, a
+    # dispatch context keeps it alive for as long as its callbacks can
+    # run, and an entry is dropped the moment both its counts reach zero,
+    # so an address a later token reuses is never already in the table.
     void* owner
+    # Scoped calls in progress for this owner on this thread.
     uintptr_t depth
+    # Callback dispatches in progress for this owner on this thread.
+    uintptr_t dispatch
 
 
 ctypedef struct scoped_table_t:
@@ -3389,11 +3427,11 @@ cdef void _scoped_table_free(object capsule) noexcept:
     # A thread's Python state can end while its OS thread lives on: every
     # call into Python from a native thread gets a fresh one. That state's
     # table is freed on its own thread, so the native slot is cleared here
-    # and the next scoped call on that thread builds a new table. A thread
-    # state can also be cleared from another thread -- interpreter
-    # finalization clears the states of threads still running, and a
-    # forked child those of the parent's other threads -- so the slot is
-    # cleared only when it holds the table being freed.
+    # and the next scoped call or dispatch on that thread builds a new
+    # table. A thread state can also be cleared from another thread --
+    # interpreter finalization clears the states of threads still running,
+    # and a forked child those of the parent's other threads -- so the slot
+    # is cleared only when it holds the table being freed.
     if <scoped_table_t*>PyThread_tss_get(&_SCOPED_DEPTH_KEY) == table:
         PyThread_tss_set(&_SCOPED_DEPTH_KEY, NULL)
     free(table.slots)
@@ -3405,7 +3443,8 @@ cdef inline scoped_table_t* _scoped_table() noexcept:
 
 
 cdef scoped_table_t* _scoped_table_ensure() except NULL:
-    """This thread's table, created on its first scoped call.
+    """This thread's table, created on its first scoped call or callback
+    dispatch.
 
     A capsule in the thread state's dict owns the table: it is what frees
     it when the thread state ends. The native key caches the same pointer
@@ -3473,15 +3512,12 @@ cdef uintptr_t _scoped_depth_for(object owner_token) except? <uintptr_t>-1:
     return slot.depth
 
 
-cdef void _enter_scoped_for(object owner_token) except *:
-    cdef scoped_table_t* table = _scoped_table_ensure()
-    cdef void* owner = <void*>owner_token
-    cdef scoped_slot_t* slot = _scoped_slot(table, owner)
+cdef inline scoped_slot_t* _scoped_slot_add(
+        scoped_table_t* table, void* owner) except NULL:
+    """Append an entry for `owner` with both counts at zero."""
     cdef size_t cap
     cdef scoped_slot_t* grown
-    if slot != NULL:
-        slot.depth += 1
-        return
+    cdef scoped_slot_t* slot
     if table.used == table.cap:
         cap = table.cap * 2
         grown = <scoped_slot_t*>realloc(
@@ -3491,9 +3527,30 @@ cdef void _enter_scoped_for(object owner_token) except *:
                 'Could not allocate QuestDB thread-use counters.')
         table.slots = grown
         table.cap = cap
-    table.slots[table.used].owner = owner
-    table.slots[table.used].depth = 1
+    slot = &table.slots[table.used]
+    slot.owner = owner
+    slot.depth = 0
+    slot.dispatch = 0
     table.used += 1
+    return slot
+
+
+cdef inline void _scoped_slot_drop_if_idle(
+        scoped_table_t* table, scoped_slot_t* slot) noexcept:
+    # Vacated by moving the last entry down, which keeps the scan over
+    # `used` dense and drops the borrowed owner address.
+    if slot.depth == 0 and slot.dispatch == 0:
+        table.used -= 1
+        slot[0] = table.slots[table.used]
+
+
+cdef void _enter_scoped_for(object owner_token) except *:
+    cdef scoped_table_t* table = _scoped_table_ensure()
+    cdef void* owner = <void*>owner_token
+    cdef scoped_slot_t* slot = _scoped_slot(table, owner)
+    if slot == NULL:
+        slot = _scoped_slot_add(table, owner)
+    slot.depth += 1
 
 
 cdef void _exit_scoped_for(object owner_token) except *:
@@ -3502,14 +3559,40 @@ cdef void _exit_scoped_for(object owner_token) except *:
     if table == NULL:
         raise RuntimeError('QuestDB thread-use counter underflow.')
     slot = _scoped_slot(table, <void*>owner_token)
-    if slot == NULL:
+    if slot == NULL or slot.depth == 0:
         raise RuntimeError('QuestDB thread-use counter underflow.')
     slot.depth -= 1
-    if slot.depth == 0:
-        # Vacated by moving the last entry down, which keeps the scan over
-        # `used` dense and drops the borrowed owner address.
-        table.used -= 1
-        slot[0] = table.slots[table.used]
+    _scoped_slot_drop_if_idle(table, slot)
+
+
+cdef void _enter_dispatch(object owner_token) except *:
+    cdef scoped_table_t* table = _scoped_table_ensure()
+    cdef void* owner = <void*>owner_token
+    cdef scoped_slot_t* slot = _scoped_slot(table, owner)
+    if slot == NULL:
+        slot = _scoped_slot_add(table, owner)
+    slot.dispatch += 1
+
+
+cdef void _exit_dispatch(object owner_token) except *:
+    cdef scoped_table_t* table = _scoped_table()
+    cdef scoped_slot_t* slot
+    if table == NULL:
+        raise RuntimeError('QuestDB callback-dispatch counter underflow.')
+    slot = _scoped_slot(table, <void*>owner_token)
+    if slot == NULL or slot.dispatch == 0:
+        raise RuntimeError('QuestDB callback-dispatch counter underflow.')
+    slot.dispatch -= 1
+    _scoped_slot_drop_if_idle(table, slot)
+
+
+cdef inline bint _dispatching_for(object owner_token) noexcept:
+    cdef scoped_table_t* table = _scoped_table()
+    cdef scoped_slot_t* slot
+    if table == NULL:
+        return False
+    slot = _scoped_slot(table, <void*>owner_token)
+    return slot != NULL and slot.dispatch != 0
 
 
 cdef void _connection_event_dispatch(
@@ -5026,17 +5109,17 @@ cdef pyobj_built_t* _dataframe_columnar_build_datetime_pyobj(
                     us = PyDateTime_DATE_GET_MICROSECOND(dt)
                     days = _days_from_civil(year, month, day)
                     values[i] = (
-                        days * 86_400_000_000
-                        + <int64_t>hour * 3_600_000_000
+                        days * <int64_t>86_400_000_000
+                        + <int64_t>hour * <int64_t>3_600_000_000
                         + <int64_t>minute * 60_000_000
                         + <int64_t>second * 1_000_000
                         + <int64_t>us)
                 else:
                     delta = dt - epoch_aware
-                    values[i] = <int64_t>(
-                        delta.days * 86_400_000_000
-                        + delta.seconds * 1_000_000
-                        + delta.microseconds)
+                    values[i] = (
+                        <int64_t>delta.days * <int64_t>86_400_000_000
+                        + <int64_t>delta.seconds * 1_000_000
+                        + <int64_t>delta.microseconds)
                 if b.validity != NULL:
                     _pyobj_set_validity_bit(b.validity, i)
             else:
@@ -7931,97 +8014,73 @@ cdef bint _capsule_polars_dtype_is_string_like(object dtype) except -1:
     return False
 
 
+cdef bint _capsule_pyarrow_type_is_utf8(object pa_type) except -1:
+    cdef object is_string_view = getattr(
+        _PYARROW.types, 'is_string_view', None)
+    return (_PYARROW.types.is_string(pa_type)
+            or _PYARROW.types.is_large_string(pa_type)
+            or (is_string_view is not None and is_string_view(pa_type)))
+
+
 cdef bint _capsule_pyarrow_type_is_string_like(object field_type) except -1:
     """pyarrow: utf8 / large_utf8 / utf8_view, plus Dictionary whose
     value type is one of those."""
     if _PYARROW is None:
         return False
-    if (_PYARROW.types.is_string(field_type)
-            or _PYARROW.types.is_large_string(field_type)):
+    if _capsule_pyarrow_type_is_utf8(field_type):
         return True
-    if _PYARROW.types.is_dictionary(field_type):
-        value_type = field_type.value_type
-        if (_PYARROW.types.is_string(value_type)
-                or _PYARROW.types.is_large_string(value_type)):
-            return True
-    return False
+    return (_PYARROW.types.is_dictionary(field_type)
+            and _capsule_pyarrow_type_is_utf8(field_type.value_type))
 
 
-cdef bint _capsule_pandas_dtype_is_string_like(object dtype) except -1:
-    cdef object storage
-    cdef object arrow_type
-    cdef object cat_dtype
-    if _PANDAS is None:
-        return False
-    if isinstance(dtype, _PANDAS.StringDtype):
-        storage = getattr(dtype, 'storage', None)
-        return storage == 'pyarrow'
-    if isinstance(dtype, _PANDAS.ArrowDtype):
-        _dataframe_require_pyarrow()
-        arrow_type = dtype.pyarrow_dtype
-        return _capsule_pyarrow_type_is_string_like(arrow_type)
-    if isinstance(dtype, _PANDAS.CategoricalDtype):
-        cat_dtype = dtype.categories.dtype
-        if cat_dtype == object:
-            return True
-        return _capsule_pandas_dtype_is_string_like(cat_dtype)
-    return False
-
-
-cdef object _capsule_get_string_column_names(object sliceable):
-    """Return names of all string-like columns (utf8 / large_utf8 /
-    utf8_view / dict-of-utf8). Supports polars DataFrame and pyarrow
-    Table / RecordBatch. Returns None if schema introspection is not
-    available on the input."""
-    cdef object schema
-    cdef object out
-    cdef object name
-    cdef object dtype
-    cdef object field_type
-    cdef int i
-    if _is_pandas_dataframe_object(sliceable):
-        _dataframe_may_import_deps()
-        out = []
-        for name, dtype in sliceable.dtypes.items():
-            if _capsule_pandas_dtype_is_string_like(dtype):
-                out.append(name)
-        return out
-    if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
-        out = []
-        for name, dtype in sliceable.schema.items():
-            if _capsule_polars_dtype_is_string_like(dtype):
-                out.append(name)
-        return out
+cdef object _capsule_schema(object sliceable, object symbols):
+    """Arrow schema of a pyarrow Table / RecordBatch when resolving
+    `symbols` needs one, else None. Pandas input takes its schema from its
+    first exported batch instead."""
+    if (symbols is None or symbols == 'auto'
+            or _is_polars_dataframe_or_lazy(sliceable)):
+        return None
     if _PYARROW is None:
         try:
             _dataframe_require_pyarrow()
         except ImportError:
             return None
     if isinstance(sliceable, (_PYARROW.Table, _PYARROW.RecordBatch)):
-        schema = sliceable.schema
-        out = []
-        for i in range(len(schema.names)):
-            field_type = schema.field(i).type
-            if _capsule_pyarrow_type_is_string_like(field_type):
-                out.append(schema.names[i])
-        return out
+        return sliceable.schema
     return None
 
 
-cdef object _capsule_column_is_string_like(object sliceable, str name):
+cdef object _capsule_get_string_column_names(
+        object sliceable, object schema):
+    """Return names of all string-like columns (utf8 / large_utf8 /
+    dict-of-utf8). Returns None if schema introspection is not
+    available on the input."""
+    cdef object out
+    cdef object name
+    cdef object dtype
+    cdef object field
+    if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
+        out = []
+        for name, dtype in sliceable.schema.items():
+            if _capsule_polars_dtype_is_string_like(dtype):
+                out.append(name)
+        return out
+    if schema is None:
+        return None
+    out = []
+    for field in schema:
+        if _capsule_pyarrow_type_is_string_like(field.type):
+            out.append(field.name)
+    return out
+
+
+cdef object _capsule_column_is_string_like(
+        object sliceable, object schema, str name):
     """Returns True iff `name` is a string-like column on `sliceable`,
     False iff it is some other type, or None if schema introspection
     is not available on the input."""
     cdef object dtype
     cdef object field_type
-    if _is_pandas_dataframe_object(sliceable):
-        _dataframe_may_import_deps()
-        try:
-            dtype = sliceable.dtypes[name]
-        except KeyError:
-            raise KeyError(
-                f'symbols column {name!r} not found in the dataframe.')
-        return _capsule_pandas_dtype_is_string_like(dtype)
     if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
         try:
             dtype = sliceable.schema[name]
@@ -8029,49 +8088,26 @@ cdef object _capsule_column_is_string_like(object sliceable, str name):
             raise KeyError(
                 f'symbols column {name!r} not found in the dataframe.')
         return _capsule_polars_dtype_is_string_like(dtype)
-    if _PYARROW is None:
-        try:
-            _dataframe_require_pyarrow()
-        except ImportError:
-            return None
-    if isinstance(sliceable, (_PYARROW.Table, _PYARROW.RecordBatch)):
-        try:
-            field_type = sliceable.schema.field(name).type
-        except (KeyError, ValueError):
-            raise KeyError(
-                f'symbols column {name!r} not found in the dataframe.')
-        return _capsule_pyarrow_type_is_string_like(field_type)
-    return None
+    if schema is None:
+        return None
+    try:
+        field_type = schema.field(name).type
+    except (KeyError, ValueError):
+        raise KeyError(
+            f'symbols column {name!r} not found in the dataframe.')
+    return _capsule_pyarrow_type_is_string_like(field_type)
 
 
-cdef object _capsule_get_dict_string_column_names(object sliceable):
+cdef object _capsule_get_dict_string_column_names(
+        object sliceable, object schema):
     """Return names of dict-encoded string-like columns (polars
-    Categorical / Enum or pyarrow Dictionary(*, utf8/large_utf8)).
+    Categorical / Enum or pyarrow Dictionary(*, utf8/large_utf8/utf8_view)).
     Returns None if schema introspection is not available."""
-    cdef object schema
     cdef object out
     cdef object name
     cdef object dtype
-    cdef object field_type
-    cdef object value_type
+    cdef object field
     cdef object enum_t
-    cdef int i
-    if _is_pandas_dataframe_object(sliceable):
-        _dataframe_may_import_deps()
-        out = []
-        for name, dtype in sliceable.dtypes.items():
-            if (isinstance(dtype, _PANDAS.CategoricalDtype)
-                    and _capsule_pandas_dtype_is_string_like(dtype)):
-                out.append(name)
-            elif isinstance(dtype, _PANDAS.ArrowDtype):
-                _dataframe_require_pyarrow()
-                field_type = dtype.pyarrow_dtype
-                if _PYARROW.types.is_dictionary(field_type):
-                    value_type = field_type.value_type
-                    if (_PYARROW.types.is_string(value_type)
-                            or _PYARROW.types.is_large_string(value_type)):
-                        out.append(name)
-        return out
     if _POLARS is not None and isinstance(sliceable, _POLARS_DATAFRAME_T):
         out = []
         enum_t = getattr(_POLARS, 'Enum', None)
@@ -8081,26 +8117,18 @@ cdef object _capsule_get_dict_string_column_names(object sliceable):
             elif enum_t is not None and isinstance(dtype, enum_t):
                 out.append(name)
         return out
-    if _PYARROW is None:
-        try:
-            _dataframe_require_pyarrow()
-        except ImportError:
-            return None
-    if isinstance(sliceable, (_PYARROW.Table, _PYARROW.RecordBatch)):
-        schema = sliceable.schema
-        out = []
-        for i in range(len(schema.names)):
-            field_type = schema.field(i).type
-            if _PYARROW.types.is_dictionary(field_type):
-                value_type = field_type.value_type
-                if (_PYARROW.types.is_string(value_type)
-                        or _PYARROW.types.is_large_string(value_type)):
-                    out.append(schema.names[i])
-        return out
-    return None
+    if schema is None:
+        return None
+    out = []
+    for field in schema:
+        if (_PYARROW.types.is_dictionary(field.type)
+                and _capsule_pyarrow_type_is_utf8(field.type.value_type)):
+            out.append(field.name)
+    return out
 
 
-cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
+cdef object _resolve_symbols_to_overrides(
+        object sliceable, object schema, object symbols):
     """Translate `symbols` into a list of
     (name_bytes, kind, arg) tuples matching the shape returned by
     _validate_schema_overrides. `kind` is `qwp_arrow_override_symbol`
@@ -8133,7 +8161,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
         return []
 
     if symbols is False:
-        col_names = _capsule_get_dict_string_column_names(sliceable)
+        col_names = _capsule_get_dict_string_column_names(sliceable, schema)
         if col_names is None:
             return None
         out = []
@@ -8142,7 +8170,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
         return out
 
     if symbols is True:
-        col_names = _capsule_get_string_column_names(sliceable)
+        col_names = _capsule_get_string_column_names(sliceable, schema)
         if col_names is None:
             return None
         out = []
@@ -8176,7 +8204,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
             raise TypeError(
                 f'symbols entry must be str or int, got '
                 f'{type(entry).__name__}.')
-        is_str = _capsule_column_is_string_like(sliceable, name)
+        is_str = _capsule_column_is_string_like(sliceable, schema, name)
         if is_str is None:
             return None
         if not is_str:
@@ -8190,7 +8218,7 @@ cdef object _resolve_symbols_to_overrides(object sliceable, object symbols):
     # Match the row/numpy planner: an explicit symbols list marks only the
     # listed columns as symbols; every other dict-encoded (categorical)
     # column is forced to a plain VARCHAR field rather than auto-symbolized.
-    dict_names = _capsule_get_dict_string_column_names(sliceable)
+    dict_names = _capsule_get_dict_string_column_names(sliceable, schema)
     if dict_names is None:
         return None
     for name in dict_names:
@@ -8780,6 +8808,8 @@ cdef bint _dataframe_client_try_capsule_path(
     cdef size_t deferred_since_sync = 0
     cdef bint force_drop_conn = False
     cdef object row_slice = None
+    cdef object first_batch = None
+    cdef object schema
     cdef Py_ssize_t total_rows = 0
     cdef Py_ssize_t offset = 0
     cdef Py_ssize_t chunk_rows
@@ -8868,7 +8898,24 @@ cdef bint _dataframe_client_try_capsule_path(
 
     _reject_nul_column_names(sliceable)
 
-    symbol_overrides = _resolve_symbols_to_overrides(sliceable, symbols)
+    if _is_pandas_dataframe_object(sliceable):
+        if _PYARROW is None:
+            _dataframe_require_pyarrow()
+        if not hasattr(_PYARROW.Table, '__arrow_c_stream__'):
+            raise ImportError(
+                '`pyarrow` >= 14.0.0 is required for Arrow-backed pandas '
+                f'DataFrames (version {_PYARROW.__version__} is installed). '
+                'Upgrade with `pip install -U pyarrow`.')
+        chunk_rows = max_rows_per_batch
+        if chunk_rows > total_rows:
+            chunk_rows = total_rows
+        first_batch = _PYARROW.Table.from_pandas(
+            _capsule_slice_rows(sliceable, 0, chunk_rows))
+        schema = first_batch.schema
+    else:
+        schema = _capsule_schema(sliceable, symbols)
+    symbol_overrides = _resolve_symbols_to_overrides(
+        sliceable, schema, symbols)
     if symbol_overrides is None:
         return False
     merged_overrides = _merge_capsule_overrides(
@@ -8940,8 +8987,12 @@ cdef bint _dataframe_client_try_capsule_path(
                         chunk_rows = max_rows_per_batch
                         if chunk_rows > total_rows - offset:
                             chunk_rows = total_rows - offset
-                        row_slice = _capsule_slice_rows(
-                            sliceable, offset, chunk_rows)
+                        if first_batch is not None:
+                            row_slice = first_batch
+                            first_batch = None
+                        else:
+                            row_slice = _capsule_slice_rows(
+                                sliceable, offset, chunk_rows)
                         _capsule_consume_stream_with_hint(
                             conn, row_slice, c_table_name, c_ts_column_ptr,
                             at_scalar_set, at_scalar_nanos,
@@ -9474,11 +9525,10 @@ cdef class QuestDB:
         self._closing = False
         self._close_running = False
         self._close_deadline = None
-        # This exact owner token indexes the handle's entries in the
-        # per-OS-thread table of scoped call depths and in the
-        # module-level thread-local of callback-dispatch depths. Both are
-        # shared by every handle, so a handle keeps its own identity per
-        # thread without allocating an OS TLS key or a threading.local
+        # This exact owner token indexes the handle's entry in the
+        # per-OS-thread table of scoped call and callback-dispatch
+        # depths. The table is shared by every handle, so a handle keeps
+        # its own identity per thread without allocating an OS TLS key
         # of its own.
         self._thread_owner_token = object()
         self._dispatch_context = None
@@ -9618,8 +9668,8 @@ cdef class QuestDB:
         Pooled row auto-flush is enabled by default at 1,000 rows, 100
         milliseconds, or an estimated encoded size at 90% of the effective
         frame cap. Before a server cap is known, or when the server omits it,
-        the byte threshold is the lower of 8 MiB and 90% of the local
-        store-and-forward frame cap. Set
+        the byte threshold is 90% of the lower of QuestDB's default cap, 2 MiB
+        less 14 bytes, and the local store-and-forward frame cap. Set
         ``auto_flush_bytes=off`` to disable only the byte trigger, or
         ``auto_flush=off`` to disable all automatic publishing.
         The mode is immutable and shared by every lease; the interval starts
@@ -10379,7 +10429,7 @@ cdef class QuestDB:
                 self._end_db_use()
             _oidc_raise_unscheduled_main()
 
-    def execute(self, str sql, object binds=None):
+    def execute(self, str sql, object binds=None, *, object timeout=None):
         """
         Run a statement and discard whatever it returns.
 
@@ -10391,14 +10441,21 @@ cdef class QuestDB:
         ``SELECT``) is discarded; use :meth:`query` when you want the
         result. The connection's SYMBOL dictionary is left untouched.
 
-        ``binds`` behaves exactly as on :meth:`query`. Returns
-        ``None``: the protocol carries no rows-affected count.
+        ``binds`` and ``timeout`` behave exactly as on :meth:`query`.
+
+        Returns the statement's ``EXEC_DONE`` report as an
+        :class:`ExecDone` named tuple ``(op_type, rows_affected)``, or
+        ``None`` for a statement that streamed a result set instead (a
+        ``SELECT``). See :attr:`QueryResult.exec_done` for the caveats on
+        ``rows_affected``.
         """
         self._begin_db_use('execute')
         try:
-            result = self.query(sql, binds, reset_symbol_dict=False)
+            result = self.query(
+                sql, binds, reset_symbol_dict=False, timeout=timeout)
             try:
                 result._drain()
+                return result.exec_done
             finally:
                 result.close()
         finally:
@@ -10409,7 +10466,8 @@ cdef class QuestDB:
             str sql,
             object binds=None,
             *,
-            bint reset_symbol_dict=True):
+            bint reset_symbol_dict=True,
+            object timeout=None):
         """
         Execute a SQL query and return a :class:`QueryResult`.
 
@@ -10441,6 +10499,10 @@ cdef class QuestDB:
               in the API)
             - :class:`TimestampMicros` → TIMESTAMP
             - :class:`TimestampNanos` → TIMESTAMP_NS
+            - ``datetime.date`` → DATE
+            - ``decimal.Decimal`` → the narrowest DECIMAL that holds it,
+              with its fractional digits as the scale (up to 76 digits and
+              scale 76; NaN and infinities raise :class:`ValueError`)
             - ``uuid.UUID`` → UUID
 
             Any other type raises :class:`TypeError` naming the placeholder.
@@ -10459,10 +10521,28 @@ cdef class QuestDB:
             the dictionary warm across repeated identical queries. No-op
             against servers that predate the capability.
 
+        :param timeout: Run this query under its own budget instead of the
+            server-wide ``query.timeout``, overriding the connect string's
+            ``query_timeout_ms``. An ``int`` is milliseconds; a
+            ``datetime.timedelta`` works too, with a positive value below
+            one millisecond rounded *up* to 1 ms. ``None`` (the default)
+            keeps the connect string's ``query_timeout_ms``; ``0`` clears
+            it. Requires a server advertising ``CAP_QUERY_TIMEOUT``: against
+            an older one a non-zero timeout is refused before anything is
+            sent, with ``QuestDBErrorCode.UnsupportedServer``, rather than
+            silently running under the server default; the connection is
+            untouched, so pass ``timeout=0`` or raise the server's
+            ``query.timeout`` instead. On expiry the error carries
+            ``QuestDBErrorCode.QueryTimeout`` and the connection stays
+            usable — but do not retry a write on it: a statement that
+            outlives its timeout is reported as done instead, and a DDL /
+            INSERT / UPDATE that timed out waiting for the table writer may
+            still be applied.
+
         :return: A :class:`QueryResult`. Materialise it via
-            ``to_pandas()``, ``to_arrow()``, ``iter_arrow()``,
-            ``iter_pandas()``, or the ``__arrow_c_stream__`` PyCapsule
-            protocol.
+            ``iter_rows()``, ``to_pandas()``, ``to_arrow()``,
+            ``iter_arrow()``, ``iter_pandas()``, or the
+            ``__arrow_c_stream__`` PyCapsule protocol.
 
         Sentinel-value collisions in the result frame round-trip QuestDB's
         contract: ``INT64_MIN`` in a LONG column, NaN in DOUBLE / FLOAT,
@@ -10490,13 +10570,19 @@ cdef class QuestDB:
             raise TypeError(
                 '"binds" must be a list or tuple of positional bind '
                 f'parameters (or None), not {_fqn(type(binds))}')
+        cdef int64_t timeout_ms = _query_timeout_to_millis(timeout)
         db = self._begin_db_use('query')
         try:
             reader_handle = _borrow_reader_from_pool(db)
             reader_handle._oidc_auth = self._oidc_auth
             reader_handle._bearer_token_provider = self._bearer_token_provider
-            cursor_handle = _execute_query(
-                reader_handle, sql, binds, reset_symbol_dict)
+            try:
+                cursor_handle = _execute_query(
+                    reader_handle, sql, binds, reset_symbol_dict, True,
+                    timeout_ms)
+            except:
+                reader_handle._close()
+                raise
         finally:
             self._end_db_use()
         return QueryResult(cursor_handle)
@@ -11226,6 +11312,7 @@ cdef class Sender:
     # PyPy can also collect a provider that owns this sender.
     cdef dict __dict__
     cdef auto_flush_mode_t _auto_flush_mode
+    cdef bint _auto_flush_bytes_dynamic
     cdef int64_t* _last_flush_ms
     cdef size_t _init_buf_size
     cdef bint _in_txn
@@ -11647,6 +11734,12 @@ cdef class Sender:
                     '"request_timeout" must be an int or a timedelta, '
                     f'not {_fqn(type(request_timeout))}')
 
+        if _is_qwp_ws_protocol(self._c_protocol) and auto_flush_bytes is None:
+            # As on a pooled lease, the byte threshold derives from the
+            # connection's frame cap, read on every check. The placeholder
+            # lets the byte trigger alone turn auto-flush on.
+            auto_flush_bytes = 1
+            self._auto_flush_bytes_dynamic = True
         _parse_auto_flush(
             self._c_protocol,
             auto_flush,
@@ -11678,6 +11771,7 @@ cdef class Sender:
         self._connection_listener = None
         self._oidc_auth = None
         self._auto_flush_mode.enabled = False
+        self._auto_flush_bytes_dynamic = False
         self._last_flush_ms = NULL
         self._init_buf_size = 0
         self._in_txn = False
@@ -11712,7 +11806,7 @@ cdef class Sender:
             object request_timeout=None,
             object auto_flush=None,  # Default True
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
-            object auto_flush_bytes=None,  # Default off
+            object auto_flush_bytes=None,  # Default off (90% of the frame cap for ws and wss)
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 1 for QWP/UDP
@@ -11814,7 +11908,7 @@ cdef class Sender:
             object request_timeout=None,
             object auto_flush=None,  # Default True
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
-            object auto_flush_bytes=None,  # Default off
+            object auto_flush_bytes=None,  # Default off (90% of the frame cap for ws and wss)
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 1 for QWP/UDP
@@ -12015,7 +12109,7 @@ cdef class Sender:
             object request_timeout=None,
             object auto_flush=None,  # Default True
             object auto_flush_rows=None,  # Default 75000 (HTTP) or 600 (TCP)
-            object auto_flush_bytes=None,  # Default off
+            object auto_flush_bytes=None,  # Default off (90% of the frame cap for ws and wss)
             object auto_flush_interval=None,  # Default 1000 milliseconds
             object max_datagram_size=None,  # Default 1400 for QWP/UDP
             object multicast_ttl=None,  # Default 1 for QWP/UDP
@@ -12143,6 +12237,11 @@ cdef class Sender:
         
         Consult the `.auto_flush_rows`, `.auto_flush_bytes` and
         `.auto_flush_interval` properties for the current active thresholds.
+
+        Over ``ws`` and ``wss`` the byte threshold is on by default, so
+        auto-flush stays on with ``auto_flush_rows`` and
+        ``auto_flush_interval`` both off. Pass ``auto_flush=off`` to batch
+        by hand.
         """
         return self._auto_flush_mode.enabled
 
@@ -12160,13 +12259,43 @@ cdef class Sender:
     @property
     def auto_flush_bytes(self) -> Optional[int]:
         """
-        Byte-count threshold for the auto-flush logic, or None if disabled.
+        Byte-count threshold for the auto-flush logic, or None if disabled or
+        not yet known.
+
+        Over ``ws`` and ``wss`` the threshold is at most 90% of the
+        connection's frame cap, and by default it is 90% of that cap. The
+        cap is known once :func:`Sender.establish` has connected, so before
+        that the default reports ``None``. A server that does not advertise
+        a cap counts as having QuestDB's default, 2 MiB less 14 bytes,
+        unless the local limit is lower. An explicit threshold reads as
+        configured before :func:`Sender.establish` and after
+        :func:`Sender.close`; the cap lowers it only between the two.
+
+        Raises :class:`QuestDBError <questdb.QuestDBError>`
+        (``InvalidApiCall``) when read over ``ws`` or ``wss`` from this
+        sender's own ``error_handler`` or ``connection_listener``.
         """
+        cdef size_t hard_cap = 0
+        cdef cbool server_cap_known = False
+        cdef line_sender_error* err = NULL
         if not self._auto_flush_mode.enabled:
             return None
         if self._auto_flush_mode.byte_count == -1:
             return None
-        return self._auto_flush_mode.byte_count
+        if not _is_qwp_ws_protocol(self._c_protocol):
+            return self._auto_flush_mode.byte_count
+        if self._impl == NULL:
+            if self._auto_flush_bytes_dynamic:
+                return None
+            return self._auto_flush_mode.byte_count
+        self._check_not_in_own_callback('auto_flush_bytes')
+        if not line_sender_qwpws_effective_frame_cap(
+                self._impl, &hard_cap, &server_cap_known, &err):
+            raise c_err_to_py(err)
+        return _qwp_row_byte_limit(
+            &self._auto_flush_mode,
+            self._auto_flush_bytes_dynamic,
+            _qwp_row_planning_cap(hard_cap, server_cap_known))
     
     @property
     def auto_flush_interval(self) -> Optional[datetime.timedelta]:
@@ -12305,10 +12434,13 @@ cdef class Sender:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(bytes(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(sender))`` over ILP.
 
         For QWP/UDP senders this returns an estimated size hint, not the
-        exact serialized byte count.
+        exact serialized byte count. For QWP/WebSocket senders it is an
+        estimate that is never below the size of the frame a flush
+        encodes, unless store-and-forward has fallen back to sending full
+        symbol dictionaries.
         """
         if self._buffer is None:
             return 0
@@ -12361,6 +12493,31 @@ cdef class Sender:
         it runs could not be flushed until it returned. Over ``ws`` and
         ``wss`` the frame goes out on a connection of its own, so a row
         written from inside it is accepted and flushed as usual.
+
+        Over ``ws`` and ``wss``, it also raises ``InvalidApiCall``, without
+        adding the row, when called from this sender's own ``error_handler``
+        or ``connection_listener``. That includes a logging handler that
+        writes the ``questdb`` logger's records through this sender while no
+        ``error_handler`` is set, since server rejections are then logged
+        from inside that callback.
+
+        Over ``ws`` and ``wss``, auto-flush also publishes a buffer whose size
+        estimate reaches the connection's frame cap, even with
+        ``auto_flush_bytes=off``. Every published frame fits the frame cap:
+        when the whole buffer does not, or its size estimate is past the
+        cap, the rows buffered before this one go out as a frame of their
+        own and this row starts the next batch, so one call publishes at
+        most two frames. Re-adding the row converts its values a second
+        time.
+
+        Over ``ws`` and ``wss``, whatever this method raises, the row was not
+        added. :class:`QuestDBError <questdb.QuestDBError>`
+        (``BatchTooLarge``) means either it does not fit in a frame on its
+        own, or the rows buffered before it do not fit even without it,
+        which can happen after the frame cap shrinks, for example on
+        reconnect; those rows are then discarded, and the error says how
+        many. Any other error raised by a publish also clears the rows
+        buffered before it, as :func:`Sender.flush` does.
         """
         if self._in_txn:
             raise QuestDBError(
@@ -12376,6 +12533,8 @@ cdef class Sender:
                 QuestDBErrorCode.InvalidApiCall,
                 "row() can\'t be called: Sender is closed."
             )
+        # Refused before the row is added. Over ws/wss, auto-flush also
+        # reads the frame cap from the native sender on every row.
         self._check_not_in_own_callback('row')
         # A row-serializing `dataframe()` holds this buffer from the
         # moment it starts and runs caller Python before its first row:
@@ -12387,7 +12546,12 @@ cdef class Sender:
             "A logging handler that writes the `questdb` logger's records "
             "through this same sender arrives here too; give it a Sender "
             "of its own.")
-        self._buffer.row(table_name, symbols=symbols, columns=columns, at=at)
+        if _is_qwp_ws_protocol(self._c_protocol):
+            _qwp_row_append(
+                self, None, self._buffer, table_name, symbols, columns, at)
+        else:
+            self._buffer.row(
+                table_name, symbols=symbols, columns=columns, at=at)
         return self
 
     def dataframe(
@@ -12616,14 +12780,17 @@ cdef class Sender:
             transactionally. This feature requires ILP/HTTP and is not available
             when connecting over TCP. *Default: False.*
 
+        If the flush fails, the internal buffer is cleared, rows and all; a
+        buffer passed as ``buffer`` is left as it is. Over QWP/WebSocket a
+        buffer is published as one frame, and one whose encoded frame
+        exceeds the connection's frame cap raises
+        :class:`QuestDBError <questdb.QuestDBError>` (``BatchTooLarge``)
+        without publishing anything.
+
         The Python GIL is released during the network IO operation.
         """
-        cdef line_sender* sender = self._impl
-        cdef line_sender_error* err = NULL
         cdef line_sender_buffer* c_buf = NULL
         cdef Buffer active_buf
-        cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
-        cdef bint ok = False
         # Only a clearing flush modifies the buffer; a kept flush borrows it
         # read-only (`const line_sender_buffer*`), so concurrent reads and
         # other kept flushes of the same buffer stay allowed.
@@ -12639,7 +12806,7 @@ cdef class Sender:
         if buffer is None and not clear:
             raise ValueError('The internal buffer must always be cleared.')
 
-        if sender == NULL:
+        if self._impl == NULL:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'flush() can\'t be called: Sender is closed.')
@@ -12661,6 +12828,41 @@ cdef class Sender:
         if line_sender_buffer_size(c_buf) == 0 and not _is_qwp_ws_protocol(self._c_protocol):
             return
         active_buf = buffer if buffer is not None else self._buffer
+        self._flush_c_buf(active_buf, clear, transactional, False)
+
+    cdef void_int _flush_c_buf(
+            self,
+            Buffer active_buf,
+            bint clear,
+            bint transactional,
+            bint keep_on_batch_too_large) except -1:
+        """
+        Flush `active_buf`, which the caller has checked against this
+        sender, with the GIL released.
+
+        A failed flush of the internal buffer clears it. With
+        `keep_on_batch_too_large`, a `BatchTooLarge` refusal leaves it
+        intact instead: that refusal publishes nothing and leaves the sender
+        usable, so the caller can rewind the row it just added and publish
+        the rest.
+        """
+        cdef line_sender* sender = self._impl
+        cdef line_sender_buffer* c_buf = active_buf._impl
+        cdef line_sender_error* err = NULL
+        cdef PyThreadState* gs = NULL  # GIL state. NULL means we have the GIL.
+        cdef bint ok = False
+        cdef object exc
+        # Only a clearing flush modifies the buffer; a kept flush borrows it
+        # read-only, as `flush()` checked it.
+        cdef bint exclusive = clear
+
+        # Every publish of this sender's rows comes through here, including
+        # auto-flush from `row()`, so the re-entry guard lives here too.
+        self._check_not_in_own_callback('flush')
+        if sender == NULL:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                'flush() can\'t be called: Sender is closed.')
 
         # Publish the guard before releasing the GIL: while native holds
         # `&mut Sender` and a borrowed pointer to `c_buf`, another thread must
@@ -12689,30 +12891,37 @@ cdef class Sender:
         if ok and c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
         if not ok:
-            if c_buf == self._buffer._impl:
+            if _is_tcp_protocol(self._c_protocol):
+                # Provide further context pointing to the logs.
+                exc = c_err_to_py_fmt(err, _FLUSH_FMT)
+            else:
+                exc = c_err_to_py(err)
+            if c_buf == self._buffer._impl and not (
+                    keep_on_batch_too_large and
+                    exc.code == QuestDBErrorCode.BatchTooLarge):
                 # Prevent a follow-up call to `.close(flush=True)` (as is
                 # usually called from `__exit__`) to raise after the sender
                 # entered an error state following a failed call to `.flush()`.
                 #
-                # Cleared for every failure, with no carve-out. The internal
-                # buffer is shared state that `may_flush_on_row_complete`,
-                # `SenderTransaction.__enter__` / `.commit()` and
-                # `close(flush=True)` all read as "unflushed rows, publish at
-                # the next opportunity", so rows left here do not wait for the
-                # caller: an auto-flush discards them, a transaction publishes
-                # them without its own transactional framing, and `__exit__`
-                # re-raises. A caller who wants to republish a failed batch
-                # after recovering owns the buffer instead --
+                # Cleared for every failure but a `BatchTooLarge` refusal
+                # under `keep_on_batch_too_large`, which `row()` settles
+                # before it returns: it takes its newest row back out and
+                # publishes or discards the rest (see `_qwp_row_append`).
+                # The internal buffer is shared state that
+                # `may_flush_on_row_complete`, `SenderTransaction.__enter__`
+                # / `.commit()` and `close(flush=True)` all read as
+                # "unflushed rows, publish at the next opportunity", so rows
+                # left here do not wait for the caller: an auto-flush
+                # discards them, a transaction publishes them without its
+                # own transactional framing, and `__exit__` re-raises. A
+                # caller who wants to republish a failed batch after
+                # recovering owns the buffer instead --
                 # `buf = sender.new_buffer()` then `sender.flush(buf,
                 # clear=False)`, which keeps `buf` intact on ANY error and is
                 # invisible to all of the above.
                 # Note: For the internal buffer `clear` is always `True`.
                 line_sender_buffer_clear(c_buf)
-            if _is_tcp_protocol(self._c_protocol):
-                # Provide further context pointing to the logs.
-                raise c_err_to_py_fmt(err, _FLUSH_FMT)
-            else:
-                raise c_err_to_py(err)
+            raise exc
         # Native errors above are consumed before the fallback raises. On
         # success all sender/buffer borrows have already been released.
         _oidc_raise_unscheduled_main()
@@ -13147,6 +13356,241 @@ cdef class Sender:
         free(self._last_flush_ms)
 
 
+# QWP/WebSocket row auto-flush, shared by a standalone `Sender` and a
+# `PooledSender` lease: each function takes both, exactly one of them set.
+
+cdef void_int _qwp_row_add(
+        Sender sender,
+        PooledSender pooled,
+        Buffer buf,
+        str table_name,
+        dict symbols,
+        dict columns,
+        object at) except -1:
+    """
+    Append a row, holding the rewind point just before it. A row whose
+    values are all `None` writes nothing and leaves no rewind point.
+    """
+    cdef bint starts_batch = line_sender_buffer_row_count(buf._impl) == 0
+    buf._row(False, table_name, symbols, columns, at, True)
+    if pooled is not None and starts_batch:
+        pooled._batch_started_ms = line_sender_now_micros() // 1000
+
+
+cdef bint _qwp_row_due(
+        Sender sender,
+        PooledSender pooled,
+        Buffer buf,
+        size_t* hard_cap) except -1:
+    """
+    Whether the row buffer is due for auto-flush, reporting the frame cap
+    it plans for through `hard_cap` (see `_qwp_row_planning_cap`).
+    """
+    cdef auto_flush_mode_t* mode
+    cdef bint bytes_dynamic
+    cdef int64_t interval_start_ms
+    cdef cbool server_cap_known = False
+    cdef line_sender_error* err = NULL
+    cdef bint ok
+    if pooled is not None:
+        mode = &pooled._handle._auto_flush_mode
+        if not mode.enabled:
+            return False
+        bytes_dynamic = pooled._handle._auto_flush_bytes_dynamic
+        interval_start_ms = pooled._batch_started_ms
+        ok = qwp_sender_effective_frame_cap(
+            pooled._qwp, hard_cap, &server_cap_known, &err)
+    else:
+        mode = &sender._auto_flush_mode
+        if not mode.enabled:
+            return False
+        if sender._impl == NULL:
+            raise QuestDBError(
+                QuestDBErrorCode.InvalidApiCall,
+                "row() can't be called: Sender is closed.")
+        bytes_dynamic = sender._auto_flush_bytes_dynamic
+        interval_start_ms = sender._last_flush_ms[0]
+        ok = line_sender_qwpws_effective_frame_cap(
+            sender._impl, hard_cap, &server_cap_known, &err)
+    if not ok:
+        raise c_err_to_py(err)
+    hard_cap[0] = _qwp_row_planning_cap(hard_cap[0], server_cap_known)
+    return _qwp_row_should_auto_flush(
+        mode,
+        bytes_dynamic,
+        buf._impl,
+        hard_cap[0],
+        interval_start_ms)
+
+
+cdef void_int _qwp_row_publish(Sender sender, PooledSender pooled) except -1:
+    """
+    Publish the whole row buffer as one frame and clear it.
+
+    A `BatchTooLarge` refusal publishes nothing and leaves the buffer intact
+    on both senders. After any other failure a pooled lease keeps its rows
+    and a standalone sender has cleared them, as their `flush()` does.
+    """
+    if pooled is not None:
+        pooled._flush_locked(False)
+    else:
+        sender._flush_c_buf(sender._buffer, True, False, True)
+
+
+cdef void_int _qwp_row_reject(
+        PooledSender pooled,
+        Buffer buf,
+        object exc,
+        bint earlier_rows_published) except -1:
+    """Remove the newest row, which does not fit in a frame on its own."""
+    buf._rewind_to_marker()
+    if pooled is not None:
+        pooled._batch_started_ms = 0
+    raise QuestDBError(
+        QuestDBErrorCode.BatchTooLarge,
+        'The row was not added: it does not fit in one QWP/WebSocket '
+        'frame on its own. '
+        + ('The rows buffered before it were published. '
+           if earlier_rows_published else '')
+        + str(exc)) from exc
+
+
+cdef object _qwp_row_not_added(object exc, bint earlier_rows_published):
+    """
+    `exc`, a publish failure other than `BatchTooLarge`, with its message
+    saying that the row was not added.
+    """
+    return type(exc)(
+        exc.code,
+        'The row was not added. '
+        + ('The rows buffered before it were published. '
+           if earlier_rows_published else '')
+        + str(exc),
+        exc.sender_error,
+        in_doubt=exc.in_doubt)
+
+
+cdef void_int _qwp_row_split(
+        Sender sender,
+        PooledSender pooled,
+        Buffer buf,
+        str table_name,
+        dict symbols,
+        dict columns,
+        object at) except -1:
+    """
+    Publish the rows buffered before the newest one as a frame of their
+    own, then add the newest row back to start the next batch.
+    """
+    cdef size_t hard_cap = 0
+    cdef size_t discarded
+    buf._rewind_to_marker()
+    try:
+        _qwp_row_publish(sender, pooled)
+    except QuestDBError as exc:
+        if exc.code == QuestDBErrorCode.BatchTooLarge:
+            # No frame can carry these rows, and the routine cannot cut
+            # them any finer: it removes only the newest row.
+            discarded = line_sender_buffer_row_count(buf._impl)
+            line_sender_buffer_clear(buf._impl)
+            if pooled is not None:
+                qdb_pystr_buf_clear(buf._b)
+                pooled._batch_started_ms = 0
+            raise QuestDBError(
+                QuestDBErrorCode.BatchTooLarge,
+                f'{discarded} buffered '
+                + ('row was' if discarded == 1 else 'rows were')
+                + ' discarded and the row was not added: the buffered rows '
+                'do not fit in one QWP/WebSocket frame even without it. '
+                'This can happen when the frame cap shrinks, for example '
+                'on reconnect, or when a lazily connected sender learns '
+                "that the server's cap is below the default. "
+                + str(exc)) from exc
+        # The rows before the newest one are as the sender's `flush()`
+        # leaves them, and the newest one stays out, so a pooled lease
+        # keeps only rows that fit in one frame.
+        raise _qwp_row_not_added(exc, False) from exc
+    # Converts the row's values a second time.
+    _qwp_row_add(sender, pooled, buf, table_name, symbols, columns, at)
+    if _qwp_row_due(sender, pooled, buf, &hard_cap):
+        try:
+            _qwp_row_publish(sender, pooled)
+        except QuestDBError as exc:
+            if exc.code == QuestDBErrorCode.BatchTooLarge:
+                _qwp_row_reject(pooled, buf, exc, True)
+            raise _qwp_row_not_added(exc, True) from exc
+
+
+cdef void_int _qwp_row_append(
+        Sender sender,
+        PooledSender pooled,
+        Buffer buf,
+        str table_name,
+        dict symbols,
+        dict columns,
+        object at) except -1:
+    """
+    Append a row to a QWP/WebSocket row buffer and run auto-flush, keeping
+    every published frame within the connection's frame cap.
+
+    The whole buffer goes out as one frame when it fits. When it does not,
+    or its size estimate is already past the cap, the rows buffered before
+    the new one go out on their own and the new row starts the next batch,
+    so a single call publishes at most two frames.
+
+    Whatever this raises, the new row is not in the buffer. A
+    `BatchTooLarge` means either it does not fit in a frame on its own, or
+    the rows before it do not fit even without it, as after the frame cap
+    shrinks, and those rows are discarded. After any other failure the rows
+    before it are as the sender's `flush()` leaves them: a pooled lease
+    keeps them and a standalone sender has cleared them.
+    """
+    cdef size_t hard_cap = 0
+    cdef size_t row_count
+    cdef bint split
+    _qwp_row_add(sender, pooled, buf, table_name, symbols, columns, at)
+    if not buf._marker_set:
+        # Nothing was written, and the split and reject paths below need
+        # the rewind point. Such a row triggers no auto-flush, as in
+        # `Buffer._row`.
+        return 0
+    try:
+        if not _qwp_row_due(sender, pooled, buf, &hard_cap):
+            return 0
+        row_count = line_sender_buffer_row_count(buf._impl)
+        # Past the cap, the estimate cannot tell whether the whole buffer
+        # fits. The rows before the newest one fit unless the cap shrank:
+        # they were under the threshold when the previous row was checked,
+        # and the estimate does not undercount a frame (see
+        # `line_sender_buffer_size`). So they go out on their own, without
+        # first encoding the whole buffer to find out.
+        split = (row_count > 1 and
+                 line_sender_buffer_size(buf._impl) > hard_cap)
+        if not split:
+            try:
+                _qwp_row_publish(sender, pooled)
+                return 0
+            except QuestDBError as exc:
+                if exc.code != QuestDBErrorCode.BatchTooLarge:
+                    raise _qwp_row_not_added(exc, False) from exc
+                if row_count == 1:
+                    _qwp_row_reject(pooled, buf, exc, False)
+        _qwp_row_split(sender, pooled, buf, table_name, symbols, columns, at)
+    except:
+        # A path that removed the new row itself has spent the rewind
+        # point, and a failed standalone publish has cleared the buffer,
+        # rewind point included. Otherwise the row is still buffered, since
+        # a failed publish leaves a pooled lease's rows in place, and it
+        # comes out here.
+        buf._rewind_after_failure()
+        if (pooled is not None and
+                line_sender_buffer_row_count(buf._impl) == 0):
+            pooled._batch_started_ms = 0
+        raise
+    finally:
+        buf._clear_marker()
+
+
 @cython.no_gc_clear
 cdef class PooledSender:
     """
@@ -13326,51 +13770,6 @@ cdef class PooledSender:
                 'while that call is still using it. Close the lease '
                 'after the call returns.')
 
-    cdef bint _should_auto_flush_locked(self) except -1:
-        cdef auto_flush_mode_t* mode = &self._handle._auto_flush_mode
-        cdef size_t row_count
-        cdef size_t buffer_size
-        cdef size_t hard_cap = 0
-        cdef size_t soft_cap = 0
-        cdef size_t byte_limit = 0
-        cdef cbool server_cap_known = False
-        cdef line_sender_error* err = NULL
-
-        if not mode.enabled:
-            return False
-
-        row_count = line_sender_buffer_row_count(self._buffer._impl)
-        if mode.row_count != -1 and row_count >= <size_t>mode.row_count:
-            return True
-
-        if mode.byte_count != -1:
-            if not qwp_sender_effective_frame_cap(
-                    self._qwp, &hard_cap, &server_cap_known, &err):
-                raise c_err_to_py(err)
-
-            # floor(hard_cap * 0.9) without overflowing size_t.
-            soft_cap = ((hard_cap // 10) * 9
-                        + ((hard_cap % 10) * 9) // 10)
-            if self._handle._auto_flush_bytes_dynamic:
-                byte_limit = soft_cap
-                if not server_cap_known and byte_limit > 8 * 1024 * 1024:
-                    byte_limit = 8 * 1024 * 1024
-            else:
-                byte_limit = <size_t>mode.byte_count
-                if soft_cap < byte_limit:
-                    byte_limit = soft_cap
-
-            buffer_size = line_sender_buffer_size(self._buffer._impl)
-            if buffer_size >= byte_limit:
-                return True
-
-        if mode.interval != -1 and (
-                (line_sender_now_micros() // 1000)
-                - self._batch_started_ms) >= mode.interval:
-            return True
-
-        return False
-
     cdef void_int _wait_locked(self, uint64_t timeout_millis) except -1:
         cdef line_sender_error* err = NULL
         cdef PyThreadState* gs = NULL
@@ -13467,18 +13866,26 @@ cdef class PooledSender:
         When pooled auto-flush is enabled on the :class:`QuestDB` handle,
         completing a row that breaches a configured row, byte, or interval
         threshold publishes the buffer without waiting for an acknowledgement.
-        Any error raised by that publish propagates from this method.
-        If a single row cannot fit in a QWP frame, that row is removed before
-        :class:`QuestDBErrorCode.BatchTooLarge` is raised. If a multi-row
-        batch exceeds the exact encoded limit despite the byte-size estimate,
-        the complete batch remains buffered.
+        A buffer whose size estimate reaches the connection's frame cap is
+        published too, even with ``auto_flush_bytes=off``. Every published
+        frame fits the frame cap: when the whole buffer does not, or its
+        size estimate is past the cap, the rows buffered before this one go
+        out as a frame of their own and this row starts the next batch, so
+        one call publishes at most two frames. Re-adding the row converts its
+        values a second time.
+
+        Whatever this method raises, the row was not added.
+        :class:`QuestDBErrorCode.BatchTooLarge` means either it does not fit
+        in a frame on its own, or the rows buffered before it do not fit
+        even without it, which can happen after the frame cap shrinks, for
+        example on reconnect; those rows are then discarded, and the error
+        says how many. Any other error raised by a publish propagates from
+        this method and leaves the rows buffered before it in place.
 
         See :func:`Buffer.row <questdb.ingress.Buffer.row>` for supported
         column types, protocol restrictions, server requirements, and
         ``NULL``-sentinel behavior.
         """
-        cdef bint starts_batch
-        cdef bint auto_flush
         cdef Buffer buf
         cdef QuestDB handle
         if at is None:
@@ -13496,34 +13903,8 @@ cdef class PooledSender:
                 # back in here. A strong local reference keeps the buffer
                 # alive for the whole row, including its cleanup.
                 buf = self._buffer
-                starts_batch = (
-                    line_sender_buffer_row_count(buf._impl) == 0)
-                buf._row(
-                    False, table_name, symbols, columns, at, True)
-                if starts_batch:
-                    self._batch_started_ms = line_sender_now_micros() // 1000
-                try:
-                    auto_flush = self._should_auto_flush_locked()
-                except:
-                    buf._clear_marker()
-                    raise
-                if not auto_flush:
-                    buf._clear_marker()
-                    return self
-                try:
-                    self._flush_locked(False)
-                except QuestDBError as exc:
-                    if (starts_batch and
-                            exc.code == QuestDBErrorCode.BatchTooLarge):
-                        buf._rewind_to_marker()
-                        self._batch_started_ms = 0
-                    else:
-                        buf._clear_marker()
-                    raise
-                except:
-                    buf._clear_marker()
-                    raise
-                buf._clear_marker()
+                _qwp_row_append(
+                    None, self, buf, table_name, symbols, columns, at)
             finally:
                 self._exit_call_locked(handle)
         finally:
@@ -13944,8 +14325,10 @@ cdef class PooledReader:
     :meth:`QuestDB.reader`; it holds one pooled reader connection for
     its lifetime and runs queries on it sequentially via :meth:`query`.
     ``close()`` (or leaving the ``with`` block) releases the
-    connection: back to the pool if the last query was drained cleanly,
-    dropped otherwise.
+    connection: back to the pool if the last query reached its terminal
+    on a live connection (a clean drain, a successful ``cancel()``, or a
+    server-side error such as a parse error or a query timeout), dropped
+    otherwise.
 
     Queries are strictly sequential — one result at a time. Fully drain
     (or ``close()``) each :class:`QueryResult` before calling
@@ -14079,11 +14462,19 @@ cdef class PooledReader:
         self._reader = None
         self._last_cursor = None
         self._handle = None
-        if last is not None:
-            last._free()
-        reader._close()
-        if handle is not None:
-            handle._end_db_use(scoped=False)
+        try:
+            if last is not None:
+                last._close()
+        finally:
+            if last is not None and last._cursor != NULL:
+                # Deferred or interrupted: whoever frees the cursor closes
+                # the reader.
+                last._owns_reader = True
+                reader = None
+            if reader is not None:
+                reader._close()
+            if handle is not None:
+                handle._end_db_use(scoped=False)
 
     cdef void _release_finalizer_locked(self) noexcept:
         """Release a GC-owned lease without waiting for a worker cursor."""
@@ -14127,20 +14518,22 @@ cdef class PooledReader:
             str sql,
             object binds=None,
             *,
-            bint reset_symbol_dict=True) -> QueryResult:
+            bint reset_symbol_dict=True,
+            object timeout=None) -> QueryResult:
         """
         Execute a SQL query on the lease's connection and return a
         :class:`QueryResult`.
 
-        ``sql``, ``binds`` and ``reset_symbol_dict`` behave exactly as
-        on :meth:`QuestDB.query`, except the query runs on the reader
-        this lease holds instead of a per-call pool borrow. The
+        ``sql``, ``binds``, ``reset_symbol_dict`` and ``timeout`` behave
+        exactly as on :meth:`QuestDB.query`, except the query runs on the
+        reader this lease holds instead of a per-call pool borrow. The
         previous query's result must be fully drained (or closed)
         first; ``reset_symbol_dict=False`` reuses the connection's
         SYMBOL dictionary built up by the lease's earlier queries.
         """
         cdef _CursorHandle cursor_handle
         cdef _CursorHandle last
+        cdef int64_t timeout_ms
         cdef QuestDB handle
         cdef bint outer_in_flight
         cdef unsigned long outer_thread
@@ -14148,6 +14541,9 @@ cdef class PooledReader:
             raise TypeError(
                 '"binds" must be a list or tuple of positional bind '
                 f'parameters (or None), not {_fqn(type(binds))}')
+        # Validated before the lease is touched, so a bad argument is a
+        # plain TypeError / ValueError and never disturbs the connection.
+        timeout_ms = _query_timeout_to_millis(timeout)
         with self._lock:
             self._check_open('query')
             handle = self._enter_call_locked()
@@ -14164,10 +14560,10 @@ cdef class PooledReader:
                         raise QuestDBError(
                             QuestDBErrorCode.InvalidApiCall,
                             "the lease's connection is terminal: the "
-                            'previous query was not drained to its '
-                            'clean end, so its transport was torn '
-                            'down. close() this lease and obtain a new '
-                            'one with QuestDB.reader().')
+                            'previous query did not reach its terminal '
+                            'frame, so its transport was torn down. close() '
+                            'this lease and obtain a new one with '
+                            'QuestDB.reader().')
                 # Restored rather than cleared: a query re-entered from this
                 # one's bind values must not end the outer one's guard.
                 outer_in_flight = self._query_in_flight
@@ -14176,7 +14572,8 @@ cdef class PooledReader:
                 self._query_thread = PyThread_get_thread_ident()
                 try:
                     cursor_handle = _execute_query(
-                        self._reader, sql, binds, reset_symbol_dict, False)
+                        self._reader, sql, binds, reset_symbol_dict, False,
+                        timeout_ms)
                 finally:
                     self._query_in_flight = outer_in_flight
                     self._query_thread = outer_thread
@@ -14185,14 +14582,16 @@ cdef class PooledReader:
                 self._exit_call_locked(handle)
         return QueryResult(cursor_handle)
 
-    def execute(self, str sql, object binds=None):
+    def execute(self, str sql, object binds=None, *, object timeout=None):
         """
         Run a statement on the lease's connection and discard whatever
         it returns.
 
-        Mirrors :meth:`QuestDB.execute`. The result is drained to its
-        clean end, so the lease stays usable for the next call, and the
-        connection's SYMBOL dictionary is left untouched — an
+        Mirrors :meth:`QuestDB.execute`, including the
+        :class:`ExecDone` ``(op_type, rows_affected)`` return value. The
+        result is drained
+        to its clean end, so the lease stays usable for the next call,
+        and the connection's SYMBOL dictionary is left untouched — an
         interleaved statement does not invalidate a warm dictionary
         built with ``reset_symbol_dict=False``.
         """
@@ -14203,9 +14602,11 @@ cdef class PooledReader:
             # Held for the whole statement, as in every method of a lease:
             # the call count is then visible only to the thread running it.
             try:
-                result = self.query(sql, binds, reset_symbol_dict=False)
+                result = self.query(
+                    sql, binds, reset_symbol_dict=False, timeout=timeout)
                 try:
                     result._drain()
+                    return result.exec_done
                 finally:
                     result.close()
             finally:
@@ -14216,9 +14617,10 @@ cdef class PooledReader:
         Release the lease's reader connection. Idempotent.
 
         A still-open (undrained) last result is freed first, which
-        tears down the connection; a cleanly-drained connection is
-        returned to the pool, any other is dropped and the pool refills
-        on demand.
+        tears down the connection; a connection whose last query reached
+        its terminal (a clean drain, a successful ``cancel()``, or a
+        server-side error) is returned to the pool, any other is dropped
+        and the pool refills on demand.
         """
         cdef QuestDB handle
         # Reject re-entry from a cursor operation on this thread before
@@ -14244,8 +14646,11 @@ cdef class PooledReader:
 
     def __dealloc__(self):
         if self._lock is not None:
-            with self._lock:
-                self._release_finalizer_locked()
+            try:
+                with self._lock:
+                    self._release_finalizer_locked()
+            except KeyboardInterrupt:
+                _rearm_interrupt()
 
 
 def _debug_new_pooled_reader_finalizer_owner(

@@ -4,11 +4,508 @@
 Changelog
 =========
 
-6.0.0 (unreleased)
+6.1.0 (unreleased)
 ------------------
 
 Breaking changes
 ~~~~~~~~~~~~~~~~
+
+A sender's own callbacks can no longer drive that sender
+********************************************************
+
+A :class:`Sender <questdb.Sender>`'s own ``connection_listener`` or
+``error_handler`` could already not call ``flush()`` or ``close()`` on it, nor
+``row()`` while auto-flush is on. The same now applies to ``row()`` with
+``auto_flush=off``, ``dataframe()``, ``new_buffer()``, ``establish()``,
+``transaction()`` and every
+:class:`SenderTransaction <questdb.SenderTransaction>` operation: called from
+the sender's own callback they raise :class:`QuestDBError <questdb.QuestDBError>`
+with ``code`` set to ``QuestDBErrorCode.InvalidApiCall``, even while the sender
+is idle. A 6.0 listener that records its events through its own sender with
+``auto_flush=off`` now logs ``connection event listener failed`` and drops
+those rows. Separately, the
+read-only ``max_name_len``, ``protocol_version``, ``connection_events_dropped``
+and ``connection_events_delivered`` now raise the same error, from any thread,
+while the sender is inside a native call such as ``flush()``. Write listener
+events to a different sender or queue them for the owning thread, and read the
+counters when the sender is not flushing.
+
+Likewise, a :class:`Buffer <questdb.ingress.Buffer>` that a native call is modifying --
+the sender's internal buffer during ``flush()``, an explicit buffer during
+``flush(buffer)`` (``clear=True``) or ``flush_and_get_fsn(buffer)``, or any
+buffer during a row-serializing ``dataframe()`` (``SenderTransaction.dataframe()``
+included) -- now raises that error from ``len()``,
+``bytes()``, truthiness (``if buffer:`` / ``if sender:``), ``capacity()``,
+``reserve()``, ``clear()`` and ``row()``, from any other thread, instead of
+reading or modifying memory the native call is using. Code that a
+``dataframe()`` itself runs on its own thread -- a cell's conversion, a
+handler on the ``questdb`` logger -- follows the rules for re-entering
+``row()`` instead: reads are answered, and every call that would change the
+buffer is refused. A ``flush(buffer, clear=False)`` or
+``flush_and_keep_and_get_fsn(buffer)`` only reads the buffer, so other threads
+may keep reading it and flushing it with ``clear=False`` to other senders;
+only modifying it raises.
+
+An established sender rides out a rejected credential
+*****************************************************
+
+Once a QWP/WebSocket sender -- a :class:`Sender <questdb.Sender>` over
+``ws::`` or ``wss::``, or one borrowed from a
+:class:`QuestDB <questdb.QuestDB>` pool -- has connected, a server that
+answers its reconnect with HTTP 401 or 403 no longer stops it. The sender
+keeps reconnecting with capped backoff, keeps its unacknowledged rows, and
+reports each failed attempt as a :attr:`ConnectionEventKind.AuthFailed
+<questdb.ConnectionEventKind.AuthFailed>` event. A wait, a ``close()``
+draining the queue, or a ``flush()`` blocked on a full store-and-forward
+queue that times out meanwhile names the rejection. In 6.0 the first such
+rejection made the sender terminal, and its next call raised ``AuthError``.
+
+This applies to a fixed ``token=`` or ``username=`` / ``password=`` as well
+as to token providers. While an identity platform or its signing keys are
+unavailable, a server rejects even a valid credential for a while, and
+store-and-forward must not drop a live producer over it. A connection that is
+waited for still fails on the first rejection: a sender's first connection, an
+eager :func:`questdb.connect`, a pool borrow that opens a connection.
+
+To stop on a rejection instead, close the sender from your own code when you
+see ``AuthFailed`` events -- not from inside its connection listener, which
+cannot close its own sender. A store-and-forward slot left by an earlier
+sender (``drain_orphans=on``) whose fixed credential is rejected is now left on
+disk for the next session at once, rather than retried for the rest of this
+one. See :ref:`token_rejections`.
+
+New
+~~~
+
+Rotating Bearer tokens (:class:`questdb.auth.RefreshingTokenProvider`)
+**********************************************************************
+
+New ``bearer_token_provider=`` on :func:`questdb.connect`,
+:class:`Sender <questdb.Sender>`, :meth:`Sender.from_conf
+<questdb.Sender.from_conf>` and :meth:`Sender.from_env
+<questdb.Sender.from_env>`, for machine credentials that rotate: Microsoft
+Entra ID managed identities and service principals, OAuth2 client credentials,
+tokens from a secrets vault.
+
+* :class:`questdb.auth.RefreshingTokenProvider` is a native, proactively
+  refreshing cache in front of a token source you write -- for example one
+  that calls Azure Identity, which stays your own dependency. It refreshes at
+  about half each token's lifetime on its own thread, retries failures with
+  backoff, refreshes early when a server rejects the token with HTTP 401, and
+  never shows a token in an error, log line or ``repr``.
+* Any callable returning a token, or an object with ``token()`` and an
+  optional ``on_rejected()``, works as a provider too. Reusing the same Python
+  provider across clients shares its native single-flight acquisition, including
+  when passing repeated bound-method lookups. A ``RefreshingTokenProvider``
+  such a provider calls -- ``bearer_token_provider=lambda: tokens.token()`` --
+  still refreshes early when a server rejects its token with HTTP 401.
+* Such a provider that knows retrying can never succeed raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.InvalidApiCall``, as a Rust provider returns
+  ``InvalidApiCall``. Its clients then stop: a QWP/WebSocket sender, query or
+  pool fails with ``ConfigError`` and stops reconnecting, and an ILP/HTTP
+  flush fails at once. A token source cannot do this; close its
+  ``RefreshingTokenProvider`` instead.
+* ``RefreshingTokenProvider.close(wait=True, timeout=30)`` optionally drains an
+  active source with a deadline. A timeout leaves the provider closed and raises
+  ``TimeoutError``. Sources must bound their own I/O: interpreter exit cannot
+  safely abandon an executing Python callback even after provider close.
+* Main-thread token callbacks defer interrupts to the native-return boundary
+  without repeatedly interrupting provider retries or swallowing signal-handler
+  deadline exceptions. Pooled dataframe calls fail fast on native foreground
+  OIDC failures rather than spinning through the reconnect budget.
+* A successful OIDC refresh can revalidate the same still-valid token after a
+  transient server rejection. Token-store stale-lock recovery preserves live
+  displaced-owner captures as acquisition fences, and displaced refresh actions
+  cannot clear or restore a successor's state. Concurrent writers in other
+  clients must implement the same capture-fence rule.
+* :class:`questdb.auth.TokenUnavailableError` classifies a source's failure
+  as retryable or permanent; a connection the caller waits for retries only a
+  retryable one.
+* A store-and-forward slot left by an earlier sender (``drain_orphans=on``)
+  rides out the server rejecting the provider's tokens -- at least 6
+  rejections persisting for ``min(reconnect_max_duration_millis, 5 min)`` --
+  before it is left on disk for the next session.
+* A query whose failover gives up because the provider cannot supply a token
+  raises :class:`~questdb.auth.TokenUnavailableError`, naming the cause,
+  instead of the connection failure that started the failover.
+* A provider used over ``http::`` or ``ws::`` is warned about, once per
+  process, on the ``questdb`` logger: its tokens cross the network in
+  cleartext.
+
+Behaviour follows the cross-language dynamic-credential specification shared
+with the Java client. No provider is selected from a configuration string:
+``token_provider`` and the ``azure_*`` keys are rejected. See
+:ref:`refreshing_token_provider`.
+
+OIDC Authentication (:mod:`questdb.auth`)
+************************************************
+
+Interpreter shutdown suppresses new OIDC callbacks and drains every admitted
+renderer or persistence-diagnostic callback before finalization, including
+callbacks on daemon sign-in threads. Callbacks must return promptly; a blocked
+renderer or logging handler can delay process exit.
+
+New :mod:`questdb.auth` module backed by the native QuestDB client. It runs the
+OAuth 2.0 Device Authorization Grant (RFC 8628), including from remote Jupyter
+kernels, and supplies rotating Bearer tokens directly to QuestDB transports.
+
+.. code-block:: python
+
+    import questdb
+    from questdb.auth import OidcDeviceAuth
+
+    auth = OidcDeviceAuth.from_questdb("https://questdb.example.com:9000")
+    auth.sign_in()
+    db = questdb.connect(
+        "wss::addr=questdb.example.com:9000;", oidc_auth=auth)
+
+Highlights:
+
+* :func:`questdb.connect`, :class:`questdb.Sender`,
+  :meth:`questdb.Sender.from_conf`, :meth:`questdb.Sender.from_env` and
+  :meth:`questdb.QuestDB.from_conf` accept ``oidc_auth=``. They retain the
+  shared native provider and pull a fresh token for each connect or reconnect.
+  It is mutually exclusive with a fixed ``token``, ``username`` or ``password``.
+* :meth:`~questdb.auth.OidcDeviceAuth.sign_in` is the only interactive
+  operation. :meth:`~questdb.auth.OidcDeviceAuth.token` and every transport
+  path remain non-interactive, silently refreshing when possible and otherwise
+  raising :class:`~questdb.auth.OidcInteractionRequired`.
+* Silent refresh retains both the in-memory and persisted refresh token after
+  retryable identity-provider responses (HTTP 408, 429 and 5xx, or OAuth
+  ``temporarily_unavailable``), and later retries use exponential backoff. A
+  status-less failure after request dispatch
+  remains genuinely ambiguous: the possibly rotated parent is discarded and
+  the call raises ``OidcInteractionRequired`` with that reason. A QuestDB 401
+  only forces refresh when a refresh token exists; otherwise the still-valid
+  access/ID token remains usable until expiry. Cached tokens also remain on the
+  non-blocking fast path until their actual expiry instead of making every
+  shared transport wait through a refresh during the 30-second skew window.
+* A QWP/WebSocket close whose drain times out while reconnecting keeps
+  failing returns the latest reconnect/OIDC cause, in either progress mode;
+  manual progress observes ``close_flush_timeout_millis`` meanwhile instead of
+  spinning indefinitely. A ``flush()`` that times out on a full
+  store-and-forward queue (``sf_append_deadline_millis``) names that cause
+  too, instead of advising a larger ``sf_max_total_bytes``, which cannot help
+  while nothing is acknowledged.
+* Auth failures are typed :class:`~questdb.auth.OidcError` subclasses of
+  :class:`~questdb.QuestDBError`. Their ``code`` reports the failing call's
+  native error category, not a recovery instruction: a flush with no usable
+  credential reports ``SocketError`` although only a sign-in fixes it, so catch
+  :class:`~questdb.auth.OidcInteractionRequired` (and check its
+  ``acquisition_busy``) before retry logic keyed on ``code``. A
+  transport attached with ``oidc_auth=`` can raise one from the same
+  ``flush`` / ``dataframe`` / ``row`` / ``query`` / :func:`questdb.connect`
+  call, so an existing ``except QuestDBError`` retry or dead-letter handler
+  keeps catching auth failures; catch :class:`~questdb.auth.OidcError` (or a
+  typed subclass such as :class:`~questdb.auth.OidcInteractionRequired`) for
+  auth-specific handling.
+* Token-endpoint diagnostics are credential-safe before they reach a renderer,
+  exception, C view or log. If an IdP reflects the submitted device code or
+  refresh token in a non-issued-token field, the occurrence becomes
+  ``[redacted credential]``. Python exposes the sanitized fields as
+  ``OidcDeviceFlowError.error`` and ``.error_description``. Issued token fields
+  remain unchanged, including a non-rotating refresh token.
+* OIDC discovery, endpoint validation, token selection, caching, refresh, and
+  concurrency control use the same native implementation as the C/C++ clients.
+  Discovery confirmation compares normalized origins plus the exact request
+  target, so QuestDB's explicit ``:443`` matches an Entra/Google discovery URL
+  that omits the default HTTPS port.
+  The explicit :class:`~questdb.auth.OidcDeviceAuth` constructor takes its two
+  endpoints as keyword-only arguments, preventing an accidental endpoint swap.
+* OIDC does not survive ``fork()`` without ``exec()``. A provider inherited by
+  a forked child is refused there, and once the parent has constructed any
+  :class:`~questdb.auth.OidcDeviceAuth` (used or not), constructing a new one
+  in a forked child raises :class:`~questdb.auth.OidcConfigError`. Pre-fork
+  servers (``gunicorn --preload``, Celery prefork, :mod:`multiprocessing` with
+  the ``fork`` start method) must construct the provider inside each worker or
+  start workers with ``spawn`` / ``forkserver``; see :ref:`auth-fork`.
+* OIDC scopes are preserved exactly for groups-mode token selection and the
+  persisted token-store identity. Refresh requests intentionally omit ``scope``,
+  matching the Java client, so the identity provider preserves the scope that
+  was originally granted. Include ``openid`` explicitly when the identity
+  provider requires it to issue an ID token.
+* OIDC device-flow polling tolerates transient transport failures until the
+  device code expires, matching the Java client. When no poll ever reached the
+  token endpoint, the expiry reports that transport failure instead of
+  ``expired_token``'s "you did not authorize in time", so a misconfigured or
+  firewalled ``token_endpoint`` is named rather than blamed on the user. The
+  error class and the ``expired_token`` tag are unchanged.
+* A refresh token that is not printable ASCII is rejected when the identity
+  provider returns it, rather than being cached, persisted, and then silently
+  dropped by the stricter check applied when the store is read back — which
+  left the credential unusable after a restart while the plaintext file stayed
+  on disk.
+* Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes plaintext
+  credentials atomically and coordinates refresh across processes. Its
+  directories/files are owner-only (``0700``/``0600``) on Unix. Recovery of an
+  insecure directory durably publishes distrust before tightening permissions
+  and makes record deletion durable before removing the distrust marker.
+  Non-Unix platforms reject mutation before changing the stored entry until an
+  equivalent durable metadata barrier is available; reads, and therefore the
+  empty ``.lock`` files of the shared coordination protocol, remain available,
+  as does in-memory authentication.
+  Its directory is overridable with the
+  ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` environment variable, shared with the
+  native client. Custom Python token stores are not supported by the native
+  provider.
+* PG adapters reject malformed driver-option keys and every destination alias,
+  including ``unix_sock``; the validated ``host``/``hostaddr``/``port`` values
+  are inserted last before the bearer password is handed to the driver.
+* :meth:`~questdb.auth.OidcDeviceAuth.sign_in` fails up front when the
+  configured token store cannot hold a credential — a directory whose
+  owner-only permissions cannot be enforced, as on WSL ``drvfs`` without
+  ``metadata``, CIFS/SMB with a fixed ``file_mode``, or vfat/exFAT. Persistence
+  is opt-in, so this is reported rather than silently skipped; previously the
+  sign-in succeeded, wrote nothing, and the whole device flow ran again on
+  every start. The check runs before any device code is shown, and a provider
+  with no token store is unaffected. Transient preflight contention and I/O
+  failures are warnings rather than terminal configuration errors. Transient
+  write failures (a full disk, an NFS blip) warn through the ``questdb`` logger and keep the in-process
+  credential working.
+* A ``FileTokenStore`` directory is expanded with :func:`os.path.expanduser`
+  and made absolute at construction; one whose leading ``~`` cannot be
+  expanded (an unknown ``~user``, or no resolvable home directory) is refused
+  rather than creating a directory literally named ``~`` under the working
+  directory and leaving a plaintext refresh token in it. On POSIX ``..``
+  components are left for the operating system to resolve, as the native
+  client does, so a path through a symlink names the same directory in both.
+  The ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` override must already be
+  absolute -- on Windows with a drive letter or UNC prefix, as the native
+  client requires -- and is passed on unchanged. The ``ca_bundle`` argument
+  of :class:`~questdb.auth.OidcDeviceAuth` takes the same path forms
+  (``str``, ``bytes`` or any ``os.PathLike``) and is expanded and made
+  absolute the same way.
+* An OIDC flush or connect that needs a fresh token can wait up to the
+  provider's ``timeout`` for the refresh -- or six times it behind a refresh
+  already running on another thread -- regardless of the sender's
+  ``request_timeout`` and ``retry_timeout``; see :ref:`auth-token-wait`.
+* A persistence-warning handler or renderer callback that uses a
+  :class:`~questdb.PooledSender` lease another thread is blocked in (for
+  example ``wait()``) gives up after two seconds with
+  ``QuestDBError(InvalidApiCall)`` instead of deadlocking both threads. So
+  does a renderer callback that closes the :class:`~questdb.QuestDB` pool while
+  another thread still holds a lease.
+* Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
+  :func:`~questdb.auth.psycopg_connect`) that wire the token into PG-wire as the
+  ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
+  token on every new pooled connection, ``psycopg_connect`` captures it at
+  connect time. They authenticate remote PG servers with ``verify-full`` by
+  default, which needs a trust root: libpq does **not** consult the operating
+  system's certificate store unless told to, so without
+  ``~/.postgresql/root.crt`` or ``PGSSLROOTCERT`` the connection fails with
+  ``root certificate file ... does not exist``. Pass ``sslrootcert`` -- a CA
+  file, or ``"system"`` with libpq 16 or later -- through ``connect_args``
+  (``sqlalchemy_engine``) or as a keyword argument (``psycopg_connect``), as
+  ``docs/auth.rst`` shows. Numeric loopback literals (``127.0.0.1``, ``::1``) resolve to
+  ``prefer`` instead, so a local QuestDB without TLS still works; the name
+  ``localhost`` does **not** — it keeps ``verify-full``, because its resolved
+  addresses are not pinned. Use a numeric literal for local development, or
+  pass an explicit ``sslmode``. Both adapters own the connection destination:
+  a ``host``, ``hostaddr``, ``port``, ``service``, ``dsn``, ``conninfo`` or
+  ``unix_sock`` in
+  the driver passthrough (``connect_args`` / ``connect_kwargs``) raises
+  ``OidcConfigError`` before any token is acquired, because the token is a
+  bearer credential and SQLAlchemy merges ``connect_args`` over the arguments
+  built from the validated URL. Pass ``host=`` / ``pg_port=`` instead. They
+  also own the login: a ``user``, ``password``, ``dbname`` or ``database`` in
+  the passthrough raises ``OidcConfigError`` up front too, instead of a bare
+  ``TypeError`` after a token fetch (``psycopg_connect``) or a silent login as
+  someone other than ``_sso`` (``sqlalchemy_engine``); pass ``database=``.
+  Libpq connections explicitly pass an empty ``hostaddr`` to suppress an
+  inherited ``PGHOSTADDR`` that could otherwise redirect the bearer password
+  despite the validated ``host``. This is applied on every pooled connection.
+  ``sqlalchemy_engine`` accepts a non-libpq ``drivername`` (``pg8000``, say)
+  only with ``sslmode=None``, since such a driver takes no ``sslmode``.
+* :meth:`~questdb.auth.OidcDeviceAuth.close` permanently closes a provider and
+  cancels a device flow, silent-refresh coordination, or token-store lock wait
+  running on another thread; ``OidcDeviceAuth`` is also a context manager.
+  Operations on a closed provider -- including attaching it to a new
+  ``Sender``, pool or reader -- raise the new
+  :class:`~questdb.auth.OidcCancelledError`, except
+  :meth:`~questdb.auth.OidcDeviceAuth.clear`, which stays available so the
+  persisted credential can still be removed;
+  :meth:`~questdb.auth.OidcDeviceAuth.cancel_sign_in`, which remains an
+  idempotent no-op when no flow is running; and ``config``, which remains
+  readable. ``Ctrl-C`` during ``sign_in()`` cancels only the current attempt and
+  raises ``KeyboardInterrupt``; the provider remains open, already-attached
+  ``Sender``/pool/reader instances remain usable, and a later ``sign_in()`` can
+  retry on the same provider. Custom UIs can invoke the new attempt-scoped
+  ``cancel_sign_in()`` method directly. Only ``close()`` is permanent.
+  :meth:`~questdb.auth.OidcDeviceAuth.clear` never waits behind a
+  ``sign_in()`` running on another thread: it raises
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.InvalidApiCall`` and clears nothing, so cancel the sign-in
+  first or retry once it completes.
+* On CPython, failed pending-call registration no longer strands a signal
+  exception caught during a synchronous transport persistence diagnostic.
+  An exception-safe native-return boundary delivers it without rerunning the
+  signal handler; additional saved exceptions retain their context chain.
+* Renderer prompts receive the device code's bounded lifetime and polling
+  interval (``expires_in`` / ``interval``), matching the complete Java device
+  challenge, plus ``browser_target``, the single natively vetted URL that
+  built-in renderers use for links and QR codes. A prompted sign-in that is
+  cancelled, closed or interrupted reports ``on_failure('Sign-in cancelled.')``
+  so the renderer's output does not stay on "waiting".
+* OIDC requires no additional Python dependency; ``sqlalchemy`` / ``psycopg`` /
+  ``qrcode`` / ``IPython`` are imported lazily for optional conveniences.
+
+See the :ref:`OIDC authentication guide <oidc_auth>` for details.
+
+New ``ConnectionEventKind.CredentialUnavailable``
+*************************************************
+
+:attr:`ConnectionEventKind.CredentialUnavailable <questdb.ConnectionEventKind.CredentialUnavailable>`
+is a new event kind reporting a token provider that failed to supply a
+credential — an ``oidc_auth=`` provider with no cached or refreshable
+credential, either before any endpoint was dialled or when replacing a token a
+server rejected with HTTP 401. It has no counterpart before 6.1, because token
+providers did not exist: a listener written against 6.0 cannot have seen it.
+
+``AuthFailed`` keeps its meaning: the server rejected a credential the client
+presented, and ``host`` / ``port`` are always set. It is terminal before a
+sender's first connection; once connected, a sender keeps reconnecting and
+reports each rejected attempt (see "An established sender rides out a rejected
+credential" above). ``CredentialUnavailable`` sets ``host`` and
+``port`` to ``None`` when the provider failed before any dial; after a 401
+they name the endpoint that rejected the previous token and ``cause_msg``
+includes the 401. It reports the provider's classification in ``cause_code``,
+which is what says whether the sender will carry on:
+
+* ``SocketError`` — retryable, and the ordinary case. The sender keeps
+  reconnecting so queued rows survive while the identity provider recovers or
+  a human signs in, and nothing is raised to the caller. Only a foreground
+  call such as :meth:`questdb.QuestDB.dataframe` fails fast, and an ACK wait
+  (:meth:`PooledSender.wait <questdb.PooledSender.wait>`) whose timeout expires
+  meanwhile raises :class:`~questdb.auth.OidcInteractionRequired` -- ``code``
+  ``FailoverRetry``, rows still queued -- when the provider needs a new sign-in.
+* ``AuthError`` / ``ConfigError`` — the provider cannot recover in this
+  process, so the reconnect is **terminal** and the sender stops. Reached by a
+  permanently closed provider (``close()`` is one-way; cancelling one
+  ``sign_in()`` attempt does not close it) and by a scope that cannot yield the
+  required token kind. Queued rows are not deleted — a disk-backed store-and-forward
+  slot stays drainable by a later process — but this process will not send
+  them.
+
+A listener that pages on a permanent stop must qualify on ``cause_code``, not
+on the kind alone.
+
+This matches the Java client, whose ``QwpCredentialUnavailableException`` is
+likewise distinct from its ``QwpAuthFailedException``.
+
+This is additive and needs no migration: existing enum ordinals are
+unchanged, the new kind is appended as ``7``, and a 6.0 listener keeps
+working untouched. A listener that wants to distinguish the two conditions
+opts in by handling the new kind.
+
+Other changes
+~~~~~~~~~~~~~
+
+- A token provider's failure while a connection is waited for -- an eager
+  :func:`questdb.connect`, a sender's ``initial_connect_retry=sync`` connect --
+  is retried only when the provider classified it retryable with
+  :class:`~questdb.auth.TokenUnavailableError`; any other failure, an
+  ``oidc_auth`` network error included, fails the connection at once.
+  Background reconnects keep retrying every provider failure, except
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.InvalidApiCall`` from an application provider, which
+  stops them.
+
+- A 401 is retried with a refreshed token only when the server's
+  ``WWW-Authenticate`` challenge allows it: no Bearer ``error``, or
+  ``invalid_token``.
+
+- The configuration-string keys ``token_provider``, ``azure_resource``,
+  ``azure_client_id`` and ``azure_credential`` are rejected on every protocol.
+  ILP/HTTP and ILP/TCP previously ignored them silently.
+
+- Finalizers and garbage collection no longer block on, or free, a query
+  cursor that another operation is using: an abandoned ``QueryResult``,
+  ``PooledReader``, Arrow stream or batch iterator is reclaimed without
+  waiting, and cursor ``close()`` / ``cancel()`` / pulls reject same-thread
+  re-entry while a native read is in progress.
+
+- A DataFrame error that gains a note about a partially consumed input
+  stream keeps its exception class, ``in_doubt`` and ``sender_error`` instead
+  of being rebuilt as a plain :class:`QuestDBError <questdb.QuestDBError>`, so
+  ``except OidcError`` and ``except QuestDBServerRejectionError`` still match.
+
+6.0.0 (2026-10-21)
+------------------
+
+Highlights
+~~~~~~~~~~
+
+- Query results as Python rows, without pyarrow or pandas:
+  :meth:`QueryResult.iter_rows <questdb.QueryResult.iter_rows>` yields a
+  tuple per row, and :meth:`QueryResult.columns <questdb.QueryResult.columns>`
+  gives the column names and QuestDB types.
+- Per-query timeouts through the ``query_timeout_ms`` configuration key, for
+  servers that support them.
+- :meth:`QuestDB.execute <questdb.QuestDB.execute>` returns the statement's
+  ``EXEC_DONE`` report, including ``rows_affected``.
+- ``row()`` on QWP senders writes UUID, IPV4, BINARY, CHAR, DATE, LONG256 and
+  GEOHASH columns.
+- UUID raw bytes use RFC 4122 byte order, the bytes of ``uuid.UUID.bytes``,
+  everywhere they cross the API. This is a breaking change; see below.
+- ``duckdb.from_arrow(result)`` works on duckdb 1.5.
+- Requires QuestDB server version 10 or later.
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+- **A standalone QWP/WebSocket flush too large for one frame raises
+  ``BatchTooLarge``**, as a pooled one does, instead of ``InvalidApiCall``.
+  The message names the limit that applies: ``max_buf_size``, the server's
+  advertised limit, or the store-and-forward segment capacity, which the
+  standalone sender now also checks. Code that caught ``InvalidApiCall`` for
+  this case must catch ``BatchTooLarge``.
+
+- **A standalone QWP/WebSocket ``Sender`` keeps auto-flushing with
+  ``auto_flush_rows=off`` and ``auto_flush_interval=off``.** Its byte
+  trigger is now on by default (see the ``row()`` auto-flush entry under
+  *Fixed*), so turning off the other two triggers leaves auto-flush on:
+  ``Sender.auto_flush`` is ``True``, a batch that reaches 90% of the frame
+  limit is published in parts, and ``flush_and_get_fsn()`` covers only the
+  rows after the last of those parts. To batch by hand, set
+  ``auto_flush=off``. ``Sender.auto_flush_bytes`` reports the threshold in
+  effect: between ``establish()`` and ``close()`` that is 90% of the frame
+  limit, or an explicit threshold lowered to it. Outside them the default
+  reads ``None`` and an explicit threshold reads as configured.
+
+- **A standalone QWP/WebSocket ``Sender`` refuses ``row()`` from its own
+  ``error_handler`` or ``connection_listener`` while auto-flush is on**,
+  raising ``InvalidApiCall`` before adding the row, as it already did for
+  ``flush()`` and ``close()``. Reading ``auto_flush_bytes`` there is
+  refused too. Such a callback runs while the native sender is borrowed,
+  and auto-flush reads the frame limit from it on every row. An exception
+  that escapes the callback is only logged through the ``questdb`` logger,
+  so the row is lost unless the callback catches the error. This includes
+  a handler on the ``questdb`` logger that writes its records through the
+  same sender while no ``error_handler`` is set, because the sender then
+  logs server rejections from inside that callback. Give such code a
+  sender of its own.
+
+- :meth:`QuestDB.execute <questdb.QuestDB.execute>` and
+  :meth:`PooledReader.execute <questdb.PooledReader.execute>` return the
+  statement's ``EXEC_DONE`` report as an
+  :class:`ExecDone <questdb.ExecDone>` named tuple ``(op_type,
+  rows_affected)`` instead of ``None``; ``None`` is now returned only for a
+  statement that streamed a result set. The protocol does carry the count —
+  the previous documentation saying otherwise was wrong. ``rows_affected``
+  is meaningful for ``INSERT`` and ``UPDATE``, and ``0`` for a statement
+  that carries no count, such as one executed at parse time; ``op_type`` is
+  the server's operation-type byte, carried through as an opaque ``int``.
+  The same report is on
+  :attr:`QueryResult.exec_done <questdb.QueryResult.exec_done>` once a
+  result has been drained, and stays there after the result is closed.
+
+- A :class:`QueryResult <questdb.QueryResult>` cancelled before it was read
+  can no longer be read: ``to_pandas()``, ``to_arrow()``, the ``iter_*``
+  methods and the Arrow PyCapsule stream raise
+  ``QuestDBErrorCode.InvalidApiCall`` instead of returning an empty result
+  with no columns, which was indistinguishable from a statement that has
+  no result set.
 
 - **UUID raw bytes are now RFC 4122 byte order** (big-endian, the same bytes
   as ``uuid.UUID.bytes``) everywhere they cross the API. This affects Arrow
@@ -296,71 +793,78 @@ Breaking changes
   "QueryResult cursor was closed") should check
   ``err.code == QuestDBErrorCode.InvalidApiCall`` instead.
 
-A sender's own callbacks can no longer drive that sender
-********************************************************
-
-A :class:`Sender <questdb.Sender>`'s own ``connection_listener`` or
-``error_handler`` could already not call ``flush()`` or ``close()`` on it. The
-same now applies to ``row()``, ``dataframe()``, ``new_buffer()``,
-``establish()``, ``transaction()`` and every
-:class:`SenderTransaction <questdb.SenderTransaction>` operation: called from
-the sender's own callback they raise :class:`QuestDBError <questdb.QuestDBError>`
-with ``code`` set to ``QuestDBErrorCode.InvalidApiCall``, even while the sender
-is idle. Before, ``row()`` from a listener succeeded, so a 5.0 listener that
-records its events through its own sender now logs
-``connection event listener failed`` and drops those rows. Separately, the
-read-only ``max_name_len``, ``protocol_version``, ``connection_events_dropped``
-and ``connection_events_delivered`` now raise the same error, from any thread,
-while the sender is inside a native call such as ``flush()``. Write listener
-events to a different sender or queue them for the owning thread, and read the
-counters when the sender is not flushing.
-
-Likewise, a :class:`Buffer <questdb.ingress.Buffer>` that a native call is modifying --
-the sender's internal buffer during ``flush()``, an explicit buffer during
-``flush(buffer)`` (``clear=True``) or ``flush_and_get_fsn(buffer)``, or any
-buffer during a row-serializing ``dataframe()`` (``SenderTransaction.dataframe()``
-included) -- now raises that error from ``len()``,
-``bytes()``, truthiness (``if buffer:`` / ``if sender:``), ``capacity()``,
-``reserve()``, ``clear()`` and ``row()``, from any other thread, instead of
-reading or modifying memory the native call is using. Code that a
-``dataframe()`` itself runs on its own thread -- a cell's conversion, a
-handler on the ``questdb`` logger -- follows the rules for re-entering
-``row()`` instead: reads are answered, and every call that would change the
-buffer is refused. A ``flush(buffer, clear=False)`` or
-``flush_and_keep_and_get_fsn(buffer)`` only reads the buffer, so other threads
-may keep reading it and flushing it with ``clear=False`` to other senders;
-only modifying it raises.
-
-An established sender rides out a rejected credential
-*****************************************************
-
-Once a QWP/WebSocket sender -- a :class:`Sender <questdb.Sender>` over
-``ws::`` or ``wss::``, or one borrowed from a
-:class:`QuestDB <questdb.QuestDB>` pool -- has connected, a server that
-answers its reconnect with HTTP 401 or 403 no longer stops it. The sender
-keeps reconnecting with capped backoff, keeps its unacknowledged rows, and
-reports each failed attempt as a :attr:`ConnectionEventKind.AuthFailed
-<questdb.ConnectionEventKind.AuthFailed>` event. A wait, a ``close()``
-draining the queue, or a ``flush()`` blocked on a full store-and-forward
-queue that times out meanwhile names the rejection. In 5.0 the first such
-rejection made the sender terminal, and its next call raised ``AuthError``.
-
-This applies to a fixed ``token=`` or ``username=`` / ``password=`` as well
-as to token providers. While an identity platform or its signing keys are
-unavailable, a server rejects even a valid credential for a while, and
-store-and-forward must not drop a live producer over it. A connection that is
-waited for still fails on the first rejection: a sender's first connection, an
-eager :func:`questdb.connect`, a pool borrow that opens a connection.
-
-To stop on a rejection instead, close the sender from your own code when you
-see ``AuthFailed`` events -- not from inside its connection listener, which
-cannot close its own sender. A store-and-forward slot left by an earlier
-sender (``drain_orphans=on``) whose fixed credential is rejected is now left on
-disk for the next session at once, rather than retried for the rest of this
-one. See :ref:`token_rejections`.
-
 New
 ~~~
+
+- :class:`QueryResult <questdb.QueryResult>` can now be read as rows of
+  Python objects, without pyarrow or pandas. :meth:`iter_rows
+  <questdb.QueryResult.iter_rows>` streams one batch at a time and yields a
+  tuple per row, with ``None`` for SQL NULL; :meth:`columns
+  <questdb.QueryResult.columns>` gives ``(name, type_name)`` pairs using the
+  QuestDB DDL spelling (``VARCHAR``, ``TIMESTAMP_NS``, ``IPv4``,
+  ``GEOHASH(8c)``, ``DECIMAL(18,2)``, ``DOUBLE[]``), so they can be compared
+  against ``tables()`` / ``information_schema.questdb_columns()`` without
+  normalising. Two things the wire does not carry: a ``DECIMAL`` is reported
+  at its storage width's precision (18, 38 or 76), and an array column as
+  ``DOUBLE[]`` / ``LONG[]`` whatever its dimensionality. Asking for the
+  columns does not consume the rows, so a DB-API-style caller can read its
+  ``description`` first; a ``LIMIT 0`` schema probe returns its connection
+  to the pool, while a result with unread rows needs ``cancel()`` before
+  ``close()`` to do the same. Intended for row-shaped consumers and small
+  result sets — metadata lookups, test rows, ``limit 0`` schema probes;
+  large analytical results still belong on ``to_pandas()`` / ``to_arrow()``,
+  which stay columnar.
+
+  Timestamps come back timezone-aware in UTC, matching what ``to_arrow()``
+  labels them. ``TIMESTAMP_NS`` is rounded down to microseconds, because
+  ``datetime`` has no nanosecond field. A ``CHAR`` whose code point is 0 is
+  ``None``, matching how the server's own text protocol renders it. A
+  ``DECIMAL`` keeps its scale. ``BOOLEAN``, ``BYTE`` and ``SHORT`` have no
+  NULL representation in QuestDB, so an inserted ``null`` reads back as
+  ``False`` / ``0``.
+
+  ``UUID`` columns come back as the canonical RFC-4122 value, agreeing with
+  ``to_arrow()``, with ``to_pandas()`` and with the server's own text output.
+
+- Queries can be given their own timeout instead of running under the
+  server-wide ``query.timeout``. ``query_timeout_ms`` in the connection
+  string sets a default for every query on that handle (``0``, the default,
+  means none), and ``timeout=`` on ``query()`` / ``execute()`` of both
+  :class:`QuestDB <questdb.QuestDB>` and
+  :class:`PooledReader <questdb.PooledReader>` overrides it per query, with
+  ``timeout=0`` clearing it. An ``int`` is milliseconds (any integer type);
+  a ``datetime.timedelta`` or ``pandas.Timedelta`` works too, with a
+  positive value below one millisecond rounded *up* to 1 ms. The server
+  applies no ceiling, so a value above ``query.timeout`` is honoured — which
+  is the point for a long transform.
+
+  Requires a server advertising ``CAP_QUERY_TIMEOUT``
+  (questdb/questdb#7768). Against an older one a non-zero timeout is refused
+  before anything is sent, with ``QuestDBErrorCode.UnsupportedServer``, rather
+  than silently running under the server default; the connection is
+  untouched by the refusal, so raise the server's ``query.timeout`` instead,
+  or pass ``timeout=0`` on the same handle or lease. On expiry the error
+  carries the new :class:`QuestDBErrorCode.QueryTimeout
+  <questdb.QuestDBErrorCode>` and the pooled connection stays open and
+  authenticated, so the next query runs on it without reconnecting. **Do
+  not retry a write after a timeout:** a
+  statement that completes past its timeout is reported as ``EXEC_DONE``
+  rather than a timeout, precisely so a retry cannot apply it twice, and a
+  DDL / ``INSERT`` / ``UPDATE`` that timed out waiting for the table writer
+  may still be applied afterwards.
+
+- A pooled connection whose query ended in a server-side error — a parse
+  error, a timeout — now goes back to the pool instead of being dropped, on
+  every path: the result reached a terminal frame, so the connection is as
+  healthy as after a clean drain. A :class:`PooledReader
+  <questdb.PooledReader>` lease likewise stays usable after such an error.
+  A result abandoned mid-stream still drops its connection.
+- ``datetime.date`` and ``decimal.Decimal`` are bind parameter types. A date
+  is bound as ``DATE``; a decimal as the narrowest ``DECIMAL`` that holds it
+  — 64, 128 or 256 bits for up to 18, 38 or 76 digits — with its fractional
+  digits as the scale, so it reaches a ``DECIMAL`` column exactly instead of
+  through a ``DOUBLE``. ``NaN``, infinities, and values needing more than 76
+  digits or a scale above 76 raise ``ValueError``.
 
 - **``QuestDB.close(timeout=...)`` sets how long closing may wait.** With
   no argument, ``close()`` waits for a call in progress until it returns
@@ -478,329 +982,76 @@ New
   ``pyarrow>=14.0.1`` (``to_polars()`` and ``iter_polars()`` need pyarrow), and
   ``pip install questdb[duckdb]`` installs ``duckdb>=1.2.0``.
 
-Rotating Bearer tokens (:class:`questdb.auth.RefreshingTokenProvider`)
-**********************************************************************
-
-New ``bearer_token_provider=`` on :func:`questdb.connect`,
-:class:`Sender <questdb.Sender>`, :meth:`Sender.from_conf
-<questdb.Sender.from_conf>` and :meth:`Sender.from_env
-<questdb.Sender.from_env>`, for machine credentials that rotate: Microsoft
-Entra ID managed identities and service principals, OAuth2 client credentials,
-tokens from a secrets vault.
-
-* :class:`questdb.auth.RefreshingTokenProvider` is a native, proactively
-  refreshing cache in front of a token source you write -- for example one
-  that calls Azure Identity, which stays your own dependency. It refreshes at
-  about half each token's lifetime on its own thread, retries failures with
-  backoff, refreshes early when a server rejects the token with HTTP 401, and
-  never shows a token in an error, log line or ``repr``.
-* Any callable returning a token, or an object with ``token()`` and an
-  optional ``on_rejected()``, works as a provider too. Reusing the same Python
-  provider across clients shares its native single-flight acquisition, including
-  when passing repeated bound-method lookups. A ``RefreshingTokenProvider``
-  such a provider calls -- ``bearer_token_provider=lambda: tokens.token()`` --
-  still refreshes early when a server rejects its token with HTTP 401.
-* Such a provider that knows retrying can never succeed raises
-  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-  ``QuestDBErrorCode.InvalidApiCall``, as a Rust provider returns
-  ``InvalidApiCall``. Its clients then stop: a QWP/WebSocket sender, query or
-  pool fails with ``ConfigError`` and stops reconnecting, and an ILP/HTTP
-  flush fails at once. A token source cannot do this; close its
-  ``RefreshingTokenProvider`` instead.
-* ``RefreshingTokenProvider.close(wait=True, timeout=30)`` optionally drains an
-  active source with a deadline. A timeout leaves the provider closed and raises
-  ``TimeoutError``. Sources must bound their own I/O: interpreter exit cannot
-  safely abandon an executing Python callback even after provider close.
-* Main-thread token callbacks defer interrupts to the native-return boundary
-  without repeatedly interrupting provider retries or swallowing signal-handler
-  deadline exceptions. Pooled dataframe calls fail fast on native foreground
-  OIDC failures rather than spinning through the reconnect budget.
-* A successful OIDC refresh can revalidate the same still-valid token after a
-  transient server rejection. Token-store stale-lock recovery preserves live
-  displaced-owner captures as acquisition fences, and displaced refresh actions
-  cannot clear or restore a successor's state. Concurrent writers in other
-  clients must implement the same capture-fence rule.
-* :class:`questdb.auth.TokenUnavailableError` classifies a source's failure
-  as retryable or permanent; a connection the caller waits for retries only a
-  retryable one.
-* A store-and-forward slot left by an earlier sender (``drain_orphans=on``)
-  rides out the server rejecting the provider's tokens -- at least 6
-  rejections persisting for ``min(reconnect_max_duration_millis, 5 min)`` --
-  before it is left on disk for the next session.
-* A query whose failover gives up because the provider cannot supply a token
-  raises :class:`~questdb.auth.TokenUnavailableError`, naming the cause,
-  instead of the connection failure that started the failover.
-* A provider used over ``http::`` or ``ws::`` is warned about, once per
-  process, on the ``questdb`` logger: its tokens cross the network in
-  cleartext.
-
-Behaviour follows the cross-language dynamic-credential specification shared
-with the Java client. No provider is selected from a configuration string:
-``token_provider`` and the ``azure_*`` keys are rejected. See
-:ref:`refreshing_token_provider`.
-
-OIDC Authentication (:mod:`questdb.auth`)
-************************************************
-
-Interpreter shutdown suppresses new OIDC callbacks and drains every admitted
-renderer or persistence-diagnostic callback before finalization, including
-callbacks on daemon sign-in threads. Callbacks must return promptly; a blocked
-renderer or logging handler can delay process exit.
-
-New :mod:`questdb.auth` module backed by the native QuestDB client. It runs the
-OAuth 2.0 Device Authorization Grant (RFC 8628), including from remote Jupyter
-kernels, and supplies rotating Bearer tokens directly to QuestDB transports.
-
-.. code-block:: python
-
-    import questdb
-    from questdb.auth import OidcDeviceAuth
-
-    auth = OidcDeviceAuth.from_questdb("https://questdb.example.com:9000")
-    auth.sign_in()
-    db = questdb.connect(
-        "wss::addr=questdb.example.com:9000;", oidc_auth=auth)
-
-Highlights:
-
-* :func:`questdb.connect`, :class:`questdb.Sender`,
-  :meth:`questdb.Sender.from_conf`, :meth:`questdb.Sender.from_env` and
-  :meth:`questdb.QuestDB.from_conf` accept ``oidc_auth=``. They retain the
-  shared native provider and pull a fresh token for each connect or reconnect.
-  It is mutually exclusive with a fixed ``token``, ``username`` or ``password``.
-* :meth:`~questdb.auth.OidcDeviceAuth.sign_in` is the only interactive
-  operation. :meth:`~questdb.auth.OidcDeviceAuth.token` and every transport
-  path remain non-interactive, silently refreshing when possible and otherwise
-  raising :class:`~questdb.auth.OidcInteractionRequired`.
-* Silent refresh retains both the in-memory and persisted refresh token after
-  retryable identity-provider responses (HTTP 408, 429 and 5xx, or OAuth
-  ``temporarily_unavailable``), and later retries use exponential backoff. A
-  status-less failure after request dispatch
-  remains genuinely ambiguous: the possibly rotated parent is discarded and
-  the call raises ``OidcInteractionRequired`` with that reason. A QuestDB 401
-  only forces refresh when a refresh token exists; otherwise the still-valid
-  access/ID token remains usable until expiry. Cached tokens also remain on the
-  non-blocking fast path until their actual expiry instead of making every
-  shared transport wait through a refresh during the 30-second skew window.
-* A QWP/WebSocket close whose drain times out while reconnecting keeps
-  failing returns the latest reconnect/OIDC cause, in either progress mode;
-  manual progress observes ``close_flush_timeout_millis`` meanwhile instead of
-  spinning indefinitely. A ``flush()`` that times out on a full
-  store-and-forward queue (``sf_append_deadline_millis``) names that cause
-  too, instead of advising a larger ``sf_max_total_bytes``, which cannot help
-  while nothing is acknowledged.
-* Auth failures are typed :class:`~questdb.auth.OidcError` subclasses of
-  :class:`~questdb.QuestDBError`. Their ``code`` reports the failing call's
-  native error category, not a recovery instruction: a flush with no usable
-  credential reports ``SocketError`` although only a sign-in fixes it, so catch
-  :class:`~questdb.auth.OidcInteractionRequired` (and check its
-  ``acquisition_busy``) before retry logic keyed on ``code``. A
-  transport attached with ``oidc_auth=`` can raise one from the same
-  ``flush`` / ``dataframe`` / ``row`` / ``query`` / :func:`questdb.connect`
-  call, so an existing ``except QuestDBError`` retry or dead-letter handler
-  keeps catching auth failures; catch :class:`~questdb.auth.OidcError` (or a
-  typed subclass such as :class:`~questdb.auth.OidcInteractionRequired`) for
-  auth-specific handling.
-* Token-endpoint diagnostics are credential-safe before they reach a renderer,
-  exception, C view or log. If an IdP reflects the submitted device code or
-  refresh token in a non-issued-token field, the occurrence becomes
-  ``[redacted credential]``. Python exposes the sanitized fields as
-  ``OidcDeviceFlowError.error`` and ``.error_description``. Issued token fields
-  remain unchanged, including a non-rotating refresh token.
-* OIDC discovery, endpoint validation, token selection, caching, refresh, and
-  concurrency control use the same native implementation as the C/C++ clients.
-  Discovery confirmation compares normalized origins plus the exact request
-  target, so QuestDB's explicit ``:443`` matches an Entra/Google discovery URL
-  that omits the default HTTPS port.
-  The explicit :class:`~questdb.auth.OidcDeviceAuth` constructor takes its two
-  endpoints as keyword-only arguments, preventing an accidental endpoint swap.
-* OIDC does not survive ``fork()`` without ``exec()``. A provider inherited by
-  a forked child is refused there, and once the parent has constructed any
-  :class:`~questdb.auth.OidcDeviceAuth` (used or not), constructing a new one
-  in a forked child raises :class:`~questdb.auth.OidcConfigError`. Pre-fork
-  servers (``gunicorn --preload``, Celery prefork, :mod:`multiprocessing` with
-  the ``fork`` start method) must construct the provider inside each worker or
-  start workers with ``spawn`` / ``forkserver``; see :ref:`auth-fork`.
-* OIDC scopes are preserved exactly for groups-mode token selection and the
-  persisted token-store identity. Refresh requests intentionally omit ``scope``,
-  matching the Java client, so the identity provider preserves the scope that
-  was originally granted. Include ``openid`` explicitly when the identity
-  provider requires it to issue an ID token.
-* OIDC device-flow polling tolerates transient transport failures until the
-  device code expires, matching the Java client. When no poll ever reached the
-  token endpoint, the expiry reports that transport failure instead of
-  ``expired_token``'s "you did not authorize in time", so a misconfigured or
-  firewalled ``token_endpoint`` is named rather than blamed on the user. The
-  error class and the ``expired_token`` tag are unchanged.
-* A refresh token that is not printable ASCII is rejected when the identity
-  provider returns it, rather than being cached, persisted, and then silently
-  dropped by the stricter check applied when the store is read back — which
-  left the credential unusable after a restart while the plaintext file stayed
-  on disk.
-* Opt-in :class:`~questdb.auth.FileTokenStore` persistence writes plaintext
-  credentials atomically and coordinates refresh across processes. Its
-  directories/files are owner-only (``0700``/``0600``) on Unix. Recovery of an
-  insecure directory durably publishes distrust before tightening permissions
-  and makes record deletion durable before removing the distrust marker.
-  Non-Unix platforms reject mutation before changing the stored entry until an
-  equivalent durable metadata barrier is available; reads, and therefore the
-  empty ``.lock`` files of the shared coordination protocol, remain available,
-  as does in-memory authentication.
-  Its directory is overridable with the
-  ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` environment variable, shared with the
-  native client. Custom Python token stores are not supported by the native
-  provider.
-* PG adapters reject malformed driver-option keys and every destination alias,
-  including ``unix_sock``; the validated ``host``/``hostaddr``/``port`` values
-  are inserted last before the bearer password is handed to the driver.
-* :meth:`~questdb.auth.OidcDeviceAuth.sign_in` fails up front when the
-  configured token store cannot hold a credential — a directory whose
-  owner-only permissions cannot be enforced, as on WSL ``drvfs`` without
-  ``metadata``, CIFS/SMB with a fixed ``file_mode``, or vfat/exFAT. Persistence
-  is opt-in, so this is reported rather than silently skipped; previously the
-  sign-in succeeded, wrote nothing, and the whole device flow ran again on
-  every start. The check runs before any device code is shown, and a provider
-  with no token store is unaffected. Transient preflight contention and I/O
-  failures are warnings rather than terminal configuration errors. Transient
-  write failures (a full disk, an NFS blip) warn through the ``questdb`` logger and keep the in-process
-  credential working.
-* A ``FileTokenStore`` directory is expanded with :func:`os.path.expanduser`
-  and made absolute at construction; one whose leading ``~`` cannot be
-  expanded (an unknown ``~user``, or no resolvable home directory) is refused
-  rather than creating a directory literally named ``~`` under the working
-  directory and leaving a plaintext refresh token in it. On POSIX ``..``
-  components are left for the operating system to resolve, as the native
-  client does, so a path through a symlink names the same directory in both.
-  The ``QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR`` override must already be
-  absolute -- on Windows with a drive letter or UNC prefix, as the native
-  client requires -- and is passed on unchanged. The ``ca_bundle`` argument
-  of :class:`~questdb.auth.OidcDeviceAuth` takes the same path forms
-  (``str``, ``bytes`` or any ``os.PathLike``) and is expanded and made
-  absolute the same way.
-* An OIDC flush or connect that needs a fresh token can wait up to the
-  provider's ``timeout`` for the refresh -- or six times it behind a refresh
-  already running on another thread -- regardless of the sender's
-  ``request_timeout`` and ``retry_timeout``; see :ref:`auth-token-wait`.
-* A persistence-warning handler or renderer callback that uses a
-  :class:`~questdb.PooledSender` lease another thread is blocked in (for
-  example ``wait()``) gives up after two seconds with
-  ``QuestDBError(InvalidApiCall)`` instead of deadlocking both threads. So
-  does a renderer callback that closes the :class:`~questdb.QuestDB` pool while
-  another thread still holds a lease.
-* Convenience adapters (:func:`~questdb.auth.sqlalchemy_engine`,
-  :func:`~questdb.auth.psycopg_connect`) that wire the token into PG-wire as the
-  ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
-  token on every new pooled connection, ``psycopg_connect`` captures it at
-  connect time. They authenticate remote PG servers with ``verify-full`` by
-  default, which needs a trust root: libpq does **not** consult the operating
-  system's certificate store unless told to, so without
-  ``~/.postgresql/root.crt`` or ``PGSSLROOTCERT`` the connection fails with
-  ``root certificate file ... does not exist``. Pass ``sslrootcert`` -- a CA
-  file, or ``"system"`` with libpq 16 or later -- through ``connect_args``
-  (``sqlalchemy_engine``) or as a keyword argument (``psycopg_connect``), as
-  ``docs/auth.rst`` shows. Numeric loopback literals (``127.0.0.1``, ``::1``) resolve to
-  ``prefer`` instead, so a local QuestDB without TLS still works; the name
-  ``localhost`` does **not** — it keeps ``verify-full``, because its resolved
-  addresses are not pinned. Use a numeric literal for local development, or
-  pass an explicit ``sslmode``. Both adapters own the connection destination:
-  a ``host``, ``hostaddr``, ``port``, ``service``, ``dsn``, ``conninfo`` or
-  ``unix_sock`` in
-  the driver passthrough (``connect_args`` / ``connect_kwargs``) raises
-  ``OidcConfigError`` before any token is acquired, because the token is a
-  bearer credential and SQLAlchemy merges ``connect_args`` over the arguments
-  built from the validated URL. Pass ``host=`` / ``pg_port=`` instead. They
-  also own the login: a ``user``, ``password``, ``dbname`` or ``database`` in
-  the passthrough raises ``OidcConfigError`` up front too, instead of a bare
-  ``TypeError`` after a token fetch (``psycopg_connect``) or a silent login as
-  someone other than ``_sso`` (``sqlalchemy_engine``); pass ``database=``.
-  Libpq connections explicitly pass an empty ``hostaddr`` to suppress an
-  inherited ``PGHOSTADDR`` that could otherwise redirect the bearer password
-  despite the validated ``host``. This is applied on every pooled connection.
-  ``sqlalchemy_engine`` accepts a non-libpq ``drivername`` (``pg8000``, say)
-  only with ``sslmode=None``, since such a driver takes no ``sslmode``.
-* :meth:`~questdb.auth.OidcDeviceAuth.close` permanently closes a provider and
-  cancels a device flow, silent-refresh coordination, or token-store lock wait
-  running on another thread; ``OidcDeviceAuth`` is also a context manager.
-  Operations on a closed provider -- including attaching it to a new
-  ``Sender``, pool or reader -- raise the new
-  :class:`~questdb.auth.OidcCancelledError`, except
-  :meth:`~questdb.auth.OidcDeviceAuth.clear`, which stays available so the
-  persisted credential can still be removed;
-  :meth:`~questdb.auth.OidcDeviceAuth.cancel_sign_in`, which remains an
-  idempotent no-op when no flow is running; and ``config``, which remains
-  readable. ``Ctrl-C`` during ``sign_in()`` cancels only the current attempt and
-  raises ``KeyboardInterrupt``; the provider remains open, already-attached
-  ``Sender``/pool/reader instances remain usable, and a later ``sign_in()`` can
-  retry on the same provider. Custom UIs can invoke the new attempt-scoped
-  ``cancel_sign_in()`` method directly. Only ``close()`` is permanent.
-  :meth:`~questdb.auth.OidcDeviceAuth.clear` never waits behind a
-  ``sign_in()`` running on another thread: it raises
-  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-  ``QuestDBErrorCode.InvalidApiCall`` and clears nothing, so cancel the sign-in
-  first or retry once it completes.
-* On CPython, failed pending-call registration no longer strands a signal
-  exception caught during a synchronous transport persistence diagnostic.
-  An exception-safe native-return boundary delivers it without rerunning the
-  signal handler; additional saved exceptions retain their context chain.
-* Renderer prompts receive the device code's bounded lifetime and polling
-  interval (``expires_in`` / ``interval``), matching the complete Java device
-  challenge, plus ``browser_target``, the single natively vetted URL that
-  built-in renderers use for links and QR codes. A prompted sign-in that is
-  cancelled, closed or interrupted reports ``on_failure('Sign-in cancelled.')``
-  so the renderer's output does not stay on "waiting".
-* OIDC requires no additional Python dependency; ``sqlalchemy`` / ``psycopg`` /
-  ``qrcode`` / ``IPython`` are imported lazily for optional conveniences.
-
-See the :ref:`OIDC authentication guide <oidc_auth>` for details.
-
-New ``ConnectionEventKind.CredentialUnavailable``
-*************************************************
-
-:attr:`ConnectionEventKind.CredentialUnavailable <questdb.ConnectionEventKind.CredentialUnavailable>`
-is a new event kind reporting a token provider that failed to supply a
-credential — an ``oidc_auth=`` provider with no cached or refreshable
-credential, either before any endpoint was dialled or when replacing a token a
-server rejected with HTTP 401. It has no counterpart before 6.0, because token
-providers did not exist: a listener written against 5.0 cannot have seen it.
-
-``AuthFailed`` keeps its meaning: the server rejected a credential the client
-presented, and ``host`` / ``port`` are always set. It is terminal before a
-sender's first connection; once connected, a sender keeps reconnecting and
-reports each rejected attempt (see "An established sender rides out a rejected
-credential" above). ``CredentialUnavailable`` sets ``host`` and
-``port`` to ``None`` when the provider failed before any dial; after a 401
-they name the endpoint that rejected the previous token and ``cause_msg``
-includes the 401. It reports the provider's classification in ``cause_code``,
-which is what says whether the sender will carry on:
-
-* ``SocketError`` — retryable, and the ordinary case. The sender keeps
-  reconnecting so queued rows survive while the identity provider recovers or
-  a human signs in, and nothing is raised to the caller. Only a foreground
-  call such as :meth:`questdb.QuestDB.dataframe` fails fast, and an ACK wait
-  (:meth:`PooledSender.wait <questdb.PooledSender.wait>`) whose timeout expires
-  meanwhile raises :class:`~questdb.auth.OidcInteractionRequired` -- ``code``
-  ``FailoverRetry``, rows still queued -- when the provider needs a new sign-in.
-* ``AuthError`` / ``ConfigError`` — the provider cannot recover in this
-  process, so the reconnect is **terminal** and the sender stops. Reached by a
-  permanently closed provider (``close()`` is one-way; cancelling one
-  ``sign_in()`` attempt does not close it) and by a scope that cannot yield the
-  required token kind. Queued rows are not deleted — a disk-backed store-and-forward
-  slot stays drainable by a later process — but this process will not send
-  them.
-
-A listener that pages on a permanent stop must qualify on ``cause_code``, not
-on the kind alone.
-
-This matches the Java client, whose ``QwpCredentialUnavailableException`` is
-likewise distinct from its ``QwpAuthFailedException``.
-
-This is additive and needs no migration: existing enum ordinals are
-unchanged, the new kind is appended as ``7``, and a 5.0 listener keeps
-working untouched. A listener that wants to distinguish the two conditions
-opts in by handling the new kind.
-
 Fixed
 ~~~~~
+
+- **QWP/WebSocket ``row()`` auto-flush no longer fails on rows that each fit
+  a frame** (`#161 <https://github.com/questdb/py-questdb-client/issues/161>`_).
+  In 5.0 a standalone ``ws::`` / ``wss::`` ``Sender`` had no byte trigger, so
+  600 rows of 4 KiB already exceeded the server's default 2 MiB frame limit,
+  and a pooled lease checked its byte trigger only after appending, so one
+  large row could push a batch past the limit. Either way the whole batch
+  failed: the standalone sender discarded it, and a pooled lease kept it
+  but could never publish it. Now both senders auto-flush at 90% of the
+  frame limit, and publish as soon as the size estimate reaches the full
+  limit, even with ``auto_flush_bytes=off``. When the estimate is past the
+  limit or the whole buffer does not fit in one frame, the rows buffered
+  before the newest one go out as a frame of their own and the newest row
+  starts the next batch. The estimate counts each symbol value at its
+  largest encoded size, so it is not below the size of the encoded frame
+  unless store-and-forward has fallen back to sending full symbol
+  dictionaries. ``len()`` of a QWP/WebSocket ``Buffer`` or standalone
+  ``Sender`` with symbol columns therefore reads higher than before, and
+  frames that the byte trigger publishes carry fewer rows. Until the server
+  advertises its frame limit, as while a lazily connected lease is still
+  connecting, both senders plan for the limit a QuestDB server has by
+  default, 2 MiB less 14 bytes, instead of the local queue limit, so the
+  rows buffered meanwhile still fit a default server once its limit is
+  known.
+
+  Whatever a QWP/WebSocket ``row()`` raises, the row was not added.
+  ``BatchTooLarge`` means
+  it does not fit in a frame on its own, or the rows before it no longer
+  fit, for example after the frame limit shrank on reconnect, in which case
+  those rows are discarded and the error says how many. After any other
+  auto-publish error a pooled lease keeps the rows before it and a
+  standalone sender clears them. In 5.0 a pooled lease also kept the row
+  itself. It now leaves it out, as on every other error, so a failed split
+  no longer leaves the lease holding a batch too large for one frame.
+
+- A :class:`PooledReader <questdb.PooledReader>` that had become reachable
+  only through a reference cycle could be collected by the cyclic garbage
+  collector while one of its results was being decoded, on the same
+  thread; its finaliser then freed the native cursor under the decoder and
+  the process crashed. ``to_pandas()`` and ``iter_pandas()`` were exposed.
+  The free is now deferred until the decoder
+  has let go of the batch, and the consumer sees a plain
+  ``QuestDBError('cursor is closed')``. For the same reason,
+  :meth:`QueryResult.cancel <questdb.QueryResult.cancel>` called from a
+  signal handler while a batch of that result is being decoded now raises
+  ``QuestDBErrorCode.InvalidApiCall`` instead of invalidating the batch.
+- On POSIX, a ``KeyboardInterrupt`` that arrived while
+  ``QueryResult.close()`` or ``PooledReader.close()`` waited for another
+  thread's in-flight batch (Ctrl-C while joining a worker, say) was lost,
+  and the connection leaked. The interrupt now propagates at once, and the
+  worker stops after its current batch and releases the connection.
+- The default ``iter_pandas()`` stopped as if the result were complete when
+  the result was closed underneath it; it now raises
+  ``QuestDBError('cursor is closed')``, like the other iterators.
+- A sub-microsecond ``pandas.Timedelta`` given as a sender timeout or
+  interval (``auth_timeout``, ``retry_timeout``, ...) became 0 ms instead of
+  rounding up to 1 ms.
+- ``copy.copy()`` of a :class:`QueryResult <questdb.QueryResult>` produced
+  a second result over the same cursor: reading from both lost rows, and
+  dropping the copy closed the original's stream. It now raises
+  ``TypeError``.
+- :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>` did not count Arrow
+  ``string_view`` columns, plain or dictionary-encoded, as strings when
+  resolving ``symbols``. Naming one in ``symbols=[...]`` raised
+  ``Bad argument `symbols` ... is not a strings column``, ``symbols=True``
+  stored it as ``VARCHAR`` instead of ``SYMBOL``, and ``symbols=False`` left
+  a dictionary-encoded one as ``SYMBOL``. They now behave like ``string``
+  columns.
 
 - **Python ``True`` in an object-dtype DataFrame column was written as
   ``False``** by ``QuestDB.dataframe()``, ``PooledSender.dataframe()`` and
@@ -1243,38 +1494,6 @@ Fixed
   that the previous result was still open, not that its connection was
   terminal.
 
-Other changes
-~~~~~~~~~~~~~
-
-- A token provider's failure while a connection is waited for -- an eager
-  :func:`questdb.connect`, a sender's ``initial_connect_retry=sync`` connect --
-  is retried only when the provider classified it retryable with
-  :class:`~questdb.auth.TokenUnavailableError`; any other failure, an
-  ``oidc_auth`` network error included, fails the connection at once.
-  Background reconnects keep retrying every provider failure, except
-  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-  ``QuestDBErrorCode.InvalidApiCall`` from an application provider, which
-  stops them.
-
-- A 401 is retried with a refreshed token only when the server's
-  ``WWW-Authenticate`` challenge allows it: no Bearer ``error``, or
-  ``invalid_token``.
-
-- The configuration-string keys ``token_provider``, ``azure_resource``,
-  ``azure_client_id`` and ``azure_credential`` are rejected on every protocol.
-  ILP/HTTP and ILP/TCP previously ignored them silently.
-
-- Finalizers and garbage collection no longer block on, or free, a query
-  cursor that another operation is using: an abandoned ``QueryResult``,
-  ``PooledReader``, Arrow stream or batch iterator is reclaimed without
-  waiting, and cursor ``close()`` / ``cancel()`` / pulls reject same-thread
-  re-entry while a native read is in progress.
-
-- A DataFrame error that gains a note about a partially consumed input
-  stream keeps its exception class, ``in_doubt`` and ``sender_error`` instead
-  of being rebuilt as a plain :class:`QuestDBError <questdb.QuestDBError>`, so
-  ``except OidcError`` and ``except QuestDBServerRejectionError`` still match.
-
 Faster
 ~~~~~~
 
@@ -1330,6 +1549,11 @@ Faster
   before ``uuid.UUID`` and IPV4. A ``Geohash`` cell is about 33% cheaper and
   an ``IPv4Address`` cell about 15%, and the common ``int`` / ``float`` /
   ``str`` path no longer has that code laid out around it.
+
+Build & dependencies
+~~~~~~~~~~~~~~~~~~~~
+
+- The bundled ``c-questdb-client`` native library is upgraded to 7.2.0.
 
 5.0.0 (2026-07-27)
 ------------------

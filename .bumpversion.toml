@@ -1,5 +1,5 @@
 [tool.bumpversion]
-current_version = "5.0.0"
+current_version = "6.0.0"
 commit = false
 tag = false
 
@@ -22,6 +22,11 @@ replace = "library is {new_version}"
 filename = "docs/conf.py"
 search = "version = release = '{current_version}'"
 replace = "version = release = '{new_version}'"
+
+[[tool.bumpversion.files]]
+filename = "docs/installation.rst"
+search = ">>> questdb.__version__\n    '{current_version}'"
+replace = ">>> questdb.__version__\n    '{new_version}'"
 
 [[tool.bumpversion.files]]
 filename = "src/questdb/__init__.py"
