@@ -99,7 +99,8 @@ from cpython.bool cimport bool
 from cpython.ref cimport Py_XDECREF
 from cpython.exc cimport PyErr_CheckSignals, PyErr_SetObject
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
-from cpython.object cimport PyObject, PyTypeObject, PyObject_TypeCheck
+from cpython.object cimport (PyObject, PyTypeObject, PyObject_TypeCheck,
+                             PyObject_GenericSetAttr)
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
     PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
 from cpython.pycapsule cimport (PyCapsule_Destructor,
@@ -731,7 +732,10 @@ cdef void_int _setattr_without_dict(
         if not hasattr(type(descr), '__set__'):
             raise AttributeError(
                 f"'{_fqn(cls)}' object attribute {name!r} is read-only")
-    object.__setattr__(obj, name, value)
+    # Not `object.__setattr__`: before 3.13 CPython refuses it ("can't apply
+    # this __setattr__") on any instance whose type, like `cls`, overrides
+    # the C-level setattr slot. This is the function it would have called.
+    PyObject_GenericSetAttr(obj, name, value)
     return 0
 
 
