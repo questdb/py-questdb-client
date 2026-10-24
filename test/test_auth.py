@@ -3490,6 +3490,13 @@ class NativeOidcIntegrationTest(unittest.TestCase):
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_pooled_dataframe_does_not_spin_on_oidc_network_failure(self):
         events = []
+        unavailable_seen = threading.Event()
+
+        def on_event(event):
+            events.append(event)
+            if event.kind is questdb.ConnectionEventKind.CredentialUnavailable:
+                unavailable_seen.set()
+
         with OidcTestServer(
                 initial_expires_in=2,
                 refresh_token_response=(
@@ -3502,13 +3509,23 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                     with questdb.connect(
                             f'ws::addr=127.0.0.1:{qwp_server.port};'
                             'lazy_connect=true;reconnect_max_duration_millis=3000;',
-                            oidc_auth=auth, connection_listener=events.append) as db:
+                            oidc_auth=auth, connection_listener=on_event) as db:
                         started = time.monotonic()
                         with self.assertRaises(OidcNetworkError):
                             db.dataframe(
                                 pd.DataFrame({'v': [1]}), table_name='t',
                                 at=questdb.ServerTimestamp)
                         self.assertLess(time.monotonic() - started, 1.5)
+                        # Events are dispatched asynchronously, and leaving
+                        # the block closes the pool, which discards any event
+                        # not delivered yet. dataframe() queued all of its
+                        # events before it raised: wait for the first, then
+                        # briefly for any surplus. The pause can only miss a
+                        # retrying call, never fail a correct one.
+                        self.assertTrue(
+                            unavailable_seen.wait(timeout=10),
+                            'the provider failure was never narrated')
+                        time.sleep(0.5)
                     self.assertEqual(
                         qwp_server.snapshot()['accepted_connections'], 0)
                 # One native foreground failure, not thousands of outer
