@@ -294,6 +294,69 @@ class RefreshingTokenProviderTest(unittest.TestCase):
             release.set()
             provider.close(wait=True, timeout=datetime.timedelta(seconds=5))
 
+    def test_close_waits_beyond_the_lock_timeout_limit(self):
+        # Both exceed `threading.TIMEOUT_MAX`, where a single lock wait raises
+        # OverflowError instead of waiting.
+        for timeout in (sys.maxsize, datetime.timedelta.max):
+            with self.subTest(timeout=timeout):
+                entered = threading.Event()
+                release = threading.Event()
+
+                def source():
+                    entered.set()
+                    release.wait(10)
+                    return ExpiringToken.expires_in('valid', 3600)
+
+                provider = RefreshingTokenProvider(source)
+                try:
+                    self.assertTrue(entered.wait(5))
+                    threading.Timer(0.1, release.set).start()
+                    provider.close(wait=True, timeout=timeout)
+                    self.assertTrue(provider.closed)
+                finally:
+                    release.set()
+                    provider.close(wait=True, timeout=5)
+
+    def test_huge_durations_mean_a_long_wait(self):
+        # A duration beyond the uint64 millisecond range used to reach an
+        # undefined double-to-integer conversion, which yields 0 on some
+        # platforms: "wait forever" became no wait at all.
+        entered = threading.Event()
+        release = threading.Event()
+
+        def source():
+            entered.set()
+            release.wait(10)
+            return ExpiringToken.expires_in('slow', 3600)
+
+        provider = RefreshingTokenProvider(
+            source, cold_wait=sys.maxsize, backoff_max=sys.maxsize,
+            retry_after_max=1e300)
+        try:
+            self.assertTrue(entered.wait(5))
+            threading.Timer(0.1, release.set).start()
+            self.assertTrue(provider.await_ready(timeout=sys.maxsize))
+            self.assertEqual(provider.token(), 'slow')
+        finally:
+            release.set()
+            provider.close(wait=True, timeout=5)
+
+    def test_a_huge_retry_after_keeps_the_sources_classification(self):
+        # Converting it to int64 milliseconds used to overflow, and the
+        # failure was then reported as an unclassified "callback failed".
+        def source():
+            raise TokenUnavailableError(
+                'busy', retryable=False, retry_after=1e300)
+
+        with RefreshingTokenProvider(source, cold_wait=0.05) as provider:
+            with self.assertRaises(TokenUnavailableError):
+                provider.token()
+            failure = _last_failure(provider)
+        self.assertIn('busy', failure.message)
+        self.assertFalse(failure.retryable)
+        self.assertIsNotNone(failure.retry_after)
+        self.assertGreater(failure.retry_after, 0)
+
     def test_close_waits_for_a_source_call_that_has_begun(self):
         # Hold the refresher inside `Event.clear()` -- Python code, so a
         # thread switch can land there -- on its way into the source, and
@@ -848,6 +911,66 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
             caught.exception.code, questdb.QuestDBErrorCode.ConfigError)
         self.assertIn('provider retired', str(caught.exception))
         self.assertEqual(provider.calls, 1)
+
+    def test_an_http_flush_at_interpreter_exit_still_gets_its_token(self):
+        # questdb's atexit hook closes the callback gate before
+        # `logging.shutdown()` and any atexit callback registered before
+        # `import questdb` run. A flush from either, on the main thread,
+        # must still reach the application provider and deliver its rows.
+        script = textwrap.dedent('''
+            import atexit, logging, sys
+            state = {}
+
+            def flush(where):
+                sender = state['sender']
+                sender.row(
+                    'exit', columns={'phase': where},
+                    at=questdb.ServerTimestamp)
+                sender.flush()
+                print('flushed', where, flush=True)
+
+            atexit.register(flush, 'atexit')
+            import questdb
+
+            class Handler(logging.Handler):
+                def emit(self, record):
+                    pass
+
+                def flush(self):
+                    if not state.pop('pending_log_flush', False):
+                        return
+                    flush('logging')
+
+            logging.getLogger('app').addHandler(Handler())
+            sender = questdb.Sender(
+                questdb.Protocol.Http, '127.0.0.1', int(sys.argv[1]),
+                bearer_token_provider=lambda: 'exit-token',
+                auto_flush=False, retry_timeout=1000, protocol_version=2)
+            sender.establish()
+            state['sender'] = sender
+            state['pending_log_flush'] = True
+        ''')
+        env = os.environ.copy()
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, (
+            os.path.dirname(os.path.dirname(questdb.__file__)),
+            env.get('PYTHONPATH'))))
+        with HttpServer() as server:
+            result = subprocess.run(
+                [sys.executable, '-c', script, str(server.port)], env=env,
+                capture_output=True, text=True, timeout=60)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn('flushed logging', result.stdout, output)
+        self.assertIn('flushed atexit', result.stdout, output)
+        self.assertEqual(len(server.requests), 2, server.requests)
+        body = b''.join(server.requests)
+        self.assertIn(b'logging', body)
+        self.assertIn(b'atexit', body)
+        seen = [
+            value for headers in server.headers
+            for key, value in headers.items()
+            if key.lower() == 'authorization']
+        self.assertEqual(seen, ['Bearer exit-token'] * 2)
 
     def test_invalid_api_call_stops_a_pool_and_is_narrated(self):
         provider = _RetiredProvider()

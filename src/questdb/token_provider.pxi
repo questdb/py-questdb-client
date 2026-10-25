@@ -40,7 +40,10 @@
 # is deliberately empty: it can run on any thread after interpreter finalization,
 # so it must never enter Python (see `_oidc_user_data_release_trampoline`).
 # Every callback goes through the process-wide callback gate that `oidc.pxi`
-# drains before finalization.
+# drains before finalization. Once questdb's atexit hook has closed it, a
+# provider callback the main thread makes from inside its own native call --
+# an ILP/HTTP flush from `logging.shutdown()`, say -- still runs (see
+# `_tp_main_thread_before_finalization`).
 
 import weakref
 from functools import partial as _token_partial
@@ -267,9 +270,29 @@ cdef object _tp_datetime_from_ms(int64_t ms):
     return datetime.datetime.fromtimestamp(ms / 1000.0, datetime.timezone.utc)
 
 
+# 2**64 as a double. Converting a double at or above it to `uint64_t` is
+# undefined behaviour in C (C11 6.3.1.4): the result differs by compiler and
+# architecture, and some x86-64 code sequences give 0, so a "wait forever"
+# duration such as `sys.maxsize` could become no wait at all. Native caps
+# every duration at 100 years anyway.
+cdef double _TP_UINT64_LIMIT = 18446744073709551616.0
+
+
 cdef uint64_t _tp_duration_ms(object value, str name) except? 0:
-    cdef double seconds = _tp_seconds(value, name)
-    return <uint64_t>(seconds * 1000.0 + 0.5)
+    cdef double ms = _tp_seconds(value, name) * 1000.0 + 0.5
+    if ms >= _TP_UINT64_LIMIT:
+        return <uint64_t>-1
+    return <uint64_t>ms
+
+
+cdef int64_t _tp_retry_after_ms(double seconds) noexcept:
+    """A source's non-negative ``retry_after`` in milliseconds, clamped below
+    the `int64_t` range: converting the Python float overflowed past it, and
+    the source's failure was then reported unclassified. Native caps the wait
+    at ``retry_after_max`` anyway."""
+    if seconds * 1000.0 >= 9.2e18:
+        return <int64_t>9200000000000000000
+    return <int64_t>(seconds * 1000.0)
 
 
 cdef int64_t _tp_epoch_ms(double seconds) except? -1:
@@ -368,7 +391,7 @@ cdef void _tp_sink_exception(
             return
         if isinstance(exc, TokenUnavailableError):
             if exc.retry_after is not None:
-                retry_after_ms = <int64_t>(exc.retry_after * 1000.0)
+                retry_after_ms = _tp_retry_after_ms(exc.retry_after)
             _tp_sink_text_error(sink, exc.retryable, retry_after_ms, str(exc))
             return
         # `InvalidApiCall` is the failure retrying can never clear, as for a
@@ -393,6 +416,24 @@ cdef void _tp_sink_unavailable(questdb_token_sink* sink) noexcept nogil:
         b'the Python interpreter is shutting down, so the Python token '
         b'callback cannot run')
     questdb_token_sink_set_error(sink, True, -1, msg, strlen(msg))
+
+
+cdef inline bint _tp_main_thread_before_finalization() noexcept nogil:
+    """Whether a provider callback the exit gate refused may run anyway.
+
+    questdb's atexit hook (`_oidc_detach_diagnostics_at_exit`) closes the
+    callback gate so that no native thread is entering Python when
+    finalization begins. The main thread runs the atexit callbacks that come
+    after that hook -- `logging.shutdown()`, and any registered before
+    `import questdb` -- and only then finalizes the interpreter. A provider
+    callback it makes from inside its own native call, such as an ILP/HTTP
+    flush from a logging handler, therefore returns before finalization can
+    start, and needs no drain. Refusing it failed that flush and lost its
+    rows. Callbacks on any other thread -- a QWP/WebSocket connect, a
+    refreshing provider's refresher -- stay refused.
+    """
+    return (questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
+            and not qdb_py_is_finalizing())
 
 
 cdef void _token_source_dispatch(
@@ -521,14 +562,18 @@ cdef void _token_get_trampoline(
         void* user_data, questdb_token_sink* sink) noexcept nogil:
     cdef qdb_oidc_callback_gate* gate = qdb_oidc_callback_enter()
     if gate == NULL:
-        _tp_sink_unavailable(sink)
+        if _tp_main_thread_before_finalization():
+            _token_get_dispatch(<size_t>user_data, sink)
+        else:
+            _tp_sink_unavailable(sink)
         return
     try:
         if qdb_py_is_finalizing():
             _tp_sink_unavailable(sink)
             return
         qdb_oidc_callback_before_gil(gate)
-        if qdb_oidc_callback_stopped(gate):
+        if (qdb_oidc_callback_stopped(gate)
+                and not _tp_main_thread_before_finalization()):
             _tp_sink_unavailable(sink)
             return
         _token_get_dispatch(<size_t>user_data, sink)
@@ -590,12 +635,16 @@ cdef void _token_rejected_trampoline(
         uint16_t http_status) noexcept nogil:
     cdef qdb_oidc_callback_gate* gate = qdb_oidc_callback_enter()
     if gate == NULL:
+        if _tp_main_thread_before_finalization():
+            _token_rejected_dispatch(
+                <size_t>user_data, token, token_len, http_status)
         return
     try:
         if qdb_py_is_finalizing():
             return
         qdb_oidc_callback_before_gil(gate)
-        if not qdb_oidc_callback_stopped(gate):
+        if (not qdb_oidc_callback_stopped(gate)
+                or _tp_main_thread_before_finalization()):
             _token_rejected_dispatch(
                 <size_t>user_data, token, token_len, http_status)
     finally:
@@ -917,8 +966,16 @@ cdef class RefreshingTokenProvider:
                 raise QuestDBError(
                     QuestDBErrorCode.InvalidApiCall,
                     'close(wait=True) cannot wait for its own token source.')
-            if not handle._source_done.wait(seconds):
-                raise TimeoutError('The token source has not returned after close.')
+            # In slices: a lock wait longer than `threading.TIMEOUT_MAX`
+            # raises OverflowError instead of waiting, and a timedelta can
+            # ask for one.
+            deadline = time.monotonic() + seconds
+            while not handle._source_done.wait(
+                    min(seconds, threading.TIMEOUT_MAX)):
+                seconds = deadline - time.monotonic()
+                if seconds <= 0.0:
+                    raise TimeoutError(
+                        'The token source has not returned after close.')
 
     @property
     def name(self) -> str:

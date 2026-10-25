@@ -11,6 +11,7 @@ principals, OAuth2 client credentials, tokens from a secrets vault -- need a
 every connection and reconnection (on every request, for ILP/HTTP).
 
 Attach one with ``bearer_token_provider=`` on :func:`questdb.connect`,
+:meth:`QuestDB.from_conf <questdb.QuestDB.from_conf>`,
 :class:`~questdb.Sender`, :meth:`Sender.from_conf
 <questdb.Sender.from_conf>` and :meth:`Sender.from_env
 <questdb.Sender.from_env>`. The client selects no provider from a
@@ -111,6 +112,16 @@ drain. A source cannot wait for itself with ``close(wait=True)``.
 Interpreter exit must wait for admitted Python callbacks even after a provider
 is closed. That finalization wait cannot safely abandon Python frames and is
 not interrupted by Ctrl-C: a source without bounded I/O can prevent exit.
+
+When the interpreter starts to exit, the client stops running Python token
+code on its native threads. Its own ``atexit`` hook does this, and it runs
+before ``logging.shutdown()`` and before any ``atexit`` callback registered
+before ``questdb`` was imported. A flush made from such exit-time code on the
+main thread still reaches an application provider, because an ILP/HTTP flush
+calls it on the flushing thread. What runs on a native thread can no longer
+supply a token: a QWP/WebSocket sender, pool or query that has to open a
+connection then, and a refreshing provider whose token needs a refresh.
+Flush and close those clients before the interpreter exits.
 
 Providers and their clients must not be used across ``fork()``. Start workers
 with ``spawn`` (or ``exec()`` after forking), then construct providers inside

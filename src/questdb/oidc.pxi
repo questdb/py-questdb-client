@@ -713,6 +713,10 @@ def _oidc_detach_diagnostics_at_exit():
     Providers stay open so transports can finish their bounded close-flush drain
     during subsequent module teardown. We do not wait for an IdP request that
     has not entered a Python callback; its later callback is refused by the gate.
+    The one exception is a token-provider callback the main thread makes from
+    inside its own native call while the interpreter is not yet finalizing --
+    an ILP/HTTP flush from a later atexit callback or from `logging.shutdown()`
+    -- which still runs (see `_tp_main_thread_before_finalization`).
     """
     global _oidc_callbacks_shutting_down
     if _oidc_callback_on_this_thread():

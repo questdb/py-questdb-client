@@ -25,7 +25,9 @@ is idle. A 6.0 listener that records its events through its own sender with
 ``auto_flush=off`` now logs ``connection event listener failed`` and drops
 those rows. Separately, the
 read-only ``max_name_len``, ``protocol_version``, ``connection_events_dropped``
-and ``connection_events_delivered`` now raise the same error, from any thread,
+and ``connection_events_delivered`` -- and, over ``ws`` and ``wss``,
+``auto_flush_bytes``, ``published_fsn()``, ``acked_fsn()``, ``poll_error()``
+and ``error_events_dropped()`` -- now raise the same error, from any thread,
 while the sender is inside a native call such as ``flush()``. Write listener
 events to a different sender or queue them for the owning thread, and read the
 counters when the sender is not flushing.
@@ -94,6 +96,7 @@ Rotating Bearer tokens (:class:`questdb.auth.RefreshingTokenProvider`)
 **********************************************************************
 
 New ``bearer_token_provider=`` on :func:`questdb.connect`,
+:meth:`QuestDB.from_conf <questdb.QuestDB.from_conf>`,
 :class:`Sender <questdb.Sender>`, :meth:`Sender.from_conf
 <questdb.Sender.from_conf>` and :meth:`Sender.from_env
 <questdb.Sender.from_env>`, for machine credentials that rotate: Microsoft
@@ -123,6 +126,14 @@ tokens from a secrets vault.
   active source with a deadline. A timeout leaves the provider closed and raises
   ``TimeoutError``. Sources must bound their own I/O: interpreter exit cannot
   safely abandon an executing Python callback even after provider close.
+* While the interpreter exits, an application provider still supplies the
+  token for a flush made on the main thread -- from ``logging.shutdown()``,
+  or from an ``atexit`` callback registered before ``questdb`` was imported --
+  so an ILP/HTTP flush there delivers its rows. From that point no Python
+  token code runs on a native thread: a QWP/WebSocket client that has to
+  connect at exit, or a ``RefreshingTokenProvider`` whose token needs a
+  refresh, gets no token. Flush and close such clients before the interpreter
+  exits; see :ref:`refreshing_token_provider`.
 * Main-thread token callbacks defer interrupts to the native-return boundary
   without repeatedly interrupting provider retries or swallowing signal-handler
   deadline exceptions. Pooled dataframe calls fail fast on native foreground
