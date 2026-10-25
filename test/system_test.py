@@ -16,6 +16,7 @@ import unittest
 import uuid
 import warnings
 import pathlib
+import urllib.error
 import numpy as np
 import decimal
 
@@ -134,7 +135,21 @@ def may_install_questdb():
             '/questdb-' +
             QUESTDB_VERSION +
             '-no-jre-bin.tar.gz')
-        install_path = install_questdb(QUESTDB_VERSION, url)
+        # DNS/GitHub can be briefly unavailable on CI runners. A failed
+        # setUpClass is still reported as an error even if a later class
+        # successfully downloads the same release, so retry the fetch here.
+        # Never retry an HTTP response (e.g. a missing release asset).
+        for attempt in range(4):
+            try:
+                install_path = install_questdb(QUESTDB_VERSION, url)
+                break
+            except urllib.error.URLError as exc:
+                if isinstance(exc, urllib.error.HTTPError) or attempt == 3:
+                    raise
+                delay = 2 ** attempt
+                print(f'QuestDB download failed: {exc}; '
+                      f'retrying in {delay}s.', file=sys.stderr)
+                time.sleep(delay)
 
     QUESTDB_PLAIN_INSTALL_PATH = PROJ_ROOT / 'build' / 'questdb' / 'plain'
     shutil.copytree(
