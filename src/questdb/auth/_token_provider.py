@@ -72,12 +72,22 @@ class BearerTokenProvider(Protocol):
     :class:`~questdb.auth.RefreshingTokenProvider` unless you already cache
     tokens.
 
-    Clients keep retrying a failure in the background, whatever a
-    :class:`~questdb.auth.TokenUnavailableError` says. To stop them on a
+    A QWP/WebSocket sender, query or pool keeps retrying a failure in its
+    background reconnects, whatever a
+    :class:`~questdb.auth.TokenUnavailableError` says; a connection the
+    caller waits for, such as a sender's ``initial_connect_retry=sync``
+    connect, retries only a retryable one. To stop the reconnects on a
     failure that retrying can never clear, raise
     :class:`~questdb.QuestDBError` with ``code``
     ``QuestDBErrorCode.InvalidApiCall``: the client then fails with
     ``ConfigError`` and stops reconnecting.
+
+    An ILP/HTTP sender has no background reconnects. Its flush retries a
+    retryable failure for up to ``retry_timeout``, fails at once on a
+    permanent one, and then raises; like any failed flush, it discards the
+    rows in the sender's internal buffer. Flush a batch you may need to
+    resend from a buffer of your own, with ``clear=False``, which keeps the
+    rows when the flush fails.
 
     The optional ``on_rejected(token, http_status)`` hears that a server
     rejected ``token`` with HTTP 401, when a new token can fix it: the

@@ -151,9 +151,30 @@ an error other than ``invalid_token``, which a new token cannot fix. A
 
 A provider reports failures as a source does: raise
 :class:`~questdb.auth.TokenUnavailableError` to classify one; any other
-exception counts as retryable. Clients keep retrying either kind in the
-background. When retrying can never succeed -- the provider is misconfigured
-beyond repair, or your application has retired it -- raise
+exception counts as retryable. A QWP/WebSocket sender, query or pool keeps
+retrying either kind in its background reconnects, and a connection that is
+waited for uses the classification as described under `Failures`_.
+
+An ILP/HTTP sender has no background reconnects. Its flush retries a
+retryable failure on the flushing thread for up to ``retry_timeout``, fails
+at once on a permanent one, and then raises. Like any failed flush, it
+discards the rows in the sender's internal buffer, and so does a failed
+auto-flush from ``row()`` or ``dataframe()``. Build a batch you may need to
+resend in a buffer of your own and flush it with ``clear=False``, which keeps
+the rows when the flush fails:
+
+.. code-block:: python
+
+    import questdb
+
+    buf = sender.new_buffer()
+    buf.row('trades', symbols={'sym': 'ETH-USD'}, columns={'px': 2615.54},
+            at=questdb.ServerTimestamp)
+    sender.flush(buf, clear=False)  # if this raises, the rows stay in buf
+    buf.clear()
+
+When retrying can never succeed -- the provider is misconfigured beyond
+repair, or your application has retired it -- raise
 :class:`~questdb.QuestDBError` with ``code`` ``QuestDBErrorCode.InvalidApiCall``
 instead, as a Rust provider returns ``InvalidApiCall``:
 
