@@ -1506,6 +1506,33 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_an_unusable_token_does_not_spin_dataframe_retries(self):
+        # Native refuses an empty or non-printable token before dialling, and
+        # a borrow that waits gives up on it at once. dataframe() borrowed
+        # again in a tight loop until reconnect_max_duration ran out.
+        for token in ('', 'tok\n'):
+            with self.subTest(token=token):
+                calls = []
+
+                def provider():
+                    calls.append(1)
+                    return token
+
+                with questdb.connect(
+                        'ws::addr=127.0.0.1:9000;lazy_connect=true;'
+                        'reconnect_max_duration_millis=5000;',
+                        bearer_token_provider=provider) as db:
+                    started = time.monotonic()
+                    with self.assertRaises(questdb.QuestDBError) as caught:
+                        db.dataframe(
+                            pd.DataFrame({'v': [1]}), table_name='t',
+                            at=questdb.ServerTimestamp)
+                    elapsed = time.monotonic() - started
+                self.assertIn('token provider', str(caught.exception))
+                self.assertLessEqual(len(calls), 2)
+                self.assertLess(elapsed, 4.0)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_a_provider_cannot_drive_its_sender_inside_dataframe(self):
         # An ILP/HTTP flush calls the provider on the flushing thread, inside
         # the native flush. A frame's auto-flush is that same native call, so

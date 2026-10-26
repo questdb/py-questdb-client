@@ -18,6 +18,14 @@ cdef inline object _reader_err_to_py(questdb_error* err):
     return c_err_to_py(err)
 
 
+# no_gc_clear: tp_clear would put None in the `__dict__` slot, and a
+# `PooledReader` lease collected in the same cycle still closes this reader
+# from its `__dealloc__`. `_close()` then writes through that slot, which
+# CPython 3.13+ does not type-check, so the process crashes (earlier
+# versions print an unraisable SystemError). Cycles through this handle stay
+# collectable: the OIDC provider and the bearer-token holder it references
+# have their own tp_clear.
+@cython.no_gc_clear
 cdef class _ReaderHandle:
     """Owns a ``qwp_reader*``.
 

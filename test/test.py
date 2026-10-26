@@ -11337,6 +11337,53 @@ finish()
             self._INTERRUPT_WHILE_WAITING_FOR_ANOTHER_CLOSE_SCRIPT,
             timeout=60)
 
+    _UNCLOSED_READER_LEASE_IN_A_CYCLE_SCRIPT = """
+import gc
+import sys
+
+import questdb
+from qwp_egress_failover_server import EgressFailoverServer
+
+unraisable = []
+sys.unraisablehook = unraisable.append
+
+
+def abandon(db):
+    lease = db.reader()
+    try:
+        raise ValueError('keeps this frame alive')
+    except ValueError as exc:
+        # exc -> traceback -> this frame -> lease: once this returns, the
+        # unclosed lease is reachable only through that cycle.
+        kept = exc
+
+
+with EgressFailoverServer() as server:
+    db = questdb.connect(
+        f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;')
+    gc.collect()
+    # No collection between the lease and its cycle: the reader handle must
+    # be the oldest object in the garbage, as it is when nothing intervenes.
+    gc.disable()
+    abandon(db)
+    gc.collect()
+    gc.enable()
+    db.close()
+assert not unraisable, [repr(u.exc_value) for u in unraisable]
+print('OK')
+"""
+
+    @unittest.skipUnless(
+        hasattr(sys, 'getrefcount'), 'requires refcounting finalizers')
+    def test_an_unclosed_reader_lease_collected_from_a_cycle_is_released(
+            self):
+        """The cyclic collector cleared the lease's reader handle first,
+        and the lease's finalizer then closed the reader through it: a
+        crash from CPython 3.13, an unraisable SystemError before. Runs in
+        a child interpreter, where a crash reads as a failed return code."""
+        self._run_in_child_interpreter(
+            self._UNCLOSED_READER_LEASE_IN_A_CYCLE_SCRIPT, timeout=60)
+
     def _run_in_child_interpreter(self, script, timeout=120):
         """Run `script` in a fresh interpreter and require it to print OK.
 

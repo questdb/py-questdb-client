@@ -8738,6 +8738,11 @@ cdef struct direct_conn_source_t:
     # foreground terminal-OIDC gate sees each outcome (see
     # `_direct_conn_open_checked`).
     bint slice_for_oidc
+    # Set by `_direct_conn_open_checked` when a pooled borrow that was given a
+    # retry budget fails. Native has then spent that budget, or stopped early
+    # on a failure it does not retry for a caller that waits, so
+    # `_direct_dataframe_run` must not borrow again.
+    bint connect_gave_up
 
 
 cdef qwp_direct_sender* _direct_conn_open(
@@ -8808,6 +8813,7 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
         conn = _direct_conn_open(src, slice_ms, &err)
         _ensure_has_gil(&gs)
         if conn != NULL:
+            src.connect_gave_up = False
             return conn
         # A durable-ACK failure after *every* endpoint rejected by role has
         # ProtocolVersionError code but is retryable, unlike a genuinely
@@ -8816,6 +8822,9 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
         role_reject = questdb_error_is_qwp_ws_role_reject(err)
         exc = c_err_to_py(err)
         err = NULL
+        # Read by the caller if this raises below; a later slice that
+        # connects clears it.
+        src.connect_gave_up = src.db != NULL and budget_ms > 0
         if last_slice or _is_oidc_terminal_for_foreground(exc, None):
             raise exc
         # Native makes one more pick after sleeping to its slice deadline, so
@@ -9251,6 +9260,7 @@ cdef void_int _direct_dataframe_run(
     cdef bint call_in_doubt = False
     cdef bint oidc_terminal = False
     cdef bint oidc_terminal_probe_used = False
+    cdef bint connect_final = False
     cdef object validated_overrides = _validate_schema_overrides(
         schema_overrides)
     if max_rows_per_batch <= 0:
@@ -9319,6 +9329,7 @@ cdef void_int _direct_dataframe_run(
     while True:
         # Reclaim string storage from a prior attempt's released plan.
         qdb_pystr_buf_clear(b)
+        src.connect_gave_up = False
         try:
             if _dataframe_client_try_capsule_path(
                     src,
@@ -9369,6 +9380,7 @@ cdef void_int _direct_dataframe_run(
             # rebuilding/re-exporting the whole dataframe just to discover the
             # same InteractionRequired result. Only a newly available token
             # justifies replaying data preparation once.
+            connect_final = src.connect_gave_up
             oidc_terminal = _is_oidc_terminal_for_foreground(exc, oidc_auth)
             if oidc_terminal and not (
                     oidc_terminal_probe_used or exc.in_doubt
@@ -9385,6 +9397,7 @@ cdef void_int _direct_dataframe_run(
                         # type and structured OIDC detail preserved.
                         exc = probe_exc
                         oidc_terminal = False
+                        connect_final = False
                 else:
                     budget_ms = 0
                     continue
@@ -9482,6 +9495,12 @@ cdef void_int _direct_dataframe_run(
                     QuestDBErrorCode.FailoverRetry,
                     QuestDBErrorCode.SocketError) and not bool(
                         getattr(exc, '_acquisition_busy', False)):
+                raise exc
+            # The connect already had the rest of the budget: native spent it,
+            # or stopped early on a failure it does not retry for a caller that
+            # waits (a token provider returning an empty token, say). Borrowing
+            # again would repeat that in a tight loop until the deadline.
+            if connect_final:
                 raise exc
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
