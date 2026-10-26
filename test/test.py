@@ -15134,6 +15134,104 @@ class TestBufferNativeBorrow(unittest.TestCase):
         buf.clear()
 
     @unittest.skipIf(not pd, 'pandas not installed')
+    def test_a_flush_from_the_frames_own_python_keeps_its_guard(self):
+        # Python that a `dataframe()` runs -- here a cell's tzinfo -- may
+        # flush another buffer through the same sender. That flush cleared
+        # the sender's in-native flag on its way out, so for the rest of the
+        # frame another thread was no longer refused.
+        outcome = {}
+
+        def probe(sender):
+            try:
+                outcome['probe'] = sender.max_name_len
+            except qi.QuestDBError as e:
+                outcome['probe'] = e
+
+        class FlushingTz(datetime.tzinfo):
+            def utcoffset(self, dt):
+                if 'probe' not in outcome:
+                    sender = outcome['sender']
+                    own = sender.new_buffer()
+                    own.row('own', columns={'x': 1}, at=qi.ServerTimestamp)
+                    sender.flush(own)
+                    prober = threading.Thread(target=probe, args=(sender,))
+                    prober.start()
+                    prober.join(10)
+                return datetime.timedelta(0)
+
+            def dst(self, dt):
+                return datetime.timedelta(0)
+
+            def tzname(self, dt):
+                return 'UTC'
+
+        df = pd.DataFrame({'when': pd.Series(
+            [datetime.datetime(2024, 1, 1, tzinfo=FlushingTz())],
+            dtype=object)})
+        with HttpServer() as server:
+            conf = (f'http::addr=127.0.0.1:{server.port};'
+                    'protocol_version=2;auto_flush=off;')
+            with qi.Sender.from_conf(conf) as sender:
+                outcome['sender'] = sender
+                sender.dataframe(df, table_name='t', at=qi.ServerTimestamp)
+                del outcome['sender']
+            self.assertEqual(len(server.requests), 2)
+        self.assertIsInstance(outcome['probe'], qi.QuestDBError)
+        self.assertEqual(
+            outcome['probe'].code, qi.QuestDBErrorCode.InvalidApiCall)
+        self.assertIn('native operation', str(outcome['probe']))
+
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_a_refused_nested_frame_keeps_the_outer_borrow(self):
+        # A `Buffer.dataframe()` re-entered from the frame serializing into
+        # the same buffer is refused, as before. It used to take and release
+        # the frame borrow on its way to that refusal, which left the outer
+        # frame without one, so another thread could read the buffer while
+        # the serializer wrote it.
+        outcome = {}
+        buf = qi.Buffer(protocol_version=2)
+
+        def probe():
+            try:
+                outcome['probe'] = len(buf)
+            except qi.QuestDBError as e:
+                outcome['probe'] = e
+
+        class NestingTz(datetime.tzinfo):
+            def utcoffset(self, dt):
+                if 'nested' not in outcome:
+                    try:
+                        buf.dataframe(
+                            pd.DataFrame({'x': [1]}), table_name='t',
+                            at=qi.ServerTimestamp)
+                    except qi.QuestDBError as e:
+                        outcome['nested'] = e
+                    prober = threading.Thread(target=probe)
+                    prober.start()
+                    prober.join(10)
+                return datetime.timedelta(0)
+
+            def dst(self, dt):
+                return datetime.timedelta(0)
+
+            def tzname(self, dt):
+                return 'UTC'
+
+        df = pd.DataFrame({'when': pd.Series(
+            [datetime.datetime(2024, 1, 1, tzinfo=NestingTz())],
+            dtype=object)})
+        buf.dataframe(df, table_name='t', at=qi.ServerTimestamp)
+        self.assertIn('while a row is being written', str(outcome['nested']))
+        self.assertIsInstance(outcome['probe'], qi.QuestDBError)
+        self.assertEqual(
+            outcome['probe'].code, qi.QuestDBErrorCode.InvalidApiCall)
+        expected = qi.Buffer(protocol_version=2)
+        expected.dataframe(pd.DataFrame({'when': pd.Series(
+            [datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)],
+            dtype=object)}), table_name='t', at=qi.ServerTimestamp)
+        self.assertEqual(bytes(buf), bytes(expected))
+
+    @unittest.skipIf(not pd, 'pandas not installed')
     def test_transaction_dataframe_rejects_reads_and_close(self):
         # `txn.dataframe()` serializes into the sender's internal buffer, as
         # `Sender.dataframe()` does. Reading that buffer from another thread
@@ -15250,6 +15348,22 @@ class TestNoNewAttributes(unittest.TestCase):
         sender = MySender('http', '127.0.0.1', 9000)
         sender.request_timeout = 1
         self.assertEqual(sender.request_timeout, 1)
+
+    @unittest.skipIf(
+        sys.implementation.name == 'pypy',
+        'PyPy keeps the dictionary: its collector sees the bearer holder there')
+    def test_sender_carries_no_dictionary_on_cpython(self):
+        # An instance dictionary, even an empty one, stops CPython caching
+        # the method lookup of `sender.row(...)`, which runs once per row.
+        for with_provider in (False, True):
+            with self.subTest(with_provider=with_provider):
+                kwargs = (
+                    {'bearer_token_provider': lambda: 't'}
+                    if with_provider else {})
+                sender = qi.Sender('http', '127.0.0.1', 9000, **kwargs)
+                self.assertIs(qi._debug_instance_dict_is_set(sender), False)
+                sender.close(flush=False)
+                self.assertIs(qi._debug_instance_dict_is_set(sender), False)
 
 
 class TestTypeStub(unittest.TestCase):

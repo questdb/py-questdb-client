@@ -703,7 +703,8 @@ cdef str _fqn(type obj):
         return f'{obj.__module__}.{obj.__qualname__}'
 
 
-# The only names `Sender` and `QuestDB` keep in their instance dictionary.
+# The only names `Sender` (on PyPy) and `QuestDB` keep in their instance
+# dictionary.
 cdef tuple _DICT_ONLY_ATTRS = ('_bearer_token_provider',)
 cdef object _NO_SUCH_ATTR = object()
 
@@ -713,7 +714,8 @@ cdef void_int _setattr_without_dict(
     """Set `name` on `obj` as if `cls` had no instance dictionary.
 
     `Sender` and `QuestDB` have a `__dict__` only to hold the bearer-token
-    holder where PyPy's collector can see it. Any other new name -- a
+    holder where PyPy's collector can see it (`Sender` uses it only on PyPy;
+    see `_sender_hold_bearer`). Any other new name -- a
     misspelt or invented setting such as `sender.request_timeout = 5000` --
     would otherwise be stored and read back while configuring nothing, where
     it used to raise `AttributeError`. Python subclasses keep the dictionary
@@ -1479,6 +1481,7 @@ cdef class SenderTransaction:
         # Referenced for the whole call: the serializer writes into the
         # buffer through raw pointers.
         cdef Buffer buffer = self._sender._buffer
+        cdef bint outer_in_flight
         self._check_usable('dataframe')
         if at is None:
             raise QuestDBError(
@@ -1491,10 +1494,14 @@ cdef class SenderTransaction:
                 "dataframe() can\'t be called: Sender is closed."
             )
         self._sender._check_not_in_own_callback('transaction.dataframe')
+        # Refused before the borrow below, as `_dataframe` would refuse it
+        # after: a frame this call came back into from its own Python keeps
+        # the borrow it holds.
+        buffer._check_not_in_row('dataframe')
         # Borrow the buffer as `Sender.dataframe()` does, so that reading it
         # or closing the sender from another thread raises instead of racing
         # the serializer or freeing the buffer under it.
-        self._sender._native_in_flight = True
+        outer_in_flight = self._sender._enter_native()
         buffer._begin_frame_borrow()
         try:
             _dataframe(
@@ -1508,7 +1515,7 @@ cdef class SenderTransaction:
                 at)
         finally:
             buffer._end_frame_borrow()
-            self._sender._native_in_flight = False
+            self._sender._exit_native(outer_in_flight)
             _oidc_raise_unscheduled_main()
         return self
 
@@ -1765,15 +1772,17 @@ cdef class Buffer:
         cell's conversion, an `attrs` read, a `questdb` log record -- so
         while a row is being written (`_row_depth`) such a call meets the
         same rules as one re-entering `row()`: reads are answered and
-        `_check_not_in_row` refuses what would change the buffer. An OIDC
-        callback on this thread is the exception: it runs inside a native
-        call that may be using the buffer, so it stays refused.
+        `_check_not_in_row` refuses what would change the buffer. An OIDC or
+        token-provider callback on this thread is the exception: it runs
+        inside a native call -- the frame's own auto-flush, say -- that may
+        be using the sender and the buffer, so it stays refused.
         """
         if (self._frame_thread == 0
                 or self._row_depth == 0
                 or self._frame_thread != PyThread_get_thread_ident()):
             return False
-        return not _oidc_callback_on_this_thread()
+        return not (_oidc_callback_on_this_thread()
+                    or _token_callback_on_this_thread())
 
     @property
     def init_buf_size(self) -> int:
@@ -2841,6 +2850,10 @@ cdef class Buffer:
                 "`at` must be of type TimestampNanos, datetime, or ServerTimestamp"
             )
         self._check_impl()
+        # Refused before the borrow below, as `_dataframe` would refuse it
+        # after: a frame this call came back into from its own Python keeps
+        # the borrow it holds.
+        self._check_not_in_row('dataframe')
         self._begin_frame_borrow()
         try:
             _dataframe(
@@ -3434,7 +3447,9 @@ cdef _release_callback_refs(size_t key):
 # calls or dispatches in progress on. The key is process-wide -- OS TLS
 # keys are a capped process resource, so one per handle exhausts them --
 # and holds a table per thread rather than a single count, so each count
-# belongs to one owner.
+# belongs to one owner. While no callback is being dispatched anywhere,
+# `_dispatching_for` answers from `_DISPATCHES_IN_PROGRESS` without reaching
+# the table at all.
 cdef Py_tss_t _SCOPED_DEPTH_KEY
 
 if PyThread_tss_create(&_SCOPED_DEPTH_KEY) != 0:
@@ -3442,6 +3457,11 @@ if PyThread_tss_create(&_SCOPED_DEPTH_KEY) != 0:
 
 cdef enum:
     _SCOPED_TABLE_INIT_SLOTS = 4
+
+# Callback dispatches in progress on every thread together. Changed only with
+# the GIL held, by `_enter_dispatch` and `_exit_dispatch`. A count left raised
+# by a failed exit only costs the lookup it saves.
+cdef size_t _DISPATCHES_IN_PROGRESS = 0
 
 
 ctypedef struct scoped_slot_t:
@@ -3622,15 +3642,18 @@ cdef void _exit_scoped_for(object owner_token) except *:
 
 
 cdef void _enter_dispatch(object owner_token) except *:
+    global _DISPATCHES_IN_PROGRESS
     cdef scoped_table_t* table = _scoped_table_ensure()
     cdef void* owner = <void*>owner_token
     cdef scoped_slot_t* slot = _scoped_slot(table, owner)
     if slot == NULL:
         slot = _scoped_slot_add(table, owner)
     slot.dispatch += 1
+    _DISPATCHES_IN_PROGRESS += 1
 
 
 cdef void _exit_dispatch(object owner_token) except *:
+    global _DISPATCHES_IN_PROGRESS
     cdef scoped_table_t* table = _scoped_table()
     cdef scoped_slot_t* slot
     if table == NULL:
@@ -3639,12 +3662,16 @@ cdef void _exit_dispatch(object owner_token) except *:
     if slot == NULL or slot.dispatch == 0:
         raise RuntimeError('QuestDB callback-dispatch counter underflow.')
     slot.dispatch -= 1
+    _DISPATCHES_IN_PROGRESS -= 1
     _scoped_slot_drop_if_idle(table, slot)
 
 
 cdef inline bint _dispatching_for(object owner_token) noexcept:
-    cdef scoped_table_t* table = _scoped_table()
+    cdef scoped_table_t* table
     cdef scoped_slot_t* slot
+    if _DISPATCHES_IN_PROGRESS == 0:
+        return False
+    table = _scoped_table()
     if table == NULL:
         return False
     slot = _scoped_slot(table, <void*>owner_token)
@@ -11365,9 +11392,14 @@ cdef class Sender:
     cdef object _error_handler
     cdef object _connection_listener
     cdef object _oidc_auth
-    # The bearer holder lives in __dict__, not an opaque cpyext field, so
-    # PyPy can also collect a provider that owns this sender. `__setattr__`
-    # keeps every other name out of it.
+    # The bearer-token holder on CPython; see `_sender_hold_bearer`.
+    cdef object _bearer_holder
+    # Holds the bearer-token holder on PyPy only, where a cpyext field would
+    # hide it from the collector and a provider that owns this sender could
+    # never be collected. CPython keeps the pointer NULL: an instance
+    # dictionary, even an empty one, stops CPython caching the method lookup
+    # of `sender.row(...)`, which is made once per row. `__setattr__` keeps
+    # every other name out of it.
     cdef dict __dict__
     cdef auto_flush_mode_t _auto_flush_mode
     cdef bint _auto_flush_bytes_dynamic
@@ -11376,8 +11408,9 @@ cdef class Sender:
     cdef bint _in_txn
     # Set while a GIL-released native call borrows this sender/buffer: another
     # thread must not free the sender or mutate its buffer before the call
-    # returns. An OIDC diagnostic can also reacquire the GIL on that very
-    # thread and run arbitrary logging or signal handlers before then.
+    # returns. An OIDC diagnostic or a token-provider callback can also
+    # reacquire the GIL on that very thread and run arbitrary logging or
+    # signal handlers before then. See `_enter_native`.
     cdef bint _native_in_flight
     cdef int64_t _slot_id
     # A clone of the fully-configured opts for QWP/WebSocket senders, retained
@@ -11633,7 +11666,7 @@ cdef class Sender:
             if not line_sender_opts_token_provider(
                     self._opts, _tp_holder_raw(_holder), &err):
                 raise c_err_to_py(err)
-            self._bearer_token_provider = _holder
+            _sender_hold_bearer(self, _holder)
 
         if oidc_auth is not None or bearer_token_provider is not None:
             _tp_warn_if_cleartext(protocol)
@@ -11822,6 +11855,9 @@ cdef class Sender:
         _setattr_without_dict(self, Sender, name, value)
 
     def __cinit__(self):
+        # Cython has just created the instance dictionary, which CPython
+        # does not use: see `__dict__` above.
+        qdb_drop_empty_instance_dict(self)
         self._c_protocol = line_sender_protocol_tcp
         self._opts = NULL
         self._impl = NULL
@@ -11831,6 +11867,7 @@ cdef class Sender:
         self._error_handler = None
         self._connection_listener = None
         self._oidc_auth = None
+        self._bearer_holder = None
         self._auto_flush_mode.enabled = False
         self._auto_flush_bytes_dynamic = False
         self._last_flush_ms = NULL
@@ -12421,11 +12458,11 @@ cdef class Sender:
         # it can make HTTP requests to auto-detect the protocol version.
         # Native borrows the options until it returns, and build can pull an
         # OIDC token and enter a Python diagnostic callback meanwhile.
-        self._native_in_flight = True
+        cdef bint outer_in_flight = self._enter_native()
         _ensure_doesnt_have_gil(&gs)
         self._impl = line_sender_build(self._opts, &err)
         _ensure_has_gil(&gs)
-        self._native_in_flight = False
+        self._exit_native(outer_in_flight)
 
         if self._impl == NULL:
             raise c_err_to_py(err)
@@ -12600,8 +12637,10 @@ cdef class Sender:
                 "row() can\'t be called: Sender is closed."
             )
         # Refused before the row is added. Over ws/wss, auto-flush also
-        # reads the frame cap from the native sender on every row.
-        self._check_not_in_own_callback('row')
+        # reads the frame cap from the native sender on every row. Asked
+        # only when the answer can be a refusal: this runs once per row.
+        if self._native_in_flight or _DISPATCHES_IN_PROGRESS != 0:
+            self._check_not_in_own_callback('row')
         # A row-serializing `dataframe()` holds this buffer from the
         # moment it starts and runs caller Python before its first row:
         # the `questdb` logger, an object column's sniff. A row written
@@ -12793,7 +12832,7 @@ cdef class Sender:
                 QuestDBErrorCode.InvalidApiCall,
                 "dataframe() can\'t be called: Sender is closed."
             )
-        self._native_in_flight = True
+        cdef bint outer_in_flight = self._enter_native()
         self._buffer._begin_frame_borrow()
         try:
             _dataframe(
@@ -12807,7 +12846,7 @@ cdef class Sender:
                 at)
         finally:
             self._buffer._end_frame_borrow()
-            self._native_in_flight = False
+            self._exit_native(outer_in_flight)
             _oidc_raise_unscheduled_main()
         return self
 
@@ -12935,7 +12974,7 @@ cdef class Sender:
         # not free the sender or mutate its buffer. OIDC diagnostics can also
         # re-enter Python on this thread meanwhile, and a logging or signal
         # handler there must not do either.
-        self._native_in_flight = True
+        cdef bint outer_in_flight = self._enter_native()
         active_buf._begin_native_borrow(exclusive)
         # We might be blocking on IO, so temporarily release the GIL.
         _ensure_doesnt_have_gil(&gs)
@@ -12953,7 +12992,7 @@ cdef class Sender:
             ok = line_sender_flush_and_keep(sender, c_buf, &err)
         _ensure_has_gil(&gs)
         active_buf._end_native_borrow(exclusive)
-        self._native_in_flight = False
+        self._exit_native(outer_in_flight)
         if ok and c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
         if not ok:
@@ -12991,6 +13030,19 @@ cdef class Sender:
         # Native errors above are consumed before the fallback raises. On
         # success all sender/buffer borrows have already been released.
         _oidc_raise_unscheduled_main()
+
+    cdef inline bint _enter_native(self) noexcept:
+        """Mark a native call borrowing this sender as in progress. Returns
+        the previous state, for the matching `_exit_native`."""
+        cdef bint outer = self._native_in_flight
+        self._native_in_flight = True
+        return outer
+
+    cdef inline void _exit_native(self, bint outer) noexcept:
+        # Restored, not cleared: a call made from Python that a `dataframe()`
+        # runs -- a flush of another buffer -- must leave the frame's guard
+        # up for the rest of the frame.
+        self._native_in_flight = outer
 
     cdef inline void_int _check_not_in_own_callback(
             self, str method, bint allow_idle_callback=False) except -1:
@@ -13073,13 +13125,13 @@ cdef class Sender:
         (buffer if buffer is not None else self._buffer)._check_not_in_row(
             'flush_and_get_fsn')
 
-        self._native_in_flight = True
+        cdef bint outer_in_flight = self._enter_native()
         buffer._begin_native_borrow(True)
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_flush_and_get_fsn(sender, c_buf, &fsn, &err)
         _ensure_has_gil(&gs)
         buffer._end_native_borrow(True)
-        self._native_in_flight = False
+        self._exit_native(outer_in_flight)
         if not ok:
             if c_buf == self._buffer._impl:
                 line_sender_buffer_clear(c_buf)
@@ -13120,14 +13172,14 @@ cdef class Sender:
         (buffer if buffer is not None else self._buffer)._check_not_in_row(
             'flush_and_keep_and_get_fsn')
 
-        self._native_in_flight = True
+        cdef bint outer_in_flight = self._enter_native()
         buffer._begin_native_borrow(False)
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_flush_and_keep_and_get_fsn(
             sender, c_buf, &fsn, &err)
         _ensure_has_gil(&gs)
         buffer._end_native_borrow(False)
-        self._native_in_flight = False
+        self._exit_native(outer_in_flight)
         if not ok:
             if c_buf == self._buffer._impl:
                 line_sender_buffer_clear(c_buf)
@@ -13210,7 +13262,7 @@ cdef class Sender:
         # deadline (`timeout_millis`; 0 == wait indefinitely) surfaces as a
         # `line_sender_error_failover_retry`, which we translate back into the
         # historical ``reached == False`` return rather than raising.
-        self._native_in_flight = True
+        cdef bint outer_in_flight = self._enter_native()
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_wait(
             self._impl,
@@ -13218,7 +13270,7 @@ cdef class Sender:
             c_timeout_millis,
             &err)
         _ensure_has_gil(&gs)
-        self._native_in_flight = False
+        self._exit_native(outer_in_flight)
         if not ok:
             if line_sender_error_get_code(err) != \
                     line_sender_error_failover_retry:
@@ -13243,11 +13295,11 @@ cdef class Sender:
         cdef bint ok = False
 
         self._check_qwp_ws('drive_once')
-        self._native_in_flight = True
+        cdef bint outer_in_flight = self._enter_native()
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_drive_once(self._impl, &progressed, &err)
         _ensure_has_gil(&gs)
-        self._native_in_flight = False
+        self._exit_native(outer_in_flight)
         if not ok:
             raise c_err_to_py(err)
         _oidc_raise_unscheduled_main()
@@ -13326,11 +13378,11 @@ cdef class Sender:
         # other call that ends the buffer.
         if self._buffer is not None:
             self._buffer._check_not_in_row('close_drain')
-        self._native_in_flight = True
+        cdef bint outer_in_flight = self._enter_native()
         _ensure_doesnt_have_gil(&gs)
         ok = line_sender_qwpws_close_drain(self._impl, &err)
         _ensure_has_gil(&gs)
-        self._native_in_flight = False
+        self._exit_native(outer_in_flight)
         if not ok:
             raise c_err_to_py(err)
         _oidc_raise_unscheduled_main()
@@ -13359,9 +13411,10 @@ cdef class Sender:
         self._oidc_auth = None
         # Normal close must release the holder even if the sender stays alive.
         # During __dealloc__, attribute access would resurrect a dying PyPy
-        # wrapper; Cython/PyPy clears the instance dictionary after we return.
+        # wrapper; Cython releases the slot and the instance dictionary after
+        # we return.
         if not dealloc:
-            self._bearer_token_provider = None
+            _sender_hold_bearer(self, None)
         if self._slot_id != -1:
             qdb_active_senders_track_closed(<uint32_t>self._slot_id)
             self._slot_id = -1
@@ -13420,6 +13473,30 @@ cdef class Sender:
     def __dealloc__(self):
         self._close(dealloc=True)
         free(self._last_flush_ms)
+
+
+cdef void_int _sender_hold_bearer(Sender sender, object holder) except -1:
+    """Keep `holder`, the sender's bearer-token holder, alive with `sender`,
+    or release it with `None`.
+
+    CPython keeps it in a typed slot, which its cycle collector traverses.
+    PyPy cannot see references held in cpyext fields, so there it goes in the
+    instance dictionary instead, which keeps a provider that owns its own
+    sender collectable.
+    """
+    if CYTHON_COMPILING_IN_PYPY:
+        PyObject_GenericSetAttr(sender, '_bearer_token_provider', holder)
+    else:
+        sender._bearer_holder = holder
+    return 0
+
+
+def _debug_instance_dict_is_set(object obj):
+    """Internal test seam: whether `obj` carries an instance dictionary, read
+    without creating one as `obj.__dict__` does. `None` when its type keeps
+    the dictionary elsewhere."""
+    cdef int state = qdb_instance_dict_is_set(obj)
+    return None if state < 0 else bool(state)
 
 
 # QWP/WebSocket row auto-flush, shared by a standalone `Sender` and a

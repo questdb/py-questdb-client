@@ -1,6 +1,8 @@
 cdef extern from "_client_helper.inc":
     bint Py_buffer_obj_is_set(Py_buffer* buf)
     bint qdb_py_is_finalizing() noexcept nogil
+    void qdb_drop_empty_instance_dict(object obj) noexcept
+    int qdb_instance_dict_is_set(object obj) noexcept
     ctypedef struct qdb_oidc_callback_gate:
         pass
     bint qdb_oidc_callback_gate_init() noexcept

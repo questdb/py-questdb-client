@@ -1506,6 +1506,64 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_provider_cannot_drive_its_sender_inside_dataframe(self):
+        # An ILP/HTTP flush calls the provider on the flushing thread, inside
+        # the native flush. A frame's auto-flush is that same native call, so
+        # a provider driving its own sender there nested a flush inside it;
+        # outside a frame the same calls were already refused.
+        outcomes = []
+        state = {}
+
+        def provider():
+            sender = state.get('sender')
+            if sender is not None:
+                for name, action in (
+                        ('new_buffer', sender.new_buffer),
+                        ('flush', lambda: sender.flush(state['own']))):
+                    try:
+                        action()
+                    except questdb.QuestDBError as exc:
+                        outcomes.append((
+                            name, exc.code, 'native operation' in str(exc)))
+                    else:
+                        outcomes.append((name, None, False))
+            return 'tok'
+
+        refused = [
+            ('new_buffer', questdb.QuestDBErrorCode.InvalidApiCall, True),
+            ('flush', questdb.QuestDBErrorCode.InvalidApiCall, True)]
+        with HttpServer() as server:
+            sender = questdb.Sender(
+                questdb.Protocol.Http, '127.0.0.1', server.port,
+                bearer_token_provider=provider, protocol_version=2,
+                auto_flush_rows=1, auto_flush_bytes=False,
+                auto_flush_interval=False)
+            sender.establish()
+            try:
+                state['own'] = sender.new_buffer()
+                state['own'].row(
+                    'own', columns={'v': 1}, at=questdb.ServerTimestamp)
+                for frame in (True, False):
+                    with self.subTest(frame=frame):
+                        del outcomes[:]
+                        state['sender'] = sender
+                        try:
+                            if frame:
+                                sender.dataframe(
+                                    pd.DataFrame({'v': [1]}), table_name='t',
+                                    at=questdb.ServerTimestamp)
+                            else:
+                                sender.row(
+                                    't', columns={'v': 1},
+                                    at=questdb.ServerTimestamp)
+                        finally:
+                            del state['sender']
+                        self.assertEqual(outcomes, refused)
+            finally:
+                sender.close(flush=False)
+            self.assertEqual(server.requests, [b't v=1i\n'] * 2)
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
     def test_dataframe_auto_flush_preserves_provider_classification(self):
         def provider():
             raise TokenUnavailableError(

@@ -24,6 +24,43 @@ static int qdb_py_is_finalizing(void)
 #endif
 }
 
+// CPython only. Cython gives a class declaring `cdef dict __dict__` its instance
+// dictionary eagerly, in tp_new. While that pointer is non-NULL, CPython's
+// specializing interpreter cannot cache a method lookup on the instance
+// (LOAD_ATTR_METHOD_LAZY_DICT requires a NULL dictionary), so every
+// `obj.method(...)` takes the generic lookup -- for `Sender`, every `row()`.
+// An empty dictionary carries nothing: drop it, and generic attribute access
+// recreates it on demand. PyPy keeps it.
+static void qdb_drop_empty_instance_dict(PyObject* obj)
+{
+#if !defined(PYPY_VERSION)
+    Py_ssize_t offset = Py_TYPE(obj)->tp_dictoffset;
+    if (offset > 0) {
+        PyObject** slot = (PyObject**)((char*)obj + offset);
+        PyObject* dict = *slot;
+        if (dict != NULL && PyDict_CheckExact(dict)
+                && PyDict_GET_SIZE(dict) == 0) {
+            *slot = NULL;
+            Py_DECREF(dict);
+        }
+    }
+#else
+    (void)obj;
+#endif
+}
+
+// Whether `obj` has an instance dictionary, read without creating one as
+// `obj.__dict__` does. -1 when its type keeps the dictionary elsewhere.
+static int qdb_instance_dict_is_set(PyObject* obj)
+{
+    Py_ssize_t offset = Py_TYPE(obj)->tp_dictoffset;
+    if (offset == 0)
+        return 0;
+    if (offset < 0)
+        return -1;
+    return *(PyObject**)((char*)obj + offset) != NULL;
+}
+
 // No Python objects or GIL acquisition in this gate. An admission covers the
 // ENTIRE foreign callback, including the interval before it acquires the GIL.
 // Shutdown closes admission and drains with the GIL released while Python is

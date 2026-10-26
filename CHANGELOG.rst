@@ -382,7 +382,8 @@ New ``ConnectionEventKind.CredentialUnavailable``
 :attr:`ConnectionEventKind.CredentialUnavailable <questdb.ConnectionEventKind.CredentialUnavailable>`
 is a new event kind reporting a token provider that failed to supply a
 credential — an ``oidc_auth=`` provider with no cached or refreshable
-credential, either before any endpoint was dialled or when replacing a token a
+credential, or a ``bearer_token_provider=`` that raised or returned no usable
+token — either before any endpoint was dialled or when replacing a token a
 server rejected with HTTP 401. It has no counterpart before 6.1, because token
 providers did not exist: a listener written against 6.0 cannot have seen it.
 
@@ -406,10 +407,13 @@ which is what says whether the sender will carry on:
 * ``AuthError`` / ``ConfigError`` — the provider cannot recover in this
   process, so the reconnect is **terminal** and the sender stops. Reached by a
   permanently closed provider (``close()`` is one-way; cancelling one
-  ``sign_in()`` attempt does not close it) and by a scope that cannot yield the
-  required token kind. Queued rows are not deleted — a disk-backed store-and-forward
-  slot stays drainable by a later process — but this process will not send
-  them.
+  ``sign_in()`` attempt does not close an ``OidcDeviceAuth``), by a scope that
+  cannot yield the required token kind, and by an application
+  ``bearer_token_provider=`` that raised :class:`QuestDBError
+  <questdb.QuestDBError>` with ``code`` ``QuestDBErrorCode.InvalidApiCall``,
+  reported as ``ConfigError``. Queued rows are not deleted — a disk-backed
+  store-and-forward slot stays drainable by a later process — but this process
+  will not send them.
 
 A listener that pages on a permanent stop must qualify on ``cause_code``, not
 on the kind alone.

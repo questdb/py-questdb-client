@@ -76,6 +76,37 @@ if hasattr(os, 'register_at_fork'):
 # caps it at 256 characters anyway.
 cdef Py_ssize_t _TOKEN_ERROR_MSG_MAX = 1024
 
+# Token callbacks in progress on each thread, kept as the integer value of a
+# native thread-specific slot: counting allocates nothing and cannot raise,
+# and nothing is left to free when the thread ends. A callback runs inside the
+# client call that needs the token -- for ILP/HTTP, the flush on the caller's
+# own thread -- which may still hold the sender and its buffer, so Python
+# running there is never the frame's own (see `Buffer._reentered_from_frame`).
+cdef Py_tss_t _TOKEN_CALLBACK_DEPTH_KEY
+
+if PyThread_tss_create(&_TOKEN_CALLBACK_DEPTH_KEY) != 0:
+    raise RuntimeError('Could not create the QuestDB token-callback key.')
+
+
+cdef inline bint _token_callback_enter() noexcept:
+    """Count a token callback on this thread. The result goes to the matching
+    `_token_callback_exit`: False when the count could not be recorded."""
+    cdef uintptr_t depth = <uintptr_t>PyThread_tss_get(
+        &_TOKEN_CALLBACK_DEPTH_KEY)
+    return PyThread_tss_set(
+        &_TOKEN_CALLBACK_DEPTH_KEY, <void*>(depth + 1)) == 0
+
+
+cdef inline void _token_callback_exit(bint entered) noexcept:
+    cdef uintptr_t depth
+    if entered:
+        depth = <uintptr_t>PyThread_tss_get(&_TOKEN_CALLBACK_DEPTH_KEY)
+        PyThread_tss_set(&_TOKEN_CALLBACK_DEPTH_KEY, <void*>(depth - 1))
+
+
+cdef inline bint _token_callback_on_this_thread() noexcept:
+    return PyThread_tss_get(&_TOKEN_CALLBACK_DEPTH_KEY) != NULL
+
 
 class ExpiringToken:
     """
@@ -444,6 +475,7 @@ cdef void _token_source_dispatch(
     cdef object result = None
     cdef object token = None
     cdef bint entered = False
+    cdef bint counted = _token_callback_enter()
     try:
         handle = _token_callback_get(callback_id)
         if handle is None:
@@ -485,6 +517,7 @@ cdef void _token_source_dispatch(
             source = None
             handle._source_thread = 0
             handle._source_done.set()
+        _token_callback_exit(counted)
 
 
 cdef void _token_source_trampoline(
@@ -516,6 +549,7 @@ cdef void _token_get_dispatch(
     # snapshot is taken: the error path below looks codes up in it.
     cdef object signal_codes = {}
     cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
+    cdef bint counted = _token_callback_enter()
     if on_main:
         _OIDC_MAIN_TOKEN_DEPTH += 1
     try:
@@ -556,6 +590,7 @@ cdef void _token_get_dispatch(
             _OIDC_MAIN_TOKEN_DEPTH -= 1
             if _OIDC_MAIN_TOKEN_DEPTH == 0:
                 _oidc_schedule_parked_main()
+        _token_callback_exit(counted)
 
 
 cdef void _token_get_trampoline(
@@ -593,6 +628,7 @@ cdef void _token_rejected_dispatch(
     # up in it, and `on_rejected` can raise before the snapshot is taken.
     cdef object signal_codes = {}
     cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
+    cdef bint counted = _token_callback_enter()
     if on_main:
         _OIDC_MAIN_TOKEN_DEPTH += 1
     try:
@@ -626,6 +662,7 @@ cdef void _token_rejected_dispatch(
             _OIDC_MAIN_TOKEN_DEPTH -= 1
             if _OIDC_MAIN_TOKEN_DEPTH == 0:
                 _oidc_schedule_parked_main()
+        _token_callback_exit(counted)
 
 
 cdef void _token_rejected_trampoline(
