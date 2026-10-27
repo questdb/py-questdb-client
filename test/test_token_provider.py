@@ -1529,6 +1529,52 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                 _collect_until(lambda: watch() is None and not (
                     registered & _client._debug_token_callbacks_ids()))
 
+    @unittest.skipIf(pa is None, 'pyarrow not installed')
+    def test_query_token_failure_is_typed_only_on_python_driven_readers(self):
+        # The Arrow C stream carries only an error string, so its consumer
+        # raises its own exception type with the provider's message, as
+        # docs/token_providers.rst says under "Failures".
+        for reader in ('to_arrow', 'arrow_c_stream'):
+            with self.subTest(reader=reader), EgressFailoverServer(
+                    deliver_first_batch=True) as server:
+                outage = threading.Event()
+
+                def provider():
+                    if outage.is_set():
+                        raise TokenUnavailableError('identity platform down')
+                    return 'valid'
+
+                with questdb.connect(
+                        f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                        'reconnect_max_duration_millis=1000;',
+                        bearer_token_provider=provider) as db:
+                    result = db.query('select v from t')
+                    try:
+                        self.assertTrue(server.first_batch_sent.wait(10))
+                        # The reader connection drops after the first batch,
+                        # and its reconnect cannot get a token.
+                        outage.set()
+                        server.release_first.set()
+                        with self.assertRaises(Exception) as caught:
+                            if reader == 'to_arrow':
+                                result.to_arrow()
+                            elif hasattr(pa.RecordBatchReader, 'from_stream'):
+                                pa.RecordBatchReader.from_stream(
+                                    result).read_all()
+                            else:  # pyarrow 14
+                                pa.RecordBatchReader._import_from_c_capsule(
+                                    result.__arrow_c_stream__()).read_all()
+                        if reader == 'to_arrow':
+                            self.assertIsInstance(
+                                caught.exception, TokenUnavailableError)
+                        else:
+                            self.assertNotIsInstance(
+                                caught.exception, questdb.QuestDBError)
+                        self.assertIn(
+                            'identity platform down', str(caught.exception))
+                    finally:
+                        result.close()
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_permanent_failure_stops_pandas_dataframe_retries(self):
         self._assert_permanent_dataframe_failure(pd.DataFrame({'v': [1]}))

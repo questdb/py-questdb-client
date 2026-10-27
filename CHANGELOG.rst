@@ -152,7 +152,10 @@ tokens from a secrets vault.
   before it is left on disk for the next session.
 * A query whose failover gives up because the provider cannot supply a token
   raises :class:`~questdb.auth.TokenUnavailableError`, naming the cause,
-  instead of the connection failure that started the failover.
+  instead of the connection failure that started the failover. A result read
+  through its Arrow C stream (``pyarrow.table(result)``,
+  ``polars.DataFrame(result)``) can carry only the message: the consumer
+  raises its own exception type.
 * A provider used over ``http::`` or ``ws::`` is warned about, once per
   process, on the ``questdb`` logger: its tokens cross the network in
   cleartext.
@@ -446,8 +449,13 @@ Other changes
 - Finalizers and garbage collection no longer block on, or free, a query
   cursor that another operation is using: an abandoned ``QueryResult``,
   ``PooledReader``, Arrow stream or batch iterator is reclaimed without
-  waiting, and cursor ``close()`` / ``cancel()`` / pulls reject same-thread
-  re-entry while a native read is in progress.
+  waiting. Code that runs on the thread reading a result while it reads -- a
+  finalizer, a ``gc`` callback or a signal handler, during a native read or
+  while a batch is decoded -- cannot call ``QueryResult.close()``,
+  ``QueryResult.cancel()``, ``PooledReader.close()`` or a batch pull: they
+  raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.InvalidApiCall``. In 6.0 such a ``close()`` was
+  accepted, and the cursor was freed once the decoder let go of the batch.
 
 - A DataFrame error that gains a note about a partially consumed input
   stream keeps its exception class, ``in_doubt`` and ``sender_error`` instead

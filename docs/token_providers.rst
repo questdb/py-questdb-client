@@ -92,6 +92,17 @@ fetched for a while. A failure surfaces as a
 :class:`~questdb.QuestDBError`. A source cannot stop those reconnects: to
 end them, close the provider (see `Closing`_).
 
+A query result read through its Arrow C stream -- ``pyarrow.table(result)``,
+``pyarrow.RecordBatchReader.from_stream(result)``,
+``polars.DataFrame(result)``, duckdb -- cannot carry that exception: the
+stream passes only an error string. When the provider cannot supply a token
+for a reconnect while such a consumer reads, the consumer raises its own
+exception type (pyarrow raises ``OSError``) with the provider's message.
+``query()`` itself, and the result's ``iter_arrow()``, ``to_pandas()``,
+``to_arrow()`` and ``to_polars()``, raise
+:class:`~questdb.auth.TokenUnavailableError`: read the result with one of
+those when you need to catch it.
+
 Inspect the provider with :attr:`~questdb.auth.RefreshingTokenProvider.status`:
 the token's expiry, the last successful fetch, and the last failure. Nothing
 the provider logs, raises or reports contains the token: at most its length.
@@ -229,7 +240,8 @@ happens then depends on where the client is:
   first rejection.
 * A query fails. If its failover gives up -- also when the provider cannot
   supply a token, which raises :class:`~questdb.auth.TokenUnavailableError`
-  -- the pool discards the connection and the next query opens a new one.
+  except through the result's Arrow C stream (see `Failures`_) -- the pool
+  discards the connection and the next query opens a new one.
 
 Use ``https::`` and ``wss::``: over ``http::`` and ``ws::`` every token
 crosses the network in cleartext. The client logs a warning, once per

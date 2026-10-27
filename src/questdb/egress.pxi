@@ -113,11 +113,13 @@ cdef class _CursorHandle:
     Being re-entrant, the lock does not protect a decoder from code
     running on its *own* thread: a cyclic-GC finaliser (a
     ``PooledReader`` reachable only through a cycle, collected while a
-    per-cell constructor runs) or a signal handler calling ``close()``
-    re-acquires it freely. The decoders therefore ``_pin()`` the handle
-    while they hold pointers into the current batch; a ``_free()`` that
-    arrives while pinned is deferred to ``_unpin()``, and ``cancel()``
-    refuses, instead of pulling the batch out from under the decoder.
+    per-cell constructor runs) or a signal handler re-acquires it freely.
+    The decoders therefore ``_pin()`` the handle while they hold pointers
+    into the current batch. The public ``close()`` and ``cancel()`` and
+    the batch pulls refuse such re-entry (``_check_not_driving``); a free
+    requested while pinned -- by a finaliser's ``_try_reclaim()`` or by
+    ``_free()`` -- is deferred to ``_unpin()``. Neither pulls the batch out
+    from under the decoder.
     Every locked network call is pinned too, so a close whose lock wait
     was interrupted (Ctrl-C while another thread holds the lock) is
     finished by that thread once its current call returns.
@@ -4211,19 +4213,19 @@ class QueryResult:
         one thread at a time; concurrent ``get_next`` / ``release`` calls
         are unsupported.
 
-        Typed-``OidcError`` caveat (``oidc_auth`` transports only): a token
-        failure that happens *mid-stream* — a failover reconnect between
-        batches that needs a fresh token — reaches the consumer as a generic
-        Arrow / ``OSError``, **not** a typed
-        :class:`~questdb.auth.OidcError`, because the Arrow C-stream boundary
-        carries only an error string, not a Python exception type. A failure
-        acquiring the token *before* streaming begins still raises the typed
-        ``OidcError``, and the Python-driven readers (:meth:`iter_arrow`,
-        :meth:`to_pandas`, :meth:`to_arrow`, :meth:`to_polars`) surface it on
-        every path. Call :meth:`~questdb.auth.OidcDeviceAuth.sign_in` up front
-        so no mid-stream token acquisition is needed, or materialize with
-        :meth:`to_pandas` / :meth:`to_arrow`, when the typed error must be
-        caught.
+        Token providers (``oidc_auth=`` and ``bearer_token_provider=``): when
+        a reconnect while the stream is being read needs a fresh token and
+        the provider cannot supply one, the consumer raises its own exception
+        type (pyarrow raises ``OSError``) carrying the provider's message,
+        **not** :class:`~questdb.auth.OidcError` or
+        :class:`~questdb.auth.TokenUnavailableError`: the Arrow C-stream
+        boundary carries only an error string, not a Python exception type.
+        ``query()`` itself and the Python-driven readers (:meth:`iter_arrow`,
+        :meth:`to_pandas`, :meth:`to_arrow`, :meth:`to_polars`) raise the
+        typed error; read the result with one of those when it must be
+        caught. With ``oidc_auth=``, also call
+        :meth:`~questdb.auth.OidcDeviceAuth.sign_in` up front, so that a
+        reconnect mid-stream needs no new sign-in.
         """
         cdef _QueryStreamProducer prod
         if _called_by_old_polars():
