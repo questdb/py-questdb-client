@@ -100,7 +100,7 @@ from cpython.ref cimport Py_XDECREF
 from cpython.exc cimport PyErr_CheckSignals, PyErr_SetObject
 from cpython.weakref cimport PyWeakref_NewRef, PyWeakref_GetRef
 from cpython.object cimport (PyObject, PyTypeObject, PyObject_TypeCheck,
-                             PyObject_GenericSetAttr)
+                             PyObject_GenericGetAttr, PyObject_GenericSetAttr)
 from cpython.buffer cimport Py_buffer, PyObject_CheckBuffer, \
     PyObject_GetBuffer, PyBuffer_Release, PyBUF_SIMPLE
 from cpython.pycapsule cimport (PyCapsule_Destructor,
@@ -12759,6 +12759,7 @@ cdef class Sender:
         cdef dataframe_plan_t ws_plan
         cdef line_sender_opts* ws_opts = NULL
         cdef object ws_dispatch_context = None
+        cdef object ws_bearer_holder = None
         cdef PyThreadState* gs = NULL
         self._check_not_in_own_callback('dataframe')
         # The QWP/WebSocket branch below goes straight to its own
@@ -12774,10 +12775,13 @@ cdef class Sender:
                     QuestDBErrorCode.InvalidApiCall,
                     "dataframe() can't be called: Sender is closed.")
             # The cloned opts below contain a borrowed pointer to this
-            # context. Caller Python run while planning may close the Sender,
-            # so keep the clone's callback target rooted in this frame until
-            # the direct connection and its dispatchers have been torn down.
+            # context, and the native token provider, which reaches its Python
+            # target through the sender's bearer-token holder. Caller Python
+            # run while planning may close the Sender, which releases both, so
+            # keep them rooted in this frame until the direct connection and
+            # its dispatchers have been torn down.
             ws_dispatch_context = self._dispatch_context
+            ws_bearer_holder = _sender_bearer_holder(self)
             src.db = NULL
             # The call owns its options for its whole length. The plan
             # build below runs caller Python -- reading `attrs`,
@@ -13508,6 +13512,16 @@ cdef void_int _sender_hold_bearer(Sender sender, object holder) except -1:
     else:
         sender._bearer_holder = holder
     return 0
+
+
+cdef object _sender_bearer_holder(Sender sender):
+    """The holder `_sender_hold_bearer` keeps alive with `sender`, or None."""
+    if CYTHON_COMPILING_IN_PYPY:
+        try:
+            return PyObject_GenericGetAttr(sender, '_bearer_token_provider')
+        except AttributeError:
+            return None
+    return sender._bearer_holder
 
 
 def _debug_instance_dict_is_set(object obj):

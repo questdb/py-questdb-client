@@ -1354,6 +1354,54 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                 _collect_until(lambda: watch() is None and not (
                     registered & _client._debug_token_callbacks_ids()))
 
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_a_ws_dataframe_keeps_its_provider_through_a_close_mid_plan(self):
+        # The ws route connects with its own clone of the sender's options, so
+        # a close() from Python its plan build runs does not stop it (see
+        # `Sender.dataframe/ws-plan` in reentrancy_matrix.py). The clone still
+        # calls the provider.
+        class SenderSubclass(questdb.Sender):
+            pass
+
+        for sender_type in (questdb.Sender, SenderSubclass):
+            with self.subTest(sender_type=sender_type):
+                with QwpAckServer(
+                        required_authorization='Bearer fixed') as server:
+                    sender = sender_type(
+                        questdb.Protocol.Ws, '127.0.0.1', server.port,
+                        bearer_token_provider=lambda: 'fixed')
+
+                    class ClosingFrame(pd.DataFrame):
+                        fired = False
+
+                        @property
+                        def attrs(self):
+                            if not ClosingFrame.fired:
+                                ClosingFrame.fired = True
+                                sender.close(flush=False)
+                                # PyPy frees a released holder only when
+                                # it is collected.
+                                gc.collect()
+                            return {}
+
+                        @attrs.setter
+                        def attrs(self, value):
+                            pass
+
+                    try:
+                        sender.dataframe(
+                            ClosingFrame({
+                                'v': [1, 2],
+                                'ts': pd.to_datetime([0, 1], unit='s')}),
+                            table_name='t', at='ts')
+                    finally:
+                        sender.close(flush=False)
+                    stats = server.snapshot_when_closed()
+                self.assertTrue(ClosingFrame.fired)
+                self.assertEqual(
+                    stats['upgrade_authorizations'], ['Bearer fixed'])
+                self.assertGreater(stats['qwp1_frames'], 0)
+
     def test_sender_finalization_does_not_emit_unraisable_errors(self):
         # Ordinary attribute access in __dealloc__ tries to resurrect a dying
         # PyPy cpyext wrapper. The process can exit successfully while printing
