@@ -1295,11 +1295,26 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                     caught.exception.code,
                     questdb.QuestDBErrorCode.ConfigError)
                 self.assertIn('bearer_token_provider', str(caught.exception))
-        with self.assertRaises(questdb.QuestDBError) as caught:
-            questdb.connect(
-                'ws::addr=127.0.0.1:9000;lazy_connect=true;'
+        # The pool names the Python argument as Sender.from_conf does, not the
+        # C, C++ and Rust APIs native's message lists.
+        conf = ('ws::addr=127.0.0.1:9000;lazy_connect=true;'
                 'token_provider=azure;')
-        self.assertIn('token_provider', str(caught.exception))
+        with self.assertRaises(questdb.QuestDBError) as from_sender:
+            questdb.Sender.from_conf(conf)
+        for name, connect in (
+                ('connect', lambda: questdb.connect(conf)),
+                ('connect kwarg', lambda: questdb.connect(
+                    host='127.0.0.1', port=9000, lazy_connect=True,
+                    token_provider='azure')),
+                ('QuestDB.from_conf', lambda: questdb.QuestDB.from_conf(conf))):
+            with self.subTest(entry_point=name):
+                with self.assertRaises(questdb.QuestDBError) as caught:
+                    connect()
+                self.assertEqual(
+                    caught.exception.code,
+                    questdb.QuestDBErrorCode.ConfigError)
+                self.assertEqual(
+                    str(caught.exception), str(from_sender.exception))
 
     def test_the_holder_lives_with_the_sender(self):
         class Provider:

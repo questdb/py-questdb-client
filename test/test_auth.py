@@ -4773,9 +4773,8 @@ class NativeTransportAttachmentTest(unittest.TestCase):
             db.close()
         self.assertTrue(events, 'the failed token pull was never narrated')
         event = events[0]
-        # CredentialUnavailable, not AuthFailed. AuthFailed is terminal and
-        # means the server rejected a credential we presented; this round never
-        # presented one. Overloading the two forced every listener to gate on
+        # CredentialUnavailable, not AuthFailed. AuthFailed means the server
+        # rejected a credential we presented; this round never presented one. Overloading the two forced every listener to gate on
         # `host is not None` and made a silent-refresh blip indistinguishable
         # from a rejected credential. The Java client draws the same line with
         # QwpCredentialUnavailableException vs QwpAuthFailedException.
@@ -6329,6 +6328,51 @@ class AdapterTest(unittest.TestCase):
             # clear or to an unauthenticated remote server.
             sslmode='verify-full')
 
+    def test_psycopg_accepts_a_callable_provider(self):
+        # A function returning the token, as bearer_token_provider= takes.
+        calls = []
+
+        def fetch():
+            calls.append(None)
+            return 'TOKEN'
+
+        driver = mock.Mock()
+        with mock.patch.object(_adapters, '_pg_module', return_value=driver):
+            _adapters.psycopg_connect(
+                fetch, 'https://questdb.example.com:9000')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(driver.connect.call_args.kwargs['password'], 'TOKEN')
+
+    def test_adapters_refuse_a_non_provider_up_front(self):
+        # Typed, and before a driver is chosen or an engine is built -- not a
+        # bare AttributeError from the first pooled connection.
+        for auth in (None, object(), 'TOKEN',
+                     types.SimpleNamespace(token='TOKEN')):
+            with self.subTest(auth=auth):
+                with mock.patch.object(_adapters, '_pg_module') as pg_module:
+                    with self.assertRaises(OidcConfigError) as caught:
+                        _adapters.psycopg_connect(
+                            auth, 'https://questdb.example.com:9000')
+                    self.assertIn('token provider', str(caught.exception))
+                    with self.assertRaises(OidcConfigError):
+                        _adapters.sqlalchemy_engine(
+                            auth, 'https://questdb.example.com:9000')
+                pg_module.assert_not_called()
+
+    def test_psycopg_refuses_a_token_that_is_not_a_str(self):
+        # A token source passed in place of a provider returns an expiry
+        # too; the driver would otherwise str() it into the password.
+        from questdb.auth import ExpiringToken
+        driver = mock.Mock()
+        with mock.patch.object(_adapters, '_pg_module', return_value=driver):
+            with self.assertRaises(OidcConfigError) as caught:
+                _adapters.psycopg_connect(
+                    lambda: ExpiringToken.expires_in('TOKEN', 3600),
+                    'https://questdb.example.com:9000')
+        self.assertIn('RefreshingTokenProvider', str(caught.exception))
+        self.assertNotIn('TOKEN', str(caught.exception))
+        driver.connect.assert_not_called()
+
     def test_adapters_default_to_authenticated_remote_pg_transport(self):
         # An explicit sslmode wins, and None opts out entirely for a caller
         # managing TLS through the environment or a service file.
@@ -6944,6 +6988,27 @@ class AdapterRealDriverTest(unittest.TestCase):
             self.assertEqual(login['params']['user'], '_sso')
             self.assertEqual(login['params']['database'], 'qdb')
             self.assertIn('ssl', login['encryption_requests'])
+
+    def test_adapters_take_a_callable_provider(self):
+        from sqlalchemy.pool import NullPool
+        tokens = iter(['DIRECT-TOKEN', 'POOLED-TOKEN'])
+
+        def fetch():
+            return next(tokens)
+
+        with pg_capture_server.PgCaptureServer() as pg:
+            self._refused(lambda: psycopg_connect(
+                fetch, self.URL, pg_port=pg.port))
+            engine = sqlalchemy_engine(
+                fetch, self.URL, pg_port=pg.port, poolclass=NullPool)
+            try:
+                self._refused(engine.connect)
+            finally:
+                engine.dispose()
+        self.assertEqual(pg.errors, [])
+        self.assertEqual(
+            [login['password'] for login in pg.logins],
+            ['DIRECT-TOKEN', 'POOLED-TOKEN'])
 
     def test_sqlalchemy_connect_args_merge_over_the_adapter_defaults(self):
         # SQLAlchemy merges `connect_args` into cparams before the final

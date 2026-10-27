@@ -3290,69 +3290,88 @@ class SenderError:
 class ConnectionEventKind(TaggedEnum):
     """
     Connection-state transitions observed by the ingress connection pool.
+
+    ``Connected``
+        First successful connect of the pool's lifetime.
+
+    ``Disconnected``
+        An active wire connection died.
+
+    ``Reconnected``
+        Reconnect succeeded against the same endpoint after a failure.
+
+    ``FailedOver``
+        Reconnect succeeded against a different endpoint.
+
+    ``EndpointAttemptFailed``
+        One endpoint connect/upgrade attempt failed; the walk moves on.
+
+    ``AllEndpointsUnreachable``
+        Every configured endpoint was attempted and none accepted.
+
+    ``AuthFailed``
+        The server rejected the credential the client presented: HTTP 401
+        or 403 on the WebSocket upgrade, once per connect attempt.
+        :attr:`ConnectionEvent.host` and :attr:`ConnectionEvent.port` are
+        always set.
+
+        Before a sender's first connection it is terminal, and the owning
+        sender/pool operation raises. Once connected, a sender keeps
+        reconnecting with capped backoff and keeps its unacknowledged rows,
+        reporting each rejected attempt with this event: an
+        identity-platform outage makes a server reject a valid credential
+        for a while. To give up instead, close the sender from your own
+        code. See :ref:`token_rejections`.
+
+        A 401 followed by failure to obtain a replacement token is instead
+        ``CredentialUnavailable``, which preserves the rejected endpoint and
+        retains the provider error's retry/stop classification.
+
+    ``CredentialUnavailable``
+        A token provider -- ``oidc_auth=`` or ``bearer_token_provider=`` --
+        failed while acquiring a credential.
+
+        Before the first dial, :attr:`ConnectionEvent.host` and
+        :attr:`ConnectionEvent.port` are ``None``. If the provider fails when
+        reacquiring a token after a server 401, they identify the endpoint
+        that rejected the previous token; :attr:`ConnectionEvent.cause_msg`
+        includes the 401. Read :attr:`ConnectionEvent.cause_code` to tell a
+        retry from a stop:
+
+        * ``SocketError`` — the ordinary case, and retryable. The sender
+          keeps reconnecting so queued rows survive while the identity
+          provider recovers or a human signs in, and nothing is raised to
+          the caller. Only a foreground call such as
+          :meth:`QuestDB.dataframe` fails fast, because a credential problem
+          there is the caller's to see.
+        * ``AuthError`` or ``ConfigError`` — the provider cannot recover in
+          this process, so the reconnect is **terminal** and the sender
+          stops. Reached by a permanently closed provider
+          (:meth:`~questdb.auth.OidcDeviceAuth.close` is one-way; cancelling
+          one :meth:`~questdb.auth.OidcDeviceAuth.sign_in` attempt does not
+          close it), by a scope that cannot yield the required token kind,
+          such as ``groups_in_token=True`` against an identity provider that
+          returns no ID token, and by a ``bearer_token_provider=`` that
+          raised :class:`QuestDBError` with ``code`` ``InvalidApiCall`` (see
+          :class:`~questdb.auth.BearerTokenProvider`), which reports
+          ``ConfigError``. Queued rows are not deleted — a disk-backed
+          store-and-forward slot stays drainable by a later process — but
+          this process will not send them.
+
+        A listener that pages on a permanent stop must therefore qualify on
+        ``cause_code``, not on the kind alone.
+
+        Counterpart of the Java client's
+        ``QwpCredentialUnavailableException``, which is likewise distinct
+        from its ``QwpAuthFailedException``.
     """
-    #: First successful connect of the pool's lifetime.
     Connected = ('connected', 0)
-    #: An active wire connection died.
     Disconnected = ('disconnected', 1)
-    #: Reconnect succeeded against the same endpoint after a failure.
     Reconnected = ('reconnected', 2)
-    #: Reconnect succeeded against a different endpoint.
     FailedOver = ('failed_over', 3)
-    #: One endpoint connect/upgrade attempt failed; the walk moves on.
     EndpointAttemptFailed = ('endpoint_attempt_failed', 4)
-    #: Every configured endpoint was attempted and none accepted.
     AllEndpointsUnreachable = ('all_endpoints_unreachable', 5)
-    #: The server rejected the credential the client presented: HTTP 401 or
-    #: 403 on the WebSocket upgrade, once per connect attempt.
-    #:
-    #: :attr:`ConnectionEvent.host` and :attr:`ConnectionEvent.port` are always
-    #: set. Before a sender's first connection it is terminal, and the owning
-    #: sender/pool operation raises. Once connected, a sender keeps
-    #: reconnecting with capped backoff and keeps its unacknowledged rows,
-    #: reporting each rejected attempt with this event: an identity-platform
-    #: outage makes a server reject a valid credential for a while. To give up
-    #: instead, close the sender from your own code. See
-    #: :ref:`token_rejections`.
-    #:
-    #: A 401 followed by failure to obtain a replacement token is instead
-    #: :attr:`CredentialUnavailable`, which preserves the rejected endpoint
-    #: and retains the provider error's retry/stop classification.
     AuthFailed = ('auth_failed', 6)
-    #: A token provider -- ``oidc_auth=`` or ``bearer_token_provider=`` --
-    #: failed while acquiring a credential.
-    #:
-    #: Before the first dial, :attr:`ConnectionEvent.host` and
-    #: :attr:`ConnectionEvent.port` are ``None``. If the provider fails when
-    #: reacquiring a token after a server 401, they identify the endpoint that
-    #: rejected the previous token; :attr:`ConnectionEvent.cause_msg` includes
-    #: the 401. Read :attr:`ConnectionEvent.cause_code` to tell a retry from
-    #: a stop:
-    #:
-    #: * ``SocketError`` — the ordinary case, and retryable. The sender keeps
-    #:   reconnecting so queued rows survive while the identity provider
-    #:   recovers or a human signs in, and nothing is raised to the caller.
-    #:   Only a foreground call such as :meth:`QuestDB.dataframe` fails fast,
-    #:   because a credential problem there is the caller's to see.
-    #: * ``AuthError`` or ``ConfigError`` — the provider cannot recover in
-    #:   this process, so the reconnect is **terminal** and the sender stops.
-    #:   Reached by a permanently closed provider
-    #:   (:meth:`~questdb.auth.OidcDeviceAuth.close` is one-way; cancelling one
-    #:   :meth:`~questdb.auth.OidcDeviceAuth.sign_in` attempt does not close it),
-    #:   by a scope that cannot yield the required token kind, such as
-    #:   ``groups_in_token=True`` against an identity provider that returns no
-    #:   ID token, and by a ``bearer_token_provider=`` that raised
-    #:   :class:`QuestDBError` with ``code`` ``InvalidApiCall`` (see
-    #:   :class:`~questdb.auth.BearerTokenProvider`), which reports
-    #:   ``ConfigError``. Queued rows are not deleted — a disk-backed
-    #:   store-and-forward slot stays drainable by a later process — but this
-    #:   process will not send them.
-    #:
-    #: A listener that pages on a permanent stop must therefore qualify on
-    #: ``cause_code``, not on the kind alone.
-    #:
-    #: Counterpart of the Java client's ``QwpCredentialUnavailableException``,
-    #: which is likewise distinct from its ``QwpAuthFailedException``.
     CredentialUnavailable = ('credential_unavailable', 7)
 
 
@@ -9809,8 +9828,17 @@ cdef class QuestDB:
 
         ``connection_listener``, when set, is a callable receiving one
         :class:`ConnectionEvent` per connection-state transition of the
-        pool's ingress connections (initial connect, per-endpoint attempt
-        failures, failover, terminal auth rejection). It runs on a
+        pool's ingress connections: connects, disconnects and reconnects,
+        per-endpoint attempt failures, failover, credential rejections and
+        token-provider failures (see :class:`ConnectionEventKind`). A
+        credential the server rejects (``AuthFailed``) fails a connection
+        that is waited for -- the eager first connect, or a borrow that
+        opens a connection -- but a sender that has already connected keeps
+        reconnecting and reports each rejected attempt. For a token-provider
+        failure (``CredentialUnavailable``),
+        :attr:`ConnectionEvent.cause_code` tells a retry (``SocketError``)
+        from a stop (``AuthError`` or ``ConfigError``). See
+        :ref:`token_rejections`. The listener runs on a
         dedicated dispatcher thread fed by a bounded inbox
         (``connection_event_inbox_capacity``; ``0`` selects the default
         of 64) with a drop-oldest overflow policy, so a slow listener
@@ -9870,6 +9898,9 @@ cdef class QuestDB:
         cdef questdb_db_connect_options connect_options
         try:
             protocol, params = parse_conf_str(b, conf_str)
+            # Here rather than in native, whose message also names the C,
+            # C++ and Rust APIs: the same wording as `Sender.from_conf`.
+            _tp_reject_conf_keys(params)
             if protocol not in (Protocol.Ws, Protocol.Wss):
                 raise QuestDBError(
                     QuestDBErrorCode.ConfigError,

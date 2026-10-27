@@ -36,3 +36,5 @@ def check_provider_api(
     provider.close(wait=True, timeout=timedelta(seconds=5))
     sqlalchemy_engine(oidc, 'http://localhost:9000')
     psycopg_connect(oidc, 'http://localhost:9000')
+    sqlalchemy_engine(lambda: 't', 'http://localhost:9000')
+    psycopg_connect(provider.token, 'http://localhost:9000')

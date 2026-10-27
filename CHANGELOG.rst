@@ -317,7 +317,13 @@ Highlights:
   :func:`~questdb.auth.psycopg_connect`) that wire the token into PG-wire as the
   ``_sso`` password — ``sqlalchemy_engine`` re-supplies a fresh, auto-refreshed
   token on every new pooled connection, ``psycopg_connect`` captures it at
-  connect time. They authenticate remote PG servers with ``verify-full`` by
+  connect time. They take an ``OidcDeviceAuth`` or any provider
+  ``bearer_token_provider=`` takes -- a ``RefreshingTokenProvider``, any other
+  object with a ``token()`` method, or a function returning the token -- and
+  refuse anything else with ``OidcConfigError`` up front: when
+  ``sqlalchemy_engine`` builds the engine, and before ``psycopg_connect``
+  connects. They authenticate
+  remote PG servers with ``verify-full`` by
   default, which needs a trust root: libpq does **not** consult the operating
   system's certificate store unless told to, so without
   ``~/.postgresql/root.crt`` or ``PGSSLROOTCERT`` the connection fails with

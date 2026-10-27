@@ -311,5 +311,6 @@ PG-wire
 -------
 
 :func:`~questdb.auth.sqlalchemy_engine` and
-:func:`~questdb.auth.psycopg_connect` accept any provider with a ``token()``
-method, so a ``RefreshingTokenProvider`` works with them too.
+:func:`~questdb.auth.psycopg_connect` accept the same providers as
+``bearer_token_provider=``: a ``RefreshingTokenProvider``, any other object
+with a ``token()`` method, or a function that returns the current token.

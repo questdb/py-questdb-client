@@ -50,7 +50,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import urllib.parse
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 from ._errors import OidcConfigError
 
@@ -435,8 +435,47 @@ def _effective_sslmode(host: str, sslmode: Optional[str]) -> Optional[str]:
     return 'prefer' if _is_numeric_loopback_host(host) else 'verify-full'
 
 
+def _type_name(value: Any) -> str:
+    cls = type(value)
+    if cls.__module__ == 'builtins':
+        return cls.__qualname__
+    return f'{cls.__module__}.{cls.__qualname__}'
+
+
+def _token_getter(auth: Any) -> Callable[[], Any]:
+    """The function each connection calls for its token.
+
+    Accepts the provider shapes ``bearer_token_provider=`` accepts: an object
+    with a ``token()`` method (an ``OidcDeviceAuth`` too), or a callable
+    returning the token. Anything else is refused here, before an engine
+    exists or a token is fetched, rather than as a bare ``AttributeError``
+    from the first connection.
+    """
+    token = getattr(auth, 'token', None)
+    if callable(token):
+        return token
+    if callable(auth):
+        return auth
+    raise OidcConfigError(
+        'auth must be a token provider -- an object with a token() method, '
+        'such as an OidcDeviceAuth or a RefreshingTokenProvider, or a '
+        f'callable returning the token -- not {_type_name(auth)}.')
+
+
+def _fetch_token(token_getter: Callable[[], Any]) -> str:
+    """Call ``token_getter``, refusing a result that is not a ``str``: the
+    driver would turn it into the PG password with ``str()``."""
+    token = token_getter()
+    if not isinstance(token, str):
+        raise OidcConfigError(
+            f'auth must return the token as a str, not {_type_name(token)}. '
+            'Wrap a token source that returns an expiry in '
+            'RefreshingTokenProvider.')
+    return token
+
+
 def sqlalchemy_engine(
-        auth: BearerTokenProvider,
+        auth: Union[BearerTokenProvider, Callable[[], str]],
         url: str,
         *,
         host: Optional[str] = None,
@@ -463,8 +502,10 @@ def sqlalchemy_engine(
     interactive sign-in.
 
     :param auth: An :class:`OidcDeviceAuth`, e.g. from
-        :meth:`OidcDeviceAuth.from_questdb`, or any provider with a
-        ``token()`` method, such as a :class:`RefreshingTokenProvider`.
+        :meth:`OidcDeviceAuth.from_questdb`, or any provider
+        ``bearer_token_provider=`` takes: a
+        :class:`RefreshingTokenProvider`, any other object with a ``token()``
+        method, or a callable returning the token.
     :param url: The QuestDB base URL; the PG host is derived from it unless
         ``host=`` is given.
     :param host: Override the PG-wire host (otherwise taken from ``url``).
@@ -507,15 +548,17 @@ def sqlalchemy_engine(
         token. A listener that returns its own
         DBAPI connection bypasses the dialect and therefore the adapter's
         token injection.
-    :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
-        has no host; if the resolved host carries connection-string
-        metacharacters; if ``pg_port`` is not a valid TCP port; if
-        ``drivername`` is not a libpq driver while ``sslmode`` is set; if
-        ``connect_args`` sets the login or database; or if ``connect_args``
-        (or a foreign ``do_connect`` listener) sets a connection destination
-        other than the validated one; or a listener changes the login/database.
+    :raises OidcConfigError: if ``auth`` is not a token provider; if ``url``
+        is not HTTP(S), contains userinfo, or has no host; if the resolved
+        host carries connection-string metacharacters; if ``pg_port`` is not
+        a valid TCP port; if ``drivername`` is not a libpq driver while
+        ``sslmode`` is set; if ``connect_args`` sets the login or database;
+        or if ``connect_args`` (or a foreign ``do_connect`` listener) sets a
+        connection destination other than the validated one; or a listener
+        changes the login/database. When a connection opens, also if
+        ``auth`` returns something other than a ``str``.
     :raises questdb.QuestDBError: if token acquisition fails while
-        SQLAlchemy opens a connection: whatever ``auth.token()`` raises,
+        SQLAlchemy opens a connection: whatever the provider raises,
         unchanged -- :class:`OidcError` from an :class:`OidcDeviceAuth`,
         :class:`TokenUnavailableError` from a
         :class:`RefreshingTokenProvider`. Catch
@@ -524,6 +567,7 @@ def sqlalchemy_engine(
         SQLAlchemy and DBAPI construction/connection exceptions otherwise
         propagate unchanged.
     """
+    token_getter = _token_getter(auth)
     resolved_host = _require_host(url, host)
     sslmode = _effective_sslmode(resolved_host, sslmode)
     pg_port = _coerce_port(pg_port)
@@ -588,7 +632,7 @@ def sqlalchemy_engine(
             cparams.setdefault('sslmode', sslmode)
         # Non-interactive: silently refresh an existing token, but never start
         # a device flow from a pool thread. Fetch it only after validation.
-        cparams['password'] = auth.token()
+        cparams['password'] = _fetch_token(token_getter)
         # Reinsert the adapter's destination after every listener-controlled
         # value and after the credential. Libpq trims conninfo keys and the last
         # duplicate wins, so final ordering is part of the defense in depth.
@@ -601,7 +645,7 @@ def sqlalchemy_engine(
 
 
 def psycopg_connect(
-        auth: BearerTokenProvider,
+        auth: Union[BearerTokenProvider, Callable[[], str]],
         url: str,
         *,
         host: Optional[str] = None,
@@ -618,8 +662,10 @@ def psycopg_connect(
     server.
 
     :param auth: An :class:`OidcDeviceAuth`, e.g. from
-        :meth:`OidcDeviceAuth.from_questdb`, or any provider with a
-        ``token()`` method, such as a :class:`RefreshingTokenProvider`.
+        :meth:`OidcDeviceAuth.from_questdb`, or any provider
+        ``bearer_token_provider=`` takes: a
+        :class:`RefreshingTokenProvider`, any other object with a ``token()``
+        method, or a callable returning the token.
     :param url: The QuestDB base URL; the PG host is derived from it unless
         ``host=`` is given.
     :param host: Override the PG-wire host (otherwise taken from ``url``).
@@ -647,12 +693,14 @@ def psycopg_connect(
         (``user``, ``password``, ``dbname``, ``database``) is rejected too:
         the adapter always connects as ``_sso`` with the token; pass
         ``database=``.
-    :raises OidcConfigError: if ``url`` is not HTTP(S), contains userinfo, or
-        has no host; if the resolved host carries connection-string
-        metacharacters; if ``pg_port`` is not a valid TCP port; or if
-        ``connect_kwargs`` sets a connection destination, login or database.
-    :raises questdb.QuestDBError: if token acquisition fails: whatever
-        ``auth.token()`` raises, unchanged -- :class:`OidcError` from an
+    :raises OidcConfigError: if ``auth`` is not a token provider or returns
+        something other than a ``str``; if ``url`` is not HTTP(S), contains
+        userinfo, or has no host; if the resolved host carries
+        connection-string metacharacters; if ``pg_port`` is not a valid TCP
+        port; or if ``connect_kwargs`` sets a connection destination, login
+        or database.
+    :raises questdb.QuestDBError: if token acquisition fails: whatever the
+        provider raises, unchanged -- :class:`OidcError` from an
         :class:`OidcDeviceAuth`, :class:`TokenUnavailableError` from a
         :class:`RefreshingTokenProvider`. Catch
         :class:`~questdb.QuestDBError` to handle both.
@@ -660,16 +708,17 @@ def psycopg_connect(
         Driver connection, TLS and server-authentication exceptions otherwise
         propagate unchanged.
     """
+    token_getter = _token_getter(auth)
     resolved_host = _require_host(url, host)
     sslmode = _effective_sslmode(resolved_host, sslmode)
     pg_port = _coerce_port(pg_port)
     # `host=`/`port=`/`user=`/`password=`/`dbname=` here would be a bare
     # TypeError (duplicate keyword), and `hostaddr` / `service` / `dsn` /
     # `conninfo` would silently redirect the connection. Rejected together, as
-    # one typed error, before `auth.token()`.
+    # one typed error, before the token is fetched.
     _reject_destination_overrides(connect_kwargs, 'connect_kwargs')
     mod = _pg_module()
-    token = auth.token()
+    token = _fetch_token(token_getter)
     params = dict(connect_kwargs)
     if sslmode is not None:
         # setdefault, so an explicit sslmode in connect_kwargs wins.
