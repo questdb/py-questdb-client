@@ -82,8 +82,8 @@ Token-provider keys in a configuration string are rejected
 The configuration-string keys ``token_provider``, ``azure_resource``,
 ``azure_client_id`` and ``azure_credential`` now fail with
 :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-``QuestDBErrorCode.ConfigError`` on every protocol. In 6.0 an ILP/HTTP or
-ILP/TCP :meth:`Sender.from_conf <questdb.Sender.from_conf>` or
+``QuestDBErrorCode.ConfigError`` on every protocol. In 6.0 an ILP/HTTP,
+ILP/TCP or QWP/UDP :meth:`Sender.from_conf <questdb.Sender.from_conf>` or
 :meth:`Sender.from_env <questdb.Sender.from_env>` ignored them silently, so a
 configuration string shared with another client that reads them stops
 working. Remove them and pass ``bearer_token_provider=`` instead; see

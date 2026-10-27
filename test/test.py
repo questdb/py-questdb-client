@@ -53,6 +53,7 @@ from mock_server import (Server, HttpServer, UdpServer,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1, SETTINGS_WITH_PROTOCOL_VERSION_V2,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3,SETTINGS_WITH_PROTOCOL_VERSION_V4)
 from qwp_ws_ack_server import QwpAckServer, TLS_CA
+from qwp_egress_failover_server import EgressFailoverServer
 import api_surface
 import qwp_wire
 
@@ -431,6 +432,76 @@ class TestQwpWebSocketApi(unittest.TestCase):
         qi._debug_hold_cursor_handle_lock(handle, DuringDecode(), DuringDecode())
         self.assertEqual(tested, operations)
         result.close()
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_cursor_close_and_cancel_from_another_thread_wait_for_its_read(
+            self):
+        # Only re-entry from the reading thread is refused. A close() or
+        # cancel() from another thread while the reader is blocked in a
+        # native read waits for that read to return, as it does for a row
+        # stream, instead of raising InvalidApiCall.
+        for operation in ('close', 'cancel'):
+            with self.subTest(operation=operation), EgressFailoverServer(
+                    deliver_first_batch=True,
+                    batches=((1, 2, 3), (4, 5, 6))) as server:
+                db = questdb.connect(
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;')
+                try:
+                    result = db.query('select v from t')
+                    batches = result.iter_arrow()
+                    got_first = threading.Event()
+                    read = []
+                    operated = []
+
+                    def read_all():
+                        try:
+                            next(batches)
+                            got_first.set()
+                            # Blocks in the native read: the server holds
+                            # the next batch until `release_first` is set.
+                            read.extend(batches)
+                        except BaseException as exc:  # noqa: BLE001
+                            read.append(exc)
+                        finally:
+                            got_first.set()
+
+                    def operate():
+                        try:
+                            getattr(result, operation)()
+                            operated.append(None)
+                        except BaseException as exc:  # noqa: BLE001
+                            operated.append(exc)
+
+                    reader = threading.Thread(target=read_all, daemon=True)
+                    reader.start()
+                    self.assertTrue(got_first.wait(10))
+                    # Lets the reader enter its native read. A call made
+                    # before that has nothing to wait for and tests nothing.
+                    time.sleep(0.5)
+                    release = threading.Timer(0.2, server.release_first.set)
+                    release.start()
+                    caller = threading.Thread(target=operate, daemon=True)
+                    caller.start()
+                    caller.join(10)
+                    release.cancel()
+                    server.release_first.set()
+                    reader.join(10)
+                    self.assertFalse(caller.is_alive())
+                    self.assertFalse(reader.is_alive())
+                    # The refusal is InvalidApiCall. A cancel() that ran
+                    # before the read began can fail on this server's held
+                    # connection instead, which is not what is tested here.
+                    self.assertNotIn(
+                        qi.QuestDBErrorCode.InvalidApiCall,
+                        [getattr(exc, 'code', None) for exc in operated])
+                    if operation == 'close':
+                        self.assertEqual(operated, [None])
+                    for item in read:
+                        if isinstance(item, BaseException):
+                            self.assertIsInstance(item, qi.QuestDBError)
+                    result.close()
+                finally:
+                    db.close()
 
     @unittest.skipUnless(
         hasattr(sys, 'getrefcount'), 'requires refcounting finalizers')

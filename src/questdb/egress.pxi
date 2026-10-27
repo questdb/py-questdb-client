@@ -161,7 +161,8 @@ cdef class _CursorHandle:
     cdef object _lock
     cdef int _reset_seq
     # The RLock does not prevent same-thread re-entry, e.g. from a finalizer
-    # or callback that runs on this thread mid-operation.
+    # or callback that runs on this thread mid-operation. Set and cleared
+    # only with `_lock` held; `_check_not_driving` relies on that.
     cdef bint _native_in_flight
     cdef int _pinned
     cdef bint _free_pending
@@ -189,10 +190,14 @@ cdef class _CursorHandle:
 
     cdef void_int _check_not_driving(
             self, str method, bint check_lock=False) except -1:
-        # At entry, reject a lock already owned by this thread: decoding can
-        # run Python code while it still borrows the current native batch.
-        # Under-lock checks must leave check_lock false.
-        if self._native_in_flight or (check_lock and self._lock._is_owned()):
+        # Refuse only the thread driving this cursor: a finalizer, signal
+        # handler or callback that runs there mid-decode or mid-read. Another
+        # thread waits for `_lock` instead, as `_close()` always let it.
+        # `_native_in_flight` changes only under the lock, so only its owner
+        # can be driving: at entry (`check_lock`) ownership is the test, and
+        # under the lock the flag is. Under-lock checks must leave check_lock
+        # false.
+        if (check_lock or self._native_in_flight) and self._lock._is_owned():
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f'{method}() cannot be called during a cursor operation.')
