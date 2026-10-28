@@ -65,6 +65,10 @@ def _reraise_signal_interrupt() -> None:
 
 def in_ipython_kernel() -> bool:
     """True when running inside an interactive Jupyter/ZMQ kernel."""
+    # A running shell has imported IPython already. Importing it here would
+    # load hundreds of modules in a plain process only to find no shell.
+    if 'IPython' not in sys.modules:
+        return False
     try:
         from IPython import get_ipython  # type: ignore
     except Exception:

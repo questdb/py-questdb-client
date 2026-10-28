@@ -548,7 +548,10 @@ cdef bint _oidc_wait_diagnostics_drained(
         return True
     provider_id = (<OidcDeviceAuth>provider)._provider_id
     deadline = time.monotonic() + timeout
-    with _OIDC_DIAGNOSTICS_DRAINED:
+    # The RLock's own `with`, whose `__enter__` and `__exit__` are C. The
+    # Condition's are Python, and a pending Ctrl-C raised in them left this
+    # process-wide lock held (see `QuestDB.close()`). `wait()` shares the lock.
+    with _OIDC_REGISTRY_LOCK:
         while _OIDC_DIAGNOSTICS_ACTIVE.get(provider_id, 0) != 0:
             remaining = deadline - time.monotonic()
             if remaining <= 0:

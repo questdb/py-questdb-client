@@ -365,6 +365,36 @@ class NativeOidcTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {'IPython': ipython}):
             self.assertTrue(in_ipython_kernel())
 
+    def test_construction_does_not_import_ipython_outside_a_shell(self):
+        # Regression: kernel detection imported IPython to learn that no shell
+        # was running. In a plain process with IPython installed, every default
+        # construction loaded ~600 modules, and the changed teardown order made
+        # a pool left open print an unraisable error at exit.
+        attempts = []
+
+        class RefuseIPython:
+            @staticmethod
+            def find_spec(name, path=None, target=None):
+                if name.partition('.')[0] == 'IPython':
+                    attempts.append(name)
+                    raise ImportError(f'{name} is refused by this test')
+                return None
+
+        finder = RefuseIPython()
+        saved = {name: module for name, module in list(sys.modules.items())
+                 if name.partition('.')[0] == 'IPython'}
+        for name in saved:
+            del sys.modules[name]
+        sys.meta_path.insert(0, finder)
+        try:
+            self.assertFalse(in_ipython_kernel())
+            # All three defaults consult the kernel check.
+            make_auth(open_browser=None, interactive=None).close()
+        finally:
+            sys.meta_path.remove(finder)
+            sys.modules.update(saved)
+        self.assertEqual(attempts, [])
+
     def test_a_missing_tty_does_not_refuse_sign_in(self):
         # detect_interactive() used to end in `sys.stderr.isatty()`, which
         # refuses on the absence of evidence rather than evidence of absence:
@@ -9481,6 +9511,58 @@ class OidcDiagnosticSignalTest(_IsolatedReentry, unittest.TestCase):
                 auth.close()
         finally:
             signal.signal(signal.SIGINT, previous)
+
+    def test_interrupt_in_pool_close_leaves_the_registry_lock_free(self):
+        # Regression: a pool close waits for its provider's diagnostics under
+        # the process-wide registry lock, taken through the Condition's Python
+        # `__enter__`. A Ctrl-C raised there once the lock was taken left it
+        # held by the closing thread, and every provider built, collected or
+        # warning on another thread then blocked on it for good.
+        import _thread
+        registry_lock = _client._debug_oidc_registry_lock()
+        auth = make_auth()
+        db = questdb.connect(
+            'ws::addr=127.0.0.1:9000;lazy_connect=true;', oidc_auth=auth)
+        acquired = threading.Event()
+        closing = threading.Event()
+
+        def hold_lock_then_interrupt():
+            with registry_lock:
+                acquired.set()
+                if not closing.wait(10):
+                    return
+                # Let close() block on the lock, then mark an interrupt
+                # pending without waking that wait: it is raised once
+                # close() has taken the lock.
+                time.sleep(0.2)
+                _thread.interrupt_main()
+
+        holder = threading.Thread(target=hold_lock_then_interrupt)
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            holder.start()
+            self.assertTrue(acquired.wait(10))
+            closing.set()
+            with self.assertRaises(KeyboardInterrupt):
+                db.close()
+            holder.join()
+            self.assertFalse(registry_lock._is_owned())
+            built = []
+            builder = threading.Thread(
+                target=lambda: built.append(make_auth()), daemon=True)
+            builder.start()
+            builder.join(5)
+            self.assertEqual(
+                len(built), 1, 'another thread could not build a provider')
+            built[0].close()
+        finally:
+            signal.signal(signal.SIGINT, previous)
+            holder.join()
+            # A failure must not leave the lock held for the rest of the suite.
+            while registry_lock._is_owned():
+                registry_lock.release()
+            db.close()
+            auth.close()
 
     def test_other_threads_diagnostic_does_not_delay_the_exception(self):
         # Another thread is inside its own persistence diagnostic, blocked in
