@@ -79,7 +79,11 @@ class BearerTokenProvider(Protocol):
     it: CPython runs a pending signal handler on the main thread at the first
     Python code it executes, which there is ``token()``, and a sender refuses
     such a call with :class:`~questdb.QuestDBError` with ``code``
-    ``QuestDBErrorCode.InvalidApiCall``. See
+    ``QuestDBErrorCode.InvalidApiCall``. On a native thread, a call it makes
+    to a :class:`~questdb.PooledSender` lease that another thread holds in
+    an ACK wait -- which may be waiting for this very token -- gives up after
+    two seconds with the same error, which counts as retryable if it escapes
+    ``token()``. See
     :ref:`Code that runs inside a client call <token_provider_reentrancy>`.
 
     A QWP/WebSocket sender, query or pool keeps retrying a failure in its

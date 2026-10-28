@@ -587,6 +587,29 @@ class RefreshingTokenProviderTest(unittest.TestCase):
         self.assertEqual(
             caught.exception.code, questdb.QuestDBErrorCode.ConfigError)
 
+    def test_unknown_attributes_are_refused(self):
+        # The provider has an instance dictionary only for its native handle.
+        # A setting written after construction, or a misspelt name, would
+        # otherwise be stored and read back while configuring nothing, which
+        # Sender and QuestDB refuse for the same reason.
+        source, _ = _counting_source()
+        with RefreshingTokenProvider(source) as provider:
+            for name, value in (('cold_wait', 5), ('refresh_margin', 120),
+                                ('nmae', 'tokens'), ('name', 'tokens'),
+                                ('token', None)):
+                with self.subTest(name=name):
+                    with self.assertRaises(AttributeError):
+                        setattr(provider, name, value)
+                    self.assertNotIn(name, vars(provider))
+            self.assertEqual(provider.token(), 'T1')
+
+        class Subclass(RefreshingTokenProvider):
+            pass
+
+        with Subclass(source) as subclassed:
+            subclassed.extra = 1
+            self.assertEqual(subclassed.extra, 1)
+
     def test_the_token_is_never_rendered(self):
         with RefreshingTokenProvider(
                 lambda: ExpiringToken.expires_in('SENTINEL-c20', 3600),
@@ -1721,6 +1744,134 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
             self.assertIn(' - See https://', str(caught.exception))
         finally:
             sender.close(flush=False)
+
+    # The child holds a lease across an indefinite ACK wait while the server
+    # closes every session whose token is not "refreshed": the frame is
+    # acknowledged only once a reconnect on a native thread gets that token
+    # from `Provider.token()`. A regression that blocks the provider on the
+    # lease hangs the child, so it runs under a timeout.
+    _HELD_LEASE_CHILD_PREAMBLE = textwrap.dedent('''
+        import logging, sys, time
+        import questdb
+
+        port, action = int(sys.argv[1]), sys.argv[2]
+        started = time.monotonic()
+        held = {}
+        events = []
+
+        def connect(provider):
+            db = held['db'] = questdb.connect(
+                f'ws::addr=127.0.0.1:{port};lazy_connect=true;'
+                'sender_pool_min=0;query_pool_min=0;'
+                'reconnect_initial_backoff_millis=25;'
+                'reconnect_max_backoff_millis=25;'
+                'reconnect_max_duration_millis=10000;',
+                bearer_token_provider=provider,
+                connection_listener=events.append)
+            lease = held['lease'] = db.sender()
+            lease.row('events', columns={'value': 42},
+                      at=questdb.ServerTimestamp)
+            lease.flush(wait=False)
+            lease.wait(0)
+            return db, lease
+    ''')
+
+    def _run_held_lease_child(self, body, action):
+        env = os.environ.copy()
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, (
+            os.path.dirname(os.path.dirname(questdb.__file__)),
+            env.get('PYTHONPATH'))))
+        with QwpAckServer(close_after_upgrade_unless_authorization=(
+                'Bearer refreshed')) as server:
+            result = subprocess.run(
+                [sys.executable, '-c',
+                 self._HELD_LEASE_CHILD_PREAMBLE + textwrap.dedent(body),
+                 str(server.port), action],
+                env=env, capture_output=True, text=True, timeout=60)
+            frames = server.snapshot()['binary_frames']
+        self.assertEqual(
+            result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(frames, 1)
+        return result.stdout
+
+    def test_a_provider_cannot_deadlock_a_lease_held_across_an_ack_wait(self):
+        # A logging handler the provider triggers used to block forever on
+        # the lease, or in a pool close waiting for it: the ACK needed the
+        # reconnect, and the reconnect needed the provider to return. It
+        # must give up with InvalidApiCall, as an OIDC callback does.
+        body = '''
+            refused = []
+
+            class Provider:
+                def token(self):
+                    if time.monotonic() - started < 1.0:
+                        return 'stale'
+                    logging.getLogger('provider').warning('refreshing')
+                    return 'refreshed'
+
+            class TouchPool(logging.Handler):
+                def emit(self, record):
+                    try:
+                        if action == 'len':
+                            len(held['lease'])
+                        else:
+                            held['db'].close()
+                    except questdb.QuestDBError as exc:
+                        refused.append((exc.code.name, str(exc)))
+
+            logger = logging.getLogger('provider')
+            logger.addHandler(TouchPool())
+            logger.setLevel(logging.WARNING)
+            logger.propagate = False
+            db, lease = connect(Provider())
+            print('refused:', refused)
+            lease.close()
+            db.close()
+        '''
+        for action, refusal in (
+                ('len', '__len__() cannot wait for this sender lease '
+                        'inside a token-provider callback'),
+                ('close', 'QuestDB.close() cannot wait for 1 outstanding '
+                          'lease(s) inside a token-provider callback')):
+            with self.subTest(action=action):
+                output = self._run_held_lease_child(body, action)
+                self.assertIn("('InvalidApiCall', ", output)
+                self.assertIn(refusal, output)
+
+    def test_a_lease_refusal_escaping_the_provider_stays_retryable(self):
+        # An InvalidApiCall from a provider stops its clients for good. The
+        # refusal of a lease the provider gave up waiting for must not: that
+        # lease is busy, waiting for this very token, not broken.
+        body = '''
+            escaped = []
+
+            class Provider:
+                def token(self):
+                    if time.monotonic() - started < 1.0:
+                        return 'stale'
+                    if not escaped:
+                        try:
+                            len(held['lease'])
+                        except questdb.QuestDBError as exc:
+                            escaped.append(exc.code.name)
+                            raise
+                    return 'refreshed'
+
+            db, lease = connect(Provider())
+            kind = questdb.ConnectionEventKind.CredentialUnavailable
+            deadline = time.monotonic() + 10
+            while (time.monotonic() < deadline
+                   and not any(e.kind is kind for e in events)):
+                time.sleep(0.01)
+            causes = sorted(
+                {e.cause_code.name for e in events if e.kind is kind})
+            print('escaped:', escaped, 'causes:', causes)
+            lease.close()
+            db.close()
+        '''
+        output = self._run_held_lease_child(body, 'escape')
+        self.assertIn("escaped: ['InvalidApiCall']", output)
+        self.assertIn("causes: ['SocketError']", output)
 
 
 @unittest.skipUnless(hasattr(os, 'fork'), 'os.fork required')

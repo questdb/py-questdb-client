@@ -710,20 +710,24 @@ cdef object _NO_SUCH_ATTR = object()
 
 
 cdef void_int _setattr_without_dict(
-        object obj, type cls, object name, object value) except -1:
-    """Set `name` on `obj` as if `cls` had no instance dictionary.
+        object obj, type cls, tuple dict_only, object name,
+        object value) except -1:
+    """Set `name` on `obj` as if `cls` had no instance dictionary, except
+    for the names in `dict_only`.
 
     `Sender` and `QuestDB` have a `__dict__` only to hold the bearer-token
     holder where PyPy's collector can see it (`Sender` uses it only on PyPy;
-    see `_sender_hold_bearer`). Any other new name -- a
-    misspelt or invented setting such as `sender.request_timeout = 5000` --
-    would otherwise be stored and read back while configuring nothing, where
-    it used to raise `AttributeError`. Python subclasses keep the dictionary
-    every subclass of an extension type has always had.
+    see `_sender_hold_bearer`), and `RefreshingTokenProvider` only to hold
+    its native handle there. Any other new name -- a misspelt or invented
+    setting such as `sender.request_timeout = 5000` or
+    `tokens.cold_wait = 5` -- would otherwise be stored and read back while
+    configuring nothing, where it used to raise `AttributeError`. Python
+    subclasses keep the dictionary every subclass of an extension type has
+    always had.
     """
     cdef object descr = _NO_SUCH_ATTR
     if (type(obj) is cls and isinstance(name, str)
-            and name not in _DICT_ONLY_ATTRS):
+            and name not in dict_only):
         for klass in cls.__mro__:
             descr = klass.__dict__.get(name, _NO_SUCH_ATTR)
             if descr is not _NO_SUCH_ATTR:
@@ -3341,9 +3345,15 @@ class ConnectionEventKind(TaggedEnum):
         * ``SocketError`` — the ordinary case, and retryable. The sender
           keeps reconnecting so queued rows survive while the identity
           provider recovers or a human signs in, and nothing is raised to
-          the caller. Only a foreground call such as
-          :meth:`QuestDB.dataframe` fails fast, because a credential problem
-          there is the caller's to see.
+          the caller. A foreground call such as :meth:`QuestDB.dataframe`
+          raises instead, because a credential problem there is the
+          caller's to see. With ``oidc_auth=`` it fails fast. With
+          ``bearer_token_provider=`` it fails fast on a failure the
+          provider classified permanent, but first retries a retryable one
+          -- any exception other than a
+          :class:`~questdb.auth.TokenUnavailableError` with
+          ``retryable=False`` -- for up to
+          ``reconnect_max_duration_millis``.
         * ``AuthError`` or ``ConfigError`` — the provider cannot recover in
           this process, so the reconnect is **terminal** and the sender
           stops. Reached by a permanently closed provider
@@ -8428,22 +8438,51 @@ cdef str _close_gave_up_message(
         'timeout=None waits without a limit.')
 
 
-cdef str _close_oidc_gave_up_message(
+cdef bint _in_bounded_wait_callback() except -1:
+    """Whether a wait made on this thread must be bounded, because a lease
+    or a call on another thread may be waiting for this thread to return: it
+    is inside an OIDC renderer or persistence-warning callback, whose
+    provider cannot supply a token until the callback returns, or inside a
+    ``bearer_token_provider=`` call, which is the token request itself."""
+    return _oidc_callback_on_this_thread() or _token_callback_on_this_thread()
+
+
+cdef str _bounded_wait_callback_name():
+    """The callback `_in_bounded_wait_callback` found, for messages."""
+    if _oidc_callback_on_this_thread():
+        return 'an OIDC callback'
+    return 'a token-provider callback'
+
+
+cdef object _callback_wait_refused(str message):
+    """The `InvalidApiCall` a bounded wait inside such a callback raises.
+
+    Marked so that, if it escapes a ``bearer_token_provider=``'s
+    ``token()``, it counts as a retryable failure rather than the terminal
+    stop an `InvalidApiCall` from a provider otherwise means: the lease or
+    pool it gave up on is busy, not broken (see `_tp_sink_exception`)."""
+    cdef object exc = QuestDBError(QuestDBErrorCode.InvalidApiCall, message)
+    exc._callback_wait_refused = True
+    return exc
+
+
+cdef str _close_callback_gave_up_message(
         bint concurrent, size_t leases, size_t calls):
-    """What a `close()` called from inside an OIDC callback says when its
+    """What a `close()` called from inside such a callback says when its
     bounded wait runs out. `concurrent` says another `close()` had already
     started, and that close is left to finish the teardown."""
     cdef str message
+    cdef str callback = _bounded_wait_callback_name()
     if concurrent:
         return (
             'QuestDB.close() cannot wait for a concurrent close() on '
-            'another thread inside an OIDC callback: that close may be '
+            f'another thread inside {callback}: that close may be '
             'waiting for a lease that needs this callback to return. '
             'Return from the callback; the other close() finishes the '
             'teardown.')
     message = (
         f'QuestDB.close() cannot wait for {leases} outstanding lease(s) '
-        'inside an OIDC callback')
+        f'inside {callback}')
     if calls:
         message += f', or for {calls} call(s) in progress on this handle'
     return message + (
@@ -9636,7 +9675,7 @@ cdef class QuestDB:
     cdef bint _auto_flush_bytes_dynamic
 
     def __setattr__(self, name, value):
-        _setattr_without_dict(self, QuestDB, name, value)
+        _setattr_without_dict(self, QuestDB, _DICT_ONLY_ATTRS, name, value)
 
     def __cinit__(self):
         self._db = NULL
@@ -10964,10 +11003,11 @@ cdef class QuestDB:
         close -- which is how a close that the handler delegated to
         another thread, and waits for, is released. Called from any other
         OIDC callback -- a renderer callback, or a persistence-warning
-        handler of another provider -- each wait above is limited to two
-        seconds, after which it raises the same error and leaves the
-        handle closing: a lease or call on another thread may be blocked
-        on a token the provider cannot supply until the callback returns.
+        handler of another provider -- or from a ``bearer_token_provider=``
+        call, each wait above is limited to two seconds, after which it
+        raises the same error and leaves the handle closing: a lease or
+        call on another thread may be blocked on a token the provider
+        cannot supply until the callback returns.
         """
         cdef questdb_db* db = NULL
         cdef PyThreadState* gs = NULL
@@ -10979,10 +11019,10 @@ cdef class QuestDB:
         cdef size_t notice_calls = 0
         cdef object lease_limit
         cdef object call_limit
-        cdef bint in_oidc_callback = False
+        cdef bint in_callback = False
         cdef bint already_closing = False
-        cdef bint oidc_bound = False
-        cdef object oidc_deadline = None
+        cdef bint callback_bound = False
+        cdef object callback_deadline = None
         # Read before anything is published, so a bad argument changes
         # nothing for any other thread.
         if timeout is _CLOSE_TIMEOUT_DEFAULT:
@@ -11002,12 +11042,12 @@ cdef class QuestDB:
                 'persistence-warning callback. Return from the callback '
                 'before closing the pool.')
         # Any other OIDC callback on this thread -- a renderer event, or
-        # another provider's persistence warning -- may be what a lease or
-        # call on another thread is waiting for: its ACK can need a token
-        # the provider cannot supply until the callback returns. Every wait
-        # below is bounded then, as `PooledSender._lock_enter()` bounds a
-        # wait for the lease.
-        in_oidc_callback = _oidc_callback_on_this_thread()
+        # another provider's persistence warning -- or a bearer token-provider
+        # call may be what a lease or call on another thread is waiting for:
+        # its ACK can need a token the provider cannot supply until the
+        # callback returns. Every wait below is bounded then, as
+        # `PooledSender._lock_enter()` bounds a wait for the lease.
+        in_callback = _in_bounded_wait_callback()
         # Wait outside `_state_cond`, and before closing starts: the
         # callback's thread may need the lock to release a pool use before
         # the callback can return, and giving up here leaves the handle as
@@ -11036,8 +11076,8 @@ cdef class QuestDB:
             None if lease_limit is None else started + lease_limit)
         call_deadline = (
             None if call_limit is None else started + call_limit)
-        if in_oidc_callback:
-            oidc_deadline = started + _OIDC_CLOSE_DIAGNOSTIC_WAIT_SECS
+        if in_callback:
+            callback_deadline = started + _OIDC_CLOSE_DIAGNOSTIC_WAIT_SECS
         # The lock is taken and released through `acquire` and `release`,
         # the RLock's own C methods, here and at every other place
         # `close()` and `__exit__` hold it. `Condition.__enter__` and
@@ -11158,16 +11198,15 @@ cdef class QuestDB:
                             deadline - started,
                             self._lease_uses,
                             self._call_uses))
-                if oidc_deadline is not None:
-                    if now >= oidc_deadline:
-                        raise QuestDBError(
-                            QuestDBErrorCode.InvalidApiCall,
-                            _close_oidc_gave_up_message(
+                if callback_deadline is not None:
+                    if now >= callback_deadline:
+                        raise _callback_wait_refused(
+                            _close_callback_gave_up_message(
                                 already_closing,
                                 self._lease_uses,
                                 self._call_uses))
-                    if deadline is None or oidc_deadline < deadline:
-                        deadline = oidc_deadline
+                    if deadline is None or callback_deadline < deadline:
+                        deadline = callback_deadline
                 # Woken at whichever is sooner, the next notice or the
                 # limit, so a limit holds whatever it is set to rather
                 # than only at the notice cadence. A wait that runs out
@@ -11235,10 +11274,10 @@ cdef class QuestDB:
             else:
                 deadline = (None if lease_limit is None
                             else time.monotonic() + lease_limit)
-            if oidc_deadline is not None and (
-                    deadline is None or oidc_deadline < deadline):
-                deadline = oidc_deadline
-                oidc_bound = True
+            if callback_deadline is not None and (
+                    deadline is None or callback_deadline < deadline):
+                deadline = callback_deadline
+                callback_bound = True
             while True:
                 notice = False
                 # Held through `acquire` and `release`, as above.
@@ -11267,10 +11306,9 @@ cdef class QuestDB:
                     if deadline is not None:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0.0:
-                            if oidc_bound:
-                                raise QuestDBError(
-                                    QuestDBErrorCode.InvalidApiCall,
-                                    _close_oidc_gave_up_message(
+                            if callback_bound:
+                                raise _callback_wait_refused(
+                                    _close_callback_gave_up_message(
                                         True, 0, 0))
                             raise QuestDBError(
                                 QuestDBErrorCode.InvalidApiCall,
@@ -11905,7 +11943,7 @@ cdef class Sender:
             self._qwp_ws_opts = line_sender_opts_clone(self._opts)
 
     def __setattr__(self, name, value):
-        _setattr_without_dict(self, Sender, name, value)
+        _setattr_without_dict(self, Sender, _DICT_ONLY_ATTRS, name, value)
 
     def __cinit__(self):
         # Cython has just created the instance dictionary, which CPython
@@ -12437,7 +12475,9 @@ cdef class Sender:
 
         Raises :class:`QuestDBError <questdb.QuestDBError>`
         (``InvalidApiCall``) when read over ``ws`` or ``wss`` from this
-        sender's own ``error_handler`` or ``connection_listener``.
+        sender's own ``error_handler`` or ``connection_listener``, or from
+        any thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
         cdef size_t hard_cap = 0
         cdef cbool server_cap_known = False
@@ -13893,26 +13933,26 @@ cdef class PooledSender:
 
         Another thread may hold the lock across a native ACK wait (``wait()``,
         ``flush(wait=True)``, ``await_acked_fsn()``, ``close(wait=True)``)
-        whose reconnect needs an OIDC token. The provider cannot supply one
-        until its persistence-warning or renderer callback returns, so a
-        callback that blocked here would never return and both threads would
-        hang. From inside such a callback, wait a bounded time and then raise
-        instead, as ``QuestDB.close()`` does.
+        whose reconnect needs a token. An OIDC provider cannot supply one
+        until its persistence-warning or renderer callback returns, and a
+        ``bearer_token_provider=`` call on a native reconnect thread is that
+        token request itself, so a callback that blocked here would never
+        return and both threads would hang. From inside such a callback, wait
+        a bounded time and then raise instead, as ``QuestDB.close()`` does.
         """
         # Uncontended (or re-entrant) is the per-row common case: one call.
         if self._lock.acquire(False):
             return 0
-        if not _oidc_callback_on_this_thread():
+        if not _in_bounded_wait_callback():
             self._lock.acquire()
             return 0
         if self._lock.acquire(True, _OIDC_CLOSE_DIAGNOSTIC_WAIT_SECS):
             return 0
-        raise QuestDBError(
-            QuestDBErrorCode.InvalidApiCall,
-            f'{method}() cannot wait for this sender lease inside an OIDC '
-            'callback: another thread is using the lease and may be waiting '
-            'for this callback to return. Return from the callback before '
-            'using the lease.')
+        raise _callback_wait_refused(
+            f'{method}() cannot wait for this sender lease inside '
+            f'{_bounded_wait_callback_name()}: another thread is using the '
+            'lease and may be waiting for this callback to return. Return '
+            'from the callback before using the lease.')
 
     cdef void_int _check_not_in_row(self, str method) except -1:
         """

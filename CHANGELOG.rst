@@ -143,6 +143,15 @@ tokens from a secrets vault.
   raises there is deferred to the native-return boundary, without repeatedly
   interrupting provider retries or swallowing signal-handler deadline
   exceptions.
+* An application provider that runs on a native thread -- a QWP/WebSocket
+  sender, query or pool reconnecting -- or a logging handler it triggers,
+  that uses a :class:`~questdb.PooledSender` lease another thread is blocked
+  in (for example ``wait()``) gives up after two seconds with
+  ``QuestDBError(InvalidApiCall)`` instead of deadlocking both threads, as an
+  OIDC callback does: that thread may be waiting for this very token. So does
+  a ``db.close()`` made there that would wait for such a lease. If that
+  refusal escapes ``token()``, it counts as a retryable failure, not as a
+  request to stop; see :ref:`token_provider_reentrancy`.
 * Pooled dataframe calls fail fast on native foreground OIDC failures rather
   than spinning through the reconnect budget.
 * A successful OIDC refresh can revalidate the same still-valid token after a
@@ -415,8 +424,11 @@ which is what says whether the sender will carry on:
 
 * ``SocketError`` — retryable, and the ordinary case. The sender keeps
   reconnecting so queued rows survive while the identity provider recovers or
-  a human signs in, and nothing is raised to the caller. Only a foreground
-  call such as :meth:`questdb.QuestDB.dataframe` fails fast, and an ACK wait
+  a human signs in, and nothing is raised to the caller. A foreground call
+  such as :meth:`questdb.QuestDB.dataframe` raises instead: with
+  ``oidc_auth=`` it fails fast, and with ``bearer_token_provider=`` it fails
+  fast on a failure the provider classified permanent but first retries a
+  retryable one for up to ``reconnect_max_duration_millis``. An ACK wait
   (:meth:`PooledSender.wait <questdb.PooledSender.wait>`) whose timeout expires
   meanwhile raises :class:`~questdb.auth.OidcInteractionRequired` -- ``code``
   ``FailoverRetry``, rows still queued -- when the provider needs a new sign-in.

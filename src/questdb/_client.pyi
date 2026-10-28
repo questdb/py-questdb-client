@@ -2347,7 +2347,8 @@ class Sender:
 
         Raises :class:`QuestDBError` (``InvalidApiCall``) when read over
         ``ws`` or ``wss`` from this sender's own ``error_handler`` or
-        ``connection_listener``.
+        ``connection_listener``, or from any thread while this sender is
+        inside a native call such as :func:`Sender.flush`.
         """
 
     @property

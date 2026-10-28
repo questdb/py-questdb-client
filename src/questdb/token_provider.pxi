@@ -429,10 +429,14 @@ cdef void _tp_sink_exception(
         # Rust provider or a C++ one throwing `invalid_api_call`: clients stop
         # reconnecting. A source's sink refuses it, and the exception then
         # counts as retryable like any other. A TokenUnavailableError, handled
-        # above, keeps its classification whatever its code.
+        # above, keeps its classification whatever its code. The refusal of
+        # a lease or pool wait this callback gave up on
+        # (`_callback_wait_refused`) counts as retryable: that lease or pool
+        # is busy, maybe waiting for this very token, not broken.
         if (isinstance(exc, QuestDBError)
                 and getattr(exc, 'code', None)
                     is QuestDBErrorCode.InvalidApiCall
+                and not getattr(exc, '_callback_wait_refused', False)
                 and _tp_sink_terminal_error(sink, str(exc))):
             return
         _tp_sink_text_error(
@@ -799,6 +803,10 @@ cdef void_int _tp_on_rejected(
     return 0
 
 
+# The only name `RefreshingTokenProvider` keeps in its instance dictionary.
+cdef tuple _REFRESHING_PROVIDER_DICT_ATTRS = ('_handle',)
+
+
 cdef class RefreshingTokenProvider:
     """
     A proactively refreshing token cache in front of a token source.
@@ -850,8 +858,14 @@ cdef class RefreshingTokenProvider:
     """
     # _handle must be visible to PyPy's collector too: sources may own this
     # provider, so a cpyext-only reference here would still root that cycle.
+    # `__setattr__` keeps every other name out of it.
     cdef dict __dict__
     cdef str _name
+
+    def __setattr__(self, name, value):
+        _setattr_without_dict(
+            self, RefreshingTokenProvider, _REFRESHING_PROVIDER_DICT_ATTRS,
+            name, value)
 
     def __cinit__(self):
         self._handle = None

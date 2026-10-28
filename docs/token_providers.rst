@@ -240,6 +240,20 @@ call, or use a :class:`~questdb.auth.RefreshingTokenProvider`: its source runs
 only on its own thread, so clients read its cached token without running
 Python code.
 
+On a native thread -- a QWP/WebSocket sender, query or pool reconnecting --
+the provider runs inside no call of yours, but a call of yours may be waiting
+for it: an ACK wait such as :meth:`PooledSender.wait
+<questdb.PooledSender.wait>` holds its lease until the sender reconnects, and
+the reconnect needs this token. A provider, or a logging handler it triggers,
+that uses a lease another thread holds this way waits at most two seconds for
+it and then raises :class:`~questdb.QuestDBError` with ``code``
+``QuestDBErrorCode.InvalidApiCall`` instead of deadlocking both threads; a
+``db.close()`` called there also waits at most two seconds for such a lease.
+If that refusal escapes ``token()``, it counts as a retryable failure. Have
+such a handler queue its records for another thread, as
+:class:`logging.handlers.QueueHandler` does, rather than write them through
+the pool from inside the provider.
+
 .. _token_rejections:
 
 When the server keeps rejecting the token
