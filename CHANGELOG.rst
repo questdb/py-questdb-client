@@ -134,10 +134,17 @@ tokens from a secrets vault.
   connect at exit, or a ``RefreshingTokenProvider`` whose token needs a
   refresh, gets no token. Flush and close such clients before the interpreter
   exits; see :ref:`refreshing_token_provider`.
-* Main-thread token callbacks defer interrupts to the native-return boundary
-  without repeatedly interrupting provider retries or swallowing signal-handler
-  deadline exceptions. Pooled dataframe calls fail fast on native foreground
-  OIDC failures rather than spinning through the reconnect budget.
+* An application provider that runs on your own thread -- in every ILP/HTTP
+  flush, and in a connection the call waits for -- runs inside the client call
+  that needs the token, and a Python signal handler can run there too.
+  Neither may call into that client: a sender refuses such a call with
+  ``InvalidApiCall``, so a ``SIGTERM`` handler that closes it mid-flush closes
+  nothing; see :ref:`token_provider_reentrancy`. An exception a signal handler
+  raises there is deferred to the native-return boundary, without repeatedly
+  interrupting provider retries or swallowing signal-handler deadline
+  exceptions.
+* Pooled dataframe calls fail fast on native foreground OIDC failures rather
+  than spinning through the reconnect budget.
 * A successful OIDC refresh can revalidate the same still-valid token after a
   transient server rejection. Token-store stale-lock recovery preserves live
   displaced-owner captures as acquisition fences, and displaced refresh actions

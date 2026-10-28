@@ -72,6 +72,16 @@ class BearerTokenProvider(Protocol):
     :class:`~questdb.auth.RefreshingTokenProvider` unless you already cache
     tokens.
 
+    On your own thread -- an ILP/HTTP flush, or a connection the call waits
+    for -- ``token()`` runs inside the client call that needs the token, and
+    that client is busy until the call returns. Neither ``token()``, nor a
+    logging handler it triggers, nor a Python signal handler may call into
+    it: CPython runs a pending signal handler on the main thread at the first
+    Python code it executes, which there is ``token()``, and a sender refuses
+    such a call with :class:`~questdb.QuestDBError` with ``code``
+    ``QuestDBErrorCode.InvalidApiCall``. See
+    :ref:`Code that runs inside a client call <token_provider_reentrancy>`.
+
     A QWP/WebSocket sender, query or pool keeps retrying a failure in its
     background reconnects, whatever a
     :class:`~questdb.auth.TokenUnavailableError` says; a connection the

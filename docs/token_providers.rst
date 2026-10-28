@@ -150,7 +150,8 @@ optional ``on_rejected(token, http_status)`` (see
 :class:`~questdb.auth.BearerTokenProvider`). It runs on every connection
 attempt of a QWP/WebSocket sender, query or pool, possibly on a native
 thread, and on every flush of an ILP/HTTP sender, on the flushing thread, so
-it must be quick.
+it must be quick. When it runs on your own thread it runs inside the call
+that needs the token: see `Code that runs inside a client call`_.
 
 When a server answers HTTP 401, the client calls ``on_rejected`` with the
 rejected token, asks for a token again, and retries the same endpoint once if
@@ -209,6 +210,35 @@ fails with it at once. Queued store-and-forward rows are not deleted, and a
 disk-backed slot stays drainable by a later process. Raised from the source of
 a :class:`~questdb.auth.RefreshingTokenProvider`, it counts as retryable like
 any other exception.
+
+.. _token_provider_reentrancy:
+
+Code that runs inside a client call
+===================================
+
+An application provider runs inside the client call that needs the token
+whenever that call asks for it on your own thread: every ILP/HTTP flush,
+including an auto-flush from ``row()`` or ``dataframe()``, and a connection
+the call opens and waits for, such as :meth:`Sender.establish
+<questdb.Sender.establish>`, an eager :func:`questdb.connect` or the
+connection of :meth:`QuestDB.dataframe <questdb.QuestDB.dataframe>`. The
+client is busy until that call returns, so nothing that runs inside the
+provider may call into it, or into another client that uses the same
+provider: not the provider itself, not a logging handler it triggers, and not
+a Python signal handler.
+
+The last one is easy to miss. On the main thread, CPython runs a pending
+signal handler at the first Python code it executes, and inside such a call
+that code is your provider. A ``SIGTERM`` handler that closes the sender can
+therefore run in the middle of a flush: its ``close()`` raises
+:class:`~questdb.QuestDBError` with ``code``
+``QuestDBErrorCode.InvalidApiCall`` and closes nothing, and an exception the
+handler raises comes out of the client call once that call returns. With a
+fixed ``token=``, no Python code runs during the call, so the same handler
+runs after it. Have the handler set a flag that your code acts on after the
+call, or use a :class:`~questdb.auth.RefreshingTokenProvider`: its source runs
+only on its own thread, so clients read its cached token without running
+Python code.
 
 .. _token_rejections:
 

@@ -9811,7 +9811,10 @@ cdef class QuestDB:
         source of your own, a callable returning a token, or an object with
         ``token()`` and an optional ``on_rejected()`` -- see
         :ref:`refreshing_token_provider`. It is mutually exclusive with
-        ``oidc_auth``, ``token``, ``username`` and ``password``.
+        ``oidc_auth``, ``token``, ``username`` and ``password``. A provider
+        that runs on the calling thread runs inside the call that needs the
+        token; see :ref:`token_provider_reentrancy` for what it, and a Python
+        signal handler that runs there, must not do.
 
         The connection pool is opened eagerly unless configuration selects a
         lazy connection. Dataframe ingestion always uses the direct
@@ -12092,7 +12095,11 @@ cdef class Sender:
         source of your own, a callable returning a token, or an object with
         ``token()`` and an optional ``on_rejected()`` -- see
         :ref:`refreshing_token_provider`. It is mutually exclusive with
-        ``oidc_auth``, ``token``, ``username`` and ``password``.
+        ``oidc_auth``, ``token``, ``username`` and ``password``. It runs
+        inside every ILP/HTTP flush, and inside a connect the call waits for
+        such as :meth:`establish <questdb.Sender.establish>`, where neither
+        it nor a Python signal handler may use this sender; see
+        :ref:`token_provider_reentrancy`.
         """
 
         cdef line_sender_error* err = NULL
@@ -12286,7 +12293,11 @@ cdef class Sender:
         instead: a :class:`questdb.auth.RefreshingTokenProvider` around a token
         source of your own, a callable returning a token, or an object with
         ``token()`` and an optional ``on_rejected()`` -- see
-        :ref:`refreshing_token_provider`.
+        :ref:`refreshing_token_provider`. It runs inside every ILP/HTTP
+        flush, and inside a connect the call waits for such as
+        :meth:`establish <questdb.Sender.establish>`, where neither it nor a
+        Python signal handler may use this sender; see
+        :ref:`token_provider_reentrancy`.
         Neither has a configuration-string equivalent, so a token provider
         must be supplied here rather than through ``QDB_CLIENT_CONF``. They
         are mutually exclusive with each other and with ``token``,
@@ -13110,7 +13121,8 @@ cdef class Sender:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 f'{method}() cannot be called while this sender is in a native '
-                'operation (including from its OIDC diagnostic callback).')
+                'operation, including from code that runs inside it: a token '
+                'provider, an OIDC callback or a signal handler.')
         # Read-only getters are safe in an idle listener, but a native call
         # may hold a mutable borrow even while the listener is dispatched.
         if allow_idle_callback or (

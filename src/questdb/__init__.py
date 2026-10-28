@@ -136,7 +136,10 @@ def connect(
     your own (Azure Identity, an OAuth2 flow, ...), a callable returning a
     token, or an object with ``token()`` and an optional ``on_rejected()``.
     It is mutually exclusive with ``oidc_auth`` and with ``username``,
-    ``password`` and ``token``. See :ref:`refreshing_token_provider`.
+    ``password`` and ``token``. See :ref:`refreshing_token_provider`. A
+    provider that runs on the calling thread runs inside the call that needs
+    the token; see :ref:`token_provider_reentrancy` for what it, and a Python
+    signal handler that runs there, must not do.
 
     By default ``connect()`` opens the warm minimums up front and fails
     fast when the server is unreachable or rejects the credentials. Set
