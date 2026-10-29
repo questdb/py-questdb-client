@@ -723,7 +723,8 @@ cdef void_int _setattr_without_dict(
     `tokens.cold_wait = 5` -- would otherwise be stored and read back while
     configuring nothing, where it used to raise `AttributeError`. Python
     subclasses keep the dictionary every subclass of an extension type has
-    always had.
+    always had; `Sender`'s also get the generic setter back (see
+    `_subclass_keeps_generic_setattr`).
     """
     cdef object descr = _NO_SUCH_ATTR
     if (type(obj) is cls and isinstance(name, str)
@@ -743,6 +744,36 @@ cdef void_int _setattr_without_dict(
     # the C-level setattr slot. This is the function it would have called.
     PyObject_GenericSetAttr(obj, name, value)
     return 0
+
+
+cdef void_int _subclass_keeps_generic_setattr(
+        type cls, type ext_cls) except -1:
+    """Give `cls`, a Python subclass of `ext_cls`, the generic attribute
+    setter back, unless a class in between sets attributes its own way.
+
+    `ext_cls.__setattr__` refuses new names only on `ext_cls` itself, but a
+    subclass inherits the override all the same: each of its attribute
+    stores would pay for the call, and CPython 3.11+ does not specialize
+    stores on a type that overrides the setter, so a `__slots__` store runs
+    about twice as slow.
+    """
+    cdef object setattr_owner = None
+    cdef object delattr_owner = None
+    for klass in cls.__mro__:
+        attrs = klass.__dict__
+        if setattr_owner is None and '__setattr__' in attrs:
+            setattr_owner = klass
+        if delattr_owner is None and '__delattr__' in attrs:
+            delattr_owner = klass
+    if setattr_owner is ext_cls and delattr_owner in (ext_cls, object):
+        cls.__setattr__ = object.__setattr__
+        cls.__delattr__ = object.__delattr__
+    return 0
+
+
+def _sender_init_subclass(cls, **kwargs):
+    super(Sender, cls).__init_subclass__(**kwargs)
+    _subclass_keeps_generic_setattr(cls, Sender)
 
 
 cdef inline void_int _encode_utf8(
@@ -11944,6 +11975,10 @@ cdef class Sender:
 
     def __setattr__(self, name, value):
         _setattr_without_dict(self, Sender, _DICT_ONLY_ATTRS, name, value)
+
+    # A class attribute because Cython refuses an extension type's own
+    # `__init_subclass__` method. See `_subclass_keeps_generic_setattr`.
+    __init_subclass__ = classmethod(_sender_init_subclass)
 
     def __cinit__(self):
         # Cython has just created the instance dictionary, which CPython

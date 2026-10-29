@@ -15467,6 +15467,53 @@ class TestNoNewAttributes(unittest.TestCase):
         sender.request_timeout = 1
         self.assertEqual(sender.request_timeout, 1)
 
+    def test_subclasses_store_through_the_generic_setter(self):
+        # `Sender.__setattr__` guards `Sender` itself only; inherited, it would
+        # slow every store on a subclass and stop CPython specializing them.
+        class MySender(qi.Sender):
+            pass
+
+        class MySlotSender(qi.Sender):
+            __slots__ = ('counter',)
+
+        for cls in (MySender, MySlotSender):
+            with self.subTest(cls=cls.__name__):
+                self.assertIs(cls.__setattr__, object.__setattr__)
+                self.assertIs(cls.__delattr__, object.__delattr__)
+                sender = cls('http', '127.0.0.1', 9000)
+                sender.counter = 1
+                self.assertEqual(sender.counter, 1)
+                del sender.counter
+                self.assertFalse(hasattr(sender, 'counter'))
+
+    def test_subclass_setattr_overrides_are_kept(self):
+        calls = []
+
+        class Mixin:
+            def __setattr__(self, name, value):
+                calls.append(('mixin', name))
+                super().__setattr__(name, value)
+
+        class Own(qi.Sender):
+            def __setattr__(self, name, value):
+                calls.append(('own', name))
+                super().__setattr__(name, value)
+
+        class OwnChild(Own):
+            pass
+
+        class WithMixin(Mixin, qi.Sender):
+            pass
+
+        for cls, owner in (
+                (Own, 'own'), (OwnChild, 'own'), (WithMixin, 'mixin')):
+            with self.subTest(cls=cls.__name__):
+                del calls[:]
+                sender = cls('http', '127.0.0.1', 9000)
+                sender.counter = 1
+                self.assertEqual(calls, [(owner, 'counter')])
+                self.assertEqual(sender.counter, 1)
+
     @unittest.skipIf(
         sys.implementation.name == 'pypy',
         'PyPy keeps the dictionary: its collector sees the bearer holder there')
