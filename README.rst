@@ -19,7 +19,7 @@ and full-connection encryption with
 Install
 =======
 
-The latest version of the library is 6.0.0 (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
+The latest version of the library is 6.0.1 (`changelog <https://py-questdb-client.readthedocs.io/en/latest/changelog.html>`_).
 
 ::
 
