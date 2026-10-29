@@ -2367,6 +2367,10 @@ class Sender:
 
         Protocol version 2 introduces binary floating point support and
         the array datatype.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when read from any
+        thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     @property
@@ -2374,6 +2378,10 @@ class Sender:
         """
         Returns the sender's maximum-configured maximum name length for table
         names and column names.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when read from any
+        thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     def establish(self):
@@ -2598,12 +2606,22 @@ class Sender:
     def published_fsn(self) -> Optional[int]:
         """
         Highest QWP/WebSocket frame sequence number published locally.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when called from
+        this sender's own ``error_handler`` or ``connection_listener``, or
+        from any thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     def acked_fsn(self) -> Optional[int]:
         """
         Highest QWP/WebSocket frame sequence number completed by ACK or
         drop-and-continue rejection.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when called from
+        this sender's own ``error_handler`` or ``connection_listener``, or
+        from any thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     def await_acked_fsn(self, fsn: int, timeout_millis: int = 0) -> bool:
@@ -2619,11 +2637,21 @@ class Sender:
     def poll_error(self) -> Optional[SenderError]:
         """
         Poll the next structured QWP/WebSocket diagnostic.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when called from
+        this sender's own ``error_handler`` or ``connection_listener``, or
+        from any thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     def error_events_dropped(self) -> int:
         """
         Number of QWP/WebSocket diagnostics dropped from the bounded ring.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when called from
+        this sender's own ``error_handler`` or ``connection_listener``, or
+        from any thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     @property
@@ -2631,6 +2659,10 @@ class Sender:
         """
         Total connection events discarded by the listener inbox's
         drop-oldest policy. ``0`` when no listener is registered.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when read from any
+        thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     @property
@@ -2638,6 +2670,10 @@ class Sender:
         """
         Total connection events delivered to the listener. ``0`` when no
         listener is registered.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when read from any
+        thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     def close_drain(self):

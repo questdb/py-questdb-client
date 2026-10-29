@@ -865,6 +865,51 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         self.assertIn('provider retired', str(caught.exception))
         self.assertEqual(provider.calls, 1)
 
+    def test_a_client_refusal_escaping_a_provider_is_retried(self):
+        # A client refusing a call the provider makes raises InvalidApiCall
+        # too. That refusal says nothing about the credential, so it is
+        # retried; only the provider's own InvalidApiCall, even one raised
+        # from such a refusal, ends the connect.
+        idle = questdb.Sender(questdb.Protocol.Http, '127.0.0.1', 9000)
+        self.addCleanup(idle.close, False)
+        for own, expected_calls in ((False, 2), (True, 1)):
+            with self.subTest(own=own):
+                calls = []
+
+                def provider():
+                    calls.append(None)
+                    if len(calls) == 1:
+                        try:
+                            idle.max_name_len  # not established: refused
+                        except questdb.QuestDBError as exc:
+                            if own:
+                                raise questdb.QuestDBError(
+                                    questdb.QuestDBErrorCode.InvalidApiCall,
+                                    'provider retired') from exc
+                            raise
+                    return 'tok'
+
+                with QwpAckServer() as server:
+                    conf = (
+                        f'ws::addr=127.0.0.1:{server.port};'
+                        'initial_connect_retry=sync;'
+                        'reconnect_initial_backoff_millis=10;'
+                        'reconnect_max_backoff_millis=10;'
+                        'reconnect_max_duration_millis=2000;')
+                    if own:
+                        with self.assertRaises(questdb.QuestDBError) as caught:
+                            with questdb.Sender.from_conf(
+                                    conf, bearer_token_provider=provider):
+                                pass
+                        self.assertIs(
+                            caught.exception.code,
+                            questdb.QuestDBErrorCode.ConfigError)
+                    else:
+                        with questdb.Sender.from_conf(
+                                conf, bearer_token_provider=provider):
+                            pass
+                self.assertEqual(len(calls), expected_calls)
+
     def test_only_invalid_api_call_stops_a_background_connect(self):
         def unassigned():
             # Classified permanent, even with the terminal code: still a
@@ -1759,13 +1804,13 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         held = {}
         events = []
 
-        def connect(provider):
+        def connect(provider, conf=''):
             db = held['db'] = questdb.connect(
                 f'ws::addr=127.0.0.1:{port};lazy_connect=true;'
                 'sender_pool_min=0;query_pool_min=0;'
                 'reconnect_initial_backoff_millis=25;'
                 'reconnect_max_backoff_millis=25;'
-                'reconnect_max_duration_millis=10000;',
+                'reconnect_max_duration_millis=10000;' + conf,
                 bearer_token_provider=provider,
                 connection_listener=events.append)
             lease = held['lease'] = db.sender()
@@ -1858,6 +1903,42 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                     return 'refreshed'
 
             db, lease = connect(Provider())
+            kind = questdb.ConnectionEventKind.CredentialUnavailable
+            deadline = time.monotonic() + 10
+            while (time.monotonic() < deadline
+                   and not any(e.kind is kind for e in events)):
+                time.sleep(0.01)
+            causes = sorted(
+                {e.cause_code.name for e in events if e.kind is kind})
+            print('escaped:', escaped, 'causes:', causes)
+            lease.close()
+            db.close()
+        '''
+        output = self._run_held_lease_child(body, 'escape')
+        self.assertIn("escaped: ['InvalidApiCall']", output)
+        self.assertIn("causes: ['SocketError']", output)
+
+    def test_a_pool_refusal_escaping_the_provider_stays_retryable(self):
+        # The same for a pool at its cap: a provider borrowing from it while
+        # the only lease waits for this token gets "Connection pool
+        # exhausted", also InvalidApiCall, and the pool is busy, not broken.
+        body = '''
+            escaped = []
+
+            class Provider:
+                def token(self):
+                    if time.monotonic() - started < 1.0:
+                        return 'stale'
+                    if not escaped:
+                        try:
+                            held['db'].sender()
+                        except questdb.QuestDBError as exc:
+                            escaped.append(exc.code.name)
+                            raise
+                    return 'refreshed'
+
+            db, lease = connect(
+                Provider(), 'sender_pool_max=1;acquire_timeout_ms=100;')
             kind = questdb.ConnectionEventKind.CredentialUnavailable
             deadline = time.monotonic() + 10
             while (time.monotonic() < deadline

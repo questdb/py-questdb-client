@@ -81,10 +81,13 @@ failure: ``retryable=True`` (the default) for network failures, timeouts,
 HTTP 429 and 5xx; ``retryable=False`` for missing or wrong configuration. Any
 other exception counts as retryable. Never put a token in the message.
 
-The classification matters when a connection is waited for -- an eager
-:func:`questdb.connect`, or a sender's synchronous initial connect
-(``initial_connect_retry=sync``): it retries a retryable failure within its
-budget and fails at once on a permanent one. A connection that is already
+The classification matters when a connection is waited for and retried -- a
+sender's synchronous initial connect (``initial_connect_retry=sync``, which
+any ``reconnect_*`` key implies for a :class:`~questdb.Sender`), or an eager
+:func:`questdb.connect` or pool borrow with ``initial_connect_retry=on``: it
+retries a retryable failure within its budget and fails at once on a
+permanent one. Without initial-connect retry, such a connection makes one
+attempt and fails on either kind. A connection that is already
 established reconnects in the background and keeps retrying either kind, so
 store-and-forward data is never abandoned because a token could not be
 fetched for a while. A failure surfaces as a
@@ -211,6 +214,13 @@ disk-backed slot stays drainable by a later process. Raised from the source of
 a :class:`~questdb.auth.RefreshingTokenProvider`, it counts as retryable like
 any other exception.
 
+Only an ``InvalidApiCall`` your provider raises itself has that effect. The
+client raises the same code when it refuses a call -- a pool at its
+``sender_pool_max`` cap once ``acquire_timeout_ms`` runs out, a lease another
+thread holds, a client that is closing. Such a refusal, raised by a client
+call inside ``token()`` and let escape, counts as retryable: it is about that
+call, not the credential.
+
 .. _token_provider_reentrancy:
 
 Code that runs inside a client call
@@ -249,7 +259,9 @@ that uses a lease another thread holds this way waits at most two seconds for
 it and then raises :class:`~questdb.QuestDBError` with ``code``
 ``QuestDBErrorCode.InvalidApiCall`` instead of deadlocking both threads; a
 ``db.close()`` called there also waits at most two seconds for such a lease.
-If that refusal escapes ``token()``, it counts as a retryable failure. Have
+If that refusal escapes ``token()``, it counts as a retryable failure, as
+does any other refusal of a client call made there, such as a
+``db.sender()`` that finds the pool at its cap. Have
 such a handler queue its records for another thread, as
 :class:`logging.handlers.QueueHandler` does, rather than write them through
 the pool from inside the provider.

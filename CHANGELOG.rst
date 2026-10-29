@@ -89,6 +89,27 @@ configuration string shared with another client that reads them stops
 working. Remove them and pass ``bearer_token_provider=`` instead; see
 :ref:`refreshing_token_provider`.
 
+Subclasses of Sender see its attribute guard
+********************************************
+
+:class:`Sender <questdb.Sender>` now has an instance dictionary, which holds
+the bearer-token holder on PyPy, and defines ``__setattr__`` so that a
+misspelt setting such as ``sender.request_timeout = 5000`` still raises
+``AttributeError``. Python subclasses see the difference:
+
+* On CPython 3.10 to 3.12, ``object.__setattr__`` and ``object.__delattr__``
+  raise ``TypeError`` when applied to a sender, for example from a subclass's
+  own ``__setattr__``. Call ``super().__setattr__`` instead, which works on
+  every version.
+* A class that defines ``__setattr__`` or ``__delattr__`` and comes after
+  ``Sender`` in a subclass's bases -- ``Mixin`` in ``class S(Sender, Mixin)``
+  -- makes defining the subclass raise ``TypeError``: ``Sender``'s own method
+  comes first, so the mixin's would never run. List the mixin before
+  ``Sender``.
+* ``__slots__`` on a subclass no longer stops new attribute names, and cannot
+  name ``__dict__``; ``vars(sender)`` returns the instance dictionary rather
+  than raising ``TypeError``.
+
 New
 ~~~
 
@@ -115,13 +136,16 @@ tokens from a secrets vault.
   when passing repeated bound-method lookups. A ``RefreshingTokenProvider``
   such a provider calls -- ``bearer_token_provider=lambda: tokens.token()`` --
   still refreshes early when a server rejects its token with HTTP 401.
-* Such a provider that knows retrying can never succeed raises
+* Such a provider that knows retrying can never succeed raises its own
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.InvalidApiCall``, as a Rust provider returns
   ``InvalidApiCall``. Its clients then stop: a QWP/WebSocket sender, query or
   pool fails with ``ConfigError`` and stops reconnecting, and an ILP/HTTP
   flush fails at once. A token source cannot do this; close its
-  ``RefreshingTokenProvider`` instead.
+  ``RefreshingTokenProvider`` instead. An ``InvalidApiCall`` that a client
+  call inside the provider raised -- a pool at its ``sender_pool_max`` cap, a
+  client that is closing -- and that escapes ``token()`` counts as
+  retryable.
 * ``RefreshingTokenProvider.close(wait=True, timeout=30)`` optionally drains an
   active source with a deadline. A timeout leaves the provider closed and raises
   ``TimeoutError``. Sources must bound their own I/O: interpreter exit cannot
@@ -437,7 +461,7 @@ which is what says whether the sender will carry on:
   permanently closed provider (``close()`` is one-way; cancelling one
   ``sign_in()`` attempt does not close an ``OidcDeviceAuth``), by a scope that
   cannot yield the required token kind, and by an application
-  ``bearer_token_provider=`` that raised :class:`QuestDBError
+  ``bearer_token_provider=`` that raised its own :class:`QuestDBError
   <questdb.QuestDBError>` with ``code`` ``QuestDBErrorCode.InvalidApiCall``,
   reported as ``ConfigError``. Queued rows are not deleted — a disk-backed
   store-and-forward slot stays drainable by a later process — but this process
@@ -457,15 +481,20 @@ opts in by handling the new kind.
 Other changes
 ~~~~~~~~~~~~~
 
-- A token provider's failure while a connection is waited for -- an eager
-  :func:`questdb.connect`, a sender's ``initial_connect_retry=sync`` connect --
-  is retried only when the provider classified it retryable with
-  :class:`~questdb.auth.TokenUnavailableError`; any other failure, an
-  ``oidc_auth`` network error included, fails the connection at once.
+- A connection that is waited for retries a token provider's failure within
+  its budget only with initial-connect retry on -- a sender's
+  ``initial_connect_retry=sync`` connect, which any ``reconnect_*`` key
+  implies, or an eager :func:`questdb.connect` with
+  ``initial_connect_retry=on`` -- and only a retryable failure. A
+  ``bearer_token_provider=`` failure is retryable unless it is a
+  :class:`~questdb.auth.TokenUnavailableError` with ``retryable=False`` or
+  the provider's own ``InvalidApiCall``. An ``oidc_auth`` network error fails
+  the connection at once.
+  Without initial-connect retry, the connection makes one attempt.
   Background reconnects keep retrying every provider failure, except
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-  ``QuestDBErrorCode.InvalidApiCall`` from an application provider, which
-  stops them.
+  ``QuestDBErrorCode.InvalidApiCall`` that an application provider raises
+  itself, which stops them.
 
 - A 401 is retried with a refreshed token only when the server's
   ``WWW-Authenticate`` challenge allows it: no Bearer ``error``, or

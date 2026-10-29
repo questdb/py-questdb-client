@@ -91,10 +91,14 @@ class BearerTokenProvider(Protocol):
     :class:`~questdb.auth.TokenUnavailableError` says; a connection the
     caller waits for, such as a sender's ``initial_connect_retry=sync``
     connect, retries only a retryable one. To stop the reconnects on a
-    failure that retrying can never clear, raise
+    failure that retrying can never clear, raise your own
     :class:`~questdb.QuestDBError` with ``code``
     ``QuestDBErrorCode.InvalidApiCall``: the client then fails with
-    ``ConfigError`` and stops reconnecting.
+    ``ConfigError`` and stops reconnecting. An ``InvalidApiCall`` that a
+    client call inside ``token()`` raised -- a pool at its
+    ``sender_pool_max`` cap, a lease another thread holds, a client that is
+    closing -- counts as retryable if it escapes: it refuses that call, and
+    says nothing about the credential.
 
     An ILP/HTTP sender has no background reconnects. Its flush retries a
     retryable failure for up to ``retry_timeout``, fails at once on a

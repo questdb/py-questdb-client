@@ -157,14 +157,16 @@ class TokenUnavailableError(QuestDBError):
     says whether retrying can succeed -- network failures, timeouts, HTTP 429
     and 5xx are retryable; missing or wrong configuration is not -- and
     ``retry_after`` (seconds or a :class:`datetime.timedelta`) is the
-    platform's suggested wait. Any other exception from a source counts as
-    retryable.
+    platform's suggested wait. Any other exception from a source or provider
+    counts as retryable.
 
-    A connection the caller waits for -- an eager :func:`questdb.connect`, a
-    sender's synchronous initial connect -- retries only a retryable failure.
-    Background reconnects retry either kind. To stop them on a failure that
-    retrying can never clear, an application provider raises
-    :class:`~questdb.QuestDBError` with ``code``
+    A connection the caller waits for retries only a retryable failure, and
+    only with initial-connect retry on: a sender's synchronous initial
+    connect (``initial_connect_retry=sync``), or an eager
+    :func:`questdb.connect` with ``initial_connect_retry=on``. Without it, the
+    connection makes one attempt. Background reconnects retry either kind. To
+    stop them on a failure that retrying can never clear, an application
+    provider raises its own :class:`~questdb.QuestDBError` with ``code``
     ``QuestDBErrorCode.InvalidApiCall`` instead; a
     :class:`RefreshingTokenProvider` is stopped by closing it.
 
@@ -403,6 +405,30 @@ cdef bint _tp_sink_terminal_error(
         sink, encoded, len(encoded))
 
 
+cdef bint _tp_raised_by_client(object exc) except -1:
+    """Whether ``exc`` is a client call's refusal that the provider let
+    escape, rather than an exception the provider raised itself.
+
+    A pool at its ``sender_pool_max`` cap, a lease another thread holds and a
+    handle that is closing all refuse a call with ``InvalidApiCall``. That
+    refusal is about the call -- the client is busy or closing, not broken --
+    so it must not stop the provider's clients the way the provider's own
+    ``InvalidApiCall`` does. The innermost traceback entry is where the
+    exception was raised. Cython records an entry, with this module's globals,
+    for each function of this module the exception leaves, and the package's
+    Python modules are named ``questdb.*`` too.
+    """
+    cdef object tb = exc.__traceback__
+    cdef object name
+    if tb is None:
+        return False
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    name = tb.tb_frame.f_globals.get('__name__')
+    return isinstance(name, str) and (
+        name == 'questdb' or name.startswith('questdb.'))
+
+
 cdef void _tp_sink_exception(
         questdb_token_sink* sink, object exc, object signal_codes) noexcept:
     """Report provider failures; preserve main-thread interruptions separately.
@@ -429,14 +455,17 @@ cdef void _tp_sink_exception(
         # Rust provider or a C++ one throwing `invalid_api_call`: clients stop
         # reconnecting. A source's sink refuses it, and the exception then
         # counts as retryable like any other. A TokenUnavailableError, handled
-        # above, keeps its classification whatever its code. The refusal of
-        # a lease or pool wait this callback gave up on
-        # (`_callback_wait_refused`) counts as retryable: that lease or pool
-        # is busy, maybe waiting for this very token, not broken.
+        # above, keeps its classification whatever its code. Only the
+        # provider's own `InvalidApiCall` stops its clients. A client call's
+        # refusal that escapes the provider counts as retryable: a lease or
+        # pool wait this callback gave up on (`_callback_wait_refused`), a
+        # pool at its cap, a handle that is closing. That lease or pool is
+        # busy, maybe waiting for this very token, not broken.
         if (isinstance(exc, QuestDBError)
                 and getattr(exc, 'code', None)
                     is QuestDBErrorCode.InvalidApiCall
                 and not getattr(exc, '_callback_wait_refused', False)
+                and not _tp_raised_by_client(exc)
                 and _tp_sink_terminal_error(sink, str(exc))):
             return
         _tp_sink_text_error(

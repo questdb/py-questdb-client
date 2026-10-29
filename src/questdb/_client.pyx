@@ -756,11 +756,29 @@ cdef void_int _subclass_keeps_generic_setattr(
     stores would pay for the call, and CPython 3.11+ does not specialize
     stores on a type that overrides the setter, so a `__slots__` store runs
     about twice as slow.
+
+    A class after `ext_cls` in the MRO that sets or deletes attributes its
+    own way -- `Mixin` in `class S(Sender, Mixin)` -- is refused instead:
+    Python finds `ext_cls`'s method first, so the class's own would silently
+    never run, where it did before `ext_cls` had one. Listed before
+    `ext_cls`, it runs.
     """
     cdef object setattr_owner = None
     cdef object delattr_owner = None
+    cdef bint after_ext = False
     for klass in cls.__mro__:
         attrs = klass.__dict__
+        if after_ext and klass is not object:
+            for name in ('__setattr__', '__delattr__'):
+                if name in attrs:
+                    raise TypeError(
+                        f'{klass.__name__}.{name} would never run on '
+                        f'{cls.__name__}: {ext_cls.__name__}, which comes '
+                        'before it in the method resolution order, defines '
+                        f'{name} too. List {klass.__name__} before '
+                        f'{ext_cls.__name__} in the bases.')
+        if klass is ext_cls:
+            after_ext = True
         if setattr_owner is None and '__setattr__' in attrs:
             setattr_owner = klass
         if delattr_owner is None and '__delattr__' in attrs:
@@ -3393,7 +3411,8 @@ class ConnectionEventKind(TaggedEnum):
           close it), by a scope that cannot yield the required token kind,
           such as ``groups_in_token=True`` against an identity provider that
           returns no ID token, and by a ``bearer_token_provider=`` that
-          raised :class:`QuestDBError` with ``code`` ``InvalidApiCall`` (see
+          raised its own :class:`QuestDBError` with ``code``
+          ``InvalidApiCall`` (see
           :class:`~questdb.auth.BearerTokenProvider`), which reports
           ``ConfigError``. Queued rows are not deleted — a disk-backed
           store-and-forward slot stays drainable by a later process — but
@@ -12459,7 +12478,12 @@ cdef class Sender:
 
     @property
     def max_name_len(self) -> int:
-        """Maximum length of a table or column name."""
+        """Maximum length of a table or column name.
+
+        Raises :class:`QuestDBError <questdb.QuestDBError>`
+        (``InvalidApiCall``) when read from any thread while this sender is
+        inside a native call such as :func:`Sender.flush`.
+        """
         self._check_not_in_own_callback('max_name_len', allow_idle_callback=True)
         if self._impl == NULL:
             raise QuestDBError(
@@ -12557,6 +12581,10 @@ cdef class Sender:
 
         Protocol version 2 introduces binary floating point support and
         the array datatype.
+
+        Raises :class:`QuestDBError <questdb.QuestDBError>`
+        (``InvalidApiCall``) when read from any thread while this sender is
+        inside a native call such as :func:`Sender.flush`.
         """
         self._check_not_in_own_callback('protocol_version', allow_idle_callback=True)
         if self._impl == NULL:
@@ -13335,6 +13363,12 @@ cdef class Sender:
     def published_fsn(self):
         """
         Highest QWP/WebSocket frame sequence number published locally.
+
+        Raises :class:`QuestDBError <questdb.QuestDBError>`
+        (``InvalidApiCall``) when called from this sender's own
+        ``error_handler`` or ``connection_listener``, or from any thread
+        while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
         cdef line_sender_qwpws_fsn fsn
         cdef line_sender_error* err = NULL
@@ -13350,6 +13384,12 @@ cdef class Sender:
         """
         Highest QWP/WebSocket frame sequence number completed by ACK or
         drop-and-continue rejection.
+
+        Raises :class:`QuestDBError <questdb.QuestDBError>`
+        (``InvalidApiCall``) when called from this sender's own
+        ``error_handler`` or ``connection_listener``, or from any thread
+        while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
         cdef line_sender_qwpws_fsn fsn
         cdef line_sender_error* err = NULL
@@ -13449,6 +13489,12 @@ cdef class Sender:
     def poll_error(self):
         """
         Poll the next structured QWP/WebSocket diagnostic.
+
+        Raises :class:`QuestDBError <questdb.QuestDBError>`
+        (``InvalidApiCall``) when called from this sender's own
+        ``error_handler`` or ``connection_listener``, or from any thread
+        while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
         cdef line_sender_error* err = NULL
         cdef line_sender_qwpws_error* qwp_err = NULL
@@ -13468,6 +13514,12 @@ cdef class Sender:
     def error_events_dropped(self):
         """
         Number of QWP/WebSocket diagnostics dropped from the bounded ring.
+
+        Raises :class:`QuestDBError <questdb.QuestDBError>`
+        (``InvalidApiCall``) when called from this sender's own
+        ``error_handler`` or ``connection_listener``, or from any thread
+        while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
         cdef line_sender_error* err = NULL
         cdef uint64_t dropped = 0
@@ -13482,6 +13534,10 @@ cdef class Sender:
         """
         Total connection events discarded by the listener inbox's
         drop-oldest policy. ``0`` when no listener is registered.
+
+        Raises :class:`QuestDBError <questdb.QuestDBError>`
+        (``InvalidApiCall``) when read from any thread while this sender is
+        inside a native call such as :func:`Sender.flush`.
         """
         self._check_not_in_own_callback(
             'connection_events_dropped', allow_idle_callback=True)
@@ -13494,6 +13550,10 @@ cdef class Sender:
         """
         Total connection events delivered to the listener. ``0`` when no
         listener is registered.
+
+        Raises :class:`QuestDBError <questdb.QuestDBError>`
+        (``InvalidApiCall``) when read from any thread while this sender is
+        inside a native call such as :func:`Sender.flush`.
         """
         self._check_not_in_own_callback(
             'connection_events_delivered', allow_idle_callback=True)

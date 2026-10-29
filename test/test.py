@@ -15514,6 +15514,42 @@ class TestNoNewAttributes(unittest.TestCase):
                 self.assertEqual(calls, [(owner, 'counter')])
                 self.assertEqual(sender.counter, 1)
 
+    def test_a_setattr_mixin_after_sender_is_refused(self):
+        # Sender's own __setattr__ comes first in the MRO, so a mixin listed
+        # after it would silently never run. Listed before Sender, it runs.
+        calls = []
+
+        class SetMixin:
+            def __setattr__(self, name, value):
+                calls.append(('set', name))
+                super().__setattr__(name, value)
+
+        class DelMixin:
+            def __delattr__(self, name):
+                calls.append(('del', name))
+                super().__delattr__(name)
+
+        class Plain(qi.Sender):
+            pass
+
+        for mixin in (SetMixin, DelMixin):
+            with self.subTest(mixin=mixin.__name__):
+                for bases in ((qi.Sender, mixin), (Plain, mixin)):
+                    with self.assertRaisesRegex(
+                            TypeError,
+                            f'List {mixin.__name__} before Sender'):
+                        type('S', bases, {})
+                del calls[:]
+                sender = type('S', (mixin, qi.Sender), {})(
+                    'http', '127.0.0.1', 9000)
+                sender.counter = 1
+                del sender.counter
+                self.assertEqual(
+                    calls,
+                    [('set', 'counter')] if mixin is SetMixin
+                    else [('del', 'counter')])
+                self.assertFalse(hasattr(sender, 'counter'))
+
     @unittest.skipIf(
         sys.implementation.name == 'pypy',
         'PyPy keeps the dictionary: its collector sees the bearer holder there')
