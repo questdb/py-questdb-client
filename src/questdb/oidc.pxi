@@ -1993,9 +1993,10 @@ cdef class OidcDeviceAuth:
           value to that range, so a smaller number would be accepted here and
           silently become 5; it is rejected instead. A server-supplied
           interval, and any ``Retry-After``, take precedence.
-        * ``timeout`` — the per-HTTP-request timeout in seconds (default 30,
-          maximum 120). This is **not** a deadline for the sign-in as a whole,
-          which is bounded by the device code's own lifetime. It also bounds
+        * ``timeout`` — the per-HTTP-request timeout, in seconds or as a
+          :class:`datetime.timedelta` (default 30, maximum 120 seconds). This
+          is **not** a deadline for the sign-in as a whole, which is bounded
+          by the device code's own lifetime. It also bounds
           how long an attached transport waits for a credential: a flush or
           connect that needs a fresh token resolves it before its first
           request, and that can take one refresh (up to ``timeout``) or wait
@@ -2227,9 +2228,14 @@ cdef class OidcDeviceAuth:
                 builder, <uint64_t>default_interval, &err):
             raise _oidc_err_to_py(err)
 
-        if (not isinstance(timeout, (int, float))
-                or isinstance(timeout, bool)
-                or timeout <= 0
+        if isinstance(timeout, datetime.timedelta):
+            timeout = timeout.total_seconds()
+        elif (not isinstance(timeout, (int, float))
+                or isinstance(timeout, bool)):
+            raise OidcConfigError(
+                'timeout must be a number of seconds or a datetime.timedelta, '
+                f'not {_fqn(type(timeout))}')
+        if (timeout <= 0
                 or timeout > 120
                 or (isinstance(timeout, float) and isnan(timeout))):
             raise OidcConfigError(

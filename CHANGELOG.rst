@@ -110,6 +110,20 @@ misspelt setting such as ``sender.request_timeout = 5000`` still raises
   name ``__dict__``; ``vars(sender)`` returns the instance dictionary rather
   than raising ``TypeError``.
 
+Query results refuse re-entry from the thread reading them
+**********************************************************
+
+Code that runs on the thread reading a query result while it reads -- a
+finalizer, a ``gc`` callback or a signal handler, during a native read or
+while a batch is decoded -- can no longer call ``QueryResult.close()``,
+``QueryResult.cancel()`` or ``PooledReader.close()``, or pull another batch
+from the same cursor: these raise :class:`QuestDBError <questdb.QuestDBError>`
+with ``code`` set to ``QuestDBErrorCode.InvalidApiCall``. In 6.0 such a
+``close()`` was accepted, and the cursor was freed once the decoder let go
+of the batch. Close the result from the reading code once the read returns
+-- a ``with`` block does -- or from another thread, whose ``close()`` and
+``cancel()`` wait for the read in progress.
+
 New
 ~~~
 
@@ -503,13 +517,9 @@ Other changes
 - Finalizers and garbage collection no longer block on, or free, a query
   cursor that another operation is using: an abandoned ``QueryResult``,
   ``PooledReader``, Arrow stream or batch iterator is reclaimed without
-  waiting. Code that runs on the thread reading a result while it reads -- a
-  finalizer, a ``gc`` callback or a signal handler, during a native read or
-  while a batch is decoded -- cannot call ``QueryResult.close()``,
-  ``QueryResult.cancel()``, ``PooledReader.close()`` or a batch pull: they
-  raise :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
-  ``QuestDBErrorCode.InvalidApiCall``. In 6.0 such a ``close()`` was
-  accepted, and the cursor was freed once the decoder let go of the batch.
+  waiting. Code on the reading thread can no longer close the result while
+  it reads (see "Query results refuse re-entry from the thread reading them"
+  above).
 
 - A DataFrame error that gains a note about a partially consumed input
   stream keeps its exception class, ``in_doubt`` and ``sender_error`` instead

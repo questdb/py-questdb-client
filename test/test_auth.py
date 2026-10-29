@@ -26,6 +26,7 @@
 
 import contextlib
 import dataclasses
+import datetime
 from decimal import Decimal
 from fractions import Fraction
 import gc
@@ -522,9 +523,35 @@ class NativeOidcTest(unittest.TestCase):
 
     def test_timeout_validation(self):
         for value in (
-                0, -1, True, float('inf'), float('nan'), 121, 10**1000):
-            with self.subTest(value=value), self.assertRaises(OidcConfigError):
+                0, -1, float('inf'), float('nan'), 121, 10**1000,
+                datetime.timedelta(0), datetime.timedelta(seconds=-1),
+                datetime.timedelta(seconds=121)):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    OidcConfigError, 'no greater than 120 seconds'):
                 make_auth(timeout=value)
+        # A wrong type is named as such, not as an out-of-range number.
+        for value in (True, '30', None):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    OidcConfigError,
+                    'number of seconds or a datetime.timedelta, not '):
+                make_auth(timeout=value)
+
+    def test_timeout_accepts_a_timedelta(self):
+        # As every RefreshingTokenProvider duration does. A listener that never
+        # answers the discovery request shows the converted value reaches
+        # native: the request fails after about a second, not the default 30.
+        make_auth(timeout=datetime.timedelta(seconds=30))
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            listener.listen()
+            url = f'http://127.0.0.1:{listener.getsockname()[1]}'
+            started = time.monotonic()
+            with self.assertRaises(OidcNetworkError):
+                OidcDeviceAuth.from_questdb(
+                    url, interactive=False, open_browser=False,
+                    renderer=Renderer(),
+                    timeout=datetime.timedelta(seconds=1))
+            self.assertLess(time.monotonic() - started, 15)
 
     def test_interval_overflow_is_typed(self):
         with self.assertRaises(OidcConfigError):

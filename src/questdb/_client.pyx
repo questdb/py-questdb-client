@@ -9500,9 +9500,10 @@ cdef void_int _direct_dataframe_run(
                 except QuestDBError as probe_exc:
                     if not _is_oidc_terminal_for_foreground(
                             probe_exc, oidc_auth):
-                        # A different transient provider failure belongs in
-                        # the ordinary bounded-retry path below, with its own
-                        # type and structured OIDC detail preserved.
+                        # A different provider failure takes the checks below
+                        # with its own type and structured OIDC detail: a busy
+                        # refusal is retried within the budget, and any other
+                        # OIDC failure is raised at once.
                         exc = probe_exc
                         oidc_terminal = False
                         connect_final = False

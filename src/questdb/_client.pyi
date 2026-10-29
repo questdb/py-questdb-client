@@ -96,7 +96,7 @@ class OidcDeviceAuth:
         qr: bool = False,
         renderer: Optional[Renderer] = None,
         default_interval: int = 5,
-        timeout: float = 30,
+        timeout: Union[float, timedelta] = 30,
         token_store: Optional[FileTokenStore] = None,
     ) -> None: ...
 
@@ -119,7 +119,7 @@ class OidcDeviceAuth:
         qr: bool = False,
         renderer: Optional[Renderer] = None,
         default_interval: int = 5,
-        timeout: float = 30,
+        timeout: Union[float, timedelta] = 30,
         token_store: Optional[FileTokenStore] = None,
     ) -> OidcDeviceAuth: ...
 
