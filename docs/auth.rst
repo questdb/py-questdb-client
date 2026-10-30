@@ -43,7 +43,11 @@ client or a standalone sender:
 
 The pool and sender retain shared native ownership of the provider. Every
 connect and reconnect asks it for a current token, including silent refresh,
-without copying a fixed token into the connection configuration.
+without copying a fixed token into the connection configuration. They ask the
+native provider, never a Python ``token()``, so a subclass that overrides
+``token()`` is refused as ``oidc_auth=`` with a ``TypeError``: the override
+would run only where Python calls ``token()`` itself, as the
+:ref:`PG-wire adapters <oidc_pgwire>` do.
 
 .. warning::
 

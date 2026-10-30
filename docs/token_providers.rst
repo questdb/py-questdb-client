@@ -164,6 +164,11 @@ an error other than ``invalid_token``, which a new token cannot fix. A
 ``bearer_token_provider=lambda: tokens.token()`` -- refreshes early on such a
 401 too, as it does when attached directly.
 
+A subclass of :class:`~questdb.auth.RefreshingTokenProvider` that overrides
+``token()`` or ``on_rejected()`` is attached as an application provider too:
+clients call those methods as described here, rather than reading the cache
+past them.
+
 A provider reports failures as a source does: raise
 :class:`~questdb.auth.TokenUnavailableError` to classify one; any other
 exception counts as retryable. A QWP/WebSocket sender, query or pool keeps

@@ -70,7 +70,9 @@ class BearerTokenProvider(Protocol):
     every flush of an ILP/HTTP sender, on the flushing thread. Calls may run
     concurrently, so it should return quickly: prefer a
     :class:`~questdb.auth.RefreshingTokenProvider` unless you already cache
-    tokens.
+    tokens. Clients read a ``RefreshingTokenProvider`` attached directly from
+    its native cache instead, unless a subclass overrides ``token()`` or
+    ``on_rejected()``.
 
     On your own thread -- an ILP/HTTP flush, or a connection the call waits
     for -- ``token()`` runs inside the client call that needs the token, and

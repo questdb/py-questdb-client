@@ -149,7 +149,9 @@ tokens from a secrets vault.
   provider across clients shares its native single-flight acquisition, including
   when passing repeated bound-method lookups. A ``RefreshingTokenProvider``
   such a provider calls -- ``bearer_token_provider=lambda: tokens.token()`` --
-  still refreshes early when a server rejects its token with HTTP 401.
+  still refreshes early when a server rejects its token with HTTP 401. A
+  ``RefreshingTokenProvider`` subclass that overrides ``token()`` or
+  ``on_rejected()`` is attached as such a provider: clients call its methods.
 * Such a provider that knows retrying can never succeed raises its own
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.InvalidApiCall``, as a Rust provider returns
@@ -250,6 +252,8 @@ Highlights:
   :meth:`questdb.QuestDB.from_conf` accept ``oidc_auth=``. They retain the
   shared native provider and pull a fresh token for each connect or reconnect.
   It is mutually exclusive with a fixed ``token``, ``username`` or ``password``.
+  A subclass that overrides ``token()`` is refused, since connections never
+  call a Python ``token()``.
 * :meth:`~questdb.auth.OidcDeviceAuth.sign_in` is the only interactive
   operation. :meth:`~questdb.auth.OidcDeviceAuth.token` and every transport
   path remain non-interactive, silently refreshing when possible and otherwise

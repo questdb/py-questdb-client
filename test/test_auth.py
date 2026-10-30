@@ -4679,6 +4679,53 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 'ws::addr=localhost:9000;lazy_connect=true;',
                 oidc_auth=object())
 
+    def test_a_provider_overriding_token_is_refused(self):
+        # Connections take the token from the native provider, so they would
+        # skip an override that `headers()` and the PG-wire adapters call.
+        class Overriding(OidcDeviceAuth):
+            def token(self):
+                return 'override'
+
+        class Plain(OidcDeviceAuth):
+            pass
+
+        def attaches(auth):
+            return (
+                ('Sender', lambda: questdb.Sender(
+                    questdb.Protocol.Http, 'localhost', 9000,
+                    oidc_auth=auth)),
+                ('Sender.from_conf', lambda: questdb.Sender.from_conf(
+                    'http::addr=localhost:9000;', oidc_auth=auth)),
+                ('connect', lambda: questdb.connect(
+                    'ws::addr=localhost:9000;lazy_connect=true;',
+                    oidc_auth=auth)))
+
+        def make(cls):
+            return cls(
+                'questdb',
+                device_authorization_endpoint='https://idp.example/device',
+                token_endpoint='https://idp.example/token',
+                interactive=False,
+                open_browser=False)
+
+        overriding = make(Overriding)
+        shadowed = make(Plain)
+        shadowed.token = lambda: 'override'
+        plain = make(Plain)
+        try:
+            for label, auth in (('subclass', overriding),
+                                ('instance attribute', shadowed)):
+                for name, attach in attaches(auth):
+                    with self.subTest(override=label, attach=name):
+                        with self.assertRaisesRegex(TypeError, r'token\(\)'):
+                            attach()
+            for name, attach in attaches(plain):
+                with self.subTest(override=None, attach=name):
+                    attach().close()
+        finally:
+            for auth in (overriding, shadowed, plain):
+                auth.close()
+
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_causally_oidc_error_keeps_the_transports_own_code(self):
         # `questdb_error_oidc_get_view` reports an OIDC failure anywhere in the
@@ -5095,7 +5142,7 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         class _PeerSignInBeforeProbe(OidcDeviceAuth):
             probes = 0
 
-            def token(self):
+            def _foreground_token(self):
                 type(self).probes += 1
                 if type(self).probes == 1:
                     def run():
@@ -5110,7 +5157,7 @@ class NativeTransportAttachmentTest(unittest.TestCase):
                 try:
                     if type(self).probes == 1:
                         test.assertTrue(success_requested.wait(20))
-                    return super().token()
+                    return super()._foreground_token()
                 except questdb.QuestDBError as e:
                     probe_errors.append(
                         (e.code, getattr(e, '_acquisition_busy', None)))
@@ -5175,7 +5222,7 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         class ClosedDuringProbe(OidcDeviceAuth):
             probes = 0
 
-            def token(self):
+            def _foreground_token(self):
                 type(self).probes += 1
                 raise OidcCancelledError(
                     'the provider was closed while the flush was in flight')
@@ -5216,11 +5263,11 @@ class NativeTransportAttachmentTest(unittest.TestCase):
         class SignInOnProbe(OidcDeviceAuth):
             probes = 0
 
-            def token(self):
+            def _foreground_token(self):
                 type(self).probes += 1
                 if type(self).probes == 1:
                     self.sign_in()
-                return super().token()
+                return super()._foreground_token()
 
         with OidcTestServer() as oidc_server:
             config = make_discovered_auth(oidc_server).config

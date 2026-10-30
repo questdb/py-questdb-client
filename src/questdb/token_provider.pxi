@@ -869,6 +869,10 @@ cdef class RefreshingTokenProvider:
     remains. Behaviour follows the cross-language dynamic-credential
     specification.
 
+    A subclass that overrides :meth:`token` or :meth:`on_rejected` is
+    attached like any other application provider: clients call those methods
+    rather than reading the cache past them.
+
     The keyword parameters are durations, in seconds or as
     :class:`datetime.timedelta`, and default to the specification's values:
     ``refresh_margin`` (300), ``min_refresh_interval`` (30), ``handout_floor``
@@ -1113,6 +1117,19 @@ cdef class RefreshingTokenProvider:
         return f'RefreshingTokenProvider(name={self._name!r})'
 
 
+cdef bint _tp_reads_native_cache(object provider) except -1:
+    """Whether clients may read ``provider``, a `RefreshingTokenProvider`,
+    from its native cache: neither ``token`` nor ``on_rejected`` is overridden,
+    by a subclass or by an instance attribute. Otherwise the override runs
+    where Python calls it -- ``headers()``, the PG-wire adapters,
+    ``bearer_token_provider=tokens.token`` -- and clients must call it too.
+    """
+    return (
+        _method_not_overridden(provider, RefreshingTokenProvider, 'token')
+        and _method_not_overridden(
+            provider, RefreshingTokenProvider, 'on_rejected'))
+
+
 cdef class _ApplicationTokenProvider:
     """Bridges a Python provider -- a callable returning a token, or an object
     with ``token()`` and an optional ``on_rejected()`` -- to the native
@@ -1174,11 +1191,13 @@ def _token_application_provider_collected(key, reference):
 
 cdef object _tp_resolve_bearer_token_provider(object provider):
     """The native-backed holder for a ``bearer_token_provider=`` argument: a
-    ``RefreshingTokenProvider`` as is, anything else wrapped in an
+    ``RefreshingTokenProvider`` as is, anything else -- a subclass overriding
+    ``token()`` or ``on_rejected()`` included -- wrapped in an
     ``_ApplicationTokenProvider``. The caller keeps the holder alive."""
     if isinstance(provider, RefreshingTokenProvider):
         (<RefreshingTokenProvider>provider)._require_handle()
-        return provider
+        if _tp_reads_native_cache(provider):
+            return provider
     if isinstance(provider, OidcDeviceAuth) or isinstance(
             getattr(provider, '__self__', None), OidcDeviceAuth):
         raise TypeError(

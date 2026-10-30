@@ -746,6 +746,21 @@ cdef void_int _setattr_without_dict(
     return 0
 
 
+cdef bint _method_not_overridden(
+        object obj, type owner, str name) except -1:
+    """Whether ``obj.<name>`` resolves to ``owner``'s own definition: no class
+    ahead of ``owner`` in the MRO defines it, and no instance attribute
+    shadows it. Reads only class and instance dictionaries, so it runs no
+    descriptor."""
+    cdef object instance_dict = getattr(obj, '__dict__', None)
+    if isinstance(instance_dict, dict) and name in instance_dict:
+        return False
+    for klass in type(obj).__mro__:
+        if name in klass.__dict__:
+            return klass is owner
+    return False
+
+
 cdef void_int _subclass_keeps_generic_setattr(
         type cls, type ext_cls) except -1:
     """Give `cls`, a Python subclass of `ext_cls`, the generic attribute
@@ -9496,7 +9511,7 @@ cdef void_int _direct_dataframe_run(
                     or oidc_auth is None):
                 oidc_terminal_probe_used = True
                 try:
-                    oidc_auth.token()
+                    oidc_auth._foreground_token()
                 except QuestDBError as probe_exc:
                     if not _is_oidc_terminal_for_foreground(
                             probe_exc, oidc_auth):
@@ -10045,6 +10060,7 @@ cdef class QuestDB:
                     '"oidc_auth" must be an OidcDeviceAuth or None, '
                     f'not {_fqn(type(oidc_auth))}')
             if oidc_auth is not None:
+                _oidc_require_native_token(oidc_auth)
                 # Distinguish the two states the way `_require_open` does: a
                 # NULL handle is a provider whose construction never completed,
                 # which "is closed" misdescribes and sends the caller looking
@@ -11752,6 +11768,7 @@ cdef class Sender:
                 raise TypeError(
                     '"oidc_auth" must be an OidcDeviceAuth or None, '
                     f'not {_fqn(type(oidc_auth))}')
+            _oidc_require_native_token(oidc_auth)
             # Distinguish the two states the way `_require_open` does: a NULL
             # handle is a provider whose construction never completed, which
             # "is closed" misdescribes and sends the caller looking for a

@@ -792,6 +792,90 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         self.assertTrue(all(auth == 'Bearer T1' for auth in seen), seen)
         self.assertEqual(len(calls), 1)
 
+    def test_a_subclass_overriding_token_is_called_by_its_clients(self):
+        # The override runs where Python calls `token()` -- `headers()`, the
+        # PG-wire adapters, `bearer_token_provider=tokens.token` -- so clients
+        # must call it too, not read the native cache past it.
+        class Prefixed(RefreshingTokenProvider):
+            def token(self):
+                return 'P-' + super().token()
+
+        class Plain(RefreshingTokenProvider):
+            pass
+
+        source, _ = _counting_source()
+        with Prefixed(source) as provider, \
+                QwpAckServer(required_authorization='Bearer P-T1') as server:
+            seen = self._send_one_row(server, provider)
+        self.assertEqual(seen, ['Bearer P-T1'])
+
+        source, _ = _counting_source()
+        with Plain(source) as provider, \
+                QwpAckServer(required_authorization='Bearer I-T1') as server:
+            provider.token = (
+                lambda: 'I-' + RefreshingTokenProvider.token(provider))
+            seen = self._send_one_row(server, provider)
+        self.assertEqual(seen, ['Bearer I-T1'])
+
+        source, _ = _counting_source()
+        with Prefixed(source) as provider, \
+                QwpAckServer(required_authorization='Bearer P-T1') as server:
+            with questdb.connect(
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;',
+                    bearer_token_provider=provider) as db:
+                with db.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=questdb.ServerTimestamp)
+                    sender.flush()
+            seen = server.snapshot()['upgrade_authorizations']
+        self.assertTrue(seen)
+        self.assertTrue(all(auth == 'Bearer P-T1' for auth in seen), seen)
+
+    def test_a_subclass_overriding_on_rejected_hears_a_401(self):
+        rejected = []
+
+        class Listening(RefreshingTokenProvider):
+            def on_rejected(self, token, http_status=401):
+                rejected.append((token, http_status))
+                super().on_rejected(token, http_status)
+
+        source, calls = _counting_source()
+        with Listening(source) as provider, \
+                QwpAckServer(required_authorization='Bearer T2') as server:
+            self.assertEqual(provider.token(), 'T1')
+            seen = self._send_one_row(server, provider)
+        self.assertEqual(seen, ['Bearer T1', 'Bearer T2'])
+        self.assertEqual(rejected, [('T1', 401)])
+        self.assertEqual(len(calls), 2)
+
+    def test_a_subclass_without_overrides_is_read_from_its_native_cache(self):
+        # Only an override puts Python on the token path. Without one, the
+        # native provider is attached as for the base class, with no
+        # application-provider wrapper registered for it.
+        class Named(RefreshingTokenProvider):
+            pass
+
+        class Overriding(RefreshingTokenProvider):
+            def token(self):
+                return super().token()
+
+        for cls, wrappers in ((RefreshingTokenProvider, 0), (Named, 0),
+                              (Overriding, 1)):
+            with self.subTest(provider=cls.__name__):
+                source, _ = _counting_source()
+                with cls(source) as provider:
+                    before = _client._debug_token_callbacks_ids()
+                    sender = questdb.Sender(
+                        questdb.Protocol.Http, '127.0.0.1', 9000,
+                        bearer_token_provider=provider)
+                    try:
+                        added = (
+                            _client._debug_token_callbacks_ids() - before)
+                    finally:
+                        sender.close(flush=False)
+                self.assertEqual(len(added), wrappers)
+
     def test_connect_preserves_provider_error_that_looks_like_duplicate_key(self):
         for pool in ('sender_pool_min', 'query_pool_min'):
             for retryable in (False, True):

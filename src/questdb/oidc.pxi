@@ -1050,6 +1050,23 @@ cdef int _raise_oidc_auth_closed() except -1:
     raise OidcCancelledError('The OIDC authentication provider is closed.')
 
 
+cdef void_int _oidc_require_native_token(object oidc_auth) except -1:
+    """Refuse an ``oidc_auth=`` provider whose ``token()`` is overridden, by a
+    subclass or an instance attribute.
+
+    Connections take the token from the native provider and never call a
+    Python ``token()``, so they would skip an override that ``headers()`` and
+    the PG-wire adapters do call.
+    """
+    if not _method_not_overridden(oidc_auth, OidcDeviceAuth, 'token'):
+        raise TypeError(
+            '"oidc_auth" must not override token(): connections take the '
+            'token from the native provider and never call the override, '
+            'which runs only where Python calls token() itself, such as the '
+            'PG-wire adapters. Remove the override.')
+    return 0
+
+
 cdef object _oidc_err_to_py(questdb_error* err):
     if err == NULL:
         return _oidc_err_to_py_unowned(err)
@@ -1782,6 +1799,10 @@ cdef class OidcDeviceAuth:
     ``fork()`` followed by ``exec()`` (for example the ``spawn`` or
     ``forkserver`` :mod:`multiprocessing` start methods) to start fresh, or
     construct the provider only in the child. See :ref:`auth-fork`.
+
+    Connections attached with ``oidc_auth=`` take tokens from the native
+    provider, never from a Python :meth:`token`, so a subclass that overrides
+    :meth:`token` is refused there with :class:`TypeError`.
     """
 
     cdef object __weakref__
@@ -2531,6 +2552,15 @@ cdef class OidcDeviceAuth:
         finally:
             _oidc_release_token(token)
             _oidc_raise_unscheduled_main()
+
+    def _foreground_token(self):
+        """The native provider's token, as the fail-fast probe of
+        `QuestDB.dataframe()` reads it (`_direct_dataframe_run`).
+
+        The native-backed `token()`, which is what connections get. Private
+        so that tests can intercept the probe.
+        """
+        return OidcDeviceAuth.token(self)
 
     def headers(self):
         """Return an HTTP Authorization header containing the current token.
