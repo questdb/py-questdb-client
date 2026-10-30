@@ -666,9 +666,9 @@ section for more details.
    catching auth failures; catch ``OidcError`` (or a typed subclass)
    *before* ``QuestDBError`` to handle auth failures specifically.
 
-   A QWP/WebSocket sender's ``row()`` and ``flush()`` do **not** raise it:
-   they only queue frames locally, and the background reconnect that needs
-   the token keeps retrying instead. It reports each failed attempt as a
+   For recoverable credential failures during QWP/WebSocket background
+   reconnect, queued frames remain pending while reconnect retries.
+   Each failed attempt is reported as a
    ``ConnectionEventKind.CredentialUnavailable`` event (register a
    ``connection_listener`` to see it). An ACK wait does not fail early
    because of the missing token: with a non-zero ``timeout_millis``, a pooled
@@ -685,7 +685,14 @@ section for more details.
    queued rows are sent once :meth:`OidcDeviceAuth.sign_in
    <questdb.auth.OidcDeviceAuth.sign_in>` succeeds.
 
-   Its ``code`` reports the failing call's native error category, not a
+   Terminal provider failures are different. Calling
+   :meth:`~questdb.auth.OidcDeviceAuth.close` is terminal for every attached
+   transport; a pooled sender's auto-flushing ``row()`` can then raise
+   :class:`~questdb.auth.OidcCancelledError`. Recovery requires a new provider
+   and rebuilding the affected transports, not another ``sign_in()``. See
+   :ref:`oidc_auth` for the provider lifecycle.
+
+   An OIDC error's ``code`` reports the failing call's native category, not a
    recovery instruction: an HTTP flush with no usable credential raises
    :class:`~questdb.auth.OidcInteractionRequired` with ``code`` set to
    ``SocketError``, yet retrying cannot succeed until someone signs in. Catch
