@@ -13165,14 +13165,14 @@ cdef class Sender:
         if ok and c_buf == self._buffer._impl:
             self._last_flush_ms[0] = line_sender_now_micros() // 1000
         if not ok:
-            if _is_tcp_protocol(self._c_protocol):
-                # Provide further context pointing to the logs.
-                exc = c_err_to_py_fmt(err, _FLUSH_FMT)
-            else:
-                exc = c_err_to_py(err)
+            # Cleared before the error is converted, deciding from the native
+            # code: converting it runs Python -- an `OidcError` constructor,
+            # the re-raise of a parked signal -- where a pending signal
+            # handler's exception would otherwise skip the clear.
             if c_buf == self._buffer._impl and not (
-                    keep_on_batch_too_large and
-                    exc.code == QuestDBErrorCode.BatchTooLarge):
+                    keep_on_batch_too_large and err != NULL and
+                    line_sender_error_get_code(err)
+                        == line_sender_error_batch_too_large):
                 # Prevent a follow-up call to `.close(flush=True)` (as is
                 # usually called from `__exit__`) to raise after the sender
                 # entered an error state following a failed call to `.flush()`.
@@ -13195,6 +13195,11 @@ cdef class Sender:
                 # invisible to all of the above.
                 # Note: For the internal buffer `clear` is always `True`.
                 line_sender_buffer_clear(c_buf)
+            if _is_tcp_protocol(self._c_protocol):
+                # Provide further context pointing to the logs.
+                exc = c_err_to_py_fmt(err, _FLUSH_FMT)
+            else:
+                exc = c_err_to_py(err)
             raise exc
         # Native errors above are consumed before the fallback raises. On
         # success all sender/buffer borrows have already been released.

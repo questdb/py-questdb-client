@@ -24,6 +24,7 @@
 
 """Python binding tests for the native OIDC implementation."""
 
+import _thread
 import contextlib
 import dataclasses
 import datetime
@@ -8855,6 +8856,60 @@ class OidcSenderReentryTest(unittest.TestCase):
                     sender.close(flush=False)
         finally:
             logger.removeHandler(handler)
+
+
+@unittest.skipIf(
+    platform.python_implementation() == 'PyPy',
+    'relies on CPython running a pending signal handler at the first bytecode '
+    'after the native flush returns; PyPy runs them from periodic actions')
+class OidcFlushInterruptTest(_IsolatedReentry, unittest.TestCase):
+    def test_interrupt_during_a_failing_flush_clears_the_buffer(self):
+        # The first Python code after the native call is the OIDC error's
+        # constructor, where a pending Ctrl-C is raised. The failed rows must
+        # be cleared by then, as for any failed flush.
+        self._run_isolated(
+            'interrupt_during_a_failing_flush_clears_the_buffer',
+            self._exercise_interrupted_failing_flush, 30)
+
+    def _exercise_interrupted_failing_flush(self):
+        interrupted = threading.Event()
+
+        def interrupt_once():
+            if not interrupted.is_set():
+                interrupted.set()
+                _thread.interrupt_main()
+                # Keeps the flush in native code past the interrupt.
+                time.sleep(0.3)
+
+        # interrupt_main() does nothing while SIGINT is ignored, as it is for
+        # a runner started in the background by a non-interactive shell.
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            with OidcTestServer(
+                    write_statuses=(401,),
+                    refresh_request_hook=interrupt_once,
+                    refresh_token_response=(
+                        503, {'error': 'temporarily_unavailable'},
+                        {})) as server:
+                auth = make_discovered_auth(server)
+                auth.sign_in()
+                sender = questdb.Sender(
+                    questdb.Protocol.Http, '127.0.0.1', server.port,
+                    oidc_auth=auth, auto_flush=False, retry_timeout=1000)
+                try:
+                    sender.establish()
+                    sender.row(
+                        'events', columns={'value': 42},
+                        at=questdb.ServerTimestamp)
+                    with self.assertRaises(KeyboardInterrupt):
+                        sender.flush()
+                    self.assertTrue(interrupted.is_set())
+                    self.assertEqual(len(sender), 0)
+                finally:
+                    sender.close(flush=False)
+                    auth.close()
+        finally:
+            signal.signal(signal.SIGINT, previous)
 
 
 @unittest.skipUnless(

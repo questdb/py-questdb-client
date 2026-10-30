@@ -100,6 +100,7 @@ from test_auth import (
     OidcApiContractTest,
     OidcDiagnosticReentryTest,
     OidcDiagnosticSignalTest,
+    OidcFlushInterruptTest,
     OidcForkSafetyTest,
     OidcTestServerFixtureTest,
     OidcPoolDataframeFailoverTest,

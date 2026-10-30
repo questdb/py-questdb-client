@@ -1159,6 +1159,58 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                     finally:
                         sender.close(flush=False)
         ''')
+        self._run_with_pending_call_failures(script)
+
+    def test_http_callback_interrupt_with_a_failing_write_clears_the_buffer(self):
+        # A parked interrupt is re-raised while the flush error is converted
+        # when its pending call cannot be queued: always on PyPy, on CPython
+        # with a full queue. The failed flush must still clear its rows.
+        script = textwrap.dedent('''
+            import os
+            import questdb
+            from questdb import _client
+            from mock_server import HttpServer
+            _client._debug_oidc_fail_pending_calls(
+                int(os.environ['QDB_TEST_PENDING_FAILURES']))
+            calls = []
+            class Provider:
+                def token(self):
+                    calls.append(1)
+                    if len(calls) == 1:
+                        raise KeyboardInterrupt()
+                    return 'tok'
+            with HttpServer() as server:
+                server.responses.append((0, 400, 'text/plain', b'rejected'))
+                sender = questdb.Sender(
+                    questdb.Protocol.Http, '127.0.0.1', server.port,
+                    bearer_token_provider=Provider(), auto_flush=False,
+                    retry_timeout=1000, protocol_version=2)
+                sender.establish()
+                sender.row('t', columns={'v': 1}, at=questdb.ServerTimestamp)
+                raised = []
+                try:
+                    try:
+                        sender.flush()
+                    except BaseException as exc:
+                        raised.append(exc)
+                    # Where a queued interrupt arrives instead.
+                    for _ in range(3):
+                        pass
+                except KeyboardInterrupt as exc:
+                    raised.append(exc)
+                try:
+                    assert any(isinstance(exc, KeyboardInterrupt)
+                               for exc in raised), raised
+                    assert len(server.requests) == 1, server.requests
+                    assert len(sender) == 0, (raised, len(sender))
+                finally:
+                    sender.close(flush=False)
+        ''')
+        self._run_with_pending_call_failures(script)
+
+    def _run_with_pending_call_failures(self, script):
+        """Run `script` in a child interpreter, once with pending calls
+        queued normally and once with every registration failing."""
         env = os.environ.copy()
         env['PYTHONPATH'] = os.pathsep.join((
             str(Path(questdb.__file__).resolve().parent.parent),
