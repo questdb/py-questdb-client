@@ -96,7 +96,7 @@ the following statements from a ``python3`` interactive shell:
 
     >>> import questdb
     >>> questdb.__version__
-    '6.0.0'
+    '6.0.1'
     >>> questdb.connect
     <function connect at 0x104b68240>
 

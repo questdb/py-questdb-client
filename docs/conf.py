@@ -28,7 +28,7 @@ project = 'questdb'
 year = '2024'
 author = 'QuestDB'
 copyright = '{0}, {1}'.format(year, author)
-version = release = '6.0.0'
+version = release = '6.0.1'
 
 github_repo_url = 'https://github.com/questdb/py-questdb-client'
 

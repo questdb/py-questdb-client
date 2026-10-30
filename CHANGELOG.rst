@@ -526,6 +526,14 @@ Other changes
   of being rebuilt as a plain :class:`QuestDBError <questdb.QuestDBError>`, so
   ``except OidcError`` and ``except QuestDBServerRejectionError`` still match.
 
+6.0.1 (2026-10-29)
+------------------
+
+Updated the native client to 7.2.1:
+
+- QWP acknowledgement waits now wake on sender progress instead of polling.
+- Fixed-size QWP sender pools no longer close and reopen idle connections.
+
 6.0.0 (2026-10-21)
 ------------------
 
