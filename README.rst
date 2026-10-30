@@ -23,7 +23,7 @@ The latest version of the library is 6.0.1 (`changelog <https://py-questdb-clien
 
 ::
 
-    python3 -m pip install -U questdb[dataframe]
+    python3 -m pip install -U 'questdb[dataframe]'
 
 Quickstart
 ==========
