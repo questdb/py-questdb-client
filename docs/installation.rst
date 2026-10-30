@@ -57,12 +57,12 @@ PIP
 
 DataFrame ingest (pandas + pyarrow)::
 
-    python3 -m pip install -U questdb[dataframe]
+    python3 -m pip install -U 'questdb[dataframe]'
 
 polars or duckdb::
 
-    python3 -m pip install -U questdb[polars]
-    python3 -m pip install -U questdb[duckdb]
+    python3 -m pip install -U 'questdb[polars]'
+    python3 -m pip install -U 'questdb[duckdb]'
 
 Row-only::
 
@@ -73,9 +73,9 @@ Poetry
 
 Equivalents for poetry::
 
-    poetry add questdb[dataframe]
-    poetry add questdb[polars]
-    poetry add questdb[duckdb]
+    poetry add 'questdb[dataframe]'
+    poetry add 'questdb[polars]'
+    poetry add 'questdb[duckdb]'
     poetry add questdb
 
 
