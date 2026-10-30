@@ -199,7 +199,9 @@ tokens from a secrets vault.
   clients must implement the same capture-fence rule.
 * :class:`questdb.auth.TokenUnavailableError` classifies a source's failure
   as retryable or permanent; a connection the caller waits for retries only a
-  retryable one.
+  retryable one. :func:`questdb.connect` preserves this error and its retry
+  metadata even when the provider's diagnostic resembles a duplicate
+  configuration-key error.
 * A store-and-forward slot left by an earlier sender (``drain_orphans=on``)
   rides out the server rejecting the provider's tokens -- at least 6
   rejections persisting for ``min(reconnect_max_duration_millis, 5 min)`` --

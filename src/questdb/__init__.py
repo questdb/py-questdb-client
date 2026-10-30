@@ -232,9 +232,11 @@ def connect(
             error_handler=error_handler,
             error_event_inbox_capacity=error_event_inbox_capacity)
     except QuestDBError as e:
-        # Preserve structured OIDC failures even if untrusted IdP text happens
-        # to resemble the native config parser's duplicate-key diagnostic.
-        #
+        # Preserve structured authentication failures even if their text
+        # resembles the native config parser's duplicate-key diagnostic.
+        if isinstance(e, _client.TokenUnavailableError):
+            raise
+
         # An OidcError cannot exist unless `questdb.auth._errors` is already
         # imported, so resolve the class from `sys.modules` rather than
         # importing it here. This runs while a failure is already being

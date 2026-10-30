@@ -792,6 +792,34 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         self.assertTrue(all(auth == 'Bearer T1' for auth in seen), seen)
         self.assertEqual(len(calls), 1)
 
+    def test_connect_preserves_provider_error_that_looks_like_duplicate_key(self):
+        for pool in ('sender_pool_min', 'query_pool_min'):
+            for retryable in (False, True):
+                with self.subTest(pool=pool, retryable=retryable):
+                    calls = []
+                    message = f'provider configuration has duplicate key "{pool}"'
+
+                    def provider():
+                        calls.append(1)
+                        raise TokenUnavailableError(
+                            message, retryable=retryable, retry_after=7)
+
+                    settings = {'sender_pool_min': 0, 'query_pool_min': 0}
+                    settings[pool] = 1
+                    with QwpAckServer() as server:
+                        with self.assertRaises(TokenUnavailableError) as caught:
+                            questdb.connect(
+                                f'ws::addr=127.0.0.1:{server.port};'
+                                'connect_timeout=1000;',
+                                bearer_token_provider=provider, **settings)
+                    self.assertEqual(caught.exception.retryable, retryable)
+                    self.assertEqual(caught.exception.retry_after, 7.0)
+                    self.assertIs(
+                        caught.exception.code,
+                        questdb.QuestDBErrorCode.SocketError)
+                    self.assertIn(message, str(caught.exception))
+                    self.assertEqual(len(calls), 1)
+
     def test_a_permanent_failure_ends_a_synchronous_connect(self):
         calls = []
 
