@@ -11541,7 +11541,8 @@ cdef class Sender:
     # never be collected. CPython keeps the pointer NULL: an instance
     # dictionary, even an empty one, stops CPython caching the method lookup
     # of `sender.row(...)`, which is made once per row. `__setattr__` keeps
-    # every other name out of it.
+    # every other name out of it. Reading `__dict__` recreates it; see
+    # `_sender_drop_unused_dict`.
     cdef dict __dict__
     cdef auto_flush_mode_t _auto_flush_mode
     cdef bint _auto_flush_bytes_dynamic
@@ -11999,6 +12000,12 @@ cdef class Sender:
     # A class attribute because Cython refuses an extension type's own
     # `__init_subclass__` method. See `_subclass_keeps_generic_setattr`.
     __init_subclass__ = classmethod(_sender_init_subclass)
+
+    def __dir__(self):
+        # `object.__dir__` reads `__dict__`, which recreates the dictionary.
+        names = object.__dir__(self)
+        _sender_drop_unused_dict(self)
+        return names
 
     def __cinit__(self):
         # Cython has just created the instance dictionary, which CPython
@@ -13137,6 +13144,9 @@ cdef class Sender:
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'flush() can\'t be called: Sender is closed.')
+        # Every flush passes here, so a dictionary that another read of
+        # `__dict__` recreated slows `row()` only until the next one.
+        _sender_drop_unused_dict(self)
 
         # Publish the guard before releasing the GIL: while native holds
         # `&mut Sender` and a borrowed pointer to `c_buf`, another thread must
@@ -13706,6 +13716,25 @@ cdef object _sender_bearer_holder(Sender sender):
         except AttributeError:
             return None
     return sender._bearer_holder
+
+
+cdef inline void _sender_drop_unused_dict(Sender sender) noexcept:
+    """Drop the instance dictionary that reading `sender.__dict__` recreates.
+
+    `__cinit__` drops the one Cython creates, but any read of `__dict__` --
+    `dir()`, `vars()`, `inspect.getattr_static()`, an IDE completing
+    `sender.` -- makes a new one, and while it exists CPython cannot cache
+    the method lookup of `sender.row(...)`: every later row pays for the
+    generic lookup. `__dir__` drops it at once, and `_flush_c_buf` drops one
+    any other read left.
+
+    On CPython the client stores nothing in a `Sender`'s own dictionary --
+    `__setattr__` refuses new names, and the bearer-token holder has a typed
+    slot -- and only an empty one is dropped. A subclass's dictionary holds
+    its own attributes and is left alone. PyPy keeps the dictionary.
+    """
+    if type(sender) is Sender:
+        qdb_drop_empty_instance_dict(sender)
 
 
 def _debug_instance_dict_is_set(object obj):

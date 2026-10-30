@@ -15567,6 +15567,24 @@ class TestNoNewAttributes(unittest.TestCase):
                 sender.close(flush=False)
                 self.assertIs(qi._debug_instance_dict_is_set(sender), False)
 
+    @unittest.skipIf(
+        sys.implementation.name == 'pypy',
+        'PyPy keeps the dictionary: its collector sees the bearer holder there')
+    def test_reading_the_dictionary_does_not_keep_one_on_cpython(self):
+        # Reading `__dict__` makes a new dictionary. `dir()` drops it at once,
+        # and the next flush drops one that any other read -- `vars()`, an
+        # IDE completing `sender.` -- left.
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            self.assertIn('row', dir(sender))
+            self.assertIs(qi._debug_instance_dict_is_set(sender), False)
+            self.assertEqual(vars(sender), {})
+            self.assertIs(qi._debug_instance_dict_is_set(sender), True)
+            sender.row('t', columns={'x': 1}, at=qi.TimestampNanos(1))
+            sender.flush()
+            self.assertIs(qi._debug_instance_dict_is_set(sender), False)
+
 
 class TestTypeStub(unittest.TestCase):
     """`_client.pyi` is the type surface every editor and type checker
