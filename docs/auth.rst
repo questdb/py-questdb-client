@@ -617,11 +617,11 @@ Security notes
   later is a no-op, ``sign_in()`` completes, and the renderer receives its
   ``on_success`` or ``on_failure`` call. Use
   :meth:`~questdb.auth.OidcDeviceAuth.close` only for permanent shutdown.
-* On CPython, an exception raised by a signal handler during a synchronous
-  transport persistence diagnostic is returned to the caller without invoking
-  the handler again. If the pending-call queue is full, delivery takes place at
-  the exception-safe native-return boundary; multiple saved exceptions are
-  preserved through ``__context__`` rather than discarded.
+* An exception raised by a signal handler during a synchronous transport
+  persistence diagnostic is returned to the caller without invoking the handler
+  again. On PyPy, and on CPython when the pending-call queue is full, delivery
+  takes place at the exception-safe native-return boundary; multiple saved
+  exceptions are preserved through ``__context__`` rather than discarded.
 
 Optional dependencies
 =====================

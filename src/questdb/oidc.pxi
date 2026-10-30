@@ -32,44 +32,26 @@ if not qdb_oidc_callback_gate_init():
 
 cdef extern from *:
     """
-    /* PyPy's cpyext does not implement PyErr_SetInterrupt(): its Python.h
-       rewrites the name to PyPyErr_SetInterrupt(), which no PyPy build
-       exports, so a *compiled* call fails the extension build outright --
-       guarding the call at runtime is not enough.  Keep the C-API call on
-       CPython, where it re-arms the tripped-signal flag without touching
-       the error indicator, and let the Python fallback below handle the
-       rest. */
-    #if defined(PYPY_VERSION)
-    #define QUESTDB_HAS_SET_INTERRUPT 0
-    static void questdb_set_interrupt(void) {}
-    #else
-    #define QUESTDB_HAS_SET_INTERRUPT 1
-    static void questdb_set_interrupt(void) { PyErr_SetInterrupt(); }
-    #endif
-
     /* Re-raise an exception on the main thread at its next bytecode.
        CPython runs a pending call exactly where it runs Python signal
        handlers, and an exception the call sets propagates from there, so a
        parked exception surfaces as if the handler had raised it after the
        native call returned -- without running that handler a second time, as
        re-arming the signal did. PyPy's cpyext declares the function but
-       never delivers the call (measured on PyPy 7.3.19), so PyPy keeps the
-       interrupt_main() fallback, which re-delivers Ctrl-C only. */
+       never delivers the call (measured on PyPy 7.3.19), so there this
+       reports failure, as a full queue does on CPython, and the next
+       native-return boundary raises the exception instead
+       (`_oidc_raise_unscheduled_main`). */
     #if defined(PYPY_VERSION)
-    #define QUESTDB_HAS_PENDING_RERAISE 0
     static int questdb_add_pending_call(int (*func)(void*), void* arg) {
         (void)func; (void)arg; return -1;
     }
     #else
-    #define QUESTDB_HAS_PENDING_RERAISE 1
     static int questdb_add_pending_call(int (*func)(void*), void* arg) {
         return Py_AddPendingCall(func, arg);
     }
     #endif
     """
-    int QUESTDB_HAS_SET_INTERRUPT
-    void questdb_set_interrupt()
-    int QUESTDB_HAS_PENDING_RERAISE
     int questdb_add_pending_call(int (*func)(void*) noexcept, void* arg)
 
     # Defined by every Cython-generated module.
@@ -211,8 +193,10 @@ def _oidc_exception_is_from_signal_handler(object exc):
 # callback already cleared CPython's tripped-signal state, so each is handed
 # back to the main thread through a pending call (`_oidc_raise_parked_main`),
 # oldest first, one per pending call -- as CPython itself delivers two
-# signals' exceptions at successive bytecode boundaries. Bounded: only a
-# handler that raises adds to it. Touched only with the GIL held.
+# signals' exceptions at successive bytecode boundaries. Where no pending call
+# can be queued -- always on PyPy -- the next native-return boundary raises
+# them instead (`_oidc_raise_unscheduled_main`). Bounded: only a handler that
+# raises adds to it. Touched only with the GIL held.
 cdef list _OIDC_MAIN_PARKED = []
 cdef Py_ssize_t _OIDC_MAIN_PARKED_MAX = 64
 cdef bint _OIDC_MAIN_PARK_SCHEDULED = False
@@ -454,29 +438,6 @@ cdef void _oidc_release_error(questdb_error* err) noexcept:
     questdb_error_free(err)
     if counted:
         _OIDC_ERROR_FREES += 1
-
-
-cdef void _oidc_rearm_keyboard_interrupt() noexcept:
-    """Re-arm a swallowed Ctrl-C so the main thread raises it again.
-
-    Must not raise: every caller is on the error path of a ``noexcept``
-    callback.
-    """
-    try:
-        if QUESTDB_HAS_SET_INTERRUPT:
-            questdb_set_interrupt()
-        else:
-            # PyPy: `_thread.interrupt_main()` is the documented equivalent
-            # and, like the C API call, only sets a pending interrupt -- it
-            # does not raise here, where the surrounding handler would
-            # swallow it. `signal.raise_signal()` is not a substitute: it
-            # runs the handler synchronously (so the KeyboardInterrupt would
-            # be raised and discarded inside this callback) and it kills the
-            # process outright when SIGINT is left at SIG_DFL.
-            import _thread
-            _thread.interrupt_main()
-    except BaseException:
-        pass
 
 
 # Live providers, keyed by the opaque integer handed to native as `user_data`.
@@ -1299,15 +1260,12 @@ cdef void _oidc_park_foreground_interrupt(object exc) noexcept:
         # uncaught one would have. This covers every class a handler can raise
         # -- a SIGTERM handler's SystemExit and a SIGALRM deadline's
         # TimeoutError were discarded before -- and runs the user's handler
-        # once. Re-arming SIGINT instead ran a custom handler a second time for
-        # one Ctrl-C.
-        if QUESTDB_HAS_PENDING_RERAISE:
-            _oidc_park_main(exc)
-            # Scheduled by the dispatcher on its way out, once no more Python
-            # code of this callback remains to run.
-        elif isinstance(exc, KeyboardInterrupt):
-            # PyPy: the only portable re-delivery is a simulated SIGINT.
-            _oidc_rearm_keyboard_interrupt()
+        # once. Re-arming SIGINT instead ran a custom handler again at each
+        # later bytecode of this callback. The dispatcher schedules it on its
+        # way out, once no more Python code of this callback remains to run;
+        # on PyPy, which delivers no pending call, the native-return boundary
+        # raises it, as it does for a token callback.
+        _oidc_park_main(exc)
     except BaseException:
         pass
 

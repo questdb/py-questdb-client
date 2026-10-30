@@ -424,10 +424,12 @@ Highlights:
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.InvalidApiCall`` and clears nothing, so cancel the sign-in
   first or retry once it completes.
-* On CPython, failed pending-call registration no longer strands a signal
-  exception caught during a synchronous transport persistence diagnostic.
-  An exception-safe native-return boundary delivers it without rerunning the
-  signal handler; additional saved exceptions retain their context chain.
+* A signal exception caught during a synchronous transport persistence
+  diagnostic reaches the caller on PyPy as well as CPython. Where no pending
+  call can deliver it -- always on PyPy, and on CPython when registration
+  fails -- an exception-safe native-return boundary delivers it without
+  rerunning the signal handler; additional saved exceptions retain their
+  context chain.
 * Renderer prompts receive the device code's bounded lifetime and polling
   interval (``expires_in`` / ``interval``), matching the complete Java device
   challenge, plus ``browser_target``, the single natively vetted URL that

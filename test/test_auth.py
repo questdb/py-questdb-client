@@ -8915,9 +8915,6 @@ class OidcFlushInterruptTest(_IsolatedReentry, unittest.TestCase):
 @unittest.skipUnless(
     hasattr(signal, 'pthread_kill') and hasattr(signal, 'SIGALRM'),
     'POSIX signals required')
-@unittest.skipIf(
-    platform.python_implementation() == 'PyPy',
-    'PyPy has no pending-call re-delivery; only Ctrl-C is re-armed there')
 class OidcDiagnosticSignalTest(_IsolatedReentry, unittest.TestCase):
     """A signal handled while a persistence diagnostic runs on the main thread
     inside an attached transport's flush behaves as it would after the flush:
@@ -9370,6 +9367,10 @@ class OidcDiagnosticSignalTest(_IsolatedReentry, unittest.TestCase):
         finally:
             _client._debug_oidc_fail_pending_calls(0)
 
+    @unittest.skipIf(
+        platform.python_implementation() == 'PyPy',
+        "PyPy's cpyext sets __traceback__ through the exception's "
+        '__setattr__ when compiled code raises it')
     def test_enqueue_failure_preserves_all_saved_exceptions(self):
         class FrozenDeadline(TimeoutError):
             def __setattr__(self, name, value):
@@ -9699,6 +9700,10 @@ class OidcDiagnosticSignalTest(_IsolatedReentry, unittest.TestCase):
             f'{proc.stdout}{proc.stderr}')
         return proc.stdout
 
+    @unittest.skipIf(
+        platform.python_implementation() == 'PyPy',
+        'PyPy runs the second pending handler only at a later bytecode, where '
+        'its exception replaces the first one as that is raised')
     def test_two_pending_signals_both_reach_the_flush_caller(self):
         # Regression: with no foreground call, parking the first exception
         # asked `threading` for the main thread. That ran bytecode, where
