@@ -1708,7 +1708,9 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         finally:
             for client in clients:
                 client.close(flush=False)
-        _collect_until(lambda: _client._debug_token_callbacks_ids() == before)
+        # A subset: on PyPy, `before` can hold an earlier test's uncollected
+        # entries, and the collection here frees those too.
+        _collect_until(lambda: _client._debug_token_callbacks_ids() <= before)
 
     def test_conflicts_are_rejected(self):
         provider = lambda: 't'
