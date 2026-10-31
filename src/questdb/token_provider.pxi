@@ -108,6 +108,27 @@ cdef inline bint _token_callback_on_this_thread() noexcept:
     return PyThread_tss_get(&_TOKEN_CALLBACK_DEPTH_KEY) != NULL
 
 
+class _ConfigArgumentError(QuestDBError):
+    """An invalid argument to the token-provider API, raised as one of the
+    two subclasses below.
+
+    Each is the built-in error Python code expects and also a `QuestDBError`
+    with code `ConfigError`, as `OidcDeviceAuth` and the PG-wire adapters
+    report a bad argument (`OidcConfigError`), so `except QuestDBError`
+    catches a bad argument anywhere in `questdb.auth`.
+    """
+    def __init__(self, msg):
+        super().__init__(QuestDBErrorCode.ConfigError, msg)
+
+
+class _ConfigTypeError(_ConfigArgumentError, TypeError):
+    """An argument of the wrong type."""
+
+
+class _ConfigValueError(_ConfigArgumentError, ValueError):
+    """An argument of the right type whose value is not allowed."""
+
+
 class ExpiringToken:
     """
     A token and when it expires: the result of one token-source fetch.
@@ -126,7 +147,7 @@ class ExpiringToken:
 
     def __init__(self, token, expires_at, refresh_at=None):
         if not isinstance(token, str):
-            raise TypeError(
+            raise _ConfigTypeError(
                 f'"token" must be a str, not {_fqn(type(token))}')
         self.token = token
         self.expires_at = _tp_epoch_seconds(expires_at, 'expires_at')
@@ -255,11 +276,12 @@ cdef double _tp_seconds(object value, str name) except? -1.0:
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
         seconds = value
     else:
-        raise TypeError(
+        raise _ConfigTypeError(
             f'"{name}" must be a number of seconds or a timedelta, '
             f'not {_fqn(type(value))}')
     if not (seconds >= 0.0) or seconds == float('inf'):
-        raise ValueError(f'"{name}" must be a finite, non-negative duration')
+        raise _ConfigValueError(
+            f'"{name}" must be a finite, non-negative duration')
     return seconds
 
 
@@ -267,16 +289,16 @@ cdef double _tp_epoch_seconds(object value, str name) except? -1.0:
     cdef double seconds
     if isinstance(value, datetime.datetime):
         if value.tzinfo is None:
-            raise ValueError(
+            raise _ConfigValueError(
                 f'"{name}" must be a timezone-aware datetime; a naive one '
                 'is ambiguous')
         seconds = value.timestamp()
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
         if value != value or value in (float('inf'), float('-inf')):
-            raise ValueError(f'"{name}" must be finite')
+            raise _ConfigValueError(f'"{name}" must be finite')
         seconds = value
     else:
-        raise TypeError(
+        raise _ConfigTypeError(
             f'"{name}" must be a datetime or epoch seconds, '
             f'not {_fqn(type(value))}')
     # Every accepted expiry must also be representable in status snapshots.
@@ -284,7 +306,7 @@ cdef double _tp_epoch_seconds(object value, str name) except? -1.0:
     try:
         datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc)
     except (OverflowError, OSError, ValueError):
-        raise ValueError(
+        raise _ConfigValueError(
             f'"{name}" must be representable as a Python datetime') from None
     return seconds
 
@@ -405,6 +427,16 @@ cdef bint _tp_sink_terminal_error(
         sink, encoded, len(encoded))
 
 
+cdef str _tp_exception_label(object exc):
+    """The class name a failure message gives for ``exc``: for an argument
+    error of the token API, the built-in it also is, not its private class."""
+    if isinstance(exc, _ConfigTypeError):
+        return 'TypeError'
+    if isinstance(exc, _ConfigValueError):
+        return 'ValueError'
+    return type(exc).__qualname__
+
+
 cdef bint _tp_raised_by_client(object exc) except -1:
     """Whether ``exc`` is a client call's refusal that the provider let
     escape, rather than an exception the provider raised itself.
@@ -459,7 +491,8 @@ cdef void _tp_sink_exception(
                 and _tp_sink_terminal_error(
                     sink,
                     str(exc) if isinstance(exc, QuestDBError)
-                    else f'{type(exc).__qualname__}: {exc}')):
+                    and not isinstance(exc, _ConfigArgumentError)
+                    else f'{_tp_exception_label(exc)}: {exc}')):
             return
         if isinstance(exc, TokenUnavailableError):
             if exc.retry_after is not None:
@@ -484,7 +517,7 @@ cdef void _tp_sink_exception(
                 and _tp_sink_terminal_error(sink, str(exc))):
             return
         _tp_sink_text_error(
-            sink, True, -1, f'{type(exc).__qualname__}: {exc}')
+            sink, True, -1, f'{_tp_exception_label(exc)}: {exc}')
     except BaseException:
         questdb_token_sink_set_error(
             sink, True, -1, b'the token callback failed', 25)
@@ -838,10 +871,21 @@ cdef object _tp_token(_TokenProviderHandle handle):
 
 
 cdef void_int _tp_on_rejected(
-        _TokenProviderHandle handle, str token, int http_status) except -1:
+        _TokenProviderHandle handle, object token,
+        object http_status) except -1:
+    if not isinstance(token, str):
+        raise _ConfigTypeError(
+            f'"token" must be a str, not {_fqn(type(token))}')
+    try:
+        http_status = operator.index(http_status)
+    except TypeError:
+        raise _ConfigTypeError(
+            f'"http_status" must be an int, not '
+            f'{_fqn(type(http_status))}') from None
     if not 0 <= http_status <= 65535:
-        raise ValueError(f'"http_status" is not an HTTP status: {http_status}')
-    cdef bytes encoded = token.encode('utf-8')
+        raise _ConfigValueError(
+            f'"http_status" is not an HTTP status: {http_status}')
+    cdef bytes encoded = (<str>token).encode('utf-8')
     cdef const char* buf = encoded
     cdef size_t length = len(encoded)
     cdef uint16_t status = <uint16_t>http_status
@@ -972,7 +1016,7 @@ cdef class RefreshingTokenProvider:
         fetch = getattr(source, 'fetch_token', None)
         if fetch is None:
             if not callable(source):
-                raise TypeError(
+                raise _ConfigTypeError(
                     '"source" must be a callable or an object with a '
                     f'fetch_token() method, not {_fqn(type(source))}')
             fetch = source
@@ -980,7 +1024,7 @@ cdef class RefreshingTokenProvider:
             &options, sizeof(questdb_refreshing_token_provider_options))
         if name is not None:
             if not isinstance(name, str) or not name.strip():
-                raise ValueError('"name" must be a non-empty str')
+                raise _ConfigValueError('"name" must be a non-empty str')
             name_bytes = name.encode('utf-8')
             options.name = name_bytes
             options.name_len = len(name_bytes)
@@ -1052,7 +1096,7 @@ cdef class RefreshingTokenProvider:
         own."""
         return {'Authorization': 'Bearer ' + self.token()}
 
-    def on_rejected(self, str token, int http_status=401):
+    def on_rejected(self, token, http_status=401):
         """
         Tell the provider that a server rejected ``token`` with
         ``http_status``, for a client of your own. A 401 for the current token
@@ -1197,7 +1241,7 @@ cdef class _ApplicationTokenProvider:
         cdef object adapter = target
         if getattr(target, 'token', None) is None or not callable(target.token):
             if not callable(target):
-                raise TypeError(
+                raise _ConfigTypeError(
                     '"bearer_token_provider" must be a RefreshingTokenProvider, '
                     'a callable returning a token, or an object with a token() '
                     f'method, not {_fqn(type(target))}')
@@ -1254,7 +1298,7 @@ cdef object _tp_resolve_bearer_token_provider(object provider):
             _tp_token(handle)
     if isinstance(provider, OidcDeviceAuth) or isinstance(
             getattr(provider, '__self__', None), OidcDeviceAuth):
-        raise TypeError(
+        raise _ConfigTypeError(
             'Pass an OidcDeviceAuth as "oidc_auth=", not as '
             '"bearer_token_provider=".')
     # Each Python bound-method lookup creates a new object. Normalize it to

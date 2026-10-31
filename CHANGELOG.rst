@@ -209,6 +209,16 @@ tokens from a secrets vault.
   retryable one. :func:`questdb.connect` preserves this error and its retry
   metadata even when the provider's diagnostic resembles a duplicate
   configuration-key error.
+* An invalid argument to the token-provider API -- a
+  ``RefreshingTokenProvider`` source, duration or name, an ``ExpiringToken``
+  value, a ``TokenUnavailableError`` ``retry_after``, or a
+  ``bearer_token_provider=`` or ``oidc_auth=`` of the wrong kind -- raises
+  ``TypeError`` or ``ValueError`` that is also a
+  :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
+  ``QuestDBErrorCode.ConfigError``. ``except QuestDBError`` therefore catches
+  a bad argument anywhere in :mod:`questdb.auth`, as it catches the
+  :class:`~questdb.auth.OidcConfigError` that ``OidcDeviceAuth`` and the
+  PG-wire adapters raise.
 * A store-and-forward slot left by an earlier sender (``drain_orphans=on``)
   rides out the server rejecting the provider's tokens -- at least 6
   rejections persisting for ``min(reconnect_max_duration_millis, 5 min)`` --

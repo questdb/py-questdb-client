@@ -1059,7 +1059,7 @@ cdef void_int _oidc_require_native_token(object oidc_auth) except -1:
     the PG-wire adapters do call.
     """
     if not _method_not_overridden(oidc_auth, OidcDeviceAuth, 'token'):
-        raise TypeError(
+        raise _ConfigTypeError(
             '"oidc_auth" must not override token(): connections take the '
             'token from the native provider and never call the override, '
             'which runs only where Python calls token() itself, such as the '

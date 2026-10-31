@@ -110,6 +110,18 @@ Inspect the provider with :attr:`~questdb.auth.RefreshingTokenProvider.status`:
 the token's expiry, the last successful fetch, and the last failure. Nothing
 the provider logs, raises or reports contains the token: at most its length.
 
+An invalid argument -- a source that is neither callable nor has a
+``fetch_token()`` method, a duration that is not a non-negative number of
+seconds or a :class:`datetime.timedelta`, an
+:class:`~questdb.auth.ExpiringToken` with a naive ``datetime``, or a
+``bearer_token_provider=`` that is not a provider -- raises ``TypeError`` or
+``ValueError``. Each is also a :class:`~questdb.QuestDBError` with ``code``
+``QuestDBErrorCode.ConfigError``, like the
+:class:`~questdb.auth.OidcConfigError` that
+:class:`~questdb.auth.OidcDeviceAuth` and the PG-wire adapters raise, so
+``except QuestDBError`` catches a bad argument anywhere in
+:mod:`questdb.auth`.
+
 Closing
 -------
 

@@ -10057,7 +10057,7 @@ cdef class QuestDB:
                     f'not {_fqn(type(error_handler))}')
             if oidc_auth is not None and not isinstance(
                     oidc_auth, OidcDeviceAuth):
-                raise TypeError(
+                raise _ConfigTypeError(
                     '"oidc_auth" must be an OidcDeviceAuth or None, '
                     f'not {_fqn(type(oidc_auth))}')
             if oidc_auth is not None:
@@ -10067,7 +10067,7 @@ cdef class QuestDB:
                 # which "is closed" misdescribes and sends the caller looking
                 # for a close() they never made.
                 if (<OidcDeviceAuth>oidc_auth)._raw == NULL:
-                    raise ValueError('"oidc_auth" is not initialized')
+                    raise _ConfigValueError('"oidc_auth" is not initialized')
                 if (<OidcDeviceAuth>oidc_auth)._closed:
                     _raise_oidc_auth_closed()
             if oidc_auth is not None:
@@ -11766,7 +11766,7 @@ cdef class Sender:
 
         if oidc_auth is not None:
             if not isinstance(oidc_auth, OidcDeviceAuth):
-                raise TypeError(
+                raise _ConfigTypeError(
                     '"oidc_auth" must be an OidcDeviceAuth or None, '
                     f'not {_fqn(type(oidc_auth))}')
             _oidc_require_native_token(oidc_auth)
@@ -11775,7 +11775,7 @@ cdef class Sender:
             # "is closed" misdescribes and sends the caller looking for a
             # close() they never made.
             if (<OidcDeviceAuth>oidc_auth)._raw == NULL:
-                raise ValueError('"oidc_auth" is not initialized')
+                raise _ConfigValueError('"oidc_auth" is not initialized')
             if (<OidcDeviceAuth>oidc_auth)._closed:
                 _raise_oidc_auth_closed()
             # Reject the conflict here, in terms of the parameters the caller

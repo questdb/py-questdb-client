@@ -154,6 +154,7 @@ from test_token_provider import (
     BearerTokenProviderAttachTest,
     CleartextWarningTest,
     ExpiringTokenTest,
+    InvalidArgumentErrorTest,
     RefreshingTokenProviderTest,
     TokenCallbackForkTest,
     TokenProviderTypingTest,

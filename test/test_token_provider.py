@@ -160,6 +160,100 @@ class TokenUnavailableErrorTest(unittest.TestCase):
         self.assertEqual(permanent.code, questdb.QuestDBErrorCode.AuthError)
 
 
+class InvalidArgumentErrorTest(unittest.TestCase):
+    """A bad argument to the token-provider API raises the built-in error
+    Python code expects, which is also a QuestDBError with code ConfigError,
+    as OidcDeviceAuth and the PG-wire adapters raise OidcConfigError."""
+
+    def assertConfigError(self, builtin, call):
+        with self.assertRaises(builtin) as caught:
+            call()
+        self.assertIsInstance(caught.exception, questdb.QuestDBError)
+        self.assertEqual(
+            caught.exception.code, questdb.QuestDBErrorCode.ConfigError)
+
+    def test_constructors(self):
+        source, _ = _counting_source()
+        cases = (
+            (TypeError, lambda: RefreshingTokenProvider(42)),
+            (TypeError, lambda: RefreshingTokenProvider(source, cold_wait='30')),
+            (ValueError, lambda: RefreshingTokenProvider(source, cold_wait=-1)),
+            (ValueError, lambda: RefreshingTokenProvider(source, name='  ')),
+            (TypeError, lambda: ExpiringToken(b't', 1e9)),
+            (TypeError, lambda: ExpiringToken('t', '2030-01-01')),
+            (ValueError,
+             lambda: ExpiringToken('t', datetime.datetime(2030, 1, 1))),
+            (ValueError, lambda: ExpiringToken('t', 1e12)),
+            (ValueError, lambda: ExpiringToken.expires_in('t', -1)),
+            (TypeError, lambda: TokenUnavailableError('x', retry_after='1')))
+        for index, (builtin, call) in enumerate(cases):
+            with self.subTest(index=index):
+                self.assertConfigError(builtin, call)
+
+    def test_methods(self):
+        source, _ = _counting_source()
+        with RefreshingTokenProvider(source) as provider:
+            cases = (
+                (TypeError, lambda: provider.await_ready('1')),
+                (ValueError, lambda: provider.await_ready(-1)),
+                (TypeError, lambda: provider.close(wait=True, timeout='1')),
+                (TypeError, lambda: provider.on_rejected(None)),
+                (TypeError, lambda: provider.on_rejected('t', '401')),
+                (ValueError, lambda: provider.on_rejected('t', 2 ** 70)))
+            for index, (builtin, call) in enumerate(cases):
+                with self.subTest(index=index):
+                    self.assertConfigError(builtin, call)
+            self.assertFalse(provider.closed)
+
+    def test_provider_keyword_arguments(self):
+        from questdb.auth import OidcDeviceAuth
+
+        class OverridingAuth(OidcDeviceAuth):
+            def token(self):
+                return 'T'
+
+        endpoints = dict(
+            device_authorization_endpoint='https://idp.example/device',
+            token_endpoint='https://idp.example/token',
+            interactive=False,
+            open_browser=False)
+        attach = (
+            lambda **kw: questdb.Sender.from_conf(
+                'ws::addr=127.0.0.1:9000;', **kw),
+            lambda **kw: questdb.Sender('http', '127.0.0.1', 9000, **kw),
+            lambda **kw: questdb.connect(
+                'ws::addr=127.0.0.1:9000;lazy_connect=true;', **kw))
+        with OidcDeviceAuth('questdb', **endpoints) as auth, \
+                OverridingAuth('questdb', **endpoints) as overriding:
+            arguments = (
+                {'bearer_token_provider': 42},
+                {'bearer_token_provider': auth},
+                {'oidc_auth': 42},
+                {'oidc_auth': overriding})
+            for index, call in enumerate(attach):
+                for kw in arguments:
+                    with self.subTest(index=index, argument=sorted(kw)):
+                        self.assertConfigError(
+                            TypeError, lambda: call(**kw))
+
+    def test_a_source_failure_names_the_builtin_error(self):
+        # The message a client sees names the built-in, not the private
+        # class of the error.
+        cases = (
+            ('ValueError: "expires_at" must be a timezone-aware datetime',
+             lambda: ExpiringToken('t', datetime.datetime(2030, 1, 1))),
+            ('TypeError: "token" must be a str',
+             lambda: ExpiringToken(b't', 1e9)))
+        for expected, source in cases:
+            with self.subTest(expected=expected):
+                with RefreshingTokenProvider(
+                        source, cold_wait=0.02) as provider:
+                    with self.assertRaises(TokenUnavailableError):
+                        provider.token()
+                    message = _last_failure(provider).message
+                    self.assertTrue(message.startswith(expected), message)
+
+
 class RefreshingTokenProviderTest(unittest.TestCase):
     def test_serves_the_sources_token(self):
         source, calls = _counting_source()
