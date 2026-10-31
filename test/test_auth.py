@@ -2329,8 +2329,7 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             # why that acquisition failed and remains retryable.
             self.assertFalse(auth._sign_in_in_progress)
             self.assertFalse(
-                _client._debug_is_oidc_terminal_for_foreground(
-                    busy_error, auth))
+                _client._debug_is_oidc_terminal_for_foreground(busy_error))
 
     def test_close_cancels_device_polling_and_is_permanent(self):
         waiting = threading.Event()
@@ -7377,7 +7376,7 @@ class OidcReviewFixTest(unittest.TestCase):
             import questdb.auth._errors as errors
             exc = errors.OidcInteractionRequired('needs sign-in')
             self.assertTrue(
-                _client._debug_is_oidc_terminal_for_foreground(exc, None))
+                _client._debug_is_oidc_terminal_for_foreground(exc))
 
             # Once resolved, a transient replacement in sys.modules must not
             # change the class identity used by the gate.
@@ -7385,23 +7384,15 @@ class OidcReviewFixTest(unittest.TestCase):
             with mock.patch.dict(
                     sys.modules, {'questdb.auth._errors': half_built}):
                 self.assertTrue(
-                    _client._debug_is_oidc_terminal_for_foreground(exc, None))
+                    _client._debug_is_oidc_terminal_for_foreground(exc))
 
-            # Classification belongs to this native error snapshot, not to a
-            # later read of mutable provider state. A busy provider cannot make
-            # a non-busy error transient, while the structured busy bit remains
-            # transient even after the provider reports idle.
-            busy_provider = types.SimpleNamespace(_sign_in_in_progress=True)
-            self.assertTrue(
-                _client._debug_is_oidc_terminal_for_foreground(
-                    exc, busy_provider))
+            # Classification belongs to this native error snapshot alone: its
+            # structured busy bit makes it transient.
             exc._acquisition_busy = True
-            idle_provider = types.SimpleNamespace(_sign_in_in_progress=False)
             self.assertFalse(
-                _client._debug_is_oidc_terminal_for_foreground(
-                    exc, idle_provider))
+                _client._debug_is_oidc_terminal_for_foreground(exc))
             self.assertFalse(_client._debug_is_oidc_terminal_for_foreground(
-                errors.OidcNetworkError('network'), None))
+                errors.OidcNetworkError('network')))
         finally:
             _client._debug_oidc_reset_errors_module()
 

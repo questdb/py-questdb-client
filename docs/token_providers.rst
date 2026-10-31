@@ -167,7 +167,10 @@ an error other than ``invalid_token``, which a new token cannot fix. A
 A subclass of :class:`~questdb.auth.RefreshingTokenProvider` that overrides
 ``token()`` or ``on_rejected()`` is attached as an application provider too:
 clients call those methods as described here, rather than reading the cache
-past them.
+past them. Closing it still fails every client using it (see `Closing`_):
+once it is closed, a failure of its ``token()`` stops them as an
+``InvalidApiCall`` does, so they report ``ConfigError`` rather than the
+``AuthError`` of a provider attached directly.
 
 A provider reports failures as a source does: raise
 :class:`~questdb.auth.TokenUnavailableError` to classify one; any other

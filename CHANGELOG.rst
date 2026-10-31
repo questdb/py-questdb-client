@@ -38,9 +38,9 @@ the sender's internal buffer during ``flush()``, an explicit buffer during
 buffer during a row-serializing ``dataframe()`` (``SenderTransaction.dataframe()``
 included) -- now raises that error from ``len()``,
 ``bytes()``, truthiness (``if buffer:`` / ``if sender:``), ``capacity()``,
-``reserve()``, ``clear()`` and ``row()``, from any other thread, instead of
-reading or modifying memory the native call is using. Code that a
-``dataframe()`` itself runs on its own thread -- a cell's conversion, a
+``reserve()``, ``clear()``, ``row()`` and ``dataframe()``, from any other
+thread, instead of reading or modifying memory the native call is using. Code
+that a ``dataframe()`` itself runs on its own thread -- a cell's conversion, a
 handler on the ``questdb`` logger -- follows the rules for re-entering
 ``row()`` instead: reads are answered, and every call that would change the
 buffer is refused. A ``flush(buffer, clear=False)`` or
@@ -152,6 +152,11 @@ tokens from a secrets vault.
   still refreshes early when a server rejects its token with HTTP 401. A
   ``RefreshingTokenProvider`` subclass that overrides ``token()`` or
   ``on_rejected()`` is attached as such a provider: clients call its methods.
+  Closing it still ends them, reported as ``ConfigError``, and attaching it
+  once closed fails as it does for ``RefreshingTokenProvider`` itself.
+  Subclasses of ``RefreshingTokenProvider`` follow the attribute rules of
+  ``Sender``'s: they store attributes freely, and a mixin that defines
+  ``__setattr__`` or ``__delattr__`` must come before it in the bases.
 * Such a provider that knows retrying can never succeed raises its own
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.InvalidApiCall``, as a Rust provider returns

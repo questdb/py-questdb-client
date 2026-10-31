@@ -430,8 +430,12 @@ cdef bint _tp_raised_by_client(object exc) except -1:
 
 
 cdef void _tp_sink_exception(
-        questdb_token_sink* sink, object exc, object signal_codes) noexcept:
+        questdb_token_sink* sink, object exc, object signal_codes,
+        object provider) noexcept:
     """Report provider failures; preserve main-thread interruptions separately.
+
+    ``provider`` is the application provider whose call raised ``exc``, or
+    None for a token source.
 
     Snapshot handler codes before invoking user code: a signal handler can
     unregister itself before raising any Exception subclass.
@@ -445,6 +449,17 @@ cdef void _tp_sink_exception(
             _oidc_schedule_parked_main()
             _tp_sink_text_error(
                 sink, True, -1, 'the token callback was interrupted')
+            return
+        # Closing a RefreshingTokenProvider ends every client that uses it.
+        # Native ends them when the provider is attached as is; a subclass
+        # that overrides token() or on_rejected() is attached as an
+        # application provider, whose failures clients otherwise retry in
+        # the background, so its failure once closed stops them instead.
+        if (_tp_closed_refreshing_provider(provider)
+                and _tp_sink_terminal_error(
+                    sink,
+                    str(exc) if isinstance(exc, QuestDBError)
+                    else f'{type(exc).__qualname__}: {exc}')):
             return
         if isinstance(exc, TokenUnavailableError):
             if exc.retry_after is not None:
@@ -540,7 +555,7 @@ cdef void _token_source_dispatch(
             _tp_sink_text_error(
                 sink, True, -1, 'the token source returned an unusable token')
     except BaseException as exc:
-        _tp_sink_exception(sink, exc, {})
+        _tp_sink_exception(sink, exc, {}, None)
     finally:
         if entered:
             # Drop user result/source locals before signalling the drain: their
@@ -575,7 +590,10 @@ cdef void _token_source_trampoline(
 cdef void _token_get_dispatch(
         size_t callback_id, questdb_token_sink* sink) noexcept with gil:
     global _OIDC_MAIN_TOKEN_DEPTH
-    cdef object provider
+    # Bound before the `try`: the error path passes it on, and reading it
+    # unbound there would raise in this noexcept callback instead of
+    # reporting the failure to the sink.
+    cdef object provider = None
     cdef _TokenProviderHandle handle
     cdef bytes encoded
     # A mapping like `_oidc_signal_handler_codes()` returns, even before that
@@ -617,7 +635,7 @@ cdef void _token_get_dispatch(
             _tp_sink_text_error(
                 sink, True, -1, 'the token provider returned an unusable token')
     except BaseException as exc:
-        _tp_sink_exception(sink, exc, signal_codes)
+        _tp_sink_exception(sink, exc, signal_codes, provider)
     finally:
         if on_main:
             _OIDC_MAIN_TOKEN_DEPTH -= 1
@@ -832,8 +850,26 @@ cdef void_int _tp_on_rejected(
     return 0
 
 
+cdef bint _tp_handle_closed(_TokenProviderHandle handle) noexcept:
+    """Whether the native provider ``handle`` owns is closed. A handle without
+    one, or whose status cannot be read, counts as closed."""
+    cdef questdb_token_provider_status status
+    if handle is None or handle._raw == NULL:
+        return True
+    memset(&status, 0, sizeof(questdb_token_provider_status))
+    status.struct_size = sizeof(questdb_token_provider_status)
+    if not questdb_token_provider_get_status(handle._raw, &status):
+        return True
+    return status.closed
+
+
 # The only name `RefreshingTokenProvider` keeps in its instance dictionary.
 cdef tuple _REFRESHING_PROVIDER_DICT_ATTRS = ('_handle',)
+
+
+def _refreshing_provider_init_subclass(cls, **kwargs):
+    super(RefreshingTokenProvider, cls).__init_subclass__(**kwargs)
+    _subclass_keeps_generic_setattr(cls, RefreshingTokenProvider)
 
 
 cdef class RefreshingTokenProvider:
@@ -871,7 +907,10 @@ cdef class RefreshingTokenProvider:
 
     A subclass that overrides :meth:`token` or :meth:`on_rejected` is
     attached like any other application provider: clients call those methods
-    rather than reading the cache past them.
+    rather than reading the cache past them. Closing it still ends them -- a
+    failure of its :meth:`token` once it is closed stops them as an
+    application provider's ``InvalidApiCall`` does, so they report
+    ``ConfigError`` -- and attaching it once closed fails as for this class.
 
     The keyword parameters are durations, in seconds or as
     :class:`datetime.timedelta`, and default to the specification's values:
@@ -899,6 +938,9 @@ cdef class RefreshingTokenProvider:
         _setattr_without_dict(
             self, RefreshingTokenProvider, _REFRESHING_PROVIDER_DICT_ATTRS,
             name, value)
+
+    # As `Sender.__init_subclass__`; see `_subclass_keeps_generic_setattr`.
+    __init_subclass__ = classmethod(_refreshing_provider_init_subclass)
 
     def __cinit__(self):
         self._handle = None
@@ -1069,13 +1111,7 @@ cdef class RefreshingTokenProvider:
     @property
     def closed(self) -> bool:
         """Whether the provider is closed."""
-        cdef _TokenProviderHandle handle = self._require_handle()
-        cdef questdb_token_provider_status status
-        memset(&status, 0, sizeof(questdb_token_provider_status))
-        status.struct_size = sizeof(questdb_token_provider_status)
-        if not questdb_token_provider_get_status(handle._raw, &status):
-            return True
-        return bool(status.closed)
+        return bool(_tp_handle_closed(self._require_handle()))
 
     @property
     def status(self):
@@ -1128,6 +1164,18 @@ cdef bint _tp_reads_native_cache(object provider) except -1:
         _method_not_overridden(provider, RefreshingTokenProvider, 'token')
         and _method_not_overridden(
             provider, RefreshingTokenProvider, 'on_rejected'))
+
+
+cdef bint _tp_closed_refreshing_provider(object provider) except -1:
+    """Whether ``provider``, an application provider whose callback raised,
+    is a closed `RefreshingTokenProvider`: a subclass that overrides
+    ``token()`` or ``on_rejected()`` (see `_tp_resolve_bearer_token_provider`).
+    """
+    if not isinstance(provider, RefreshingTokenProvider):
+        return False
+    handle = getattr(provider, '_handle', None)
+    return (isinstance(handle, _TokenProviderHandle)
+            and _tp_handle_closed(<_TokenProviderHandle>handle))
 
 
 cdef class _ApplicationTokenProvider:
@@ -1194,10 +1242,16 @@ cdef object _tp_resolve_bearer_token_provider(object provider):
     ``RefreshingTokenProvider`` as is, anything else -- a subclass overriding
     ``token()`` or ``on_rejected()`` included -- wrapped in an
     ``_ApplicationTokenProvider``. The caller keeps the holder alive."""
+    cdef _TokenProviderHandle handle
     if isinstance(provider, RefreshingTokenProvider):
-        (<RefreshingTokenProvider>provider)._require_handle()
+        handle = (<RefreshingTokenProvider>provider)._require_handle()
         if _tp_reads_native_cache(provider):
             return provider
+        # Native refuses to attach a closed provider, but the application
+        # provider below wraps it unchecked. Refuse it with the same error:
+        # a closed provider fails every token request as permanent.
+        if _tp_handle_closed(handle):
+            _tp_token(handle)
     if isinstance(provider, OidcDeviceAuth) or isinstance(
             getattr(provider, '__self__', None), OidcDeviceAuth):
         raise TypeError(

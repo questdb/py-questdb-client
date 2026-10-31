@@ -610,6 +610,47 @@ class RefreshingTokenProviderTest(unittest.TestCase):
             subclassed.extra = 1
             self.assertEqual(subclassed.extra, 1)
 
+    def test_subclasses_get_the_attribute_rules_of_sender_subclasses(self):
+        # The provider's own `__setattr__` and `__delattr__` come first in a
+        # subclass's MRO, so a mixin's listed after it would silently never
+        # run. As for `Sender`, that is refused when the class is defined,
+        # and a subclass stores through the generic setter.
+        class Plain(RefreshingTokenProvider):
+            pass
+
+        self.assertIs(Plain.__setattr__, object.__setattr__)
+        self.assertIs(Plain.__delattr__, object.__delattr__)
+        calls = []
+
+        class SetMixin:
+            def __setattr__(self, name, value):
+                calls.append(('set', name))
+                super().__setattr__(name, value)
+
+        class DelMixin:
+            def __delattr__(self, name):
+                calls.append(('del', name))
+                super().__delattr__(name)
+
+        for mixin, call in ((SetMixin, ('set', 'extra')),
+                            (DelMixin, ('del', 'extra'))):
+            with self.subTest(mixin=mixin.__name__):
+                for bases in ((RefreshingTokenProvider, mixin),
+                              (Plain, mixin)):
+                    with self.assertRaisesRegex(
+                            TypeError,
+                            f'List {mixin.__name__} before '
+                            'RefreshingTokenProvider'):
+                        type('P', bases, {})
+                del calls[:]
+                source, _ = _counting_source()
+                with type('P', (mixin, RefreshingTokenProvider), {})(
+                        source) as provider:
+                    provider.extra = 1
+                    del provider.extra
+                self.assertIn(call, calls)
+                self.assertFalse(hasattr(provider, 'extra'))
+
     def test_the_token_is_never_rendered(self):
         with RefreshingTokenProvider(
                 lambda: ExpiringToken.expires_in('SENTINEL-c20', 3600),
@@ -875,6 +916,161 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                     finally:
                         sender.close(flush=False)
                 self.assertEqual(len(added), wrappers)
+
+    def test_closing_an_overriding_subclass_stops_a_background_connect(self):
+        # Attached as an application provider, an overriding subclass would
+        # have its failures retried in the background for good. Closed, it
+        # must end its clients as the base class does, if as ConfigError.
+        calls = []
+
+        class Overriding(RefreshingTokenProvider):
+            def token(self):
+                calls.append(None)
+                return super().token()
+
+        class RejectionOverride(RefreshingTokenProvider):
+            def on_rejected(self, token, http_status):
+                return super().on_rejected(token, http_status)
+
+        for cls, code in (
+                (RefreshingTokenProvider, questdb.QuestDBErrorCode.AuthError),
+                (Overriding, questdb.QuestDBErrorCode.ConfigError),
+                (RejectionOverride, questdb.QuestDBErrorCode.ConfigError)):
+            with self.subTest(provider=cls.__name__), QwpAckServer() as server:
+                source, _ = _counting_source()
+                provider = cls(source)
+                before = _client._debug_token_callbacks_ids()
+                sender = questdb.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};'
+                    'initial_connect_retry=async;'
+                    'reconnect_initial_backoff_millis=5;'
+                    'reconnect_max_backoff_millis=5;'
+                    'close_flush_timeout_millis=0;',
+                    bearer_token_provider=provider, auto_flush=False)
+                provider.close()
+                del calls[:]
+                deadline = time.monotonic() + 10.0
+                # The code and message only: an exception kept here would
+                # hold this frame, and the provider, in a reference cycle.
+                failure = None
+                try:
+                    # Its background connect pulls the first token.
+                    sender.establish()
+                    while failure is None and time.monotonic() < deadline:
+                        try:
+                            sender.row(
+                                't', columns={'v': 1},
+                                at=questdb.ServerTimestamp)
+                            sender.flush()
+                        except questdb.QuestDBError as exc:
+                            failure = (exc.code, str(exc))
+                        time.sleep(0.005)
+                finally:
+                    sender.close(flush=False)
+                self.assertIsNotNone(
+                    failure, 'the background connect never stopped')
+                self.assertIs(failure[0], code)
+                self.assertIn('is closed', failure[1])
+                self.assertEqual(
+                    server.snapshot()['upgrade_authorizations'], [])
+                self.assertEqual(len(calls), 1 if cls is Overriding else 0)
+                # Leave no application-provider wrapper registered for the
+                # tests that count registrations.
+                _collect_until(
+                    lambda: _client._debug_token_callbacks_ids() <= before)
+
+    def test_a_closed_overriding_subclass_is_refused_as_the_base_class_is(self):
+        class Overriding(RefreshingTokenProvider):
+            def token(self):
+                return super().token()
+
+        class RejectionOverride(RefreshingTokenProvider):
+            def on_rejected(self, token, http_status):
+                return super().on_rejected(token, http_status)
+
+        for cls in (RefreshingTokenProvider, Overriding, RejectionOverride):
+            source, _ = _counting_source()
+            provider = cls(source)
+            provider.close()
+            for attach in (
+                    lambda: questdb.Sender(
+                        questdb.Protocol.Http, '127.0.0.1', 9000,
+                        bearer_token_provider=provider),
+                    lambda: questdb.Sender.from_conf(
+                        'ws::addr=127.0.0.1:1;lazy_connect=true;',
+                        bearer_token_provider=provider),
+                    lambda: questdb.connect(
+                        'ws::addr=127.0.0.1:1;lazy_connect=true;',
+                        bearer_token_provider=provider)):
+                with self.subTest(provider=cls.__name__):
+                    before = _client._debug_token_callbacks_ids()
+                    try:
+                        attach()
+                    except TokenUnavailableError as exc:
+                        refused = (exc.code, exc.retryable, str(exc))
+                    else:
+                        self.fail('a closed provider was attached')
+                    self.assertEqual(
+                        refused[:2],
+                        (questdb.QuestDBErrorCode.AuthError, False))
+                    self.assertIn('is closed', refused[2])
+                    # No application-provider wrapper was registered.
+                    self.assertFalse(
+                        _client._debug_token_callbacks_ids() - before)
+
+    def test_closing_an_overriding_subclass_ends_a_pooled_flush_wait(self):
+        # A regression blocks forever in flush(wait=True), so bound the
+        # whole operation with a child-process timeout, not a daemon thread
+        # whose native wait would also prevent interpreter shutdown.
+        script = textwrap.dedent('''
+            import sys
+            import questdb
+            from questdb.auth import ExpiringToken, RefreshingTokenProvider
+
+            class Overriding(RefreshingTokenProvider):
+                def token(self):
+                    return super().token()
+
+            class RejectionOverride(RefreshingTokenProvider):
+                def on_rejected(self, token, http_status):
+                    return super().on_rejected(token, http_status)
+
+            for cls, code in (
+                    (RefreshingTokenProvider, questdb.QuestDBErrorCode.AuthError),
+                    (Overriding, questdb.QuestDBErrorCode.ConfigError),
+                    (RejectionOverride, questdb.QuestDBErrorCode.ConfigError)):
+                with cls(lambda: ExpiringToken.expires_in('T1', 3600)) as provider:
+                    assert provider.await_ready(10)
+                    with questdb.connect(
+                            f'ws::addr=127.0.0.1:{sys.argv[1]};lazy_connect=true;'
+                            'auto_flush=off;close_flush_timeout_millis=0;',
+                            bearer_token_provider=provider) as db:
+                        provider.close()
+                        lease = db.sender()
+                        try:
+                            lease.row('t', columns={'v': 1},
+                                      at=questdb.ServerTimestamp)
+                            try:
+                                lease.flush(wait=True)
+                            except questdb.QuestDBError as exc:
+                                assert exc.code is code, (cls, exc)
+                                assert 'is closed' in str(exc), (cls, exc)
+                            else:
+                                raise AssertionError('flush acknowledged unsent rows')
+                        finally:
+                            lease.close(flush=False)
+        ''')
+        env = os.environ.copy()
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, (
+            os.path.dirname(os.path.dirname(questdb.__file__)),
+            env.get('PYTHONPATH'))))
+        with QwpAckServer() as server:
+            result = subprocess.run(
+                [sys.executable, '-c', script, str(server.port)], env=env,
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(
+                result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(server.snapshot()['upgrade_authorizations'], [])
 
     def test_connect_preserves_provider_error_that_looks_like_duplicate_key(self):
         for pool in ('sender_pool_min', 'query_pool_min'):
@@ -1426,6 +1622,21 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         exc = self._row_until_refused(provider, before_rows=provider.close)
         self.assertIsInstance(exc, TokenUnavailableError)
         self.assertIs(exc.code, questdb.QuestDBErrorCode.AuthError)
+        self.assertTrue(
+            str(exc).startswith('The row was not added. '), str(exc))
+
+    def test_row_reports_a_closed_overriding_subclass(self):
+        # Attached as an application provider, yet stopped by its close().
+        class Overriding(RefreshingTokenProvider):
+            def token(self):
+                return super().token()
+
+        source, _ = _counting_source()
+        provider = Overriding(source)
+        self.assertTrue(provider.await_ready(10))
+        exc = self._row_until_refused(provider, before_rows=provider.close)
+        self.assertIs(exc.code, questdb.QuestDBErrorCode.ConfigError)
+        self.assertIn('is closed', str(exc))
         self.assertTrue(
             str(exc).startswith('The row was not added. '), str(exc))
 

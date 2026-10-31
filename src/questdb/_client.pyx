@@ -628,7 +628,7 @@ _NATIVE_RECONNECT_TERMINAL_CODES = frozenset((
     QuestDBErrorCode.SymbolDictFull))
 
 
-cdef inline bint _is_oidc_terminal_for_foreground(object exc, object oidc_auth):
+cdef inline bint _is_oidc_terminal_for_foreground(object exc):
     """Whether ``exc`` is an OIDC failure that a foreground retry cannot clear.
 
     ``OidcInteractionRequired`` alone needs this gate, and it covers three
@@ -682,9 +682,9 @@ cdef inline bint _is_oidc_terminal_for_foreground(object exc, object oidc_auth):
     return not bool(getattr(exc, '_acquisition_busy', False))
 
 
-def _debug_is_oidc_terminal_for_foreground(exc, oidc_auth):
+def _debug_is_oidc_terminal_for_foreground(exc):
     """Internal test hook for the foreground OIDC retry gate."""
-    return bool(_is_oidc_terminal_for_foreground(exc, oidc_auth))
+    return bool(_is_oidc_terminal_for_foreground(exc))
 
 
 cdef object _utf8_decode_error(
@@ -723,8 +723,8 @@ cdef void_int _setattr_without_dict(
     `tokens.cold_wait = 5` -- would otherwise be stored and read back while
     configuring nothing, where it used to raise `AttributeError`. Python
     subclasses keep the dictionary every subclass of an extension type has
-    always had; `Sender`'s also get the generic setter back (see
-    `_subclass_keeps_generic_setattr`).
+    always had; those of `Sender` and `RefreshingTokenProvider` also get the
+    generic setter back (see `_subclass_keeps_generic_setattr`).
     """
     cdef object descr = _NO_SUCH_ATTR
     if (type(obj) is cls and isinstance(name, str)
@@ -3429,9 +3429,11 @@ class ConnectionEventKind(TaggedEnum):
           raised its own :class:`QuestDBError` with ``code``
           ``InvalidApiCall`` (see
           :class:`~questdb.auth.BearerTokenProvider`), which reports
-          ``ConfigError``. Queued rows are not deleted — a disk-backed
-          store-and-forward slot stays drainable by a later process — but
-          this process will not send them.
+          ``ConfigError``, as a closed
+          :class:`~questdb.auth.RefreshingTokenProvider` subclass that
+          overrides ``token()`` or ``on_rejected()`` does. Queued rows are not
+          deleted — a disk-backed store-and-forward slot stays drainable by
+          a later process — but this process will not send them.
 
         A listener that pages on a permanent stop must therefore qualify on
         ``cause_code``, not on the kind alone.
@@ -8948,7 +8950,7 @@ cdef qwp_direct_sender* _direct_conn_open_checked(
         # Read by the caller if this raises below; a later slice that
         # connects clears it.
         src.connect_gave_up = src.db != NULL and budget_ms > 0
-        if last_slice or _is_oidc_terminal_for_foreground(exc, None):
+        if last_slice or _is_oidc_terminal_for_foreground(exc):
             raise exc
         # Native makes one more pick after sleeping to its slice deadline, so
         # a terminal error from that pick comes back AT the deadline and the
@@ -9504,7 +9506,7 @@ cdef void_int _direct_dataframe_run(
             # same InteractionRequired result. Only a newly available token
             # justifies replaying data preparation once.
             connect_final = src.connect_gave_up
-            oidc_terminal = _is_oidc_terminal_for_foreground(exc, oidc_auth)
+            oidc_terminal = _is_oidc_terminal_for_foreground(exc)
             if oidc_terminal and not (
                     oidc_terminal_probe_used or exc.in_doubt
                     or may_have_committed_prefix or nonreplayable_consumed
@@ -9513,8 +9515,7 @@ cdef void_int _direct_dataframe_run(
                 try:
                     oidc_auth._foreground_token()
                 except QuestDBError as probe_exc:
-                    if not _is_oidc_terminal_for_foreground(
-                            probe_exc, oidc_auth):
+                    if not _is_oidc_terminal_for_foreground(probe_exc):
                         # A different provider failure takes the checks below
                         # with its own type and structured OIDC detail: a busy
                         # refusal is retried within the budget, and any other
