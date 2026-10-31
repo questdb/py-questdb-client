@@ -2,6 +2,8 @@
 import sys
 
 sys.dont_write_bytecode = True
+import gc
+import importlib
 import os
 import unittest
 from unittest import mock
@@ -51,9 +53,11 @@ from mock_server import (Server, HttpServer, UdpServer,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1, SETTINGS_WITH_PROTOCOL_VERSION_V2,
                          SETTINGS_WITH_PROTOCOL_VERSION_V1_V2_V3,SETTINGS_WITH_PROTOCOL_VERSION_V4)
 from qwp_ws_ack_server import QwpAckServer, TLS_CA
+from qwp_egress_failover_server import EgressFailoverServer
 import api_surface
 import qwp_wire
 
+import questdb
 import questdb._client as qi
 
 from test_client_row_egress import TestTimeoutArgument
@@ -77,6 +81,37 @@ if os.environ.get('TEST_QUESTDB_INTEGRATION') == '1':
         TestEgressFailoverRoleNegotiation)
 
 from fixture import _parse_version
+from test_system_fixture_setup import TestSystemFixtureSetup
+
+# OIDC auth tests. Their runtime logic uses only the standard library, but
+# importing them runs ``from questdb.auth import ...``, and ``questdb.auth`` is a
+# subpackage of the compiled ``questdb`` package -- so the import triggers
+# ``questdb/__init__.py`` (``from questdb import _client``) and therefore
+# requires the compiled extension to have been built. Run them standalone with
+# ``PYTHONPATH=src python -m unittest test_auth`` only after building the
+# extension in place. They are imported here so ``unittest.main()`` picks them
+# up in the aggregated CI run alongside the ingress tests.
+from test_auth import (
+    AdapterRealDriverTest,
+    AdapterTest,
+    NativeOidcIntegrationTest,
+    NativeOidcTest,
+    NativeTransportAttachmentTest,
+    OidcApiContractTest,
+    OidcDiagnosticReentryTest,
+    OidcDiagnosticSignalTest,
+    OidcFlushInterruptTest,
+    OidcForkSafetyTest,
+    OidcTestServerFixtureTest,
+    OidcPoolDataframeFailoverTest,
+    OidcReaderLifetimeTest,
+    OidcReaderMidStreamErrorTest,
+    OidcRendererReentryTest,
+    OidcReviewFixTest,
+    OidcSenderReentryTest,
+    ProviderCycleSafetyTest,
+    RenderSanitizerTest,
+)
 
 NUMPY_VERSION = _parse_version(np.__version__)
 
@@ -112,6 +147,18 @@ _read_qwp_varint = qwp_wire.read_varint
 _first_qwp_table_row_count = qwp_wire.first_table_row_count
 _first_qwp_table_column_types = qwp_wire.first_table_column_types
 
+
+# Rotating Bearer-token providers. Like the OIDC tests above, they need the
+# compiled extension.
+from test_token_provider import (
+    BearerTokenProviderAttachTest,
+    CleartextWarningTest,
+    ExpiringTokenTest,
+    RefreshingTokenProviderTest,
+    TokenCallbackForkTest,
+    TokenProviderTypingTest,
+    TokenUnavailableErrorTest,
+)
 
 from test_client_capsule_path import (
     TestArrowFfiProducerLayoutMatrix,
@@ -155,6 +202,8 @@ from test_ci_wiring import (
 )
 from test_dataframe_leaks import (
     TestCategoricalArrowLeak,
+    TestOidcNativeLeak,
+    TestOidcNativeInterruptOwnership,
     TestFixedSizeBinaryClaimLeak,
     TestPyobjColumnarLeak,
     TestBinaryBufferRelease,
@@ -256,8 +305,18 @@ class TestQwpWebSocketApi(unittest.TestCase):
     def test_connection_event_enum_and_shape(self):
         self.assertEqual(qi.ConnectionEventKind.parse('connected'),
                          qi.ConnectionEventKind.Connected)
-        self.assertEqual(qi.ConnectionEventKind.Connected.c_value, 0)
+        self.assertEqual(
+            [kind.c_value for kind in qi.ConnectionEventKind],
+            list(range(8)),
+            'connection event ordinals are a public native/Python ABI')
         self.assertEqual(qi.ConnectionEventKind.AuthFailed.c_value, 6)
+        # Appended, so the existing ordinals stay put: the C callback maps by
+        # `c_value` and the constants are ABI.
+        self.assertEqual(
+            qi.ConnectionEventKind.parse('credential_unavailable'),
+            qi.ConnectionEventKind.CredentialUnavailable)
+        self.assertEqual(
+            qi.ConnectionEventKind.CredentialUnavailable.c_value, 7)
         event = qi.ConnectionEvent(
             kind=qi.ConnectionEventKind.FailedOver,
             host='b', port='2', previous_host='a', previous_port='1',
@@ -291,6 +350,258 @@ class TestQwpWebSocketApi(unittest.TestCase):
         self.assertIs(ConnectionEventKind, qi.ConnectionEventKind)
         self.assertIs(ServerInfo, qi.ServerInfo)
         self.assertIs(ServerRole, qi.ServerRole)
+
+    def test_cursor_finalizer_reclaim_never_waits_for_busy_lock(self):
+        handle = qi._debug_new_cursor_handle()
+        entered = threading.Event()
+        release = threading.Event()
+        holder = threading.Thread(
+            target=qi._debug_hold_cursor_handle_lock,
+            args=(handle, entered, release), daemon=True)
+        holder.start()
+        self.assertTrue(entered.wait(5))
+
+        outcomes = []
+        reclaimer = threading.Thread(
+            target=lambda: outcomes.append(
+                qi._debug_try_reclaim_cursor_handle(handle)),
+            daemon=True)
+        reclaimer.start()
+        # A blocked reclaim cannot finish before `release.set()` below, so a
+        # generous deadline discriminates exactly as well as a tight one and
+        # does not turn a slow CI agent into a fake deadlock report.
+        reclaimer.join(10)
+        finished_without_release = not reclaimer.is_alive()
+        release.set()
+        holder.join(5)
+        reclaimer.join(5)
+        self.assertTrue(finished_without_release,
+                        'finalizer reclaim blocked behind the cursor lock')
+        self.assertEqual(outcomes, [-1])
+
+    def test_cursor_finalizer_reclaim_refuses_lock_held_by_this_thread(self):
+        # The cyclic GC can collect a reader lease on the very thread that is
+        # decoding its cursor's batch under the (re-entrant) cursor lock. A
+        # reclaim that re-acquired the lock freed the cursor -- and the batch
+        # buffers the decoder was still reading.
+        handle = qi._debug_new_cursor_handle()
+        outcomes = []
+
+        class Entered:
+            def set(self):
+                pass
+
+        class ReclaimWhileHolding:
+            def wait(self):
+                outcomes.append(qi._debug_try_reclaim_cursor_handle(handle))
+
+        qi._debug_hold_cursor_handle_lock(
+            handle, Entered(), ReclaimWhileHolding())
+        self.assertEqual(outcomes, [-1])
+        # Once the holder is gone, the same reclaim proceeds.
+        self.assertEqual(qi._debug_try_reclaim_cursor_handle(handle), 0)
+
+    def test_cursor_operations_reject_same_thread_decode_reentry(self):
+        self._assert_cursor_decode_reentry_rejected()
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_numpy_cursor_iteration_rejects_same_thread_decode_reentry(self):
+        self._assert_cursor_decode_reentry_rejected(include_numpy=True)
+
+    def _assert_cursor_decode_reentry_rejected(self, *, include_numpy=False):
+        handle = qi._debug_new_cursor_handle()
+        result = qi._debug_new_cursor_finalizer_owner('query_result', handle)
+        operations = [result.close, result.cancel]
+        if include_numpy:
+            iterator = qi._debug_new_cursor_finalizer_owner('numpy', handle)
+            operations.append(lambda: next(iterator))
+        tested = []
+        case = self
+
+        class DuringDecode:
+            def set(self):
+                pass
+
+            def wait(self):
+                for operation in operations:
+                    with case.assertRaises(qi.QuestDBError) as caught:
+                        operation()
+                    case.assertIs(caught.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+                    tested.append(operation)
+                case.assertIs(result._cursor_handle, handle)
+
+        qi._debug_hold_cursor_handle_lock(handle, DuringDecode(), DuringDecode())
+        self.assertEqual(tested, operations)
+        result.close()
+
+    @unittest.skipIf(pyarrow is None, 'pyarrow not installed')
+    def test_cursor_close_and_cancel_from_another_thread_wait_for_its_read(
+            self):
+        # Only re-entry from the reading thread is refused. A close() or
+        # cancel() from another thread while the reader is blocked in a
+        # native read waits for that read to return, as it does for a row
+        # stream, instead of raising InvalidApiCall.
+        for operation in ('close', 'cancel'):
+            with self.subTest(operation=operation), EgressFailoverServer(
+                    deliver_first_batch=True,
+                    batches=((1, 2, 3), (4, 5, 6))) as server:
+                db = questdb.connect(
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;')
+                try:
+                    result = db.query('select v from t')
+                    batches = result.iter_arrow()
+                    got_first = threading.Event()
+                    read = []
+                    operated = []
+
+                    def read_all():
+                        try:
+                            next(batches)
+                            got_first.set()
+                            # Blocks in the native read: the server holds
+                            # the next batch until `release_first` is set.
+                            read.extend(batches)
+                        except BaseException as exc:  # noqa: BLE001
+                            read.append(exc)
+                        finally:
+                            got_first.set()
+
+                    def operate():
+                        try:
+                            getattr(result, operation)()
+                            operated.append(None)
+                        except BaseException as exc:  # noqa: BLE001
+                            operated.append(exc)
+
+                    reader = threading.Thread(target=read_all, daemon=True)
+                    reader.start()
+                    self.assertTrue(got_first.wait(10))
+                    # Lets the reader enter its native read. A call made
+                    # before that has nothing to wait for and tests nothing.
+                    time.sleep(0.5)
+                    release = threading.Timer(0.2, server.release_first.set)
+                    release.start()
+                    caller = threading.Thread(target=operate, daemon=True)
+                    caller.start()
+                    caller.join(10)
+                    release.cancel()
+                    server.release_first.set()
+                    reader.join(10)
+                    self.assertFalse(caller.is_alive())
+                    self.assertFalse(reader.is_alive())
+                    # The refusal is InvalidApiCall. A cancel() that ran
+                    # before the read began can fail on this server's held
+                    # connection instead, which is not what is tested here.
+                    self.assertNotIn(
+                        qi.QuestDBErrorCode.InvalidApiCall,
+                        [getattr(exc, 'code', None) for exc in operated])
+                    if operation == 'close':
+                        self.assertEqual(operated, [None])
+                    for item in read:
+                        if isinstance(item, BaseException):
+                            self.assertIsInstance(item, qi.QuestDBError)
+                    result.close()
+                finally:
+                    db.close()
+
+    @unittest.skipUnless(
+        hasattr(sys, 'getrefcount'), 'requires refcounting finalizers')
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_every_cursor_owner_finalizer_uses_nonblocking_reclaim(self):
+        for kind in (
+                'numpy', 'generator', 'capsule', 'query_result',
+                'pooled_reader'):
+            with self.subTest(kind=kind):
+                handle = qi._debug_new_cursor_handle()
+                client = None
+                if kind == 'pooled_reader':
+                    client = qi.QuestDB.from_conf(
+                        'ws::addr=127.0.0.1:1;lazy_connect=true;')
+                    owner = qi._debug_new_pooled_reader_finalizer_owner(
+                        handle, client)
+                else:
+                    owner = qi._debug_new_cursor_finalizer_owner(kind, handle)
+                entered = threading.Event()
+                release = threading.Event()
+                holder = threading.Thread(
+                    target=qi._debug_hold_cursor_handle_lock,
+                    args=(handle, entered, release), daemon=True)
+                holder.start()
+                self.assertTrue(entered.wait(5))
+
+                owners = [owner]
+                del owner
+                dropped = threading.Event()
+
+                def drop_last_owner():
+                    owners.pop()
+                    gc.collect()
+                    dropped.set()
+
+                dropper = threading.Thread(
+                    target=drop_last_owner, daemon=True)
+                dropper.start()
+                # Deadline covers an unbounded `gc.collect()`; see the note in
+                # the sibling test. The blocked case still cannot finish early.
+                finished_without_release = dropped.wait(10)
+
+                closed_without_release = True
+                closer = None
+                if client is not None:
+                    closed = threading.Event()
+
+                    def close_client():
+                        client.close()
+                        closed.set()
+
+                    closer = threading.Thread(
+                        target=close_client, daemon=True)
+                    closer.start()
+                    closed_without_release = closed.wait(10)
+
+                release.set()
+                holder.join(5)
+                dropper.join(5)
+                if closer is not None:
+                    closer.join(5)
+                self.assertFalse(holder.is_alive())
+                self.assertFalse(dropper.is_alive())
+                if closer is not None:
+                    self.assertFalse(closer.is_alive())
+                self.assertTrue(
+                    finished_without_release,
+                    f'{kind} finalizer blocked behind the cursor lock')
+                self.assertTrue(
+                    closed_without_release,
+                    f'{kind} finalizer did not end active-use accounting')
+
+    def test_query_result_busy_finalizer_keeps_its_handle_attached(self):
+        handle = qi._debug_new_cursor_handle()
+        result = qi._debug_new_cursor_finalizer_owner(
+            'query_result', handle)
+        entered = threading.Event()
+        release = threading.Event()
+        holder = threading.Thread(
+            target=qi._debug_hold_cursor_handle_lock,
+            args=(handle, entered, release), daemon=True)
+        holder.start()
+        self.assertTrue(entered.wait(5))
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            started = time.monotonic()
+            result.__del__()
+            self.assertLess(time.monotonic() - started, 5)
+        self.assertIs(
+            result._cursor_handle, handle,
+            'busy finalization detached the only eventual reclaim owner')
+        self.assertEqual(
+            [item for item in caught if item.category is ResourceWarning], [])
+
+        release.set()
+        holder.join(5)
+        self.assertFalse(holder.is_alive())
+        result.close()
 
     def test_pooled_lease_types_exported_from_package(self):
         from questdb import PooledReader, PooledSender
@@ -2335,6 +2646,43 @@ class TestQwpWebSocketApi(unittest.TestCase):
             any('listener failed' in line for line in logs.output),
             logs.output)
 
+    def test_idle_sender_listener_can_read_sender_metadata(self):
+        dispatched = threading.Event()
+        idle = threading.Event()
+        observed = []
+
+        def on_event(_event):
+            if not idle.wait(5):
+                observed.append(TimeoutError('sender did not become idle'))
+            else:
+                try:
+                    observed.append((
+                        sender.max_name_len,
+                        sender.protocol_version,
+                        sender.connection_events_dropped,
+                        sender.connection_events_delivered))
+                except BaseException as exc:
+                    observed.append(exc)
+            dispatched.set()
+
+        with QwpAckServer() as server:
+            sender = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;',
+                connection_listener=on_event)
+            try:
+                sender.establish()
+                sender.row('events', columns={'value': 1},
+                           at=qi.ServerTimestamp)
+                sender.flush()
+                idle.set()
+                self.assertTrue(dispatched.wait(5))
+                self.assertEqual(len(observed), 1)
+                self.assertIsInstance(observed[0], tuple, observed)
+                self.assertEqual(len(observed[0]), 4)
+            finally:
+                idle.set()
+                sender.close(flush=False)
+
     def test_error_event_inbox_overflow_drops_oldest(self):
         """With the handler blocked and a 1-slot inbox, a continuous
         rejection stream must overflow the inbox and count drops.
@@ -2431,6 +2779,9 @@ class TestQwpWebSocketApi(unittest.TestCase):
         def on_error(error):
             sender = holder[0]
             for call in (
+                    lambda: sender.row(
+                        'events', columns={'value': 2},
+                        at=qi.ServerTimestamp),
                     sender.published_fsn,
                     sender.acked_fsn,
                     sender.drive_once,
@@ -2489,6 +2840,118 @@ class TestQwpWebSocketApi(unittest.TestCase):
             all(code is qi.QuestDBErrorCode.InvalidApiCall
                 for code in captured),
             captured)
+
+    def test_sender_row_reentrancy_from_idle_listener(self):
+        # Unlike an in-flight native call, an idle listener is guarded by
+        # callback identity. A callback on another thread may run at the same
+        # time as row(), and must not make that thread's sender unusable.
+        entered = threading.Event()
+        release = threading.Event()
+        captured = []
+        sender = None
+
+        def on_event(event):
+            if event.host is not None:
+                return  # Ignore the sender's real connect event.
+            try:
+                sender.row(
+                    'events', columns={'value': 1}, at=qi.ServerTimestamp)
+            except qi.QuestDBError as exc:
+                captured.append(exc.code)
+            else:
+                captured.append(None)
+            entered.set()
+            release.wait(5)
+
+        with QwpAckServer() as server:
+            sender = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};auto_flush=off;',
+                connection_listener=on_event)
+            # Dispatch the target the native dispatcher was registered
+            # with, as the sender's own dispatcher thread would.
+            listener = qi._debug_registered_connection_listener(sender)
+            callback = threading.Thread(
+                target=lambda: qi._debug_connection_event_dispatch(
+                    qi.ConnectionEventKind.Connected.c_value, listener),
+                daemon=True)
+            try:
+                sender.establish()
+                callback.start()
+                self.assertTrue(entered.wait(5))
+                self.assertEqual(captured, [qi.QuestDBErrorCode.InvalidApiCall])
+                # A callback is active, but not on this thread.
+                sender.row('events', columns={'value': 2}, at=qi.ServerTimestamp)
+            finally:
+                release.set()
+                if callback.ident is not None:
+                    callback.join(5)
+                sender.close(False)
+            self.assertFalse(callback.is_alive())
+
+    def test_peer_sender_appends_from_default_rejection_handler(self):
+        # Every handler-less ws sender and pool shares the module's default
+        # rejection handler. While one of them dispatches it, a different,
+        # idle sender is not inside its own callback: a logging handler that
+        # ships the rejection record through that peer must be able to append.
+        outcomes = []
+
+        class PeerWriter(logging.Handler):
+            def __init__(self, peer):
+                super().__init__(logging.WARNING)
+                self.peer = peer
+
+            def emit(self, record):
+                if 'server rejection' not in record.getMessage():
+                    return
+                calls = [lambda: self.peer.row(
+                    'client_log', columns={'value': 1},
+                    at=qi.ServerTimestamp)]
+                if pd is not None:
+                    calls.append(lambda: self.peer.dataframe(
+                        pd.DataFrame({'value': [2]}),
+                        table_name='client_log',
+                        at=qi.ServerTimestamp))
+                for call in calls:
+                    try:
+                        call()
+                    except qi.QuestDBError as exc:
+                        outcomes.append(exc.code)
+                    else:
+                        outcomes.append(None)
+
+        with QwpAckServer(error_status=0x03) as rejecting, \
+                QwpAckServer() as healthy:
+            rejected = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{rejecting.port};auto_flush=off;'
+                'close_flush_timeout_millis=0;')
+            peer = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{healthy.port};auto_flush=off;'
+                'close_flush_timeout_millis=0;')
+            writer = PeerWriter(peer)
+            questdb_logger = logging.getLogger('questdb')
+            questdb_logger.addHandler(writer)
+            try:
+                rejected.establish()
+                peer.establish()
+                rejected.row(
+                    'events', columns={'value': 1}, at=qi.ServerTimestamp)
+                rejected.flush()
+                deadline = time.monotonic() + 10
+                while not outcomes:
+                    self.assertLess(
+                        time.monotonic(), deadline,
+                        'the default handler never dispatched the rejection')
+                    try:
+                        # Drains the rejection on this thread.
+                        rejected.flush()
+                    except qi.QuestDBError:
+                        pass
+                    time.sleep(0.01)
+            finally:
+                questdb_logger.removeHandler(writer)
+                rejected.close(False)
+                peer.close(False)
+        self.assertEqual(outcomes, [None] * (1 if pd is None else 2))
 
     def test_standalone_sender_row_from_listener_is_refused(self):
         """A standalone ws sender's connection listener runs on a native
@@ -5501,6 +5964,36 @@ print('OK')
             "dataframe() can't be called while a row is being "
             'written into this buffer',
             str(seen[0]))
+
+    @unittest.skipIf(pd is None, 'pandas not installed')
+    def test_refused_dataframe_does_not_hold_back_parked_signals(self):
+        """A `dataframe()` refused before its frame starts must not leave
+        the main thread deferring the signal exceptions a token callback
+        parks: one refusal used to swallow them for the rest of the
+        process."""
+        buffer = qi.Buffer._new_qwp()
+        refused = []
+
+        class HostileAddr(ipaddress.IPv4Address):
+            def __int__(self):
+                frame = pd.DataFrame({
+                    'x': [1],
+                    'ts': pd.to_datetime([0], unit='s')})
+                try:
+                    buffer.dataframe(frame, table_name='inner', at='ts')
+                except qi.QuestDBError as e:
+                    refused.append(e)
+                return 0x01020304
+
+        buffer.row(
+            'hostile', columns={'addr': HostileAddr('192.0.2.1')},
+            at=qi.ServerTimestamp)
+        self.assertEqual(len(refused), 1)
+        # Parks the exception and fails its pending call on purpose, so it
+        # is delivered right here -- unless delivery is deferred.
+        with self.assertRaises(KeyboardInterrupt):
+            qi._debug_oidc_deliver_test_exceptions(
+                (KeyboardInterrupt(),), True)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_clear_is_refused_while_a_dataframe_is_being_written(self):
@@ -10916,6 +11409,53 @@ finish()
             self._INTERRUPT_WHILE_WAITING_FOR_ANOTHER_CLOSE_SCRIPT,
             timeout=60)
 
+    _UNCLOSED_READER_LEASE_IN_A_CYCLE_SCRIPT = """
+import gc
+import sys
+
+import questdb
+from qwp_egress_failover_server import EgressFailoverServer
+
+unraisable = []
+sys.unraisablehook = unraisable.append
+
+
+def abandon(db):
+    lease = db.reader()
+    try:
+        raise ValueError('keeps this frame alive')
+    except ValueError as exc:
+        # exc -> traceback -> this frame -> lease: once this returns, the
+        # unclosed lease is reachable only through that cycle.
+        kept = exc
+
+
+with EgressFailoverServer() as server:
+    db = questdb.connect(
+        f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;')
+    gc.collect()
+    # No collection between the lease and its cycle: the reader handle must
+    # be the oldest object in the garbage, as it is when nothing intervenes.
+    gc.disable()
+    abandon(db)
+    gc.collect()
+    gc.enable()
+    db.close()
+assert not unraisable, [repr(u.exc_value) for u in unraisable]
+print('OK')
+"""
+
+    @unittest.skipUnless(
+        hasattr(sys, 'getrefcount'), 'requires refcounting finalizers')
+    def test_an_unclosed_reader_lease_collected_from_a_cycle_is_released(
+            self):
+        """The cyclic collector cleared the lease's reader handle first,
+        and the lease's finalizer then closed the reader through it: a
+        crash from CPython 3.13, an unraisable SystemError before. Runs in
+        a child interpreter, where a crash reads as a failed return code."""
+        self._run_in_child_interpreter(
+            self._UNCLOSED_READER_LEASE_IN_A_CYCLE_SCRIPT, timeout=60)
+
     def _run_in_child_interpreter(self, script, timeout=120):
         """Run `script` in a fresh interpreter and require it to print OK.
 
@@ -14528,6 +15068,347 @@ class TestBufferConstruction(unittest.TestCase):
         self.assertGreater(buf.capacity(), 0)
 
 
+class TestBufferNativeBorrow(unittest.TestCase):
+    """A buffer a native flush is using, observed from another thread."""
+
+    def _while_flushing(self, clear, probe):
+        # Holds server 1's reply so the flush stays inside native, with the
+        # GIL released, while `probe` runs on this thread.
+        release = threading.Event()
+        outcome = {}
+        with HttpServer() as server:
+            server.responses.append((release, 204, None, None))
+            buf = qi.Buffer(protocol_version=2)
+            buf.row('t', columns={'x': 1}, at=qi.TimestampNanos(1))
+            expected = bytes(buf)
+            conf = (f'http::addr=127.0.0.1:{server.port};'
+                    'protocol_version=2;auto_flush=off;')
+            with qi.Sender.from_conf(conf) as sender:
+                def flush():
+                    try:
+                        sender.flush(buf, clear=clear)
+                    except Exception as e:  # noqa: BLE001
+                        outcome['flush'] = e
+                flusher = threading.Thread(target=flush)
+                flusher.start()
+                try:
+                    deadline = time.monotonic() + 10
+                    while not server.requests:
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                    self.assertTrue(flusher.is_alive())
+                    probe(buf, expected)
+                finally:
+                    release.set()
+                    flusher.join(10)
+        self.assertNotIn('flush', outcome)
+        return buf, expected
+
+    def _assert_rejected(self, action):
+        with self.assertRaises(qi.QuestDBError) as cm:
+            action()
+        self.assertEqual(cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+
+    def test_kept_flush_allows_reads_and_parallel_kept_flushes(self):
+        # `flush(buf, clear=False)` borrows the buffer read-only, so the
+        # documented multi-database fan-out -- one sender per thread, one
+        # shared buffer -- and plain reads keep working while it runs.
+        def probe(buf, expected):
+            self.assertEqual(len(buf), len(expected))
+            self.assertEqual(bytes(buf), expected)
+            self.assertTrue(buf)
+            self.assertGreater(buf.capacity(), 0)
+            with HttpServer() as other:
+                conf = (f'http::addr=127.0.0.1:{other.port};'
+                        'protocol_version=2;auto_flush=off;')
+                with qi.Sender.from_conf(conf) as sender:
+                    sender.flush(buf, clear=False)
+                self.assertEqual(other.requests, [expected])
+            # Modifying it would race the native read.
+            self._assert_rejected(buf.clear)
+            self._assert_rejected(lambda: buf.reserve(1))
+            self._assert_rejected(lambda: buf.row(
+                't', columns={'x': 2}, at=qi.TimestampNanos(2)))
+
+        buf, expected = self._while_flushing(False, probe)
+        self.assertEqual(bytes(buf), expected)
+        buf.clear()  # Usable again once the flush has returned.
+
+    def test_clearing_flush_rejects_reads_and_writes(self):
+        # A clearing flush modifies the buffer when it completes.
+        def probe(buf, _expected):
+            self._assert_rejected(lambda: len(buf))
+            self._assert_rejected(lambda: bytes(buf))
+            self._assert_rejected(lambda: bool(buf))
+            self._assert_rejected(buf.capacity)
+            self._assert_rejected(buf.clear)
+
+        buf, _ = self._while_flushing(True, probe)
+        self.assertEqual(len(buf), 0)
+
+    def _while_publishing(self, method_name, probe):
+        # Slow ACKs and a tiny store-and-forward budget make the publish block
+        # inside native, with the GIL released, waiting for capacity, while
+        # `probe` runs on this thread against the same buffer.
+        big = 'x' * 1500
+
+        def fill(buf, tag):
+            buf.row('t', columns={'v': tag, 's': big},
+                    at=qi.TimestampNanos(1_700_000_000_000_000_000))
+
+        outcome = {}
+        with QwpAckServer(ack_delay_s=2.0) as slow, \
+                QwpAckServer() as healthy:
+            sender = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{slow.port};lazy_connect=true;'
+                'sf_max_segment_bytes=4096;sf_max_total_bytes=8192;'
+                'sf_append_deadline_millis=30000;'
+                'close_flush_timeout_millis=0;', auto_flush=False)
+            other = qi.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{healthy.port};lazy_connect=true;'
+                'close_flush_timeout_millis=0;', auto_flush=False)
+            sender.establish()
+            other.establish()
+            try:
+                prime = sender.new_buffer()
+                for _ in range(4):
+                    fill(prime, 1)
+                    sender.flush_and_get_fsn(prime)
+                empty_len = len(sender.new_buffer())
+                buf = sender.new_buffer()
+                fill(buf, 7)
+                expected = (len(buf), bytes(buf))
+
+                def publish():
+                    try:
+                        outcome['fsn'] = getattr(sender, method_name)(buf)
+                    except Exception as e:  # noqa: BLE001
+                        outcome['error'] = e
+
+                publisher = threading.Thread(target=publish)
+                publisher.start()
+                try:
+                    # Both kinds of borrow reject a modification, and a
+                    # capacity-only `reserve` is harmless before the publish
+                    # starts, so its first rejection marks the borrow.
+                    deadline = time.monotonic() + 10
+                    while True:
+                        self.assertLess(time.monotonic(), deadline)
+                        try:
+                            buf.reserve(1)
+                        except qi.QuestDBError as e:
+                            self.assertEqual(
+                                e.code, qi.QuestDBErrorCode.InvalidApiCall)
+                            break
+                        time.sleep(0.005)
+                    probe(buf, expected, other)
+                    self.assertTrue(
+                        publisher.is_alive(),
+                        'the publish left native before the probe finished')
+                finally:
+                    publisher.join(30)
+            finally:
+                sender.close(False)
+                other.close(False)
+        self.assertNotIn('error', outcome)
+        return buf, expected, empty_len
+
+    def test_publishing_flush_and_get_fsn_rejects_reads_and_writes(self):
+        # `flush_and_get_fsn(buf)` clears the buffer when it completes, so
+        # it borrows it exclusively: reading or fanning it out to another
+        # sender while it runs would race the native clear and abort.
+        def probe(buf, _expected, other):
+            self._assert_rejected(lambda: len(buf))
+            self._assert_rejected(lambda: bytes(buf))
+            self._assert_rejected(lambda: bool(buf))
+            self._assert_rejected(buf.capacity)
+            self._assert_rejected(
+                lambda: other.flush_and_keep_and_get_fsn(buf))
+            self._assert_rejected(lambda: other.flush(buf, clear=False))
+            self._assert_rejected(buf.clear)
+            self._assert_rejected(lambda: buf.row(
+                't', columns={'v': 2}, at=qi.TimestampNanos(2)))
+
+        buf, _, empty_len = self._while_publishing('flush_and_get_fsn', probe)
+        self.assertEqual(len(buf), empty_len)
+
+    def test_kept_flush_and_get_fsn_allows_reads_and_parallel_kept_flushes(
+            self):
+        # `flush_and_keep_and_get_fsn(buf)` only reads the buffer, so other
+        # threads may read it and fan it out with kept flushes, but not
+        # modify it.
+        def probe(buf, expected, other):
+            self.assertEqual((len(buf), bytes(buf)), expected)
+            self.assertTrue(buf)
+            self.assertGreater(buf.capacity(), 0)
+            other.flush_and_keep_and_get_fsn(buf)
+            other.flush(buf, clear=False)
+            self._assert_rejected(buf.clear)
+            self._assert_rejected(lambda: buf.row(
+                't', columns={'v': 2}, at=qi.TimestampNanos(2)))
+
+        buf, expected, _ = self._while_publishing(
+            'flush_and_keep_and_get_fsn', probe)
+        self.assertEqual((len(buf), bytes(buf)), expected)
+        buf.clear()
+
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_a_flush_from_the_frames_own_python_keeps_its_guard(self):
+        # Python that a `dataframe()` runs -- here a cell's tzinfo -- may
+        # flush another buffer through the same sender. That flush cleared
+        # the sender's in-native flag on its way out, so for the rest of the
+        # frame another thread was no longer refused.
+        outcome = {}
+
+        def probe(sender):
+            try:
+                outcome['probe'] = sender.max_name_len
+            except qi.QuestDBError as e:
+                outcome['probe'] = e
+
+        class FlushingTz(datetime.tzinfo):
+            def utcoffset(self, dt):
+                if 'probe' not in outcome:
+                    sender = outcome['sender']
+                    own = sender.new_buffer()
+                    own.row('own', columns={'x': 1}, at=qi.ServerTimestamp)
+                    sender.flush(own)
+                    prober = threading.Thread(target=probe, args=(sender,))
+                    prober.start()
+                    prober.join(10)
+                return datetime.timedelta(0)
+
+            def dst(self, dt):
+                return datetime.timedelta(0)
+
+            def tzname(self, dt):
+                return 'UTC'
+
+        df = pd.DataFrame({'when': pd.Series(
+            [datetime.datetime(2024, 1, 1, tzinfo=FlushingTz())],
+            dtype=object)})
+        with HttpServer() as server:
+            conf = (f'http::addr=127.0.0.1:{server.port};'
+                    'protocol_version=2;auto_flush=off;')
+            with qi.Sender.from_conf(conf) as sender:
+                outcome['sender'] = sender
+                sender.dataframe(df, table_name='t', at=qi.ServerTimestamp)
+                del outcome['sender']
+            self.assertEqual(len(server.requests), 2)
+        self.assertIsInstance(outcome['probe'], qi.QuestDBError)
+        self.assertEqual(
+            outcome['probe'].code, qi.QuestDBErrorCode.InvalidApiCall)
+        self.assertIn('native operation', str(outcome['probe']))
+
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_a_refused_nested_frame_keeps_the_outer_borrow(self):
+        # A `Buffer.dataframe()` re-entered from the frame serializing into
+        # the same buffer is refused, as before. It used to take and release
+        # the frame borrow on its way to that refusal, which left the outer
+        # frame without one, so another thread could read the buffer while
+        # the serializer wrote it.
+        outcome = {}
+        buf = qi.Buffer(protocol_version=2)
+
+        def probe():
+            try:
+                outcome['probe'] = len(buf)
+            except qi.QuestDBError as e:
+                outcome['probe'] = e
+
+        class NestingTz(datetime.tzinfo):
+            def utcoffset(self, dt):
+                if 'nested' not in outcome:
+                    try:
+                        buf.dataframe(
+                            pd.DataFrame({'x': [1]}), table_name='t',
+                            at=qi.ServerTimestamp)
+                    except qi.QuestDBError as e:
+                        outcome['nested'] = e
+                    prober = threading.Thread(target=probe)
+                    prober.start()
+                    prober.join(10)
+                return datetime.timedelta(0)
+
+            def dst(self, dt):
+                return datetime.timedelta(0)
+
+            def tzname(self, dt):
+                return 'UTC'
+
+        df = pd.DataFrame({'when': pd.Series(
+            [datetime.datetime(2024, 1, 1, tzinfo=NestingTz())],
+            dtype=object)})
+        buf.dataframe(df, table_name='t', at=qi.ServerTimestamp)
+        self.assertIn('while a row is being written', str(outcome['nested']))
+        self.assertIsInstance(outcome['probe'], qi.QuestDBError)
+        self.assertEqual(
+            outcome['probe'].code, qi.QuestDBErrorCode.InvalidApiCall)
+        expected = qi.Buffer(protocol_version=2)
+        expected.dataframe(pd.DataFrame({'when': pd.Series(
+            [datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)],
+            dtype=object)}), table_name='t', at=qi.ServerTimestamp)
+        self.assertEqual(bytes(buf), bytes(expected))
+
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_transaction_dataframe_rejects_reads_and_close(self):
+        # `txn.dataframe()` serializes into the sender's internal buffer, as
+        # `Sender.dataframe()` does. Reading that buffer from another thread
+        # raced the serializer, and closing the sender freed the buffer under
+        # it. A tz-aware cell runs its tzinfo during serialization: park the
+        # serializing thread there while this one probes the sender.
+        parked = threading.Event()
+        resume = threading.Event()
+        serializer = []
+
+        class ParkingTz(datetime.tzinfo):
+            def utcoffset(self, dt):
+                if (threading.current_thread() is serializer[0]
+                        and not parked.is_set()):
+                    parked.set()
+                    resume.wait(10)
+                return datetime.timedelta(0)
+
+            def dst(self, dt):
+                return datetime.timedelta(0)
+
+            def tzname(self, dt):
+                return 'UTC'
+
+        df = pd.DataFrame({'when': pd.Series(
+            [datetime.datetime(2024, 1, 1, tzinfo=ParkingTz())],
+            dtype=object)})
+        outcome = {}
+        with HttpServer() as server:
+            conf = (f'http::addr=127.0.0.1:{server.port};'
+                    'protocol_version=2;auto_flush=off;')
+            with qi.Sender.from_conf(conf) as sender:
+                def run():
+                    try:
+                        with sender.transaction('t') as txn:
+                            txn.dataframe(df, at=qi.ServerTimestamp)
+                    except Exception as e:  # noqa: BLE001
+                        outcome['txn'] = e
+
+                serializer.append(threading.Thread(target=run))
+                serializer[0].start()
+                try:
+                    self.assertTrue(parked.wait(10))
+                    self._assert_rejected(lambda: len(sender))
+                    self._assert_rejected(lambda: bytes(sender))
+                    self._assert_rejected(lambda: bool(sender))
+                    # Not the transaction's own refusal to flush: that one
+                    # still closed the sender.
+                    with self.assertRaisesRegex(
+                            qi.QuestDBError, 'in a native operation'):
+                        sender.close()
+                finally:
+                    resume.set()
+                    serializer[0].join(10)
+                self.assertNotIn('txn', outcome)
+            self.assertEqual(len(server.requests), 1)
+
+
 class TestReinitRejected(unittest.TestCase):
     """Calling `__init__` a second time on an already-initialized native
     object must raise instead of leaking or corrupting the impl state."""
@@ -14549,6 +15430,160 @@ class TestReinitRejected(unittest.TestCase):
             sender.__init__('tcp', '127.0.0.1', 9009)
         self.assertEqual(
             cm.exception.code, qi.QuestDBErrorCode.InvalidApiCall)
+
+
+class TestNoNewAttributes(unittest.TestCase):
+    """`Sender` and `QuestDB` have an instance dictionary only to hold their
+    bearer-token holder. Every other new name is refused, as before they had
+    one, so a misspelt or invented setting cannot be stored and read back
+    while configuring nothing."""
+
+    def test_sender(self):
+        sender = qi.Sender('http', '127.0.0.1', 9000)
+        for name in ('request_timeout', 'retry_timeout', 'max_buf_size'):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(
+                        AttributeError, 'has no attribute'):
+                    setattr(sender, name, 1)
+                self.assertFalse(hasattr(sender, name))
+        with self.assertRaisesRegex(AttributeError, 'not writable'):
+            sender.auto_flush_rows = 10
+        with self.assertRaisesRegex(AttributeError, 'read-only'):
+            sender.flush = None
+
+    def test_questdb(self):
+        db = questdb.connect('ws::addr=127.0.0.1:1;lazy_connect=true;')
+        try:
+            with self.assertRaisesRegex(AttributeError, 'has no attribute'):
+                db.sender_pool_max = 1
+            self.assertFalse(hasattr(db, 'sender_pool_max'))
+        finally:
+            db.close()
+
+    def test_subclasses_keep_their_dictionary(self):
+        class MySender(qi.Sender):
+            pass
+
+        sender = MySender('http', '127.0.0.1', 9000)
+        sender.request_timeout = 1
+        self.assertEqual(sender.request_timeout, 1)
+
+    def test_subclasses_store_through_the_generic_setter(self):
+        # `Sender.__setattr__` guards `Sender` itself only; inherited, it would
+        # slow every store on a subclass and stop CPython specializing them.
+        class MySender(qi.Sender):
+            pass
+
+        class MySlotSender(qi.Sender):
+            __slots__ = ('counter',)
+
+        for cls in (MySender, MySlotSender):
+            with self.subTest(cls=cls.__name__):
+                self.assertIs(cls.__setattr__, object.__setattr__)
+                self.assertIs(cls.__delattr__, object.__delattr__)
+                sender = cls('http', '127.0.0.1', 9000)
+                sender.counter = 1
+                self.assertEqual(sender.counter, 1)
+                del sender.counter
+                self.assertFalse(hasattr(sender, 'counter'))
+
+    def test_subclass_setattr_overrides_are_kept(self):
+        calls = []
+
+        class Mixin:
+            def __setattr__(self, name, value):
+                calls.append(('mixin', name))
+                super().__setattr__(name, value)
+
+        class Own(qi.Sender):
+            def __setattr__(self, name, value):
+                calls.append(('own', name))
+                super().__setattr__(name, value)
+
+        class OwnChild(Own):
+            pass
+
+        class WithMixin(Mixin, qi.Sender):
+            pass
+
+        for cls, owner in (
+                (Own, 'own'), (OwnChild, 'own'), (WithMixin, 'mixin')):
+            with self.subTest(cls=cls.__name__):
+                del calls[:]
+                sender = cls('http', '127.0.0.1', 9000)
+                sender.counter = 1
+                self.assertEqual(calls, [(owner, 'counter')])
+                self.assertEqual(sender.counter, 1)
+
+    def test_a_setattr_mixin_after_sender_is_refused(self):
+        # Sender's own __setattr__ comes first in the MRO, so a mixin listed
+        # after it would silently never run. Listed before Sender, it runs.
+        calls = []
+
+        class SetMixin:
+            def __setattr__(self, name, value):
+                calls.append(('set', name))
+                super().__setattr__(name, value)
+
+        class DelMixin:
+            def __delattr__(self, name):
+                calls.append(('del', name))
+                super().__delattr__(name)
+
+        class Plain(qi.Sender):
+            pass
+
+        for mixin in (SetMixin, DelMixin):
+            with self.subTest(mixin=mixin.__name__):
+                for bases in ((qi.Sender, mixin), (Plain, mixin)):
+                    with self.assertRaisesRegex(
+                            TypeError,
+                            f'List {mixin.__name__} before Sender'):
+                        type('S', bases, {})
+                del calls[:]
+                sender = type('S', (mixin, qi.Sender), {})(
+                    'http', '127.0.0.1', 9000)
+                sender.counter = 1
+                del sender.counter
+                self.assertEqual(
+                    calls,
+                    [('set', 'counter')] if mixin is SetMixin
+                    else [('del', 'counter')])
+                self.assertFalse(hasattr(sender, 'counter'))
+
+    @unittest.skipIf(
+        sys.implementation.name == 'pypy',
+        'PyPy keeps the dictionary: its collector sees the bearer holder there')
+    def test_sender_carries_no_dictionary_on_cpython(self):
+        # An instance dictionary, even an empty one, stops CPython caching
+        # the method lookup of `sender.row(...)`, which runs once per row.
+        for with_provider in (False, True):
+            with self.subTest(with_provider=with_provider):
+                kwargs = (
+                    {'bearer_token_provider': lambda: 't'}
+                    if with_provider else {})
+                sender = qi.Sender('http', '127.0.0.1', 9000, **kwargs)
+                self.assertIs(qi._debug_instance_dict_is_set(sender), False)
+                sender.close(flush=False)
+                self.assertIs(qi._debug_instance_dict_is_set(sender), False)
+
+    @unittest.skipIf(
+        sys.implementation.name == 'pypy',
+        'PyPy keeps the dictionary: its collector sees the bearer holder there')
+    def test_reading_the_dictionary_does_not_keep_one_on_cpython(self):
+        # Reading `__dict__` makes a new dictionary. `dir()` drops it at once,
+        # and the next flush drops one that any other read -- `vars()`, an
+        # IDE completing `sender.` -- left.
+        with HttpServer() as server, qi.Sender(
+                qi.Protocol.Http, '127.0.0.1', server.port,
+                auto_flush=False) as sender:
+            self.assertIn('row', dir(sender))
+            self.assertIs(qi._debug_instance_dict_is_set(sender), False)
+            self.assertEqual(vars(sender), {})
+            self.assertIs(qi._debug_instance_dict_is_set(sender), True)
+            sender.row('t', columns={'x': 1}, at=qi.TimestampNanos(1))
+            sender.flush()
+            self.assertIs(qi._debug_instance_dict_is_set(sender), False)
 
 
 class TestTypeStub(unittest.TestCase):
