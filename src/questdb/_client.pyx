@@ -3430,8 +3430,10 @@ class ConnectionEventKind(TaggedEnum):
           ``InvalidApiCall`` (see
           :class:`~questdb.auth.BearerTokenProvider`), which reports
           ``ConfigError``, as a closed
-          :class:`~questdb.auth.RefreshingTokenProvider` subclass that
-          overrides ``token()`` or ``on_rejected()`` does. Queued rows are not
+          :class:`~questdb.auth.RefreshingTokenProvider` does when it is
+          reached through an application provider: a subclass that
+          overrides ``token()`` or ``on_rejected()``, or a provider of your
+          own that calls its ``token()``. Queued rows are not
           deleted — a disk-backed store-and-forward slot stays drainable by
           a later process — but this process will not send them.
 

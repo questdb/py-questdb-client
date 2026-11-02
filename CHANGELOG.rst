@@ -149,11 +149,14 @@ tokens from a secrets vault.
   provider across clients shares its native single-flight acquisition, including
   when passing repeated bound-method lookups. A ``RefreshingTokenProvider``
   such a provider calls -- ``bearer_token_provider=lambda: tokens.token()`` --
-  still refreshes early when a server rejects its token with HTTP 401. A
-  ``RefreshingTokenProvider`` subclass that overrides ``token()`` or
-  ``on_rejected()`` is attached as such a provider: clients call its methods.
-  Closing it still ends them, reported as ``ConfigError``, and attaching it
-  once closed fails as it does for ``RefreshingTokenProvider`` itself.
+  still refreshes early when a server rejects its token with HTTP 401, and
+  closing it still ends that provider's clients, reported as
+  ``ConfigError``. A method bound to a closed one, ``tokens.token``, is
+  refused as the provider itself is. A ``RefreshingTokenProvider`` subclass
+  that overrides ``token()`` or ``on_rejected()`` is attached as such a
+  provider: clients call its methods. Closing it still ends them, reported as
+  ``ConfigError``, and attaching it once closed fails as it does for
+  ``RefreshingTokenProvider`` itself.
   Subclasses of ``RefreshingTokenProvider`` follow the attribute rules of
   ``Sender``'s: they store attributes freely, and a mixin that defines
   ``__setattr__`` or ``__delattr__`` must come before it in the bases.

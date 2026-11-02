@@ -38,3 +38,10 @@ def check_provider_api(
     psycopg_connect(oidc, 'http://localhost:9000')
     sqlalchemy_engine(lambda: 't', 'http://localhost:9000')
     psycopg_connect(provider.token, 'http://localhost:9000')
+
+
+def token_from_inside_with(source: TokenSource) -> str:
+    # `__exit__` never swallows the exception, so mypy must not report a
+    # missing return after the block.
+    with RefreshingTokenProvider(source) as tokens:
+        return tokens.token()

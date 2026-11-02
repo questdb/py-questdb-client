@@ -182,7 +182,11 @@ clients call those methods as described here, rather than reading the cache
 past them. Closing it still fails every client using it (see `Closing`_):
 once it is closed, a failure of its ``token()`` stops them as an
 ``InvalidApiCall`` does, so they report ``ConfigError`` rather than the
-``AuthError`` of a provider attached directly.
+``AuthError`` of a provider attached directly. Closing a provider that your
+provider calls -- ``lambda: tokens.token()`` -- ends your provider's clients
+the same way, as long as your provider lets the error escape, and a method
+bound to a closed provider, ``tokens.token``, is refused as the provider
+itself is.
 
 A provider reports failures as a source does: raise
 :class:`~questdb.auth.TokenUnavailableError` to classify one; any other

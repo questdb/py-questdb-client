@@ -174,10 +174,16 @@ class InvalidArgumentErrorTest(unittest.TestCase):
 
     def test_constructors(self):
         source, _ = _counting_source()
+
+        class NotAMethod:
+            fetch_token = 'not-a-method'
+
         cases = (
             (TypeError, lambda: RefreshingTokenProvider(42)),
+            (TypeError, lambda: RefreshingTokenProvider(NotAMethod())),
             (TypeError, lambda: RefreshingTokenProvider(source, cold_wait='30')),
             (ValueError, lambda: RefreshingTokenProvider(source, cold_wait=-1)),
+            (TypeError, lambda: RefreshingTokenProvider(source, name=42)),
             (ValueError, lambda: RefreshingTokenProvider(source, name='  ')),
             (TypeError, lambda: ExpiringToken(b't', 1e9)),
             (TypeError, lambda: ExpiringToken('t', '2030-01-01')),
@@ -223,18 +229,26 @@ class InvalidArgumentErrorTest(unittest.TestCase):
             lambda **kw: questdb.Sender('http', '127.0.0.1', 9000, **kw),
             lambda **kw: questdb.connect(
                 'ws::addr=127.0.0.1:9000;lazy_connect=true;', **kw))
+
+        class Uninitialized(RefreshingTokenProvider):
+            def __init__(self):
+                pass
+
         with OidcDeviceAuth('questdb', **endpoints) as auth, \
                 OverridingAuth('questdb', **endpoints) as overriding:
             arguments = (
-                {'bearer_token_provider': 42},
-                {'bearer_token_provider': auth},
-                {'oidc_auth': 42},
-                {'oidc_auth': overriding})
+                (TypeError, {'bearer_token_provider': 42}),
+                (TypeError, {'bearer_token_provider': auth}),
+                (ValueError, {'bearer_token_provider': Uninitialized()}),
+                (TypeError, {'oidc_auth': 42}),
+                (TypeError, {'oidc_auth': overriding}),
+                (ValueError, {'oidc_auth': OidcDeviceAuth.__new__(
+                    OidcDeviceAuth)}))
             for index, call in enumerate(attach):
-                for kw in arguments:
-                    with self.subTest(index=index, argument=sorted(kw)):
+                for case, (builtin, kw) in enumerate(arguments):
+                    with self.subTest(index=index, case=case):
                         self.assertConfigError(
-                            TypeError, lambda: call(**kw))
+                            builtin, lambda: call(**kw))
 
     def test_a_source_failure_names_the_builtin_error(self):
         # The message a client sees names the built-in, not the private
@@ -283,6 +297,12 @@ class RefreshingTokenProviderTest(unittest.TestCase):
             def fetch_token(self):
                 return ('object-source', now + 3600)
 
+        class CallableWithAttribute:
+            fetch_token = 'not-a-method'
+
+            def __call__(self):
+                return ('callable-source', now + 3600)
+
         shapes = [
             (lambda: ExpiringToken('expiring', now + 3600), 'expiring'),
             (lambda: ('tuple', now + 3600), 'tuple'),
@@ -291,6 +311,7 @@ class RefreshingTokenProviderTest(unittest.TestCase):
             (lambda: AccessTokenInfo('azure-info', now + 3600, now + 1800),
              'azure-info'),
             (Source(), 'object-source'),
+            (CallableWithAttribute(), 'callable-source'),
         ]
         for source, expected in shapes:
             with self.subTest(expected=expected):
@@ -1011,6 +1032,52 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                         sender.close(flush=False)
                 self.assertEqual(len(added), wrappers)
 
+    def _assert_closing_stops_a_background_connect(
+            self, provider, attached, code, calls=None):
+        """Attach `attached` to a sender whose initial connect runs in the
+        background, close `provider`, and check the sender stops with
+        `code`. `calls`, when given, is cleared once `provider` is closed."""
+        with QwpAckServer() as server:
+            before = _client._debug_token_callbacks_ids()
+            sender = questdb.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};'
+                'initial_connect_retry=async;'
+                'reconnect_initial_backoff_millis=5;'
+                'reconnect_max_backoff_millis=5;'
+                'close_flush_timeout_millis=0;',
+                bearer_token_provider=attached, auto_flush=False)
+            provider.close()
+            if calls is not None:
+                del calls[:]
+            deadline = time.monotonic() + 10.0
+            # The code and message only: an exception kept here would
+            # hold this frame, and the provider, in a reference cycle.
+            failure = None
+            try:
+                # Its background connect pulls the first token.
+                sender.establish()
+                while failure is None and time.monotonic() < deadline:
+                    try:
+                        sender.row(
+                            't', columns={'v': 1},
+                            at=questdb.ServerTimestamp)
+                        sender.flush()
+                    except questdb.QuestDBError as exc:
+                        failure = (exc.code, str(exc))
+                    time.sleep(0.005)
+            finally:
+                sender.close(flush=False)
+            self.assertIsNotNone(
+                failure, 'the background connect never stopped')
+            self.assertIs(failure[0], code)
+            self.assertIn('is closed', failure[1])
+            self.assertEqual(
+                server.snapshot()['upgrade_authorizations'], [])
+        # Leave no application-provider wrapper registered for the tests
+        # that count registrations.
+        _collect_until(
+            lambda: _client._debug_token_callbacks_ids() <= before)
+
     def test_closing_an_overriding_subclass_stops_a_background_connect(self):
         # Attached as an application provider, an overriding subclass would
         # have its failures retried in the background for good. Closed, it
@@ -1030,48 +1097,25 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                 (RefreshingTokenProvider, questdb.QuestDBErrorCode.AuthError),
                 (Overriding, questdb.QuestDBErrorCode.ConfigError),
                 (RejectionOverride, questdb.QuestDBErrorCode.ConfigError)):
-            with self.subTest(provider=cls.__name__), QwpAckServer() as server:
+            with self.subTest(provider=cls.__name__):
                 source, _ = _counting_source()
                 provider = cls(source)
-                before = _client._debug_token_callbacks_ids()
-                sender = questdb.Sender.from_conf(
-                    f'ws::addr=127.0.0.1:{server.port};'
-                    'initial_connect_retry=async;'
-                    'reconnect_initial_backoff_millis=5;'
-                    'reconnect_max_backoff_millis=5;'
-                    'close_flush_timeout_millis=0;',
-                    bearer_token_provider=provider, auto_flush=False)
-                provider.close()
-                del calls[:]
-                deadline = time.monotonic() + 10.0
-                # The code and message only: an exception kept here would
-                # hold this frame, and the provider, in a reference cycle.
-                failure = None
-                try:
-                    # Its background connect pulls the first token.
-                    sender.establish()
-                    while failure is None and time.monotonic() < deadline:
-                        try:
-                            sender.row(
-                                't', columns={'v': 1},
-                                at=questdb.ServerTimestamp)
-                            sender.flush()
-                        except questdb.QuestDBError as exc:
-                            failure = (exc.code, str(exc))
-                        time.sleep(0.005)
-                finally:
-                    sender.close(flush=False)
-                self.assertIsNotNone(
-                    failure, 'the background connect never stopped')
-                self.assertIs(failure[0], code)
-                self.assertIn('is closed', failure[1])
-                self.assertEqual(
-                    server.snapshot()['upgrade_authorizations'], [])
+                self._assert_closing_stops_a_background_connect(
+                    provider, provider, code, calls)
                 self.assertEqual(len(calls), 1 if cls is Overriding else 0)
-                # Leave no application-provider wrapper registered for the
-                # tests that count registrations.
-                _collect_until(
-                    lambda: _client._debug_token_callbacks_ids() <= before)
+
+    def test_closing_a_wrapped_provider_stops_a_background_connect(self):
+        # A provider of one's own that calls a refreshing provider, and lets
+        # its error escape, ends its clients once that one is closed, as an
+        # overriding subclass does. Its failures used to be retried in the
+        # background for good.
+        for name, wrap in self._WRAPPINGS:
+            with self.subTest(wrapping=name):
+                source, _ = _counting_source()
+                provider = RefreshingTokenProvider(source)
+                self._assert_closing_stops_a_background_connect(
+                    provider, wrap(provider),
+                    questdb.QuestDBErrorCode.ConfigError)
 
     def test_a_closed_overriding_subclass_is_refused_as_the_base_class_is(self):
         class Overriding(RefreshingTokenProvider):
@@ -1086,36 +1130,41 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
             source, _ = _counting_source()
             provider = cls(source)
             provider.close()
-            for attach in (
-                    lambda: questdb.Sender(
-                        questdb.Protocol.Http, '127.0.0.1', 9000,
-                        bearer_token_provider=provider),
-                    lambda: questdb.Sender.from_conf(
-                        'ws::addr=127.0.0.1:1;lazy_connect=true;',
-                        bearer_token_provider=provider),
-                    lambda: questdb.connect(
-                        'ws::addr=127.0.0.1:1;lazy_connect=true;',
-                        bearer_token_provider=provider)):
-                with self.subTest(provider=cls.__name__):
-                    before = _client._debug_token_callbacks_ids()
-                    try:
-                        attach()
-                    except TokenUnavailableError as exc:
-                        refused = (exc.code, exc.retryable, str(exc))
-                    else:
-                        self.fail('a closed provider was attached')
-                    self.assertEqual(
-                        refused[:2],
-                        (questdb.QuestDBErrorCode.AuthError, False))
-                    self.assertIn('is closed', refused[2])
-                    # No application-provider wrapper was registered.
-                    self.assertFalse(
-                        _client._debug_token_callbacks_ids() - before)
+            # A method bound to a closed provider is refused as it is.
+            for form, attached in (
+                    ('provider', provider), ('bound method', provider.token)):
+                for attach in (
+                        lambda: questdb.Sender(
+                            questdb.Protocol.Http, '127.0.0.1', 9000,
+                            bearer_token_provider=attached),
+                        lambda: questdb.Sender.from_conf(
+                            'ws::addr=127.0.0.1:1;lazy_connect=true;',
+                            bearer_token_provider=attached),
+                        lambda: questdb.connect(
+                            'ws::addr=127.0.0.1:1;lazy_connect=true;',
+                            bearer_token_provider=attached)):
+                    with self.subTest(provider=cls.__name__, form=form):
+                        before = _client._debug_token_callbacks_ids()
+                        try:
+                            attach()
+                        except TokenUnavailableError as exc:
+                            refused = (exc.code, exc.retryable, str(exc))
+                        else:
+                            self.fail('a closed provider was attached')
+                        self.assertEqual(
+                            refused[:2],
+                            (questdb.QuestDBErrorCode.AuthError, False))
+                        self.assertIn('is closed', refused[2])
+                        # No application-provider wrapper was registered.
+                        self.assertFalse(
+                            _client._debug_token_callbacks_ids() - before)
 
-    def test_closing_an_overriding_subclass_ends_a_pooled_flush_wait(self):
+    def test_closing_a_provider_ends_a_pooled_flush_wait(self):
         # A regression blocks forever in flush(wait=True), so bound the
         # whole operation with a child-process timeout, not a daemon thread
-        # whose native wait would also prevent interpreter shutdown.
+        # whose native wait would also prevent interpreter shutdown. Rows
+        # published before the wait are what it blocks on for good; a flush
+        # that publishes them itself gives up after its own timeout.
         script = textwrap.dedent('''
             import sys
             import questdb
@@ -1129,30 +1178,52 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                 def on_rejected(self, token, http_status):
                     return super().on_rejected(token, http_status)
 
-            for cls, code in (
-                    (RefreshingTokenProvider, questdb.QuestDBErrorCode.AuthError),
-                    (Overriding, questdb.QuestDBErrorCode.ConfigError),
-                    (RejectionOverride, questdb.QuestDBErrorCode.ConfigError)):
-                with cls(lambda: ExpiringToken.expires_in('T1', 3600)) as provider:
-                    assert provider.await_ready(10)
-                    with questdb.connect(
-                            f'ws::addr=127.0.0.1:{sys.argv[1]};lazy_connect=true;'
-                            'auto_flush=off;close_flush_timeout_millis=0;',
-                            bearer_token_provider=provider) as db:
-                        provider.close()
-                        lease = db.sender()
-                        try:
-                            lease.row('t', columns={'v': 1},
-                                      at=questdb.ServerTimestamp)
+            class Wrapped:
+                def __init__(self, tokens):
+                    self._tokens = tokens
+
+                def token(self):
+                    return self._tokens.token()
+
+            config_error = questdb.QuestDBErrorCode.ConfigError
+            for cls, wrapping, code in (
+                    (RefreshingTokenProvider, None,
+                     questdb.QuestDBErrorCode.AuthError),
+                    (Overriding, None, config_error),
+                    (RejectionOverride, None, config_error),
+                    (RefreshingTokenProvider, 'lambda', config_error),
+                    (RefreshingTokenProvider, 'bound method', config_error),
+                    (RefreshingTokenProvider, 'object', config_error)):
+                for published in (False, True):
+                    case = (cls.__name__, wrapping, published)
+                    with cls(lambda: ExpiringToken.expires_in('T1', 3600)) as provider:
+                        assert provider.await_ready(10)
+                        attached = {
+                            None: provider,
+                            'lambda': lambda: provider.token(),
+                            'bound method': provider.token,
+                            'object': Wrapped(provider)}[wrapping]
+                        with questdb.connect(
+                                f'ws::addr=127.0.0.1:{sys.argv[1]};lazy_connect=true;'
+                                'auto_flush=off;close_flush_timeout_millis=0;',
+                                bearer_token_provider=attached) as db:
+                            provider.close()
+                            lease = db.sender()
                             try:
-                                lease.flush(wait=True)
-                            except questdb.QuestDBError as exc:
-                                assert exc.code is code, (cls, exc)
-                                assert 'is closed' in str(exc), (cls, exc)
-                            else:
-                                raise AssertionError('flush acknowledged unsent rows')
-                        finally:
-                            lease.close(flush=False)
+                                lease.row('t', columns={'v': 1},
+                                          at=questdb.ServerTimestamp)
+                                try:
+                                    if published:
+                                        lease.flush()
+                                    lease.flush(wait=True)
+                                except questdb.QuestDBError as exc:
+                                    assert exc.code is code, (case, exc)
+                                    assert 'is closed' in str(exc), (case, exc)
+                                else:
+                                    raise AssertionError(
+                                        f'flush acknowledged unsent rows: {case}')
+                            finally:
+                                lease.close(flush=False)
         ''')
         env = os.environ.copy()
         env['PYTHONPATH'] = os.pathsep.join(filter(None, (
@@ -1161,7 +1232,7 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         with QwpAckServer() as server:
             result = subprocess.run(
                 [sys.executable, '-c', script, str(server.port)], env=env,
-                capture_output=True, text=True, timeout=30)
+                capture_output=True, text=True, timeout=60)
             self.assertEqual(
                 result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(server.snapshot()['upgrade_authorizations'], [])

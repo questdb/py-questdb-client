@@ -483,11 +483,15 @@ cdef void _tp_sink_exception(
                 sink, True, -1, 'the token callback was interrupted')
             return
         # Closing a RefreshingTokenProvider ends every client that uses it.
-        # Native ends them when the provider is attached as is; a subclass
-        # that overrides token() or on_rejected() is attached as an
-        # application provider, whose failures clients otherwise retry in
-        # the background, so its failure once closed stops them instead.
-        if (_tp_closed_refreshing_provider(provider)
+        # Native ends them when the provider is attached as is. Reached
+        # through an application provider -- a subclass that overrides
+        # token() or on_rejected(), or a provider of one's own that calls
+        # its token(), `lambda: tokens.token()` -- its failure would
+        # otherwise be retried in the background for good, so its failure
+        # once closed stops them instead. `_tp_token` marks that failure.
+        if ((_tp_closed_refreshing_provider(provider)
+                or (isinstance(exc, QuestDBError)
+                    and getattr(exc, '_provider_closed', False)))
                 and _tp_sink_terminal_error(
                     sink,
                     str(exc) if isinstance(exc, QuestDBError)
@@ -859,10 +863,17 @@ cdef class _TokenProviderHandle:
 cdef object _tp_token(_TokenProviderHandle handle):
     cdef questdb_error* err = NULL
     cdef questdb_token* token
+    cdef object exc
     with nogil:
         token = questdb_token_provider_token(handle._raw, &err)
     if token == NULL:
-        raise c_err_to_py(err)
+        exc = c_err_to_py(err)
+        # Closing is one-way: this provider fails every later request too.
+        # Marked so that an application provider which calls it and lets
+        # this escape stops its clients (see `_tp_sink_exception`).
+        if _tp_handle_closed(handle):
+            exc._provider_closed = True
+        raise exc
     try:
         return PyUnicode_FromStringAndSize(
             questdb_token_data(token), <Py_ssize_t>questdb_token_len(token))
@@ -955,6 +966,10 @@ cdef class RefreshingTokenProvider:
     failure of its :meth:`token` once it is closed stops them as an
     application provider's ``InvalidApiCall`` does, so they report
     ``ConfigError`` -- and attaching it once closed fails as for this class.
+    Closing also ends the clients of a provider of your own that calls
+    :meth:`token` and lets its error escape, such as
+    ``bearer_token_provider=lambda: tokens.token()``, and a method bound to a
+    closed provider, ``tokens.token``, is refused as the provider is.
 
     The keyword parameters are durations, in seconds or as
     :class:`datetime.timedelta`, and default to the specification's values:
@@ -1014,7 +1029,7 @@ cdef class RefreshingTokenProvider:
                 QuestDBErrorCode.InvalidApiCall,
                 'RefreshingTokenProvider is already initialized.')
         fetch = getattr(source, 'fetch_token', None)
-        if fetch is None:
+        if not callable(fetch):
             if not callable(source):
                 raise _ConfigTypeError(
                     '"source" must be a callable or an object with a '
@@ -1023,7 +1038,10 @@ cdef class RefreshingTokenProvider:
         questdb_refreshing_token_provider_options_init(
             &options, sizeof(questdb_refreshing_token_provider_options))
         if name is not None:
-            if not isinstance(name, str) or not name.strip():
+            if not isinstance(name, str):
+                raise _ConfigTypeError(
+                    f'"name" must be a str, not {_fqn(type(name))}')
+            if not name.strip():
                 raise _ConfigValueError('"name" must be a non-empty str')
             name_bytes = name.encode('utf-8')
             options.name = name_bytes
@@ -1211,9 +1229,10 @@ cdef bint _tp_reads_native_cache(object provider) except -1:
 
 
 cdef bint _tp_closed_refreshing_provider(object provider) except -1:
-    """Whether ``provider``, an application provider whose callback raised,
-    is a closed `RefreshingTokenProvider`: a subclass that overrides
-    ``token()`` or ``on_rejected()`` (see `_tp_resolve_bearer_token_provider`).
+    """Whether ``provider`` is a closed `RefreshingTokenProvider`: an
+    application provider whose callback raised -- a subclass that overrides
+    ``token()`` or ``on_rejected()`` -- or the owner of a method passed as
+    ``bearer_token_provider=`` (see `_tp_resolve_bearer_token_provider`).
     """
     if not isinstance(provider, RefreshingTokenProvider):
         return False
@@ -1287,7 +1306,12 @@ cdef object _tp_resolve_bearer_token_provider(object provider):
     ``token()`` or ``on_rejected()`` included -- wrapped in an
     ``_ApplicationTokenProvider``. The caller keeps the holder alive."""
     cdef _TokenProviderHandle handle
+    cdef object owner
     if isinstance(provider, RefreshingTokenProvider):
+        # Refused as an uninitialized `oidc_auth=` is, as a `QuestDBError`.
+        if getattr(provider, '_handle', None) is None:
+            raise _ConfigValueError(
+                '"bearer_token_provider" is not initialized')
         handle = (<RefreshingTokenProvider>provider)._require_handle()
         if _tp_reads_native_cache(provider):
             return provider
@@ -1296,8 +1320,14 @@ cdef object _tp_resolve_bearer_token_provider(object provider):
         # a closed provider fails every token request as permanent.
         if _tp_handle_closed(handle):
             _tp_token(handle)
+    owner = getattr(provider, '__self__', None)
+    # A method bound to a closed one, `tokens.token`, is refused the same
+    # way. A closure that calls one cannot be inspected: its first token
+    # request stops its clients instead (see `_tp_token`).
+    if _tp_closed_refreshing_provider(owner):
+        _tp_token(owner._handle)
     if isinstance(provider, OidcDeviceAuth) or isinstance(
-            getattr(provider, '__self__', None), OidcDeviceAuth):
+            owner, OidcDeviceAuth):
         raise _ConfigTypeError(
             'Pass an OidcDeviceAuth as "oidc_auth=", not as '
             '"bearer_token_provider=".')
@@ -1333,7 +1363,7 @@ cdef const questdb_token_provider* _tp_holder_raw(object holder) except NULL:
     else:
         handle = (<_ApplicationTokenProvider>holder)._handle
     if handle is None or handle._raw == NULL:
-        raise ValueError('the token provider is not initialized')
+        raise _ConfigValueError('"bearer_token_provider" is not initialized')
     return handle._raw
 
 
