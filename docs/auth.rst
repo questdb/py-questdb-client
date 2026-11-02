@@ -462,10 +462,11 @@ pg8000), or the token travels unencrypted.
 
 The adapters own the connection *destination*: it comes from the validated URL
 or from ``host=`` / ``pg_port=``. A destination in the driver passthrough
-(``host``, ``hostaddr``, ``port``, ``service``, ``dsn`` or ``conninfo`` in
-``connect_args`` / ``connect_kwargs``) is rejected with ``OidcConfigError``
-before any token is acquired, because the token is a bearer credential and
-SQLAlchemy applies ``connect_args`` *after* the arguments built from that URL.
+(``host``, ``hostaddr``, ``port``, ``service``, ``dsn``, ``conninfo`` or
+``unix_sock`` in ``connect_args`` / ``connect_kwargs``) is rejected with
+``OidcConfigError`` before any token is acquired, because the token is a
+bearer credential and SQLAlchemy applies ``connect_args`` *after* the
+arguments built from that URL.
 The adapters likewise own the login: they always authenticate as ``_sso`` with
 the current token as the password, so a ``user``, ``password``, ``dbname`` or
 ``database`` in the passthrough is also rejected with ``OidcConfigError``

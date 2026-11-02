@@ -78,7 +78,8 @@ _AUTO_SSLMODE = 'auto'
 #   * host / hostaddr  -- the peer (hostaddr bypasses name resolution entirely);
 #   * port             -- the peer's port;
 #   * service          -- a pg_service.conf entry that can supply host/hostaddr;
-#   * dsn / conninfo   -- a whole connection string, i.e. all of the above.
+#   * dsn / conninfo   -- a whole connection string, i.e. all of the above;
+#   * unix_sock        -- pg8000's Unix-socket path, used instead of host/port.
 _DESTINATION_PARAMS = frozenset({
     'host', 'hostaddr', 'port', 'service', 'dsn', 'conninfo', 'unix_sock'})
 
