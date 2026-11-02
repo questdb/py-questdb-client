@@ -83,6 +83,20 @@ def client_extension():
             (rpyutils_lib_dir, 'rpyutils'))]
     depends = list(extra_objects)
 
+    define_macros = [
+        ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION'),
+        ('QUESTDB_CLIENT_HAS_ARROW', '1'),
+        ('QUESTDB_CLIENT_ENABLE_ARROW', '1'),
+    ]
+    if platform.python_implementation() == 'PyPy':
+        # Cython 3.3.1 builds PyPy's extension types from type specs by
+        # default. For a class declaring both `cdef dict __dict__` and
+        # `cdef object __weakref__`, such as `Sender`, the spec carries two
+        # `Py_tp_members` slots, so importing the module fails with
+        # "SystemError: Multiple Py_tp_member slots are not supported".
+        # Keep the static types PyPy used up to Cython 3.3.0.
+        define_macros.append(('CYTHON_USE_TYPE_SPECS', '0'))
+
     return Extension(
         "questdb._client",
         ["src/questdb/_client.pyx"],
@@ -96,11 +110,7 @@ def client_extension():
         extra_link_args=extra_link_args,
         extra_objects=extra_objects,
         depends=depends,
-        define_macros = [
-            ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION'),
-            ('QUESTDB_CLIENT_HAS_ARROW', '1'),
-            ('QUESTDB_CLIENT_ENABLE_ARROW', '1'),
-        ]
+        define_macros=define_macros,
     )
 
 
