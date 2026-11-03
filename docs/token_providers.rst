@@ -85,9 +85,12 @@ The classification matters when a connection is waited for and retried -- a
 sender's synchronous initial connect (``initial_connect_retry=sync``, which
 any ``reconnect_*`` key implies for a :class:`~questdb.Sender`), or an eager
 :func:`questdb.connect` or pool borrow with ``initial_connect_retry=on``: it
-retries a retryable failure within its budget and fails at once on a
-permanent one. Without initial-connect retry, such a connection makes one
-attempt and fails on either kind. A connection that is already
+retries a retryable failure within its budget and does not retry a permanent
+one. A permanent failure ends it when the provider's cold wait does, not at
+once: the provider retries a failed fetch whatever its classification, and
+the connection waits up to ``cold_wait`` for a retry to succeed. Without
+initial-connect retry, such a connection makes one attempt and fails on
+either kind. A connection that is already
 established reconnects in the background and keeps retrying either kind, so
 store-and-forward data is never abandoned because a token could not be
 fetched for a while. A failure surfaces as a

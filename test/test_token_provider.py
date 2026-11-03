@@ -1290,6 +1290,41 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         self.assertFalse(caught.exception.retryable)
         self.assertEqual(len(calls), 1)
 
+    def test_a_permanent_source_failure_ends_a_synchronous_connect(self):
+        # Through a RefreshingTokenProvider it ends the connect when the
+        # provider's cold wait does, not at once: the provider retries a
+        # failed fetch whatever its classification, and the connect waits up
+        # to cold_wait for a retry to succeed. It is still not retried for
+        # the connect's whole budget.
+        calls = []
+
+        def source():
+            calls.append(1)
+            raise TokenUnavailableError(
+                'identity not assigned', retryable=False)
+
+        with QwpAckServer() as server, RefreshingTokenProvider(
+                source, cold_wait=0.5, backoff_initial=0.01,
+                backoff_max=0.02) as provider:
+            conf = (
+                f'ws::addr=127.0.0.1:{server.port};'
+                'initial_connect_retry=sync;'
+                'reconnect_initial_backoff_millis=10;'
+                'reconnect_max_backoff_millis=10;'
+                'reconnect_max_duration_millis=10000;')
+            started = time.monotonic()
+            with self.assertRaises(TokenUnavailableError) as caught:
+                # Entering the block establishes the connection.
+                with questdb.Sender.from_conf(
+                        conf, bearer_token_provider=provider):
+                    pass
+            elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, 0.4)
+        self.assertLess(elapsed, 5)
+        self.assertFalse(caught.exception.retryable)
+        self.assertIn('identity not assigned', str(caught.exception))
+        self.assertGreater(len(calls), 1)
+
     def test_a_retryable_failure_is_retried_by_a_synchronous_connect(self):
         calls = []
 
