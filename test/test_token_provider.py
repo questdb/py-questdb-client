@@ -2590,6 +2590,8 @@ class TokenProviderTypingTest(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, '-m', 'mypy', '--no-incremental',
                  '--cache-dir', cache, '--follow-imports=silent',
+                 # The fixture marks calls that must fail to type-check.
+                 '--warn-unused-ignores',
                  # Existing TaggedEnum stub diagnostic, unrelated to this API.
                  '--disable-error-code=misc',
                  str(root / 'test' / 'typing_token_providers.py')],

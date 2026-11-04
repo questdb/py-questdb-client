@@ -73,7 +73,7 @@ from decimal import Decimal
 from .auth._config import OidcConfig
 from .auth._render import Renderer
 from .auth._store import FileTokenStore
-from .auth._token_provider import TokenSource
+from .auth._token_provider import BearerTokenProvider, TokenSource
 
 
 class OidcDeviceAuth:
@@ -1559,7 +1559,8 @@ class QuestDB:
         conf_str: str,
         *,
         oidc_auth: Optional[OidcDeviceAuth] = None,
-        bearer_token_provider: Optional[Any] = None,
+        bearer_token_provider: Optional[
+            Union[BearerTokenProvider, Callable[[], str]]] = None,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
         error_handler: Optional[Callable[[SenderError], None]] = None,
@@ -2172,7 +2173,8 @@ class Sender:
         password: Optional[str] = None,
         token: Optional[str] = None,
         oidc_auth: Optional[OidcDeviceAuth] = None,
-        bearer_token_provider: Optional[Any] = None,
+        bearer_token_provider: Optional[
+            Union[BearerTokenProvider, Callable[[], str]]] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: Union[int, timedelta] = 15000,
@@ -2208,7 +2210,8 @@ class Sender:
         password: Optional[str] = None,
         token: Optional[str] = None,
         oidc_auth: Optional[OidcDeviceAuth] = None,
-        bearer_token_provider: Optional[Any] = None,
+        bearer_token_provider: Optional[
+            Union[BearerTokenProvider, Callable[[], str]]] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: Union[int, timedelta] = 15000,
@@ -2254,7 +2257,8 @@ class Sender:
         password: Optional[str] = None,
         token: Optional[str] = None,
         oidc_auth: Optional[OidcDeviceAuth] = None,
-        bearer_token_provider: Optional[Any] = None,
+        bearer_token_provider: Optional[
+            Union[BearerTokenProvider, Callable[[], str]]] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
         auth_timeout: Union[int, timedelta] = 15000,
