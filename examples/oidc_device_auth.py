@@ -116,7 +116,9 @@ def persist_across_restarts(url: str = QUESTDB_URL) -> OidcDeviceAuth:
     re-runs the device flow. Pass a ``token_store`` to persist it: the restarted
     process resumes from the saved refresh token (a silent token-endpoint call)
     instead of re-prompting. ``FileTokenStore`` writes one file per identity
-    under ``~/.questdb/oidc-tokens/`` (``0600``, owner-only on Unix).
+    under ``~/.questdb/oidc-tokens/`` (or ``$QUESTDB_CLIENT_OIDC_TOKEN_STORE_DIR``),
+    with mode ``0600``. Persistence is POSIX-only: on Windows the store
+    rejects writes, so use the in-memory default there.
     """
     auth = OidcDeviceAuth.from_questdb(
         url, token_store=FileTokenStore.at_default_location())
