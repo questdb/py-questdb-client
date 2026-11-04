@@ -1,0 +1,985 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without the v prefix (for example, 5.0.1)
+        required: true
+        type: string
+      release_pr:
+        description: Merged version/changelog PR number
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      release_sha: ${{ steps.release.outputs.release_sha }}
+      pr_head_sha: ${{ steps.release.outputs.pr_head_sha }}
+    steps:
+      - name: Validate dispatch and release pull request
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_PR: ${{ inputs.release_pr }}
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$DISPATCH_REF" == refs/heads/main ]] || {
+            echo "Release workflow must be dispatched from main, not $DISPATCH_REF" >&2
+            exit 1
+          }
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-zA-Z0-9.-]+)?$ ]] || {
+            echo "Invalid version: $RELEASE_VERSION" >&2
+            exit 1
+          }
+          [[ "$RELEASE_PR" =~ ^[0-9]+$ ]] || {
+            echo "Invalid release PR number: $RELEASE_PR" >&2
+            exit 1
+          }
+
+          pr_json="$(gh api \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "repos/$GITHUB_REPOSITORY/pulls/$RELEASE_PR")"
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            '.merged == true and .base.ref == "main" and .head.repo.full_name == $repository' \
+            <<<"$pr_json" >/dev/null || {
+              echo "PR $RELEASE_PR must be merged into main from $GITHUB_REPOSITORY" >&2
+              exit 1
+            }
+          release_sha="$(jq -er '.merge_commit_sha | select(test("^[0-9a-f]{40}$"))' <<<"$pr_json")"
+          pr_head_sha="$(jq -er '.head.sha | select(test("^[0-9a-f]{40}$"))' <<<"$pr_json")"
+          {
+            echo "version=$RELEASE_VERSION"
+            echo "tag=v$RELEASE_VERSION"
+            echo "release_sha=$release_sha"
+            echo "pr_head_sha=$pr_head_sha"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Check out the release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.release.outputs.release_sha }}
+          fetch-depth: 0
+
+      - name: Initialize release source submodule
+        run: |
+          set -Eeuo pipefail
+          git submodule update --init c-questdb-client
+
+      - name: Verify release commit ancestry
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "Release commit is not reachable from origin/main" >&2
+            exit 1
+          }
+
+      - name: Validate version metadata and changelog
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import datetime
+          import re
+          import tomllib
+          from pathlib import Path
+
+          import os
+
+          version = os.environ["RELEASE_VERSION"]
+          config = tomllib.loads(Path(".bumpversion.toml").read_text())
+          bump = config["tool"]["bumpversion"]
+          if bump["current_version"] != version:
+              raise SystemExit(
+                  f".bumpversion.toml has {bump['current_version']!r}, expected {version!r}"
+              )
+          for entry in bump["files"]:
+              path = Path(entry["filename"])
+              expected = entry["search"].replace("{current_version}", version)
+              if expected not in path.read_text():
+                  raise SystemExit(f"{path} does not contain configured version literal {expected!r}")
+
+          lines = Path("CHANGELOG.rst").read_text().splitlines()
+          heading_re = re.compile(r"^(\d+\.\d+\.\d+(?:[a-zA-Z0-9.-]+)?) \(([^)]+)\)$")
+          first = next(((i, match) for i, line in enumerate(lines)
+                        if (match := heading_re.fullmatch(line))), None)
+          if first is None:
+              raise SystemExit("CHANGELOG.rst has no version heading")
+          index, match = first
+          expected_date = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+          if match.group(1) != version:
+              raise SystemExit(
+                  f"first changelog version is {match.group(1)!r}, expected {version!r}"
+              )
+          date = match.group(2)
+          if date.lower() == "unreleased" or date != expected_date:
+              raise SystemExit(
+                  f"changelog date is {date!r}, expected UTC date {expected_date!r}"
+              )
+          if index + 1 >= len(lines) or not re.fullmatch(r"-+", lines[index + 1]):
+              raise SystemExit(f"changelog heading for {version} has no RST underline")
+          PY
+
+      - name: Download macOS arm64 wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR: ${{ inputs.release_pr }}
+          PR_HEAD_SHA: ${{ steps.release.outputs.pr_head_sha }}
+        run: |
+          set -Eeuo pipefail
+          source_root="$RUNNER_TEMP/release-sources/github-macos-arm64"
+          rm -rf "$source_root"
+          mkdir -p "$source_root"
+
+          gh api --paginate \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$GITHUB_REPOSITORY/actions/workflows/macos-arm64-wheels.yml/runs?event=pull_request&status=success&per_page=100" \
+            --jq '.workflow_runs[]' \
+            >"$RUNNER_TEMP/macos-runs.jsonl"
+          run_json="$(jq -cs --arg head "$PR_HEAD_SHA" '
+            [.[]
+             | select(.path == ".github/workflows/macos-arm64-wheels.yml"
+                      and .event == "pull_request"
+                      and .status == "completed"
+                      and .conclusion == "success"
+                      and .head_sha == $head)]
+            | sort_by(.created_at, .id) | reverse | .[0] // empty
+          ' "$RUNNER_TEMP/macos-runs.jsonl")"
+          [[ -n "$run_json" ]] || {
+            echo "No successful macOS arm64 pull_request run found for PR $RELEASE_PR head $PR_HEAD_SHA" >&2
+            exit 1
+          }
+          run_id="$(jq -er '.id' <<<"$run_json")"
+          run_url="$(jq -er '.html_url' <<<"$run_json")"
+
+          artifacts="$(gh api \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?name=wheels-macos-arm64&per_page=100")"
+          artifact="$(jq -c --arg head "$PR_HEAD_SHA" '
+            [.artifacts[]
+             | select(.name == "wheels-macos-arm64"
+                      and .workflow_run.head_sha == $head)]
+            | if length == 1 then .[0]
+              else error("expected exactly one wheels-macos-arm64 artifact for validated PR head")
+              end
+          ' <<<"$artifacts")"
+          jq -e '.expired == false' <<<"$artifact" >/dev/null || {
+            echo "wheels-macos-arm64 artifact for run $run_id is expired" >&2
+            exit 1
+          }
+          artifact_id="$(jq -er '.id' <<<"$artifact")"
+          gh api \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
+            >"$RUNNER_TEMP/macos-arm64-wheels.zip"
+          unzip -t "$RUNNER_TEMP/macos-arm64-wheels.zip" >/dev/null
+          unzip -q "$RUNNER_TEMP/macos-arm64-wheels.zip" -d "$source_root"
+          {
+            echo "GHA_WHEEL_ROOT=$source_root"
+            echo "GHA_SOURCE_URL=$run_url"
+          } >>"$GITHUB_ENV"
+
+      - name: Download Azure wheel artifacts
+        env:
+          AZURE_DEVOPS_TOKEN: ${{ secrets.AZURE_DEVOPS_TOKEN }}
+          RELEASE_PR: ${{ inputs.release_pr }}
+          PR_HEAD_SHA: ${{ steps.release.outputs.pr_head_sha }}
+        run: |
+          set -Eeuo pipefail
+          source_root="$RUNNER_TEMP/release-sources/azure-drop"
+          rm -rf "$source_root"
+          mkdir -p "$source_root"
+          branch="refs/pull/$RELEASE_PR/merge"
+          builds_url="https://dev.azure.com/questdb/questdb/_apis/build/builds"
+          builds_json="$(curl --fail-with-body --silent --show-error \
+            --user ":$AZURE_DEVOPS_TOKEN" \
+            --get \
+            --data-urlencode 'definitions=21' \
+            --data-urlencode "branchName=$branch" \
+            --data-urlencode 'reasonFilter=pullRequest' \
+            --data-urlencode 'statusFilter=completed' \
+            --data-urlencode 'resultFilter=succeeded' \
+            --data-urlencode 'queryOrder=finishTimeDescending' \
+            --data-urlencode '$top=10' \
+            --data-urlencode 'api-version=7.1' \
+            "$builds_url")"
+          build="$(jq -c \
+            --arg branch "$branch" \
+            --arg head "$PR_HEAD_SHA" \
+            --arg pr "$RELEASE_PR" '
+            [.value[]
+             | select(.definition.id == 21
+                      and .sourceBranch == $branch
+                      and .reason == "pullRequest"
+                      and .status == "completed"
+                      and .result == "succeeded"
+                      and .triggerInfo["pr.sourceSha"] == $head
+                      and .triggerInfo["pr.number"] == $pr)]
+            | sort_by(.finishTime, .id) | reverse | .[0] // empty
+          ' <<<"$builds_json")"
+          [[ -n "$build" ]] || {
+            echo "No successful Azure definition 21 build found for $branch head $PR_HEAD_SHA" >&2
+            exit 1
+          }
+          build_id="$(jq -er '.id' <<<"$build")"
+          build_url="https://dev.azure.com/questdb/questdb/_build/results?buildId=$build_id"
+          artifact_url="https://dev.azure.com/questdb/questdb/_apis/build/builds/$build_id/artifacts"
+          curl --fail-with-body --location --silent --show-error \
+            --user ":$AZURE_DEVOPS_TOKEN" \
+            -H 'Accept: application/zip' \
+            --get \
+            --data-urlencode 'artifactName=drop' \
+            --data-urlencode 'api-version=7.1' \
+            --output "$RUNNER_TEMP/azure-drop.zip" \
+            "$artifact_url"
+          unzip -t "$RUNNER_TEMP/azure-drop.zip" >/dev/null
+          unzip -q "$RUNNER_TEMP/azure-drop.zip" -d "$source_root"
+          {
+            echo "AZURE_WHEEL_ROOT=$source_root"
+            echo "AZURE_SOURCE_URL=$build_url"
+          } >>"$GITHUB_ENV"
+
+      - name: Build source distribution
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf dist
+          mkdir dist
+          python -m pip install --disable-pip-version-check build packaging twine
+          python -m build --sdist --outdir dist
+
+      - name: Collect and validate distributions
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import os
+          import re
+          import shutil
+          import tarfile
+          from collections import Counter
+          from itertools import product
+          from pathlib import Path
+
+          from packaging.utils import (
+              canonicalize_name,
+              parse_sdist_filename,
+              parse_wheel_filename,
+          )
+          from packaging.version import Version
+
+          version = Version(os.environ["RELEASE_VERSION"])
+          dist = Path("dist")
+          roots = [Path(os.environ["GHA_WHEEL_ROOT"]), Path(os.environ["AZURE_WHEEL_ROOT"])]
+
+          source_files = []
+          for root in roots:
+              if not root.is_dir():
+                  raise SystemExit(f"wheel source directory does not exist: {root}")
+              files = sorted(path for path in root.rglob("*") if path.is_file())
+              unexpected = [path for path in files if path.suffix != ".whl"]
+              if unexpected:
+                  raise SystemExit(
+                      "non-wheel payload in wheel artifact: "
+                      + ", ".join(str(path) for path in unexpected)
+                  )
+              source_files.extend(files)
+
+          names = Counter(path.name for path in source_files)
+          duplicates = sorted(name for name, count in names.items() if count != 1)
+          if duplicates:
+              details = [
+                  f"{name}: {', '.join(str(path) for path in source_files if path.name == name)}"
+                  for name in duplicates
+              ]
+              raise SystemExit("duplicate wheel basename(s): " + "; ".join(details))
+          for path in source_files:
+              shutil.copy2(path, dist / path.name)
+
+          sdists = sorted(dist.glob("*.tar.gz"))
+          if len(sdists) != 1:
+              raise SystemExit(f"expected exactly one .tar.gz, found {[p.name for p in sdists]}")
+          sdist_name, sdist_version = parse_sdist_filename(sdists[0].name)
+          if canonicalize_name(sdist_name) != "questdb" or sdist_version != version:
+              raise SystemExit(f"unexpected sdist identity: {sdists[0].name}")
+          max_sdist_size = 100 * 1024 * 1024
+          sdist_size = sdists[0].stat().st_size
+          if sdist_size >= max_sdist_size:
+              raise SystemExit(
+                  f"sdist {sdists[0].name} is {sdist_size} bytes; "
+                  f"must be below PyPI's {max_sdist_size}-byte per-file limit"
+              )
+
+          with tarfile.open(sdists[0], "r:gz") as archive:
+              members = archive.getmembers()
+              member_names = [member.name for member in members]
+              for name in member_names:
+                  path = Path(name)
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit(f"unsafe sdist member path: {name}")
+                  if any(
+                      path.parts[index : index + 2] == ("c-questdb-client", "questdb")
+                      for index in range(len(path.parts) - 1)
+                  ):
+                      raise SystemExit(
+                          "sdist contains nested c-questdb-client/questdb/ submodule "
+                          f"content: {name}"
+                      )
+              required_suffixes = (
+                  "/PKG-INFO",
+                  "/src/questdb/__init__.py",
+                  "/rpyutils/Cargo.toml",
+                  "/c-questdb-client/questdb-rs/Cargo.toml",
+                  "/c-questdb-client/questdb-rs-ffi/Cargo.toml",
+              )
+              for suffix in required_suffixes:
+                  if not any(name.endswith(suffix) for name in member_names):
+                      raise SystemExit(f"sdist missing required member ending in {suffix}")
+              print(
+                  f"sdist {sdists[0].name}: {len(members)} members, "
+                  f"{sdists[0].stat().st_size} bytes"
+              )
+
+          # This explicit 46-target CPython matrix duplicates ci/cibuildwheel.yaml and
+          # .github/workflows/macos-arm64-wheels.yml; update it whenever either CI matrix changes.
+          interpreters = ("cp310", "cp311", "cp312", "cp313", "cp314", "cp314t")
+          expected = set()
+          expected.update(product(interpreters, ("manylinux", "musllinux"), ("x86_64", "aarch64")))
+          expected.update(product(interpreters, ("macos",), ("x86_64", "arm64")))
+          expected.update(product(("cp310", "cp311", "cp312", "cp313", "cp314"), ("windows",), ("win32", "win_amd64")))
+
+          def classify_platform(platform):
+              linux = re.fullmatch(r"(manylinux[^.]*)_(x86_64|aarch64)", platform)
+              if linux:
+                  return "manylinux", linux.group(2), None
+              musl = re.fullmatch(r"(musllinux[^.]*)_(x86_64|aarch64)", platform)
+              if musl:
+                  return "musllinux", musl.group(2), None
+              mac = re.fullmatch(r"macosx_(\d+)_(\d+)_(x86_64|arm64|universal2)", platform)
+              if mac:
+                  return "macos", mac.group(3), (int(mac.group(1)), int(mac.group(2)))
+              if platform in ("win32", "win_amd64"):
+                  return "windows", platform, None
+              raise ValueError(f"unsupported platform tag {platform!r}")
+
+          def classify_tags(tags):
+              targets = set()
+              for tag in tags:
+                  if tag.interpreter.startswith("cp"):
+                      if tag.interpreter not in {"cp310", "cp311", "cp312", "cp313", "cp314"}:
+                          raise ValueError(f"unsupported CPython interpreter tag {tag.interpreter!r}")
+                      if tag.interpreter == "cp314" and tag.abi == "cp314t":
+                          interpreter = "cp314t"
+                      elif tag.abi == tag.interpreter:
+                          interpreter = tag.interpreter
+                      else:
+                          raise ValueError(
+                              f"ABI {tag.abi!r} is inconsistent with {tag.interpreter!r}"
+                          )
+                  elif re.fullmatch(r"pp3\d+", tag.interpreter):
+                      if not tag.abi.startswith("pypy"):
+                          raise ValueError(f"invalid PyPy ABI {tag.abi!r}")
+                      interpreter = tag.interpreter
+                  else:
+                      raise ValueError(f"unsupported interpreter tag {tag.interpreter!r}")
+
+                  family, arch, mac_floor = classify_platform(tag.platform)
+                  if arch == "universal2":
+                      raise ValueError("macOS universal2 wheels are not release targets")
+                  if family == "macos" and arch == "arm64" and mac_floor < (11, 0):
+                      raise ValueError(f"macOS arm64 tag has deployment floor below 11.0: {tag.platform}")
+                  targets.add((interpreter, family, arch))
+              if len(targets) != 1:
+                  raise ValueError(f"tags span multiple semantic targets: {sorted(targets)}")
+              return targets.pop()
+
+          cpython = Counter()
+          pypy = Counter()
+          wheels = sorted(dist.glob("*.whl"))
+          for wheel in wheels:
+              try:
+                  name, wheel_version, _build, tags = parse_wheel_filename(wheel.name)
+                  if canonicalize_name(name) != "questdb" or wheel_version != version:
+                      raise ValueError(
+                          f"expected questdb {version}, got {canonicalize_name(name)} {wheel_version}"
+                      )
+                  target = classify_tags(tags)
+              except Exception as error:
+                  raise SystemExit(f"invalid wheel {wheel.name}: {error}") from error
+              if target[0].startswith("cp"):
+                  cpython[target] += 1
+              else:
+                  if target[1:] != ("manylinux", "x86_64"):
+                      raise SystemExit(f"unexpected PyPy wheel target {target}: {wheel.name}")
+                  pypy[target] += 1
+
+          missing = sorted(expected - set(cpython))
+          extra = sorted(set(cpython) - expected)
+          repeated = sorted(target for target, count in cpython.items() if count != 1)
+          if missing or extra or repeated:
+              raise SystemExit(
+                  f"CPython wheel matrix mismatch; missing={missing}, extra={extra}, repeated={repeated}"
+              )
+          if not pypy:
+              raise SystemExit("missing PyPy 3 manylinux x86_64 wheel")
+          repeated_pypy = sorted(target for target, count in pypy.items() if count != 1)
+          if repeated_pypy:
+              raise SystemExit(f"duplicate PyPy wheel target(s): {repeated_pypy}")
+
+          distributions = sorted(path.name for path in dist.iterdir() if path.is_file())
+          if len(distributions) != len(wheels) + 1:
+              raise SystemExit(f"unexpected distribution payload: {distributions}")
+          print(f"validated {len(wheels)} wheels and one source distribution")
+          PY
+
+      - name: Check distribution metadata
+        run: |
+          set -Eeuo pipefail
+          python -m twine check dist/*
+
+      - name: Verify any pre-existing PyPI files
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"]
+          local = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in Path("dist").iterdir()
+              if path.is_file()
+          }
+          if not local:
+              raise SystemExit("release bundle contains no distributions")
+
+          request = urllib.request.Request(
+              f"https://pypi.org/pypi/questdb/{version}/json",
+              headers={"Accept": "application/json"},
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  if response.status != 200:
+                      raise SystemExit(f"PyPI lookup returned unexpected HTTP {response.status}")
+                  payload = json.load(response)
+          except urllib.error.HTTPError as error:
+              if error.code == 404:
+                  print(f"PyPI has no pre-existing files for questdb {version}")
+                  raise SystemExit(0)
+              raise SystemExit(f"PyPI lookup failed with HTTP {error.code}") from error
+          except (OSError, json.JSONDecodeError) as error:
+              raise SystemExit(f"PyPI lookup failed: {error}") from error
+
+          urls = payload.get("urls")
+          if not isinstance(urls, list):
+              raise SystemExit("PyPI response has no file list")
+          seen = set()
+          for entry in urls:
+              name = entry.get("filename") if isinstance(entry, dict) else None
+              digest = entry.get("digests", {}).get("sha256") if isinstance(entry, dict) else None
+              if not isinstance(name, str) or not isinstance(digest, str):
+                  raise SystemExit("PyPI response contains invalid file metadata")
+              if name in seen:
+                  raise SystemExit(f"PyPI response contains duplicate filename {name}")
+              seen.add(name)
+              if name not in local:
+                  raise SystemExit(f"PyPI contains unexpected file for this version: {name}")
+              if digest.lower() != local[name]:
+                  raise SystemExit(f"PyPI SHA-256 mismatch for pre-existing file {name}")
+          print(f"verified {len(seen)} pre-existing PyPI file(s) against the release bundle")
+          PY
+
+      - name: Generate release notes
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"]
+          lines = Path("CHANGELOG.rst").read_text().splitlines()
+          heading_re = re.compile(r"^(\d+\.\d+\.\d+(?:[a-zA-Z0-9.-]+)?) \([^)]+\)$")
+          start = next((i for i, line in enumerate(lines)
+                        if line.startswith(version + " (") and heading_re.fullmatch(line)), None)
+          if start is None:
+              raise SystemExit(f"no changelog section for {version}")
+          end = next((i for i in range(start + 2, len(lines)) if heading_re.fullmatch(lines[i])), len(lines))
+          section = lines[start:end]
+
+          converted = []
+          index = 0
+          while index < len(section):
+              line = section[index]
+              if index + 1 < len(section) and re.fullmatch(r"[-~^=]+", section[index + 1]):
+                  level = "#" if section[index + 1][0] in "=-" else "##"
+                  converted.append(f"{level} {line}")
+                  index += 2
+                  continue
+              line = re.sub(r"``([^`]+)``", r"`\1`", line)
+              line = re.sub(r":[A-Za-z0-9_-]+:`([^`<]+?)\s*<[^`>]+>`", r"\1", line)
+              line = re.sub(r":[A-Za-z0-9_-]+:`([^`]+)`", r"\1", line)
+              converted.append(line)
+              index += 1
+          Path("release-notes.md").write_text("\n".join(converted).rstrip() + "\n")
+          PY
+
+      - name: Write preparation summary
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.release_sha }}
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "## Validated release bundle"
+            echo
+            echo "- Release commit: \`$RELEASE_SHA\`"
+            echo "- macOS arm64 source run: $GHA_SOURCE_URL"
+            echo "- Azure source build: $AZURE_SOURCE_URL"
+            echo "- Package count: $(find dist -maxdepth 1 -type f | wc -l)"
+            echo
+            echo "### Packages"
+            find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | sed 's/^/- `/' | sed 's/$/`/'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-bundle
+          path: |
+            dist/*
+            release-notes.md
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.release_sha }}
+          fetch-depth: 0
+
+      - name: Download release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-bundle
+
+      - name: Check immutable tag and initialize publication URLs
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_SHA" ]] || {
+            echo "Checked-out commit does not match release commit $RELEASE_SHA" >&2
+            exit 1
+          }
+          git fetch --tags origin
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            tag_sha="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+            [[ "$tag_sha" == "$RELEASE_SHA" ]] || {
+              echo "Existing tag $RELEASE_TAG resolves to $tag_sha, expected $RELEASE_SHA" >&2
+              exit 1
+            }
+            echo "RELEASE_TAG_EXISTS=true" >>"$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG_EXISTS=false" >>"$GITHUB_ENV"
+          fi
+          {
+            echo "PYPI_RELEASE_URL=https://pypi.org/project/questdb/$RELEASE_VERSION/"
+            echo "GITHUB_RELEASE_URL=https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
+            echo "READTHEDOCS_BUILD_URL=https://app.readthedocs.org/projects/py-questdb-client/builds/"
+          } >>"$GITHUB_ENV"
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+
+      - name: Verify complete PyPI publication
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"]
+          expected = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in Path("dist").iterdir()
+              if path.is_file()
+          }
+          if not expected:
+              raise SystemExit("release bundle contains no distributions")
+          url = f"https://pypi.org/pypi/questdb/{version}/json"
+          deadline = time.monotonic() + 600
+
+          while True:
+              try:
+                  request = urllib.request.Request(url, headers={"Accept": "application/json"})
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      if response.status != 200:
+                          raise SystemExit(
+                              f"PyPI verification returned unexpected HTTP {response.status}"
+                          )
+                      payload = json.load(response)
+              except urllib.error.HTTPError as error:
+                  if error.code != 404:
+                      raise SystemExit(
+                          f"PyPI verification failed with HTTP {error.code}"
+                      ) from error
+                  payload = {"urls": []}
+              except (OSError, json.JSONDecodeError) as error:
+                  raise SystemExit(f"PyPI verification failed: {error}") from error
+
+              urls = payload.get("urls")
+              if not isinstance(urls, list):
+                  raise SystemExit("PyPI response has no file list")
+              actual = {}
+              for entry in urls:
+                  name = entry.get("filename") if isinstance(entry, dict) else None
+                  digest = entry.get("digests", {}).get("sha256") if isinstance(entry, dict) else None
+                  if not isinstance(name, str) or not isinstance(digest, str):
+                      raise SystemExit("PyPI response contains invalid file metadata")
+                  if name in actual:
+                      raise SystemExit(f"PyPI response contains duplicate filename {name}")
+                  actual[name] = digest.lower()
+
+              extra = sorted(set(actual) - set(expected))
+              mismatched = sorted(
+                  name for name in set(actual) & set(expected)
+                  if actual[name] != expected[name]
+              )
+              if extra or mismatched:
+                  raise SystemExit(
+                      f"PyPI publication mismatch; extra={extra}, hash_mismatch={mismatched}"
+                  )
+              missing = sorted(set(expected) - set(actual))
+              if not missing:
+                  print(f"verified all {len(expected)} PyPI files by SHA-256")
+                  break
+              if time.monotonic() >= deadline:
+                  raise SystemExit(
+                      f"PyPI did not expose the complete release within 10 minutes; missing={missing}"
+                  )
+              print(f"waiting for PyPI propagation; missing={missing}", flush=True)
+              time.sleep(15)
+          PY
+
+      - name: Create immutable release tag when absent
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$RELEASE_TAG_EXISTS" == false ]]; then
+            git tag "$RELEASE_TAG" "$RELEASE_SHA"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+
+      - name: Create or recover GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          title="QuestDB Python client $RELEASE_VERSION"
+          api_url="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+          release_json="$RUNNER_TEMP/github-release.json"
+
+          gh api \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$GITHUB_REPOSITORY" >/dev/null
+
+          lookup_release() {
+            local status
+            status="$(curl --silent --show-error \
+              --output "$release_json" \
+              --write-out '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "$api_url")" || {
+                echo "GitHub release lookup failed before receiving an HTTP response" >&2
+                return 1
+              }
+            case "$status" in
+              200) return 0 ;;
+              404) return 4 ;;
+              *)
+                echo "GitHub release lookup failed with HTTP $status" >&2
+                jq -r '.message // empty' "$release_json" >&2 || true
+                return 1
+                ;;
+            esac
+          }
+
+          verify_assets() {
+            local expected_json asset name count asset_id downloaded
+            expected_json="$(printf '%s\n' "${expected_assets[@]##*/}" | jq -R . | jq -s .)"
+            jq -e --argjson expected "$expected_json" '
+              ([.assets[].name] | length) == ([.assets[].name] | unique | length)
+              and (([.assets[].name] | sort) == ($expected | sort))
+            ' "$release_json" >/dev/null || {
+              echo "GitHub release asset names do not exactly match the release bundle" >&2
+              return 1
+            }
+            for asset in "${expected_assets[@]}"; do
+              name="${asset##*/}"
+              count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' "$release_json")"
+              [[ "$count" == 1 ]] || {
+                echo "Expected exactly one GitHub release asset named $name" >&2
+                return 1
+              }
+              asset_id="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .id' "$release_json")"
+              downloaded="$RUNNER_TEMP/github-asset-$asset_id"
+              gh api \
+                -H 'Accept: application/octet-stream' \
+                "/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"$downloaded"
+              cmp --silent "$asset" "$downloaded" || {
+                echo "Existing GitHub release asset $name differs from the validated bundle" >&2
+                return 1
+              }
+            done
+          }
+
+          mapfile -d '' expected_assets < <(find dist -maxdepth 1 -type f -print0 | LC_ALL=C sort -z)
+          (( ${#expected_assets[@]} > 0 )) || {
+            echo "Release bundle contains no distributions" >&2
+            exit 1
+          }
+
+          if lookup_release; then
+            release_exists=true
+          else
+            lookup_status=$?
+            if [[ "$lookup_status" == 4 ]]; then
+              release_exists=false
+            else
+              exit "$lookup_status"
+            fi
+          fi
+
+          if [[ "$release_exists" == false ]]; then
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --draft \
+              --title "$title" \
+              --notes-file release-notes.md
+            lookup_release
+          fi
+
+          jq -e --arg tag "$RELEASE_TAG" '
+            .tag_name == $tag and .prerelease == false
+          ' "$release_json" >/dev/null || {
+            echo "Existing GitHub release has unexpected tag or prerelease state" >&2
+            exit 1
+          }
+
+          is_draft="$(jq -r '.draft | if type == "boolean" then tostring else error("draft is not boolean") end' "$release_json")"
+          if [[ "$is_draft" == false ]]; then
+            jq -e --arg title "$title" --rawfile notes release-notes.md '
+              .name == $title and .body == $notes
+            ' "$release_json" >/dev/null || {
+              echo "Published GitHub release metadata differs from the validated bundle" >&2
+              exit 1
+            }
+            verify_assets
+            exit 0
+          fi
+
+          jq -e '.immutable != true' "$release_json" >/dev/null || {
+            echo "Draft GitHub release is immutable and cannot be recovered" >&2
+            exit 1
+          }
+          gh release edit "$RELEASE_TAG" \
+            --draft=true \
+            --prerelease=false \
+            --title "$title" \
+            --notes-file release-notes.md
+          lookup_release
+
+          for asset in "${expected_assets[@]}"; do
+            name="${asset##*/}"
+            count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' "$release_json")"
+            case "$count" in
+              0) gh release upload "$RELEASE_TAG" "$asset" ;;
+              1)
+                asset_id="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .id' "$release_json")"
+                downloaded="$RUNNER_TEMP/github-asset-$asset_id"
+                gh api \
+                  -H 'Accept: application/octet-stream' \
+                  "/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"$downloaded"
+                cmp --silent "$asset" "$downloaded" || {
+                  echo "Existing GitHub release asset $name differs from the validated bundle" >&2
+                  exit 1
+                }
+                ;;
+              *)
+                echo "GitHub release has duplicate assets named $name" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          lookup_release
+          verify_assets
+          gh release edit "$RELEASE_TAG" \
+            --draft=false \
+            --prerelease=false \
+            --title "$title" \
+            --notes-file release-notes.md
+          lookup_release
+          jq -e --arg title "$title" --rawfile notes release-notes.md '
+            .draft == false and .prerelease == false and .name == $title and .body == $notes
+          ' "$release_json" >/dev/null || {
+            echo "Published GitHub release metadata could not be verified" >&2
+            exit 1
+          }
+          verify_assets
+
+      - name: Trigger and monitor Read the Docs
+        env:
+          READTHEDOCS_TOKEN: ${{ secrets.READTHEDOCS_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          api_root="https://app.readthedocs.org/api/v3/projects/py-questdb-client"
+          deadline=$((SECONDS + 1800))
+          trigger_json="$(curl --fail-with-body --silent --show-error \
+            --max-time 30 \
+            --request POST \
+            -H "Authorization: Token $READTHEDOCS_TOKEN" \
+            -H 'Accept: application/json' \
+            "$api_root/versions/latest/builds/")"
+          build_id="$(jq -er '
+            .build.id
+            | if type == "number" then select(floor == .) | tostring
+              elif type == "string" then select(test("^[0-9]+$"))
+              else empty
+              end
+          ' <<<"$trigger_json")" || {
+            echo "Read the Docs trigger response has no valid build ID" >&2
+            exit 1
+          }
+          echo "READTHEDOCS_BUILD_URL=https://app.readthedocs.org/projects/py-questdb-client/builds/$build_id/" \
+            >>"$GITHUB_ENV"
+
+          while (( SECONDS < deadline )); do
+            remaining=$((deadline - SECONDS))
+            (( remaining > 0 )) || break
+            build_json="$(curl --fail-with-body --silent --show-error \
+              --max-time "$remaining" \
+              -H "Authorization: Token $READTHEDOCS_TOKEN" \
+              -H 'Accept: application/json' \
+              "$api_root/builds/$build_id/")"
+            jq -e --arg id "$build_id" '
+              def slug:
+                if type == "string" then .
+                elif type == "object" then .slug
+                else null
+                end;
+              (.id | tostring) == $id
+              and (.project | slug) == "py-questdb-client"
+              and (.version | slug) == "latest"
+            ' <<<"$build_json" >/dev/null || {
+              echo "Read the Docs returned the wrong build, project, or version while polling $build_id" >&2
+              jq '{id, project, version}' <<<"$build_json" >&2
+              exit 1
+            }
+            state="$(jq -er '
+              if (.state | type) == "object" then .state.code
+              elif (.state | type) == "string" then .state
+              else empty
+              end
+              | select(type == "string" and length > 0)
+            ' <<<"$build_json")"
+            case "$state" in
+              finished)
+                jq -e '.success == true' <<<"$build_json" >/dev/null || {
+                  echo "Read the Docs build $build_id finished unsuccessfully" >&2
+                  jq '{id, version, state, success, error, commit}' <<<"$build_json" >&2
+                  exit 1
+                }
+                exit 0
+                ;;
+              cancelled)
+                echo "Read the Docs build $build_id was cancelled" >&2
+                jq '{id, version, state, success, error, commit}' <<<"$build_json" >&2
+                exit 1
+                ;;
+              triggered|building|installing|cloning|uploading)
+                remaining=$((deadline - SECONDS))
+                (( remaining > 0 )) || break
+                (( remaining < 15 )) && sleep "$remaining" || sleep 15
+                ;;
+              *)
+                echo "Unknown Read the Docs build state: $state" >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "Read the Docs build $build_id did not finish within 30 minutes" >&2
+          exit 1
+
+      - name: Write publication summary
+        if: ${{ always() }}
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          pypi_url="${PYPI_RELEASE_URL:-https://pypi.org/project/questdb/$RELEASE_VERSION/}"
+          release_url="${GITHUB_RELEASE_URL:-https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG}"
+          docs_url="${READTHEDOCS_BUILD_URL:-https://app.readthedocs.org/projects/py-questdb-client/builds/}"
+          {
+            echo "## Release publication"
+            echo
+            echo "- PyPI: $pypi_url"
+            echo "- GitHub release: $release_url"
+            echo "- Read the Docs build: $docs_url"
+          } >>"$GITHUB_STEP_SUMMARY"
