@@ -489,6 +489,7 @@ class TestWithDatabase(unittest.TestCase):
             f"select id, val from '{table_name}' order by id")
         self.assertEqual(resp['dataset'], [[0, 0.0], [1, 0.5], [2, 1.0]])
 
+    @unittest.skipIf(not pd, 'pandas not installed')
     def test_oidc_provider_query_and_ingress_round_trip(self):
         self._require_qwp_ws()
         table_name = 'oidc_' + uuid.uuid4().hex

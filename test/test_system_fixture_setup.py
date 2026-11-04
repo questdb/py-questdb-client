@@ -1,6 +1,8 @@
 """Tests for the CI-facing QuestDB system-test setup."""
 
+import importlib.util
 import pathlib
+import sys
 import urllib.error
 import unittest
 from unittest import mock
@@ -9,6 +11,22 @@ import system_test
 
 
 class TestSystemFixtureSetup(unittest.TestCase):
+    def test_oidc_round_trip_skips_without_pandas(self):
+        spec = importlib.util.spec_from_file_location(
+            'system_test_without_pandas', system_test.__file__)
+        without_pandas = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(sys.modules, {'pandas': None}), \
+                mock.patch.object(sys, 'path', list(sys.path)):
+            spec.loader.exec_module(without_pandas)
+
+        case = without_pandas.TestWithDatabase(
+            'test_oidc_provider_query_and_ingress_round_trip')
+        result = unittest.TestResult()
+        # Run the case directly so no live-server setUpClass is needed.
+        case.run(result)
+        self.assertEqual(result.skipped, [(case, 'pandas not installed')])
+        self.assertTrue(result.wasSuccessful())
+
     def test_release_download_retries_transient_dns(self):
         transient = urllib.error.URLError('temporary DNS failure')
         with mock.patch.object(system_test, 'QUESTDB_PLAIN_INSTALL_PATH', None), \

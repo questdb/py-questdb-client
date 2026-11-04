@@ -95,6 +95,7 @@ class PgCaptureServer:
 
     def _serve(self, conn):
         login = {'params': None, 'password': None, 'encryption_requests': []}
+        recorded = False
         try:
             with conn:
                 conn.settimeout(10)
@@ -127,10 +128,15 @@ class PgCaptureServer:
                 if tag != b'p':
                     raise ValueError(f'expected a password message, got {tag!r}')
                 login['password'] = body.rstrip(b'\0').decode()
+                # Publish before replying: the driver can raise and the test
+                # can read `logins` before this thread reaches `finally`.
+                with self._lock:
+                    self._logins.append(login)
+                    recorded = True
                 conn.sendall(_error_response(REJECTION_MESSAGE))
         except Exception as exc:  # recorded for the test to assert on
             self.errors.append(exc)
         finally:
-            if login['params'] is not None:
+            if not recorded and login['params'] is not None:
                 with self._lock:
                     self._logins.append(login)
