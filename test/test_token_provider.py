@@ -2580,8 +2580,39 @@ class TokenCallbackForkTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
 
 
-@unittest.skipUnless(importlib.util.find_spec('mypy'), 'optional mypy not installed')
 class TokenProviderTypingTest(unittest.TestCase):
+    def test_connect_annotations_resolve_without_importing_auth(self):
+        script = textwrap.dedent('''
+            import sys
+            from typing import Callable, Optional, Union, get_type_hints
+            import questdb
+
+            assert 'questdb.auth' not in sys.modules
+            hints = get_type_hints(questdb.connect)
+            assert 'questdb.auth' not in sys.modules
+            assert hints['conf_str'] == Optional[str]
+            assert hints['return'] is questdb.QuestDB
+
+            from questdb.auth import BearerTokenProvider
+            from questdb.auth._token_provider import (
+                BearerTokenProvider as compatibility_provider)
+            assert compatibility_provider is BearerTokenProvider
+            assert hints['bearer_token_provider'] == Optional[
+                Union[BearerTokenProvider, Callable[[], str]]]
+            assert get_type_hints(questdb.connect) == hints
+        ''')
+        env = os.environ.copy()
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, (
+            os.path.dirname(os.path.dirname(questdb.__file__)),
+            env.get('PYTHONPATH'))))
+        result = subprocess.run(
+            [sys.executable, '-c', script], env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec('mypy'), 'optional mypy not installed')
     def test_supported_sources_snapshots_and_adapters_typecheck(self):
         root = Path(__file__).resolve().parent.parent
         env = os.environ.copy()

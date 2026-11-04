@@ -53,6 +53,9 @@ def check_bearer_token_provider_arguments(
         provider: RefreshingTokenProvider) -> None:
     conf = 'wss::addr=localhost:9000;'
     questdb.connect(conf, bearer_token_provider=provider)
+    questdb.connect(conf, bearer_token_provider=Provider())
+    questdb.connect(conf, bearer_token_provider=lambda: 't')
+    questdb.connect(conf, bearer_token_provider=None)
     QuestDB.from_conf(conf, bearer_token_provider=Provider())
     Sender(Protocol.Wss, 'localhost', 9000, bearer_token_provider=lambda: 't')
     Sender.from_conf(conf, bearer_token_provider=provider.token)

@@ -3,9 +3,9 @@ __version__ = '6.0.1'
 import sys as _sys
 from types import ModuleType as _ModuleType
 from typing import (
-    TYPE_CHECKING as _TYPE_CHECKING, Callable as _Callable,
-    Optional as _Optional, Union as _Union)
+    Callable as _Callable, Optional as _Optional, Union as _Union)
 
+from questdb._token_provider import BearerTokenProvider as _BearerTokenProvider
 from questdb import _client
 from questdb._client import (
     Char,
@@ -39,12 +39,6 @@ from questdb._client import (
     TlsCa,
     UnsupportedDataFrameShapeError,
 )
-
-if _TYPE_CHECKING:
-    # Type checkers only: importing `questdb.auth` at runtime would load it,
-    # and its dependencies, into every `import questdb`.
-    from typing import Callable, Optional, Union
-    from questdb.auth import BearerTokenProvider
 
 __all__ = [
     'Char',
@@ -98,8 +92,8 @@ def connect(
         port: _Union[int, str, None] = None,
         tls: _Optional[bool] = None,
         oidc_auth: _Optional[_OidcDeviceAuth] = None,
-        bearer_token_provider: (
-            'Optional[Union[BearerTokenProvider, Callable[[], str]]]') = None,
+        bearer_token_provider: _Optional[
+            _Union[_BearerTokenProvider, _Callable[[], str]]] = None,
         connection_listener: _Optional[
             _Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
