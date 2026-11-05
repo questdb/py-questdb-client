@@ -274,7 +274,11 @@ cdef double _tp_seconds(object value, str name) except? -1.0:
     if isinstance(value, datetime.timedelta):
         seconds = value.total_seconds()
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
-        seconds = value
+        try:
+            seconds = value
+        except OverflowError:
+            raise _ConfigValueError(
+                f'"{name}" must be a finite, non-negative duration') from None
     else:
         raise _ConfigTypeError(
             f'"{name}" must be a number of seconds or a timedelta, '
@@ -296,7 +300,11 @@ cdef double _tp_epoch_seconds(object value, str name) except? -1.0:
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
         if value != value or value in (float('inf'), float('-inf')):
             raise _ConfigValueError(f'"{name}" must be finite')
-        seconds = value
+        try:
+            seconds = value
+        except OverflowError:
+            raise _ConfigValueError(
+                f'"{name}" must be representable as a Python datetime') from None
     else:
         raise _ConfigTypeError(
             f'"{name}" must be a datetime or epoch seconds, '

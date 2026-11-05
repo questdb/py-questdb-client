@@ -133,11 +133,16 @@ class ExpiringTokenTest(unittest.TestCase):
 
     def test_expiry_must_fit_a_datetime_snapshot(self):
         for keyword in ('expires_at', 'refresh_at'):
-            for value in (1e12, -1e12):
+            for value in (1e12, -1e12, 10**400, -(10**400)):
                 with self.subTest(keyword=keyword, value=value):
                     args = {'expires_at': 2e9, keyword: value}
-                    with self.assertRaisesRegex(ValueError, 'Python datetime'):
+                    with self.assertRaisesRegex(
+                            ValueError, 'Python datetime') as caught:
                         ExpiringToken('t', **args)
+                    self.assertIsInstance(caught.exception, questdb.QuestDBError)
+                    self.assertEqual(
+                        caught.exception.code,
+                        questdb.QuestDBErrorCode.ConfigError)
 
     def test_repr_never_shows_the_token(self):
         text = repr(ExpiringToken('SENTINEL-secret', 2e9))
@@ -209,6 +214,21 @@ class InvalidArgumentErrorTest(unittest.TestCase):
             for index, (builtin, call) in enumerate(cases):
                 with self.subTest(index=index):
                     self.assertConfigError(builtin, call)
+            self.assertFalse(provider.closed)
+
+    def test_oversized_integer_durations(self):
+        source, _ = _counting_source()
+        with RefreshingTokenProvider(source) as provider:
+            for value in (10**400, -(10**400)):
+                cases = (
+                    lambda: RefreshingTokenProvider(source, cold_wait=value),
+                    lambda: ExpiringToken.expires_in('t', value),
+                    lambda: TokenUnavailableError('x', retry_after=value),
+                    lambda: provider.await_ready(value),
+                    lambda: provider.close(wait=True, timeout=value))
+                for index, call in enumerate(cases):
+                    with self.subTest(value=value, index=index):
+                        self.assertConfigError(ValueError, call)
             self.assertFalse(provider.closed)
 
     def test_provider_keyword_arguments(self):
