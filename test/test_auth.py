@@ -6036,6 +6036,42 @@ class RenderSanitizerTest(unittest.TestCase):
             'open directly',
             _render.format_prompt(dict(resp, browser_target=real)))
 
+    def test_native_refusal_defangs_embedded_schemes_in_plain_prompts(self):
+        for uri in (
+                'Visit https://idp.example/verify',
+                ' Visit HTTPS://idp.example/verify',
+                'Visit http://idp.example/verify or https://other.example/v',
+                'Visit custom://idp.example/verify'):
+            with self.subTest(uri=uri):
+                resp = dict(self._refused_prompt()[1],
+                            verification_uri=uri,
+                            verification_uri_complete=None)
+                expected = uri.replace('://', '[:]//')
+                stream = io.StringIO()
+                _render.TerminalRenderer(stream=stream).on_prompt(resp)
+                notebook = _render.JupyterRenderer(qr=False)
+                with mock.patch.object(notebook, '_display') as display:
+                    notebook.on_prompt(resp)
+                display.assert_called_once()
+                for rendered in (stream.getvalue(), display.call_args.args[1]):
+                    self.assertIn(expected, rendered)
+                    self.assertNotIn('://', rendered)
+                    self.assertIn(resp['user_code'], rendered)
+                    self.assertNotIn('open directly', rendered)
+
+        # A vetted target remains usable in both plain-text sinks.
+        uri = 'https://idp.example/verify'
+        resp = dict(self._refused_prompt()[1], verification_uri=uri,
+                    verification_uri_complete=None, browser_target=uri)
+        stream = io.StringIO()
+        _render.TerminalRenderer(stream=stream).on_prompt(resp)
+        notebook = _render.JupyterRenderer(qr=False)
+        with mock.patch.object(notebook, '_display') as display:
+            notebook.on_prompt(resp)
+        for rendered in (stream.getvalue(), display.call_args.args[1]):
+            self.assertIn(uri, rendered)
+            self.assertNotIn('[:]//', rendered)
+
     def test_native_refusal_yields_no_actionable_target(self):
         # Regression: the fallback chain used to re-promote the display string,
         # handing the user a live link and a QR for a URL native had explicitly

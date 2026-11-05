@@ -688,11 +688,8 @@ def sanitize_display_text(text: Optional[str]) -> str:
 
 def _defang_terminal_url(url: str) -> str:
     """Keep a refused URL readable without leaving an auto-linkable scheme."""
-    if url.startswith('https://'):
-        return 'https[:]//' + url[len('https://'):]
-    if url.startswith('http://'):
-        return 'http[:]//' + url[len('http://'):]
-    return url
+    # Refused display text may contain leading words or multiple URLs.
+    return url.replace('://', '[:]//')
 
 
 def format_prompt(resp: Dict[str, Any]) -> str:
