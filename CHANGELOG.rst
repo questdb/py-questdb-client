@@ -202,11 +202,16 @@ tokens from a secrets vault.
   request to stop; see :ref:`token_provider_reentrancy`.
 * Pooled dataframe calls fail fast on native foreground OIDC failures rather
   than spinning through the reconnect budget.
-* A successful OIDC refresh can revalidate the same still-valid token after a
-  transient server rejection. Token-store stale-lock recovery preserves live
-  displaced-owner captures as acquisition fences, and displaced refresh actions
-  cannot clear or restore a successor's state. Concurrent writers in other
-  clients must implement the same capture-fence rule.
+* A successful OIDC refresh or explicit sign-in can revalidate the same
+  still-valid token after a transient server rejection. If a refresh is rejected
+  and requires a new sign-in, an IdP reissuing the same credential no longer
+  causes a false expired-token error, including when the device grant needs an
+  immediate rescue refresh. Cached and persisted rejected tokens remain blocked
+  until acquisition succeeds.
+* Token-store stale-lock recovery preserves live displaced-owner captures as
+  acquisition fences, and displaced refresh actions cannot clear or restore a
+  successor's state. Concurrent writers in other clients must implement the
+  same capture-fence rule.
 * :class:`questdb.auth.TokenUnavailableError` classifies a source's failure
   as retryable or permanent; a connection the caller waits for retries only a
   retryable one. :func:`questdb.connect` preserves this error and its retry

@@ -3514,6 +3514,61 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             [request['headers'].get('authorization') for request in writes],
             ['Bearer AT-initial', 'Bearer AT-initial'])
 
+    def test_http_sign_in_recovers_a_reissued_token_after_refresh_rejection(self):
+        for rescue_refresh in (False, True):
+            with self.subTest(rescue_refresh=rescue_refresh), OidcTestServer(
+                    write_statuses=(401,),
+                    refresh_token_response=(
+                        400, {'error': 'invalid_grant'}, None)) as server:
+                renderer = RecordingRenderer()
+                with make_discovered_auth(server, renderer=renderer) as auth:
+                    auth.sign_in()
+                    with questdb.Sender(
+                            questdb.Protocol.Http, '127.0.0.1', server.port,
+                            oidc_auth=auth, auto_flush=False,
+                            retry_timeout=1) as sender:
+                        sender.row('events', columns={'value': 1},
+                                   at=questdb.ServerTimestamp)
+                        with self.assertRaises(OidcInteractionRequired) as caught:
+                            sender.flush()
+                        self.assertEqual(caught.exception.status, 400)
+                        self.assertEqual(len(server.requests('/device', 'POST')), 1)
+
+                        response = {
+                            'access_token': server.initial_access_token,
+                            'token_type': 'Bearer',
+                            'expires_in': 300,
+                        }
+                        server.refresh_token_response = (200, dict(response), None)
+                        if rescue_refresh:
+                            response.update(expires_in=0, refresh_token='RT-rescue')
+                        server.device_token_response = (200, response, None)
+
+                        auth.sign_in()
+                        self.assertEqual(auth.token(), server.initial_access_token)
+                        sender.row('events', columns={'value': 2},
+                                   at=questdb.ServerTimestamp)
+                        sender.flush()
+
+                    expected_grants = [
+                        'urn:ietf:params:oauth:grant-type:device_code',
+                        'refresh_token',
+                        'urn:ietf:params:oauth:grant-type:device_code',
+                    ]
+                    if rescue_refresh:
+                        expected_grants.append('refresh_token')
+                    self.assertEqual(
+                        [request['form']['grant_type'][0]
+                         for request in server.requests('/token', 'POST')],
+                        expected_grants)
+                    self.assertEqual(len(server.requests('/device', 'POST')), 2)
+                    self.assertEqual(
+                        [request['headers'].get('authorization')
+                         for request in server.requests('/write', 'POST')],
+                        ['Bearer AT-initial', 'Bearer AT-initial'])
+                    self.assertEqual(len(renderer.successes), 2)
+                    self.assertEqual(renderer.failures, [])
+
     def test_http_oidc_provider_failure_preserves_native_delivery_uncertainty(self):
         for statuses, in_doubt in (((401,), False), ((500, 401), True)):
             with self.subTest(statuses=statuses), OidcTestServer(
