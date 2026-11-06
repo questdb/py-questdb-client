@@ -442,7 +442,9 @@ Highlights:
   raises ``KeyboardInterrupt``; the provider remains open, already-attached
   ``Sender``/pool/reader instances remain usable, and a later ``sign_in()`` can
   retry on the same provider. Custom UIs can invoke the new attempt-scoped
-  ``cancel_sign_in()`` method directly. Only ``close()`` is permanent.
+  ``cancel_sign_in()`` method directly. Once tokens have been issued, or a
+  terminal failure is committed before ``on_failure``, cancellation is a
+  no-op and preserves that outcome. Only ``close()`` is permanent.
   :meth:`~questdb.auth.OidcDeviceAuth.clear` never waits behind a
   ``sign_in()`` running on another thread: it raises
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to

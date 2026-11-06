@@ -3170,6 +3170,41 @@ class NativeOidcIntegrationTest(unittest.TestCase):
             self.assertEqual(renderer.failures, ['Sign-in cancelled.'])
             self.assertEqual(len(renderer.successes), 1)
 
+    def test_cancel_from_failure_callback_preserves_terminal_error(self):
+        for idp_error, error_type in (
+                ('access_denied', OidcDeviceFlowError),
+                ('expired_token', OidcTimeoutError)):
+            with self.subTest(error=idp_error), OidcTestServer(
+                    device_token_response=(400, {'error': idp_error}, None),
+                    device_expires_in=20) as server:
+                holder = []
+                cancellations = []
+
+                class CancellingRenderer(RecordingRenderer):
+                    def on_failure(self, message):
+                        super().on_failure(message)
+                        cancellations.append(holder[0].cancel_sign_in())
+
+                renderer = CancellingRenderer()
+                auth = make_discovered_auth(server, renderer=renderer)
+                holder.append(auth)
+                try:
+                    with self.assertRaises(error_type) as caught:
+                        auth.sign_in()
+                    self.assertEqual(caught.exception.error, idp_error)
+                    self.assertEqual(cancellations, [None])
+                    self.assertEqual(len(renderer.failures), 1)
+                    self.assertEqual(renderer.successes, [])
+
+                    server.device_token_response = None
+                    auth.sign_in()
+                    self.assertEqual(auth.token(), server.initial_access_token)
+                    self.assertEqual(len(renderer.failures), 1)
+                    self.assertEqual(len(renderer.successes), 1)
+                    self.assertEqual(cancellations, [None])
+                finally:
+                    auth.close()
+
     def test_cancel_after_tokens_are_issued_still_reports_success(self):
         # The device grant returns an already-expired JWT plus a refresh
         # token, so sign_in() makes a rescue refresh after the IdP has issued

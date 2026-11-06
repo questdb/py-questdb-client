@@ -620,7 +620,9 @@ Security notes
   :meth:`~questdb.auth.OidcDeviceAuth.cancel_sign_in`. Once the identity
   provider has issued tokens, the attempt is committed: a cancel that arrives
   later is a no-op, ``sign_in()`` completes, and the renderer receives its
-  ``on_success`` or ``on_failure`` call. Use
+  ``on_success`` or ``on_failure`` call. A terminal failure is also committed
+  before ``on_failure`` runs: cancelling from that callback is a no-op and
+  preserves the original failure. Use
   :meth:`~questdb.auth.OidcDeviceAuth.close` only for permanent shutdown.
 * An exception raised by a signal handler during a synchronous transport
   persistence diagnostic is returned to the caller without invoking the handler

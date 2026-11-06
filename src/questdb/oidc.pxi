@@ -2470,7 +2470,9 @@ cdef class OidcDeviceAuth:
         running, this is an idempotent no-op that does not affect the next one.
         It is also a no-op once the identity provider has issued tokens for the
         running flow: that sign-in is committed and completes normally, and the
-        renderer receives its ``on_success`` or ``on_failure`` call.
+        renderer receives its ``on_success`` or ``on_failure`` call. A terminal
+        failure is also committed before ``on_failure`` runs: cancelling from
+        that callback is a no-op and preserves the original failure.
 
         Safe from any thread, including a renderer callback. Use :meth:`close`
         instead only when the provider and every attached transport should be
