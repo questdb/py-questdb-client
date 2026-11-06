@@ -446,11 +446,12 @@ def _type_name(value: Any) -> str:
 def _token_getter(auth: Any) -> Callable[[], Any]:
     """The function each connection calls for its token.
 
-    Accepts the provider shapes ``bearer_token_provider=`` accepts: an object
-    with a ``token()`` method (an ``OidcDeviceAuth`` too), or a callable
-    returning the token. Anything else is refused here, before an engine
-    exists or a token is fetched, rather than as a bare ``AttributeError``
-    from the first connection.
+    Accepts the provider shapes ``bearer_token_provider=`` accepts -- an
+    object with a ``token()`` method, or a callable returning the token --
+    and an ``OidcDeviceAuth``, which clients take only as ``oidc_auth=``.
+    Anything else is refused here, before an engine exists or a token is
+    fetched, rather than as a bare ``AttributeError`` from the first
+    connection.
     """
     token = getattr(auth, 'token', None)
     if callable(token):

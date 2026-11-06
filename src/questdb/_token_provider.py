@@ -68,6 +68,13 @@ class BearerTokenProvider(Protocol):
     Supplies the current Bearer token to a client: the counterpart of the Java
     client's ``HttpTokenProvider``. Pass one as ``bearer_token_provider=``.
 
+    An :class:`~questdb.auth.OidcDeviceAuth` has a ``token()`` method, so it
+    matches this protocol, and type checkers accept it as
+    ``bearer_token_provider=``. Clients refuse it there with ``TypeError``,
+    as they refuse its bound ``token`` method: attach it as ``oidc_auth=``.
+    The PG-wire adapters, :func:`~questdb.auth.sqlalchemy_engine` and
+    :func:`~questdb.auth.psycopg_connect`, accept it as a provider.
+
     ``token()`` runs on every connection attempt of a QWP/WebSocket sender,
     query or :func:`questdb.connect` pool, possibly on a native thread, and on
     every flush of an ILP/HTTP sender, on the flushing thread. Calls may run

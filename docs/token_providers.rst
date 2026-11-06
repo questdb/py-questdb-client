@@ -394,6 +394,8 @@ PG-wire
 -------
 
 :func:`~questdb.auth.sqlalchemy_engine` and
-:func:`~questdb.auth.psycopg_connect` accept the same providers as
-``bearer_token_provider=``: a ``RefreshingTokenProvider``, any other object
-with a ``token()`` method, or a function that returns the current token.
+:func:`~questdb.auth.psycopg_connect` accept the providers
+``bearer_token_provider=`` accepts -- a ``RefreshingTokenProvider``, any
+other object with a ``token()`` method, or a function that returns the
+current token -- and an :class:`~questdb.auth.OidcDeviceAuth` as well, which
+the clients take only as ``oidc_auth=``.
