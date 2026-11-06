@@ -133,13 +133,15 @@ class ExpiringToken:
     """
     A token and when it expires: the result of one token-source fetch.
 
-    ``expires_at`` and the optional ``refresh_at`` (the platform's suggested
-    refresh time) are timezone-aware :class:`datetime.datetime` objects or
-    epoch seconds, within Python's datetime range. Values outside that range
-    are rejected so provider status snapshots always remain readable. If the
-    platform reports a relative lifetime, such as
-    OAuth's ``expires_in``, use :meth:`expires_in`, which computes the expiry
-    from the local time of receipt.
+    Pass ``expires_at`` and the optional ``refresh_at`` (the platform's
+    suggested refresh time) as timezone-aware :class:`datetime.datetime`
+    objects or epoch seconds, within Python's datetime range. Values outside
+    that range are rejected so provider status snapshots always remain
+    readable. The attributes hold timezone-aware UTC datetimes, as
+    :class:`~questdb.auth.TokenProviderStatus` reports its times. If the
+    platform reports a relative lifetime, such as OAuth's ``expires_in``, use
+    :meth:`expires_in`, which computes the expiry from the local time of
+    receipt.
 
     The ``repr`` never shows the token.
     """
@@ -150,10 +152,12 @@ class ExpiringToken:
             raise _ConfigTypeError(
                 f'"token" must be a str, not {_fqn(type(token))}')
         self.token = token
-        self.expires_at = _tp_epoch_seconds(expires_at, 'expires_at')
+        self.expires_at = _tp_utc_datetime(
+            expires_at, _tp_epoch_seconds(expires_at, 'expires_at'))
         self.refresh_at = (
             None if refresh_at is None
-            else _tp_epoch_seconds(refresh_at, 'refresh_at'))
+            else _tp_utc_datetime(
+                refresh_at, _tp_epoch_seconds(refresh_at, 'refresh_at')))
 
     @classmethod
     def expires_in(cls, token, lifetime, refresh_at=None):
@@ -167,7 +171,7 @@ class ExpiringToken:
     def __repr__(self):
         return (
             f'ExpiringToken(<redacted, {len(self.token)} chars>, '
-            f'expires_at={_tp_format_epoch(self.expires_at)})')
+            f'expires_at={_tp_format_instant(self.expires_at)})')
 
 
 class TokenUnavailableError(QuestDBError):
@@ -319,12 +323,26 @@ cdef double _tp_epoch_seconds(object value, str name) except? -1.0:
     return seconds
 
 
-cdef object _tp_format_epoch(double seconds):
+cdef object _tp_utc_datetime(object value, double seconds):
+    """``value``, which `_tp_epoch_seconds` accepted as ``seconds``, as a
+    timezone-aware UTC datetime. A datetime is converted, not rebuilt from
+    ``seconds``, so it keeps its exact instant."""
+    if isinstance(value, datetime.datetime):
+        return value.astimezone(datetime.timezone.utc)
+    return datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc)
+
+
+cdef object _tp_format_instant(object value):
+    """An instant for a ``repr``: ISO time for a datetime, or for epoch
+    seconds a datetime can hold, and the ``repr`` of anything else -- an
+    attribute can be reassigned to any value after construction."""
+    if isinstance(value, datetime.datetime):
+        return value.isoformat()
     try:
         return datetime.datetime.fromtimestamp(
-            seconds, datetime.timezone.utc).isoformat()
-    except (OverflowError, OSError, ValueError):
-        return repr(seconds)
+            value, datetime.timezone.utc).isoformat()
+    except (TypeError, OverflowError, OSError, ValueError):
+        return repr(value)
 
 
 cdef object _tp_datetime_from_ms(int64_t ms):

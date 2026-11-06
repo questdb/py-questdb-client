@@ -113,13 +113,30 @@ def _last_failure(provider):
 class ExpiringTokenTest(unittest.TestCase):
     def test_expiry_forms(self):
         at = datetime.datetime(2030, 1, 1, tzinfo=UTC)
-        self.assertEqual(ExpiringToken('t', at).expires_at, at.timestamp())
-        self.assertEqual(ExpiringToken('t', 1.5e9).expires_at, 1.5e9)
+        self.assertEqual(ExpiringToken('t', at).expires_at, at)
+        east = at.astimezone(datetime.timezone(datetime.timedelta(hours=2)))
+        self.assertIs(ExpiringToken('t', east).expires_at.tzinfo, UTC)
+        self.assertEqual(ExpiringToken('t', east).expires_at, at)
+        self.assertEqual(
+            ExpiringToken('t', 1.5e9).expires_at,
+            datetime.datetime.fromtimestamp(1.5e9, UTC))
         token = ExpiringToken.expires_in(
             't', datetime.timedelta(minutes=5), refresh_at=1.6e9)
         self.assertAlmostEqual(
-            token.expires_at, time.time() + 300, delta=5)
-        self.assertEqual(token.refresh_at, 1.6e9)
+            token.expires_at.timestamp(), time.time() + 300, delta=5)
+        self.assertEqual(
+            token.refresh_at, datetime.datetime.fromtimestamp(1.6e9, UTC))
+        self.assertIsNone(ExpiringToken('t', at).refresh_at)
+
+    def test_expiry_compares_with_the_providers_status(self):
+        # Both report a timezone-aware datetime; the provider keeps
+        # whole milliseconds.
+        token = ExpiringToken.expires_in('t', 3600)
+        with RefreshingTokenProvider(lambda: token) as provider:
+            self.assertTrue(provider.await_ready(10))
+            gap = token.expires_at - provider.status.token_expires_at
+        self.assertGreaterEqual(gap, datetime.timedelta(0))
+        self.assertLessEqual(gap, datetime.timedelta(milliseconds=1))
 
     def test_invalid_values_are_rejected(self):
         with self.assertRaisesRegex(ValueError, 'timezone-aware'):
@@ -145,9 +162,15 @@ class ExpiringTokenTest(unittest.TestCase):
                         questdb.QuestDBErrorCode.ConfigError)
 
     def test_repr_never_shows_the_token(self):
-        text = repr(ExpiringToken('SENTINEL-secret', 2e9))
+        token = ExpiringToken('SENTINEL-secret', 2e9)
+        text = repr(token)
         self.assertNotIn('SENTINEL', text)
         self.assertIn('15 chars', text)
+        self.assertIn('expires_at=2033-05-18T03:33:20+00:00', text)
+        # The attributes are writable; repr must survive any value.
+        for value in (1e12, 'soon', None):
+            token.expires_at = value
+            self.assertIn(f'expires_at={value!r}', repr(token))
 
 
 class TokenUnavailableErrorTest(unittest.TestCase):

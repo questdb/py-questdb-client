@@ -243,8 +243,8 @@ class ExpiringToken:
     """A token and when it expires: the result of one token-source fetch."""
 
     token: str
-    expires_at: float
-    refresh_at: Optional[float]
+    expires_at: datetime
+    refresh_at: Optional[datetime]
 
     def __init__(
         self,
