@@ -763,15 +763,10 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                 with self.subTest(column=name):
                     _assert_no_heap_growth(self, work, per_window=200)
 
-    @unittest.skipUnless(pa is not None, 'pyarrow not installed')
-    def test_promoted_columnar_path_no_leak(self):
-        """Guards ``_dataframe_columnar_promote_cols``: the pybuf chunk
-        release + Arrow re-export for object-Decimal and NaT-carrying
-        ``datetime64[ns]`` field columns must not leak native buffers."""
+    @staticmethod
+    def _promoted_frame(n):
         from decimal import Decimal
-        from qwp_ws_ack_server import QwpAckServer
-        n = self.ROWS
-        df = pd.DataFrame({
+        return pd.DataFrame({
             'ts': pd.Series(pd.to_datetime(np.arange(n), unit='s')),
             'dec': pd.Series(
                 [None if i % 7 == 0 else Decimal(i) / 100
@@ -780,6 +775,18 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                 [pd.NaT if i % 5 == 0 else pd.Timestamp(i, unit='s')
                  for i in range(n)], dtype='datetime64[ns]'),
         })
+
+    @unittest.skipUnless(pa is not None, 'pyarrow not installed')
+    def test_promoted_columnar_path_no_leak(self):
+        """Promoted Decimal/timestamp buffers are freed after ingestion.
+
+        These buffers belong to Arrow's memory pool, which need not use
+        libc's allocator. RSS after malloc_trim cannot distinguish its
+        retained free pages from live buffers. Count live Arrow bytes
+        instead; even one retained buffer must change the count.
+        """
+        from qwp_ws_ack_server import QwpAckServer
+        df = self._promoted_frame(self.ROWS)
         with QwpAckServer() as server:
             conf = (f'ws::addr=127.0.0.1:{server.port};'
                     'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
@@ -791,7 +798,50 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                     client.dataframe(
                         df, table_name='t', at='ts', symbols=False)
 
-                self._assert_stable(work, warmup=150, measure=1800)
+                work()
+                gc.collect()
+                before = pa.total_allocated_bytes()
+                for _ in range(100):
+                    work()
+                gc.collect()
+                self.assertEqual(pa.total_allocated_bytes(), before)
+
+    @unittest.skipUnless(pa is not None, 'pyarrow not installed')
+    @unittest.skipIf(_HEAP_READER is None, _NO_HEAP_STATS)
+    def test_promoted_error_path_no_leak(self):
+        """Release the original pybuf mappings and the Arrow re-exports.
+
+        The last column fails during prebuilding, after Decimal and NaT
+        columns have been promoted but before opening a connection. This
+        keeps network/server allocations out of the C-heap measurement.
+        """
+        n = 32
+        df = self._promoted_frame(n)
+        df['bad'] = pd.Series([0] * (n - 1) + [2 ** 63], dtype=object)
+        with qi.QuestDB.from_conf(
+                'ws::addr=127.0.0.1:1;lazy_connect=true;'
+                'sender_pool_min=0;query_pool_min=0;'
+                'pool_reap=manual;') as client:
+            def work():
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    client.dataframe(
+                        df, table_name='t', at='ts', symbols=False)
+                self.assertEqual(
+                    raised.exception.code, qi.QuestDBErrorCode.BadDataFrame)
+                self.assertIn(
+                    "Bad column 'bad' at row 31", str(raised.exception))
+
+            work()
+            gc.collect()
+            before = pa.total_allocated_bytes()
+            # Each promoted column replaces a calloc'd two-pointer buffer
+            # table. Together they are smaller than the old RSS allowance
+            # could detect, but visible directly in the C allocator's count.
+            _assert_no_heap_growth(
+                self, work, per_window=1000,
+                leak=4 * ctypes.sizeof(ctypes.c_void_p))
+            gc.collect()
+            self.assertEqual(pa.total_allocated_bytes(), before)
 
 
 class TestBinaryBufferRelease(unittest.TestCase):
