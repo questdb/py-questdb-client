@@ -3,10 +3,15 @@ sys.dont_write_bytecode = True
 import ctypes
 import gc
 import ipaddress
+import logging
+import os
 import sysconfig
+import tempfile
 import threading
+import time
 import unittest
 import uuid
+from unittest import mock
 
 
 def _limit_malloc_arenas():
@@ -25,6 +30,9 @@ _limit_malloc_arenas()
 import patch_path
 
 import questdb._client as qi
+from questdb.auth import (
+    FileTokenStore, OidcConfigError, OidcDeviceAuth, OidcError, Renderer)
+from oidc_test_server import OidcTestServer
 
 try:
     import numpy as np
@@ -217,6 +225,206 @@ def _assert_no_heap_growth(test, work, per_window, windows=6, leak=16):
         f'{growths} bytes over {windows} windows of {per_window} calls; '
         f'an allocation of about {leak} bytes or more is likely never '
         f'freed on each call.')
+
+
+@unittest.skipUnless(psutil is not None, 'psutil not installed')
+class TestOidcNativeLeak(unittest.TestCase):
+    """RSS coverage for the OIDC native free sites a leak loop can reach.
+
+    Covered: the builder free (both constructors), the auth free, the token
+    free on success, and the ``questdb_error`` free in ``_oidc_err_to_py`` --
+    driven with a CA bundle the native build cannot open, whose error message
+    carries the large payload, so a dropped free is visible to the RSS
+    harness. That loop asserts the error is native: a path that Python
+    validation rejects first never reaches the free, and leaves the test green
+    whether or not the free happens. The separate interrupt/callback-cancel
+    exits have deterministic native-release assertions in
+    ``TestOidcNativeInterruptOwnership`` below.
+    """
+
+    # Each native object owns a copy of this field. Twenty leaked objects in one
+    # RSS window exceed the harness's 3 MiB allocator-retention allowance while
+    # the correct implementation quickly reuses/returns the allocation.
+    PAYLOAD = 'x' * (256 * 1024)
+
+    def test_provider_builder_and_zeroizing_token_frees_plateau(self):
+        def direct_success():
+            auth = OidcDeviceAuth(
+                self.PAYLOAD,
+                device_authorization_endpoint='https://idp.example/device',
+                token_endpoint='https://idp.example/token',
+                interactive=False, open_browser=False)
+            auth.close()
+
+        def direct_failure():
+            try:
+                # Fail only after the large client ID has been copied into the
+                # native builder. A pre-validation encoding error leaves an
+                # almost-empty builder, too small for the RSS harness to
+                # distinguish if the exceptional-path free is removed.
+                OidcDeviceAuth(
+                    self.PAYLOAD,
+                    device_authorization_endpoint='https://idp.example/device',
+                    token_endpoint='https://idp.example/token',
+                    timeout=0,
+                    interactive=False, open_browser=False)
+            except OidcConfigError:
+                pass
+
+        def native_error():
+            try:
+                # The native build cannot open this CA bundle, and its error
+                # message quotes the whole path -- so each iteration allocates
+                # a large `questdb_error` that only `_oidc_err_to_py` frees.
+                # Every other loop here succeeds, or fails in Python before
+                # any native error exists. So would a path Python rejects
+                # first, such as a leading `~` it cannot expand: hence the
+                # check for the native message.
+                OidcDeviceAuth(
+                    'questdb',
+                    device_authorization_endpoint='https://idp.example/device',
+                    token_endpoint='https://idp.example/token',
+                    ca_bundle='/nonexistent-qdb-ca/' + self.PAYLOAD,
+                    interactive=False, open_browser=False)
+            except OidcError as exc:
+                message = str(exc)
+                self.assertTrue(
+                    'Could not open the CA bundle' in message, message[:200])
+                self.assertGreater(len(message), len(self.PAYLOAD))
+            else:
+                self.fail('the CA bundle path was accepted')
+
+        for name, work in (
+                ('direct builder/auth success', direct_success),
+                ('direct builder exception', direct_failure),
+                ('native error free', native_error)):
+            with self.subTest(path=name):
+                _assert_no_leak(self, work, warmup=8, measure=120)
+
+        with OidcTestServer(settings_config_overrides={
+                'acl.oidc.client.id': self.PAYLOAD}) as server:
+            def discovered_success():
+                auth = OidcDeviceAuth.from_questdb(
+                    server.url, interactive=False, open_browser=False,
+                    renderer=Renderer())
+                auth.close()
+
+            _assert_no_leak(
+                self, discovered_success, warmup=8, measure=120)
+
+        with OidcTestServer(initial_access_token=self.PAYLOAD) as server:
+            auth = OidcDeviceAuth.from_questdb(
+                server.url, interactive=True, open_browser=False,
+                renderer=Renderer(), timeout=5)
+            auth.sign_in()
+            self.assertEqual(len(auth.token()), len(self.PAYLOAD))
+            _assert_no_leak(self, auth.token, warmup=8, measure=120)
+
+            # The device-flow path allocates a device response, event views and
+            # token response strings that the cache-hit loop above never
+            # touches. Re-authorize the same provider so RSS measures those
+            # native free sites rather than only Python weakref bookkeeping.
+            # Only the token response carries PAYLOAD, so this loop needs the
+            # same measure=120 (twenty cycles per window) as the others: with
+            # ten per window, one leaked copy per cycle (2.5 MiB) stays under
+            # the 3 MiB allowance and the leak passes.
+            auth.clear()
+
+            def sign_in_cycle():
+                auth.sign_in()
+                self.assertEqual(len(auth.token()), len(self.PAYLOAD))
+                auth.clear()
+
+            _assert_no_leak(self, sign_in_cycle, warmup=4, measure=120)
+
+
+class TestOidcNativeInterruptOwnership(unittest.TestCase):
+    """Reclamation oracles for early exits outside normal conversion/finally.
+
+    These count calls to the real native free functions, not Python weakrefs
+    or registry drainage. The RSS workloads above separately detect omission
+    of the native release itself in the shared release wrappers.
+    """
+
+    def test_interrupted_sign_in_releases_native_cancellation_error(self):
+        interrupt = KeyboardInterrupt('renderer cancellation')
+
+        class InterruptingRenderer(Renderer):
+            def on_prompt(self, challenge):
+                raise interrupt
+
+        with OidcTestServer(device_expires_in=3) as server:
+            auth = OidcDeviceAuth.from_questdb(
+                server.url, interactive=True, open_browser=False,
+                renderer=InterruptingRenderer(), timeout=5)
+            try:
+                qi._debug_oidc_native_free_counts(True)
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    auth.sign_in()
+                self.assertIs(caught.exception, interrupt)
+                self.assertEqual(
+                    qi._debug_oidc_native_free_counts(), (0, 1),
+                    'cancelled sign-in must release its owned native error')
+            finally:
+                qi._debug_oidc_native_free_counts()
+                auth.close()
+
+    @unittest.skipUnless(os.name == 'posix',
+                         'file token store persistence requires POSIX')
+    def test_interrupted_successful_refresh_releases_returned_native_token(self):
+        interrupt = KeyboardInterrupt('refresh persistence diagnostic')
+        credential = [None]
+        sabotaged = []
+        diagnostics = []
+
+        def fail_save():
+            if sabotaged:
+                return
+            if os.path.isfile(credential[0]):
+                os.remove(credential[0])
+            os.mkdir(credential[0])
+            sabotaged.append(True)
+            # Ignore ordinary cache-hit token frees before the refresh. Start
+            # counting at the successful refresh's deterministic injection.
+            qi._debug_oidc_native_free_counts(True)
+
+        class InterruptingDiagnostic(logging.Handler):
+            def emit(self, record):
+                if 'token store save failed' in record.getMessage():
+                    diagnostics.append(record.getMessage())
+                    raise interrupt
+
+        handler = InterruptingDiagnostic()
+        logger = logging.getLogger('questdb')
+        with tempfile.TemporaryDirectory() as directory, \
+                OidcTestServer(initial_expires_in=4,
+                               refresh_request_hook=fail_save) as server:
+            auth = OidcDeviceAuth.from_questdb(
+                server.url, token_store=FileTokenStore.at(directory),
+                interactive=True, open_browser=False,
+                renderer=Renderer(), timeout=5)
+            auth.sign_in()
+            credential[0] = os.path.join(directory, next(
+                name for name in os.listdir(directory) if name.endswith('.json')))
+            logger.addHandler(handler)
+            try:
+                deadline = time.monotonic() + 15
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    while not sabotaged:
+                        self.assertLess(time.monotonic(), deadline)
+                        auth.token()
+                        if not sabotaged:
+                            time.sleep(0.05)
+                self.assertIs(caught.exception, interrupt)
+                self.assertEqual(len(diagnostics), 1)
+                self.assertEqual(
+                    qi._debug_oidc_native_free_counts(), (1, 0),
+                    'successful native return interrupted before conversion '
+                    'must still release its owned token')
+            finally:
+                qi._debug_oidc_native_free_counts()
+                logger.removeHandler(handler)
+                auth.close()
 
 
 @unittest.skipUnless(pd is not None, 'pandas not installed')
@@ -555,15 +763,10 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                 with self.subTest(column=name):
                     _assert_no_heap_growth(self, work, per_window=200)
 
-    @unittest.skipUnless(pa is not None, 'pyarrow not installed')
-    def test_promoted_columnar_path_no_leak(self):
-        """Guards ``_dataframe_columnar_promote_cols``: the pybuf chunk
-        release + Arrow re-export for object-Decimal and NaT-carrying
-        ``datetime64[ns]`` field columns must not leak native buffers."""
+    @staticmethod
+    def _promoted_frame(n):
         from decimal import Decimal
-        from qwp_ws_ack_server import QwpAckServer
-        n = self.ROWS
-        df = pd.DataFrame({
+        return pd.DataFrame({
             'ts': pd.Series(pd.to_datetime(np.arange(n), unit='s')),
             'dec': pd.Series(
                 [None if i % 7 == 0 else Decimal(i) / 100
@@ -572,6 +775,18 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                 [pd.NaT if i % 5 == 0 else pd.Timestamp(i, unit='s')
                  for i in range(n)], dtype='datetime64[ns]'),
         })
+
+    @unittest.skipUnless(pa is not None, 'pyarrow not installed')
+    def test_promoted_columnar_path_no_leak(self):
+        """Promoted Decimal/timestamp buffers are freed after ingestion.
+
+        These buffers belong to Arrow's memory pool, which need not use
+        libc's allocator. RSS after malloc_trim cannot distinguish its
+        retained free pages from live buffers. Count live Arrow bytes
+        instead; even one retained buffer must change the count.
+        """
+        from qwp_ws_ack_server import QwpAckServer
+        df = self._promoted_frame(self.ROWS)
         with QwpAckServer() as server:
             conf = (f'ws::addr=127.0.0.1:{server.port};'
                     'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;'
@@ -583,7 +798,50 @@ class TestPyobjColumnarLeak(unittest.TestCase):
                     client.dataframe(
                         df, table_name='t', at='ts', symbols=False)
 
-                self._assert_stable(work, warmup=150, measure=1800)
+                work()
+                gc.collect()
+                before = pa.total_allocated_bytes()
+                for _ in range(100):
+                    work()
+                gc.collect()
+                self.assertEqual(pa.total_allocated_bytes(), before)
+
+    @unittest.skipUnless(pa is not None, 'pyarrow not installed')
+    @unittest.skipIf(_HEAP_READER is None, _NO_HEAP_STATS)
+    def test_promoted_error_path_no_leak(self):
+        """Release the original pybuf mappings and the Arrow re-exports.
+
+        The last column fails during prebuilding, after Decimal and NaT
+        columns have been promoted but before opening a connection. This
+        keeps network/server allocations out of the C-heap measurement.
+        """
+        n = 32
+        df = self._promoted_frame(n)
+        df['bad'] = pd.Series([0] * (n - 1) + [2 ** 63], dtype=object)
+        with qi.QuestDB.from_conf(
+                'ws::addr=127.0.0.1:1;lazy_connect=true;'
+                'sender_pool_min=0;query_pool_min=0;'
+                'pool_reap=manual;') as client:
+            def work():
+                with self.assertRaises(qi.QuestDBError) as raised:
+                    client.dataframe(
+                        df, table_name='t', at='ts', symbols=False)
+                self.assertEqual(
+                    raised.exception.code, qi.QuestDBErrorCode.BadDataFrame)
+                self.assertIn(
+                    "Bad column 'bad' at row 31", str(raised.exception))
+
+            work()
+            gc.collect()
+            before = pa.total_allocated_bytes()
+            # Each promoted column replaces a calloc'd two-pointer buffer
+            # table. Together they are smaller than the old RSS allowance
+            # could detect, but visible directly in the C allocator's count.
+            _assert_no_heap_growth(
+                self, work, per_window=1000,
+                leak=4 * ctypes.sizeof(ctypes.c_void_p))
+            gc.collect()
+            self.assertEqual(pa.total_allocated_bytes(), before)
 
 
 class TestBinaryBufferRelease(unittest.TestCase):
