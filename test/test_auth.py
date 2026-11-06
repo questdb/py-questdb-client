@@ -84,7 +84,7 @@ from questdb.auth._render import (
     make_renderer,
 )
 import pg_capture_server
-from oidc_test_server import OidcTestServer
+from oidc_test_server import OidcTestServer, TruncatedBody
 from qwp_ws_ack_server import QwpAckServer
 from qwp_egress_failover_server import EgressFailoverServer
 
@@ -4376,6 +4376,22 @@ class NativeOidcIntegrationTest(unittest.TestCase):
         self.assertEqual(err.error, 'access_denied')
         self.assertEqual(err.error_description, 'The user denied the request.')
         self.assertEqual(err.status, 400)
+
+    def test_a_poll_reply_cut_off_mid_body_keeps_polling(self):
+        # The IdP's answer is in the body, so a poll reply cut off after its
+        # status line answers nothing. Sign-in used to end on that status with
+        # OidcDeviceFlowError ("the identity provider rejected the request").
+        renderer = RecordingRenderer()
+        cut_off = (
+            400, TruncatedBody({'error': 'authorization_pending'}), None)
+        with OidcTestServer(device_token_responses=[cut_off]) as server:
+            auth = make_discovered_auth(server, renderer=renderer)
+            auth.sign_in()
+            self.assertEqual(auth.token(), 'AT-initial')
+            polls = server.requests('/token', 'POST')
+        self.assertEqual(len(polls), 2)
+        self.assertEqual(renderer.failures, [])
+        self.assertEqual(len(renderer.successes), 1)
 
     def test_device_poll_reflection_does_not_expose_device_code(self):
         # Some IdPs, proxies and WAFs reflect the submitted device_code in the

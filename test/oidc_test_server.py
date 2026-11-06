@@ -20,6 +20,15 @@ class _ThreadingHTTPServer(http.server.ThreadingHTTPServer):
         self.server_name, self.server_port = self.server_address[:2]
 
 
+class TruncatedBody:
+    """A token-endpoint override body that is cut off in transit: the reply
+    declares the whole body's ``Content-Length`` but sends only its first half
+    before the connection closes."""
+
+    def __init__(self, body):
+        self.body = body
+
+
 class OidcTestServer:
     """Serve QuestDB settings, an IdP device flow, and ILP/HTTP locally."""
 
@@ -67,7 +76,8 @@ class OidcTestServer:
         self.device_token_request_hook = device_token_request_hook
         # Optional error injection for the token endpoint. Each override is a
         # ``(status, body, headers)`` tuple where ``body`` is a dict (serialized
-        # as JSON), raw ``bytes`` (e.g. a non-JSON error page), or ``None``, and
+        # as JSON), raw ``bytes`` (e.g. a non-JSON error page), ``None``, or
+        # either of the first two wrapped in ``TruncatedBody``, and
         # ``headers`` is an optional dict (e.g. ``{'Retry-After': '7'}``).
         # ``device_token_response`` overrides the device-grant poll response;
         # ``refresh_token_response`` overrides the refresh-grant response.
@@ -244,9 +254,13 @@ class OidcTestServer:
     def _emit(handler, override):
         """Send an injected ``(status, body, headers)`` token-endpoint response.
 
-        ``body`` may be a dict (JSON), raw ``bytes`` (non-JSON), or ``None``.
+        ``body`` may be a dict (JSON), raw ``bytes`` (non-JSON), ``None``, or
+        either of the first two wrapped in :class:`TruncatedBody`.
         """
         status, body, headers = override
+        truncated = isinstance(body, TruncatedBody)
+        if truncated:
+            body = body.body
         if isinstance(body, (bytes, bytearray)):
             payload, content_type = bytes(body), 'text/plain'
         else:
@@ -260,6 +274,9 @@ class OidcTestServer:
             handler.send_header(key, value)
         handler.send_header('Connection', 'close')
         handler.end_headers()
+        if truncated:
+            # `Connection: close` then ends the connection mid-body.
+            payload = payload[:len(payload) // 2]
         if payload:
             handler.wfile.write(payload)
 
