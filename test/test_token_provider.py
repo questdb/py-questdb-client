@@ -433,6 +433,26 @@ class RefreshingTokenProviderTest(unittest.TestCase):
             self.assertEqual(provider.token(), 'T2')
             self.assertEqual(len(calls), 2)
 
+    def test_a_past_refresh_hint_does_not_spin_the_refresher(self):
+        # Without a minimum spacing, a hint already past on receipt started
+        # the next fetch at once, over and over: about 40k calls in 0.3 s.
+        # 0.0004 s rounds to 0 ms. One fetch a millisecond at most allows 300.
+        calls = []
+
+        def source():
+            calls.append(1)
+            now = time.time()
+            return ExpiringToken('t', now + 3600, refresh_at=now - 1)
+
+        for interval in (0, 0.0004):
+            with self.subTest(min_refresh_interval=interval):
+                calls.clear()
+                with RefreshingTokenProvider(
+                        source, min_refresh_interval=interval) as provider:
+                    self.assertTrue(provider.await_ready(10))
+                    time.sleep(0.3)
+                self.assertLess(len(calls), 2000)
+
     def test_close_can_drain_an_active_source_with_a_deadline(self):
         entered = threading.Event()
         release = threading.Event()
