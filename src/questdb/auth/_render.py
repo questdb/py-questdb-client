@@ -225,12 +225,11 @@ def _safe_link_url(url: Optional[str]) -> Optional[str]:
       address bar as a confusable. This function accepts one: ``_display_url``
       renders hosts in punycode precisely so the homoglyph is *visible* rather
       than blocked, which is the defence chosen at this layer.
-    * Native narrows the plaintext ``http`` loopback exemption to the case
-      where the *configured* IdP endpoint is itself loopback, so a remote
-      HTTPS IdP cannot aim a browser, a link or a QR at whatever else is
-      listening on the user's machine. This function has no access to the
-      configured endpoint and does not invent one, so it exempts any loopback
-      host.
+    * Native accepts a loopback target, over ``http`` or ``https``, only when
+      the *configured* IdP endpoint is itself loopback, so a remote IdP cannot
+      aim a browser, a link or a QR at whatever else is listening on the
+      user's machine. This function has no access to the configured endpoint
+      and does not invent one, so it accepts any loopback host.
 
     Both gaps close in the ordinary flow, where every native-emitted event
     carries a ``browser_target`` verdict that takes precedence over this

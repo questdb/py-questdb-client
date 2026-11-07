@@ -1145,7 +1145,8 @@ cdef class RefreshingTokenProvider:
         Tell the provider that a server rejected ``token`` with
         ``http_status``, for a client of your own. A 401 for the current token
         refreshes it early -- at most once per ``forced_min_interval`` -- and
-        waits up to ``forced_wait`` for the result.
+        waits up to ``forced_wait`` for the result. A 401 for the same token
+        while that refresh is still fetching waits for it too.
         """
         _tp_on_rejected(self._require_handle(), token, http_status)
 
