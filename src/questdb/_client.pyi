@@ -260,7 +260,8 @@ class ExpiringToken:
         lifetime: Union[float, timedelta],
         refresh_at: Optional[Union[datetime, float]] = None,
     ) -> "ExpiringToken":
-        """A token that expires ``lifetime`` from now."""
+        """A token that expires ``lifetime`` from now. ``refresh_at`` is an
+        instant, as for the constructor, not a delay."""
 
 
 class TokenUnavailableError(QuestDBError):

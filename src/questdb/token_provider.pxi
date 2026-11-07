@@ -137,7 +137,10 @@ class ExpiringToken:
     suggested refresh time) as timezone-aware :class:`datetime.datetime`
     objects or epoch seconds, within Python's datetime range. Values outside
     that range are rejected so provider status snapshots always remain
-    readable. The attributes hold timezone-aware UTC datetimes, as
+    readable. For a token that does not expire, ``datetime.max`` with a UTC
+    timezone works: an instant after 9999-12-31T23:59:59.999Z counts as that
+    instant, the latest the client represents. The attributes hold
+    timezone-aware UTC datetimes, as
     :class:`~questdb.auth.TokenProviderStatus` reports its times. If the
     platform reports a relative lifetime, such as OAuth's ``expires_in``, use
     :meth:`expires_in`, which computes the expiry from the local time of
@@ -162,7 +165,15 @@ class ExpiringToken:
     @classmethod
     def expires_in(cls, token, lifetime, refresh_at=None):
         """A token that expires ``lifetime`` (seconds or a
-        :class:`datetime.timedelta`) from now."""
+        :class:`datetime.timedelta`) from now.
+
+        ``refresh_at`` is an instant, as for the constructor -- a
+        timezone-aware datetime or epoch seconds -- not a delay like
+        ``lifetime``: for a refresh hint given relative to now, such as a
+        ``refresh_in``, pass ``time.time() + refresh_in``. A small number is
+        read as an instant in 1970, which makes the provider refresh every
+        ``min_refresh_interval``.
+        """
         return cls(
             token,
             time.time() + _tp_seconds(lifetime, 'lifetime'),
@@ -293,6 +304,32 @@ cdef double _tp_seconds(object value, str name) except? -1.0:
     return seconds
 
 
+# The Unix epoch, the datetime range relative to it, and the latest instant
+# native represents (9999-12-31T23:59:59.999Z, its `MAX_EPOCH_MS`): native
+# treats a later expiry as that instant, and so does this module.
+cdef object _TP_EPOCH = datetime.datetime(
+    1970, 1, 1, tzinfo=datetime.timezone.utc)
+cdef object _TP_MIN_DELTA = (
+    datetime.datetime.min.replace(tzinfo=datetime.timezone.utc) - _TP_EPOCH)
+cdef object _TP_MAX_DELTA = (
+    datetime.datetime.max.replace(tzinfo=datetime.timezone.utc) - _TP_EPOCH)
+cdef int64_t _TP_MAX_EPOCH_MS = 253402300799999
+
+
+cdef object _tp_instant(double seconds):
+    """Epoch ``seconds`` as a timezone-aware UTC datetime.
+
+    `datetime.fromtimestamp` where the platform's C library can convert it --
+    Windows' cannot after the year 3000 -- and exact datetime arithmetic
+    otherwise. Raises OverflowError outside the datetime range.
+    """
+    try:
+        return datetime.datetime.fromtimestamp(
+            seconds, datetime.timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return _TP_EPOCH + datetime.timedelta(seconds=seconds)
+
+
 cdef double _tp_epoch_seconds(object value, str name) except? -1.0:
     cdef double seconds
     if isinstance(value, datetime.datetime):
@@ -300,7 +337,20 @@ cdef double _tp_epoch_seconds(object value, str name) except? -1.0:
             raise _ConfigValueError(
                 f'"{name}" must be a timezone-aware datetime; a naive one '
                 'is ambiguous')
-        seconds = value.timestamp()
+        # A datetime is in range by construction, but with an offset its UTC
+        # instant may not be. Subtracting aware datetimes cannot overflow.
+        delta = value - _TP_EPOCH
+        if not (_TP_MIN_DELTA <= delta <= _TP_MAX_DELTA):
+            raise _ConfigValueError(
+                f'"{name}" must be representable as a Python datetime')
+        # As a double the seconds round past the last microsecond near the
+        # year 9999 -- `datetime.max` to the year 10000 -- so a round trip
+        # through `fromtimestamp` rejected it. Clamp to the latest instant
+        # native represents instead.
+        seconds = delta.total_seconds()
+        if seconds * 1000.0 > _TP_MAX_EPOCH_MS:
+            seconds = _TP_MAX_EPOCH_MS / 1000.0
+        return seconds
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
         if value != value or value in (float('inf'), float('-inf')):
             raise _ConfigValueError(f'"{name}" must be finite')
@@ -316,7 +366,7 @@ cdef double _tp_epoch_seconds(object value, str name) except? -1.0:
     # Every accepted expiry must also be representable in status snapshots.
     # Validate all source shapes, including mutated ExpiringToken instances.
     try:
-        datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc)
+        _tp_instant(seconds)
     except (OverflowError, OSError, ValueError):
         raise _ConfigValueError(
             f'"{name}" must be representable as a Python datetime') from None
@@ -329,7 +379,7 @@ cdef object _tp_utc_datetime(object value, double seconds):
     ``seconds``, so it keeps its exact instant."""
     if isinstance(value, datetime.datetime):
         return value.astimezone(datetime.timezone.utc)
-    return datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc)
+    return _tp_instant(seconds)
 
 
 cdef object _tp_format_instant(object value):
@@ -339,8 +389,7 @@ cdef object _tp_format_instant(object value):
     if isinstance(value, datetime.datetime):
         return value.isoformat()
     try:
-        return datetime.datetime.fromtimestamp(
-            value, datetime.timezone.utc).isoformat()
+        return _tp_instant(value).isoformat()
     except (TypeError, OverflowError, OSError, ValueError):
         return repr(value)
 
@@ -348,7 +397,10 @@ cdef object _tp_format_instant(object value):
 cdef object _tp_datetime_from_ms(int64_t ms):
     if ms < 0:
         return None
-    return datetime.datetime.fromtimestamp(ms / 1000.0, datetime.timezone.utc)
+    if ms > _TP_MAX_EPOCH_MS:
+        ms = _TP_MAX_EPOCH_MS
+    # Exact, unlike a round trip through a double, and on every platform.
+    return _TP_EPOCH + datetime.timedelta(milliseconds=ms)
 
 
 # 2**64 as a double. Converting a double at or above it to `uint64_t` is
@@ -922,7 +974,12 @@ cdef void_int _tp_on_rejected(
     if not 0 <= http_status <= 65535:
         raise _ConfigValueError(
             f'"http_status" is not an HTTP status: {http_status}')
-    cdef bytes encoded = (<str>token).encode('utf-8')
+    cdef bytes encoded
+    try:
+        encoded = (<str>token).encode('utf-8')
+    except UnicodeEncodeError:
+        raise _ConfigValueError(
+            '"token" must contain valid Unicode text') from None
     cdef const char* buf = encoded
     cdef size_t length = len(encoded)
     cdef uint16_t status = <uint16_t>http_status
@@ -1069,7 +1126,11 @@ cdef class RefreshingTokenProvider:
                     f'"name" must be a str, not {_fqn(type(name))}')
             if not name.strip():
                 raise _ConfigValueError('"name" must be a non-empty str')
-            name_bytes = name.encode('utf-8')
+            try:
+                name_bytes = name.encode('utf-8')
+            except UnicodeEncodeError:
+                raise _ConfigValueError(
+                    '"name" must contain valid Unicode text') from None
             options.name = name_bytes
             options.name_len = len(name_bytes)
         for field_name, value in (

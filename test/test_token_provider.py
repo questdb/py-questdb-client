@@ -148,6 +148,25 @@ class ExpiringTokenTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ExpiringToken.expires_in('t', -1)
 
+    def test_the_latest_instant_means_no_expiry(self):
+        # Regression: `datetime.max` rounded past the year 9999 as a float
+        # and was rejected, so a source could not say that its token does
+        # not expire. It counts as 9999-12-31T23:59:59.999Z, the latest
+        # instant the client represents, which the status then reports.
+        never = datetime.datetime.max.replace(tzinfo=UTC)
+        self.assertEqual(ExpiringToken('t', never).expires_at, never)
+        with RefreshingTokenProvider(lambda: ('t', never)) as provider:
+            self.assertTrue(provider.await_ready(10))
+            self.assertEqual(provider.token(), 't')
+            self.assertEqual(
+                provider.status.token_expires_at,
+                datetime.datetime(
+                    9999, 12, 31, 23, 59, 59, 999000, tzinfo=UTC))
+        # Its UTC instant, not the wall-clock fields, must be in range.
+        west = datetime.timezone(datetime.timedelta(hours=-5))
+        with self.assertRaisesRegex(ValueError, 'Python datetime'):
+            ExpiringToken('t', datetime.datetime.max.replace(tzinfo=west))
+
     def test_expiry_must_fit_a_datetime_snapshot(self):
         for keyword in ('expires_at', 'refresh_at'):
             for value in (1e12, -1e12, 10**400, -(10**400)):
@@ -213,6 +232,8 @@ class InvalidArgumentErrorTest(unittest.TestCase):
             (ValueError, lambda: RefreshingTokenProvider(source, cold_wait=-1)),
             (TypeError, lambda: RefreshingTokenProvider(source, name=42)),
             (ValueError, lambda: RefreshingTokenProvider(source, name='  ')),
+            (ValueError,
+             lambda: RefreshingTokenProvider(source, name='name\ud800')),
             (TypeError, lambda: ExpiringToken(b't', 1e9)),
             (TypeError, lambda: ExpiringToken('t', '2030-01-01')),
             (ValueError,
@@ -233,7 +254,8 @@ class InvalidArgumentErrorTest(unittest.TestCase):
                 (TypeError, lambda: provider.close(wait=True, timeout='1')),
                 (TypeError, lambda: provider.on_rejected(None)),
                 (TypeError, lambda: provider.on_rejected('t', '401')),
-                (ValueError, lambda: provider.on_rejected('t', 2 ** 70)))
+                (ValueError, lambda: provider.on_rejected('t', 2 ** 70)),
+                (ValueError, lambda: provider.on_rejected('t\ud800')))
             for index, (builtin, call) in enumerate(cases):
                 with self.subTest(index=index):
                     self.assertConfigError(builtin, call)
