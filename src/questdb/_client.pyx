@@ -8512,8 +8512,13 @@ cdef bint _in_bounded_wait_callback() except -1:
     or a call on another thread may be waiting for this thread to return: it
     is inside an OIDC renderer or persistence-warning callback, whose
     provider cannot supply a token until the callback returns, or inside a
-    ``bearer_token_provider=`` call, which is the token request itself."""
-    return _oidc_callback_on_this_thread() or _token_callback_on_this_thread()
+    ``bearer_token_provider=`` call, which is the token request itself.
+
+    Only the caller's own callback counts: on the main thread, another
+    greenlet suspended inside a token callback does not make this one's
+    waits bounded."""
+    return (_oidc_callback_on_this_thread()
+            or _token_callback_in_this_context())
 
 
 cdef str _bounded_wait_callback_name():

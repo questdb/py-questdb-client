@@ -6,6 +6,7 @@ cdef extern from "_client_helper.inc":
     ctypedef struct qdb_oidc_callback_gate:
         pass
     bint qdb_oidc_callback_gate_init() noexcept
+    void qdb_oidc_callback_gate_set_owner(unsigned long owner) noexcept
     qdb_oidc_callback_gate* qdb_oidc_callback_enter() noexcept nogil
     void qdb_oidc_callback_leave(qdb_oidc_callback_gate*) noexcept nogil
     void qdb_oidc_callback_stop() noexcept nogil

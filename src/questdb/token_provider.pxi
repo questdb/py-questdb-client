@@ -108,6 +108,27 @@ cdef inline bint _token_callback_on_this_thread() noexcept:
     return PyThread_tss_get(&_TOKEN_CALLBACK_DEPTH_KEY) != NULL
 
 
+cdef bint _token_callback_in_this_context() noexcept:
+    """Whether the code running now is inside a token callback, telling apart
+    the greenlets that share the main thread.
+
+    `_token_callback_on_this_thread` counts per OS thread, as the frame
+    re-entry check needs: while a greenlet's token callback is suspended
+    inside a native call using a buffer, another greenlet that reaches that
+    buffer must be refused too. A bounded wait concerns only the caller,
+    though. A greenlet
+    suspended inside a token callback -- a provider waiting on gevent I/O --
+    must not make every other greenlet's lease wait or ``close()`` give up
+    after two seconds as if it were inside that callback. Main-thread token
+    callbacks enter a token region, which records the greenlet.
+    """
+    if PyThread_tss_get(&_TOKEN_CALLBACK_DEPTH_KEY) == NULL:
+        return False
+    if questdb_thread_ident() != _OIDC_MAIN_THREAD_IDENT:
+        return True
+    return _oidc_main_region_active(_OIDC_REGION_TOKEN)
+
+
 class _ConfigArgumentError(QuestDBError):
     """An invalid argument to the token-provider API, raised as one of the
     two subclasses below.
@@ -638,7 +659,11 @@ cdef void _token_source_dispatch(
     cdef object result = None
     cdef object token = None
     cdef bint entered = False
+    cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
     cdef bint counted = _token_callback_enter()
+    cdef object region = None
+    if on_main:
+        region = _oidc_main_region_enter(_OIDC_REGION_TOKEN)
     try:
         handle = _token_callback_get(callback_id)
         if handle is None:
@@ -680,6 +705,10 @@ cdef void _token_source_dispatch(
             source = None
             handle._source_thread = 0
             handle._source_done.set()
+        if on_main:
+            _oidc_main_region_exit(_OIDC_REGION_TOKEN, region)
+            if not _oidc_main_region_active(_OIDC_REGION_TOKEN):
+                _oidc_schedule_parked_main()
         _token_callback_exit(counted)
 
 
@@ -704,7 +733,6 @@ cdef void _token_source_trampoline(
 
 cdef void _token_get_dispatch(
         size_t callback_id, questdb_token_sink* sink) noexcept with gil:
-    global _OIDC_MAIN_TOKEN_DEPTH
     # Bound before the `try`: the error path passes it on, and reading it
     # unbound there would raise in this noexcept callback instead of
     # reporting the failure to the sink.
@@ -716,8 +744,9 @@ cdef void _token_get_dispatch(
     cdef object signal_codes = {}
     cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
     cdef bint counted = _token_callback_enter()
+    cdef object region = None
     if on_main:
-        _OIDC_MAIN_TOKEN_DEPTH += 1
+        region = _oidc_main_region_enter(_OIDC_REGION_TOKEN)
     try:
         try:
             PyErr_CheckSignals()
@@ -753,8 +782,8 @@ cdef void _token_get_dispatch(
         _tp_sink_exception(sink, exc, signal_codes, provider)
     finally:
         if on_main:
-            _OIDC_MAIN_TOKEN_DEPTH -= 1
-            if _OIDC_MAIN_TOKEN_DEPTH == 0:
+            _oidc_main_region_exit(_OIDC_REGION_TOKEN, region)
+            if not _oidc_main_region_active(_OIDC_REGION_TOKEN):
                 _oidc_schedule_parked_main()
         _token_callback_exit(counted)
 
@@ -787,7 +816,6 @@ cdef void _token_rejected_dispatch(
         const char* token,
         size_t token_len,
         uint16_t http_status) noexcept with gil:
-    global _OIDC_MAIN_TOKEN_DEPTH
     cdef object provider
     cdef _TokenProviderHandle handle
     # A mapping even before the snapshot below: the error path looks codes
@@ -795,8 +823,9 @@ cdef void _token_rejected_dispatch(
     cdef object signal_codes = {}
     cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
     cdef bint counted = _token_callback_enter()
+    cdef object region = None
     if on_main:
-        _OIDC_MAIN_TOKEN_DEPTH += 1
+        region = _oidc_main_region_enter(_OIDC_REGION_TOKEN)
     try:
         try:
             PyErr_CheckSignals()
@@ -825,8 +854,8 @@ cdef void _token_rejected_dispatch(
         # Otherwise ignored: the client pulls a token next either way.
     finally:
         if on_main:
-            _OIDC_MAIN_TOKEN_DEPTH -= 1
-            if _OIDC_MAIN_TOKEN_DEPTH == 0:
+            _oidc_main_region_exit(_OIDC_REGION_TOKEN, region)
+            if not _oidc_main_region_active(_OIDC_REGION_TOKEN):
                 _oidc_schedule_parked_main()
         _token_callback_exit(counted)
 

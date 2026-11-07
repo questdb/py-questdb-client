@@ -37,6 +37,7 @@ import gc
 import importlib.util
 import os
 from pathlib import Path
+import platform
 import subprocess
 import sys
 import tempfile
@@ -2663,6 +2664,207 @@ class TokenCallbackForkTest(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout)
+
+
+@unittest.skipIf(
+    importlib.util.find_spec('gevent') is None, 'gevent not installed')
+class TokenProviderGreenletTest(unittest.TestCase):
+    """A provider that waits on gevent I/O suspends its greenlet inside the
+    token callback while the other greenlets on the main thread run. Each
+    test runs in a child interpreter, because monkey-patching cannot be
+    undone, and a hang there reads as a timeout."""
+
+    def _run(self, script, timeout=60):
+        env = os.environ.copy()
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, (
+            os.path.dirname(os.path.dirname(questdb.__file__)),
+            os.path.dirname(os.path.abspath(__file__)),
+            env.get('PYTHONPATH'))))
+        try:
+            result = subprocess.run(
+                [sys.executable, '-X', 'faulthandler', '-c',
+                 textwrap.dedent(script)],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            self.fail(f'child timed out after {exc.timeout} s: {exc.output}')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('OK', result.stdout)
+
+    def test_exit_does_not_wait_for_a_suspended_provider_greenlet(self):
+        # Regression: questdb's exit hook waited for every callback inside
+        # the client's callback gate, this one included. The greenlet can
+        # only resume once the main thread runs the hub again, which it
+        # never did, so the interpreter never exited, and Ctrl-C did not
+        # end it -- even though the provider's own wait is bounded.
+        self._run('''
+            from gevent import monkey
+            monkey.patch_all()
+            import socket
+            import gevent
+            import gevent.event
+            import questdb
+            listener = socket.socket()
+            listener.bind(('127.0.0.1', 0))
+            listener.listen(8)
+            entered = gevent.event.Event()
+            def provider():
+                entered.set()
+                gevent.sleep(3)
+                return 'tok'
+            sender = questdb.Sender(
+                questdb.Protocol.Http, '127.0.0.1',
+                listener.getsockname()[1], bearer_token_provider=provider,
+                auto_flush=False, protocol_version=2, retry_timeout=0)
+            sender.establish()
+            sender.row('t', columns={'v': 1}, at=questdb.ServerTimestamp)
+            gevent.spawn(sender.flush)
+            assert entered.wait(5)
+            print('OK', flush=True)
+        ''', timeout=30)
+
+    @unittest.skipIf(
+        platform.python_implementation() == 'PyPy',
+        "PyPy's greenlet module is Python code, so greenlets are not told "
+        'apart there')
+    def test_an_exception_thrown_into_a_provider_stays_in_its_greenlet(self):
+        # Regression: an exception gevent throws into a greenlet inside its
+        # token callback -- a Timeout, the GreenletExit of kill() -- is not an
+        # Exception, so it is parked like a signal for the main thread. It
+        # was raised in whichever greenlet ran next once no callback was
+        # left: here the other one, A. B never saw its own Timeout, and its
+        # kill() was swallowed, B running on.
+        self._run('''
+            from gevent import monkey
+            monkey.patch_all()
+            import socket
+            import gevent
+            import gevent.event
+            import questdb
+            probe = socket.socket()
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+            probe.close()  # nothing listens: every flush fails after its token
+            def sender(provider):
+                s = questdb.Sender(
+                    questdb.Protocol.Http, '127.0.0.1', port,
+                    bearer_token_provider=provider, auto_flush=False,
+                    protocol_version=2, retry_timeout=0)
+                s.establish()
+                return s
+            def flush(s):
+                # A failed flush drops its rows: add one for every flush.
+                s.row('t', columns={'v': 1}, at=questdb.ServerTimestamp)
+                s.flush()
+            release_a = gevent.event.Event()
+            def provider_a():
+                release_a.wait()
+                return 'a'
+            def provider_b():
+                gevent.sleep(5)
+                return 'b'
+            sender_a, sender_b = sender(provider_a), sender(provider_b)
+            outcome = {}
+            def a():
+                try:
+                    flush(sender_a)
+                except questdb.QuestDBError:
+                    pass
+                gevent.sleep(0)
+                outcome['a'] = 'done'
+            def b_with_timeout():
+                try:
+                    with gevent.Timeout(0.1) as timeout:
+                        flush(sender_b)
+                except gevent.Timeout as exc:
+                    outcome['b'] = exc is timeout
+            def b_killed():
+                try:
+                    flush(sender_b)
+                except questdb.QuestDBError:
+                    pass
+                outcome['b ran on'] = True
+            for b, stop in ((b_with_timeout, None), (b_killed, 'kill')):
+                outcome.clear()
+                release_a.clear()
+                greenlet_a = gevent.spawn(a)
+                gevent.sleep(0.05)  # A is suspended in its provider
+                greenlet_b = gevent.spawn(b)
+                if stop == 'kill':
+                    gevent.sleep(0.05)  # B is suspended in its provider
+                    greenlet_b.kill(block=True, timeout=5)
+                else:
+                    greenlet_b.join(5)
+                release_a.set()
+                greenlet_a.join(5)
+                assert greenlet_a.successful(), (b, greenlet_a.exception)
+                assert outcome.get('a') == 'done', (b, outcome)
+                assert greenlet_b.dead, b
+                if stop == 'kill':
+                    assert 'b ran on' not in outcome, outcome
+                else:
+                    assert outcome.get('b') is True, outcome
+            print('OK', flush=True)
+        ''')
+
+    @unittest.skipIf(
+        platform.python_implementation() == 'PyPy',
+        "PyPy's greenlet module is Python code, so greenlets are not told "
+        'apart there')
+    def test_a_suspended_provider_does_not_bound_other_greenlets_waits(self):
+        # Regression: token callbacks were counted per OS thread, so while
+        # one greenlet waited inside a provider, every other greenlet on the
+        # main thread counted as inside a token callback too. Its
+        # QuestDB.close() gave up after two seconds, leaving the handle
+        # closing, instead of waiting for the lease another greenlet held.
+        # The mock servers run in a separate, unpatched process.
+        self._run('''
+            from gevent import monkey
+            monkey.patch_all()
+            import subprocess
+            import sys
+            import time
+            import gevent
+            import gevent.event
+            servers = subprocess.Popen(
+                [sys.executable, '-c',
+                 'import sys\\n'
+                 'from qwp_ws_ack_server import QwpAckServer\\n'
+                 'from mock_server import HttpServer\\n'
+                 'with QwpAckServer() as ws, HttpServer() as http:\\n'
+                 '    print(ws.port, http.port, flush=True)\\n'
+                 '    sys.stdin.read()\\n'],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            ws_port, http_port = map(int, servers.stdout.readline().split())
+            import questdb
+            in_provider = gevent.event.Event()
+            def provider():
+                in_provider.set()
+                gevent.sleep(10)
+                return 'tok'
+            def suspended_flush():
+                sender = questdb.Sender.from_conf(
+                    f'http::addr=127.0.0.1:{http_port};',
+                    bearer_token_provider=provider, auto_flush=False)
+                sender.establish()
+                sender.row('t', columns={'v': 1}, at=questdb.ServerTimestamp)
+                sender.flush()
+            db = questdb.connect(
+                f'ws::addr=127.0.0.1:{ws_port};lazy_connect=true;')
+            lease = db.sender()
+            def return_lease_later():
+                gevent.sleep(3)
+                lease.close(flush=False)
+            gevent.spawn(suspended_flush)
+            assert in_provider.wait(5)
+            gevent.spawn(return_lease_later)
+            started = time.monotonic()
+            db.close(timeout=10)
+            assert time.monotonic() - started >= 2.5
+            servers.stdin.close()
+            servers.wait(10)
+            print('OK', flush=True)
+        ''')
 
 
 class TokenProviderTypingTest(unittest.TestCase):

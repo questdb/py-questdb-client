@@ -197,6 +197,12 @@ def _oidc_exception_is_from_signal_handler(object exc):
 # can be queued -- always on PyPy -- the next native-return boundary raises
 # them instead (`_oidc_raise_unscheduled_main`). Bounded: only a handler that
 # raises adds to it. Touched only with the GIL held.
+#
+# Each entry is `(exception, owner)`: the greenlet that was running when the
+# exception was caught, or None without greenlets. Greenlets share the main
+# thread, and an exception gevent throws into one greenlet's callback -- a
+# `gevent.Timeout`, the `GreenletExit` of `kill()` -- is parked like a signal's;
+# it is raised only in its own greenlet, never in whichever one runs next.
 cdef list _OIDC_MAIN_PARKED = []
 cdef Py_ssize_t _OIDC_MAIN_PARKED_MAX = 64
 cdef bint _OIDC_MAIN_PARK_SCHEDULED = False
@@ -206,21 +212,48 @@ cdef int _OIDC_PENDING_CALL_FAILURES_REMAINING = 0
 cdef bint _OIDC_COUNT_NATIVE_FREES = False
 cdef uint64_t _OIDC_TOKEN_FREES = 0
 cdef uint64_t _OIDC_ERROR_FREES = 0
-# Diagnostic dispatches currently running Python code ON THE MAIN THREAD. A
-# pending call that fires inside one (the logging call runs bytecode) must not
-# raise there, where the dispatcher would take the exception for a
-# logging-handler failure; it defers, and the dispatcher reschedules on its way
-# out. Pending calls only ever run on the main thread, so dispatches on other
-# threads are not counted: counting them let an unrelated worker's slow
-# logging handler hold back the main thread's interrupt for as long as that
-# handler ran, while the main thread kept executing user code.
-cdef int _OIDC_MAIN_DIAGNOSTIC_DEPTH = 0
-# Token callbacks can run repeatedly inside one GIL-released transport call.
-# Pending exceptions must never be delivered back into those callbacks.
-cdef int _OIDC_MAIN_TOKEN_DEPTH = 0
-# Row serialization wraps ordinary exceptions as dataframe errors. Deliver saved
-# signals only after leaving that region, at Sender.dataframe's outer boundary.
-cdef int _OIDC_MAIN_DATAFRAME_DEPTH = 0
+# Regions of code ON THE MAIN THREAD in which a parked exception must not be
+# raised, by kind:
+#
+# * A diagnostic dispatch: a pending call that fires inside one (the logging
+#   call runs bytecode) must not raise there, where the dispatcher would take
+#   the exception for a logging-handler failure; it defers, and the dispatcher
+#   reschedules on its way out. Pending calls only ever run on the main thread,
+#   so dispatches on other threads are not counted: counting them let an
+#   unrelated worker's slow logging handler hold back the main thread's
+#   interrupt for as long as that handler ran, while the main thread kept
+#   executing user code.
+# * A token callback: they can run repeatedly inside one GIL-released
+#   transport call, and parked exceptions must never be delivered back into
+#   one.
+# * Row serialization, which wraps ordinary exceptions as dataframe errors:
+#   saved signals are delivered only after leaving it, at Sender.dataframe's
+#   outer boundary.
+#
+# Each kind maps a context to its depth: the greenlet running when the region
+# was entered, or None without greenlets. A greenlet suspended inside a region
+# -- a token provider waiting on gevent I/O, say -- then holds back only its
+# own exceptions, not those of the greenlet that runs meanwhile. A region
+# entered before the greenlet module was loaded counts for every greenlet, and
+# so does one that could not be recorded (`_OIDC_MAIN_UNTRACKED_REGIONS`).
+cdef enum:
+    _OIDC_REGION_TOKEN = 0
+    _OIDC_REGION_DIAGNOSTIC = 1
+    _OIDC_REGION_DATAFRAME = 2
+    _OIDC_REGION_KINDS = 3
+cdef list _OIDC_MAIN_REGIONS = [{}, {}, {}]
+cdef int _OIDC_MAIN_UNTRACKED_REGIONS = 0
+# Marks a region `_oidc_main_region_enter` could not record, and an unset value.
+cdef object _OIDC_UNTRACKED = object()
+cdef object _OIDC_UNSET = object()
+# `greenlet.getcurrent` and the base type's C `dead` and `parent` getters,
+# once the greenlet module is loaded. Never imported here: without greenlets
+# there is nothing to tell apart.
+cdef object _OIDC_GREENLET_GETCURRENT = None
+cdef object _OIDC_GREENLET_DEAD = None
+cdef object _OIDC_GREENLET_PARENT = None
+
+import sys as _oidc_sys
 
 
 cdef unsigned long _oidc_main_thread_ident() except? 0:
@@ -269,14 +302,15 @@ def _oidc_after_fork_in_child():
     deferring every later one behind a depth that can never return to zero).
     """
     global _OIDC_MAIN_THREAD_IDENT, _OIDC_MAIN_PARKED
-    global _OIDC_MAIN_PARK_SCHEDULED, _OIDC_MAIN_DIAGNOSTIC_DEPTH
-    global _OIDC_MAIN_TOKEN_DEPTH
-    global _OIDC_MAIN_DATAFRAME_DEPTH
+    global _OIDC_MAIN_PARK_SCHEDULED, _OIDC_MAIN_REGIONS
+    global _OIDC_MAIN_UNTRACKED_REGIONS
     global _OIDC_REGISTRY_LOCK, _OIDC_DIAGNOSTICS_ACTIVE
     global _OIDC_DIAGNOSTICS_DRAINED
     cdef unsigned long current = questdb_thread_ident()
     if not qdb_oidc_callback_gate_init():
         raise MemoryError('Could not reset the OIDC callback gate after fork')
+    # The forking thread is the child's main thread.
+    qdb_oidc_callback_gate_set_owner(current)
     # The registry lock may have been held by a parent thread that disappeared.
     # Keep its entries, but never try to acquire the inherited lock in a child.
     _OIDC_REGISTRY_LOCK = threading.RLock()
@@ -289,9 +323,8 @@ def _oidc_after_fork_in_child():
     _OIDC_MAIN_THREAD_IDENT = current
     _OIDC_MAIN_PARKED = []
     _OIDC_MAIN_PARK_SCHEDULED = False
-    _OIDC_MAIN_DIAGNOSTIC_DEPTH = 0
-    _OIDC_MAIN_TOKEN_DEPTH = 0
-    _OIDC_MAIN_DATAFRAME_DEPTH = 0
+    _OIDC_MAIN_REGIONS = [{}, {}, {}]
+    _OIDC_MAIN_UNTRACKED_REGIONS = 0
 
 
 # `_client.pyx` includes this file before its own `import os`.
@@ -301,37 +334,193 @@ if hasattr(os, 'register_at_fork'):
     os.register_at_fork(after_in_child=_oidc_after_fork_in_child)
 
 
+# The exit drain runs on the main thread and does not wait for callbacks
+# admitted there: only a greenlet suspended inside one can hold such an
+# admission while that thread runs the drain, and it cannot resume until the
+# drain returns (see `qdb_oidc_callback_drain`).
+qdb_oidc_callback_gate_set_owner(_OIDC_MAIN_THREAD_IDENT)
+
+
 def _debug_oidc_main_thread_ident():
     """Internal test hook: the thread OIDC treats as the main thread."""
     return _OIDC_MAIN_THREAD_IDENT
 
 
+cdef object _oidc_main_context():
+    """The greenlet running on the main thread now, or None while the greenlet
+    module is not loaded.
+
+    Main thread only, GIL held. Runs no bytecode: module, dictionary and
+    attribute lookups, and the C `greenlet.getcurrent()`, so no pending signal
+    handler runs inside it. PyPy's greenlet module is Python code, which can
+    run one there, so on PyPy greenlets are not told apart.
+    """
+    global _OIDC_GREENLET_GETCURRENT, _OIDC_GREENLET_DEAD
+    global _OIDC_GREENLET_PARENT
+    cdef object getcurrent = _OIDC_GREENLET_GETCURRENT
+    if CYTHON_COMPILING_IN_PYPY:
+        return None
+    if getcurrent is None:
+        module = _oidc_sys.modules.get('greenlet')
+        if module is None:
+            return None
+        getcurrent = getattr(module, 'getcurrent', None)
+        base = getattr(module, 'greenlet', None)
+        if getcurrent is None or base is None:
+            return None
+        _OIDC_GREENLET_DEAD = base.__dict__['dead']
+        _OIDC_GREENLET_PARENT = base.__dict__['parent']
+        _OIDC_GREENLET_GETCURRENT = getcurrent
+    return getcurrent()
+
+
+cdef object _oidc_main_region_enter(int kind):
+    """Enter a main-thread region of ``kind`` (see `_OIDC_MAIN_REGIONS`).
+
+    Main thread only. Never raises: a region it cannot record counts for
+    every greenlet. Pass the result to `_oidc_main_region_exit`.
+    """
+    global _OIDC_MAIN_UNTRACKED_REGIONS
+    cdef dict regions
+    try:
+        context = _oidc_main_context()
+        regions = <dict>_OIDC_MAIN_REGIONS[kind]
+        regions[context] = regions.get(context, 0) + 1
+        return context
+    except BaseException:
+        _OIDC_MAIN_UNTRACKED_REGIONS += 1
+        return _OIDC_UNTRACKED
+
+
+cdef void _oidc_main_region_exit(int kind, object context) noexcept:
+    global _OIDC_MAIN_UNTRACKED_REGIONS
+    cdef dict regions
+    if context is _OIDC_UNTRACKED:
+        _OIDC_MAIN_UNTRACKED_REGIONS -= 1
+        return
+    try:
+        regions = <dict>_OIDC_MAIN_REGIONS[kind]
+        depth = regions.get(context, 0) - 1
+        if depth > 0:
+            regions[context] = depth
+        else:
+            regions.pop(context, None)
+    except BaseException:
+        pass
+
+
+cdef bint _oidc_main_region_active(int kind) noexcept:
+    """Whether the code running on the main thread now is inside a region of
+    ``kind``, or of any kind when ``kind`` is negative."""
+    cdef dict regions
+    cdef int k
+    if _OIDC_MAIN_UNTRACKED_REGIONS > 0:
+        return True
+    try:
+        context = _OIDC_UNSET
+        for k in range(_OIDC_REGION_KINDS):
+            if kind >= 0 and k != kind:
+                continue
+            regions = <dict>_OIDC_MAIN_REGIONS[k]
+            if not regions:
+                continue
+            if None in regions:
+                return True
+            if context is _OIDC_UNSET:
+                context = _oidc_main_context()
+            if context is not None and context in regions:
+                return True
+        return False
+    except BaseException:
+        return True
+
+
+cdef Py_ssize_t _oidc_parked_index(bint queued_rule) except -2:
+    """The index of the oldest parked exception that may be raised in the
+    code running on the main thread now, or -1.
+
+    An exception a greenlet parked is raised only in that greenlet. One parked
+    without greenlets, or by the main greenlet, keeps the rule for a single
+    flow of control: it is eligible when ``queued_rule`` is true (always for
+    the pending call, and at a native-return boundary only when no pending
+    call is queued). One parked by any other greenlet -- a gevent greenlet --
+    is eligible whenever that greenlet runs: the queued pending call may run
+    in another greenlet first, and that greenlet may end before it runs code
+    the call could interrupt. An exception whose greenlet has died is
+    dropped: nothing could ever raise it.
+    """
+    cdef Py_ssize_t i = 0
+    cdef object context = _OIDC_UNSET
+    while i < len(_OIDC_MAIN_PARKED):
+        owner = (<tuple>_OIDC_MAIN_PARKED[i])[1]
+        if owner is None:
+            if queued_rule:
+                return i
+        elif _OIDC_GREENLET_DEAD.__get__(owner, None):
+            del _OIDC_MAIN_PARKED[i]
+            continue
+        else:
+            if context is _OIDC_UNSET:
+                context = _oidc_main_context()
+            if owner is context and (
+                    queued_rule
+                    or _OIDC_GREENLET_PARENT.__get__(owner, None) is not None):
+                return i
+        i += 1
+    return -1
+
+
 cdef int _oidc_raise_parked_main(void* unused) noexcept:
     """Pending-call body: raise the oldest parked exception on the main
-    thread, and schedule the next one, if any, for the following boundary."""
+    thread, and schedule the next one, if any, for the following boundary.
+
+    It runs in whichever greenlet runs next, so it raises only an exception
+    parked without greenlets or by that greenlet; the others wait for their
+    own greenlet's native-return boundary (`_oidc_take_unscheduled_main`).
+    """
     global _OIDC_MAIN_PARK_SCHEDULED
+    cdef Py_ssize_t index
     _OIDC_MAIN_PARK_SCHEDULED = False
-    if (_OIDC_MAIN_DIAGNOSTIC_DEPTH > 0 or _OIDC_MAIN_DATAFRAME_DEPTH > 0
-            or _OIDC_MAIN_TOKEN_DEPTH > 0):
+    if _oidc_main_region_active(-1):
         return 0
-    if not _OIDC_MAIN_PARKED:
+    try:
+        index = _oidc_parked_index(True)
+        if index < 0:
+            return 0
+        entry = _OIDC_MAIN_PARKED.pop(index)
+        exc = (<tuple>entry)[0]
+        _oidc_schedule_parked_main()
+        # Queue producers can fill the slot freed by this callback. If
+        # registering the next exception fails, deliver the rest in this
+        # exception's context chain rather than stranding them after the
+        # Python call already returned.
+        if not _OIDC_MAIN_PARK_SCHEDULED and _oidc_parked_index(True) >= 0:
+            _OIDC_MAIN_PARKED.insert(index, entry)
+            chained = _oidc_take_unscheduled_main()
+            if chained is None:
+                _OIDC_MAIN_PARKED.remove(entry)
+            else:
+                exc = chained
+    except BaseException:
         return 0
-    exc = _OIDC_MAIN_PARKED.pop(0)
-    _oidc_schedule_parked_main()
-    # Queue producers can fill the slot freed by this callback. If registering
-    # the next exception fails, deliver the rest in this exception's context
-    # chain rather than stranding them after the Python call already returned.
-    if not _OIDC_MAIN_PARK_SCHEDULED and _OIDC_MAIN_PARKED:
-        _OIDC_MAIN_PARKED.insert(0, exc)
-        exc = _oidc_take_unscheduled_main()
     PyErr_SetObject(type(exc), exc)
     return -1
 
 
 cdef void _oidc_park_main(object exc) noexcept:
-    """Queue ``exc`` for `_oidc_raise_parked_main`. GIL held; never raises."""
-    if len(_OIDC_MAIN_PARKED) < _OIDC_MAIN_PARKED_MAX:
-        _OIDC_MAIN_PARKED.append(exc)
+    """Queue ``exc`` for `_oidc_raise_parked_main`, for the greenlet running
+    now. GIL held; never raises."""
+    try:
+        if len(_OIDC_MAIN_PARKED) < _OIDC_MAIN_PARKED_MAX:
+            try:
+                owner = _oidc_main_context()
+            except BaseException:
+                # Parked without an owner, as without greenlets, rather than
+                # lost.
+                owner = None
+            _OIDC_MAIN_PARKED.append((exc, owner))
+    except BaseException:
+        pass
 
 
 cdef void _oidc_schedule_parked_main() noexcept:
@@ -359,16 +548,23 @@ cdef object _oidc_take_unscheduled_main():
     instead of leaving another one stranded in the queue.
     """
     cdef object exc
-    if (_OIDC_MAIN_PARK_SCHEDULED or _OIDC_MAIN_DIAGNOSTIC_DEPTH != 0
-            or _OIDC_MAIN_DATAFRAME_DEPTH != 0 or _OIDC_MAIN_TOKEN_DEPTH != 0
-            or questdb_thread_ident() != _OIDC_MAIN_THREAD_IDENT
-            or not _OIDC_MAIN_PARKED):
+    cdef Py_ssize_t index
+    if (questdb_thread_ident() != _OIDC_MAIN_THREAD_IDENT
+            or not _OIDC_MAIN_PARKED or _oidc_main_region_active(-1)):
         return None
-    exc = _OIDC_MAIN_PARKED.pop(0)
+    # A gevent greenlet's own exceptions are raised here, at its native-return
+    # boundary, even while a pending call is queued: that call can run in
+    # another greenlet first, which must not raise them. Exceptions parked
+    # without greenlets, or by the main greenlet, keep the rule above: a
+    # queued pending call delivers them (see `_oidc_parked_index`).
+    index = _oidc_parked_index(not _OIDC_MAIN_PARK_SCHEDULED)
+    if index < 0:
+        return None
+    exc = (<tuple>_OIDC_MAIN_PARKED.pop(index))[0]
     try:
         raise exc
     except BaseException:
-        if _OIDC_MAIN_PARKED:
+        if _oidc_parked_index(not _OIDC_MAIN_PARK_SCHEDULED) >= 0:
             # Let normal exception normalization chain these, rather than
             # invoking a subclass's __setattr__ or creating a context cycle
             # when two handlers raise the same reusable exception instance.
@@ -673,6 +869,10 @@ def _oidc_detach_diagnostics_at_exit():
     the GIL released while the interpreter is still alive. Callback code must
     return: abandoning its Python frames can force an unwind through Rust on
     CPython <=3.13/glibc. A daemon sign-in does not exempt its active renderer.
+    The one exception is a greenlet suspended inside a callback on this, the
+    main, thread -- a token provider waiting on gevent I/O, say. It cannot
+    resume until this hook returns, so waiting for it hung the exit for good;
+    the drain skips it, and its thread is the one finishing the interpreter.
 
     Providers stay open so transports can finish their bounded close-flush drain
     during subsequent module teardown. We do not wait for an IdP request that
@@ -1491,15 +1691,15 @@ cdef void _oidc_park_event_interrupt(
 cdef void _oidc_diagnostic_dispatch(
         void* user_data,
         const questdb_oidc_diagnostic* diagnostic) noexcept with gil:
-    global _OIDC_MAIN_DIAGNOSTIC_DEPTH
     cdef size_t provider_id = <size_t>user_data
     cdef bint on_main = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
     cdef bint registered = False
     cdef object signal_codes = ()
     cdef object thread_ids = None
     cdef object lock
+    cdef object region = None
     if on_main:
-        _OIDC_MAIN_DIAGNOSTIC_DEPTH += 1
+        region = _oidc_main_region_enter(_OIDC_REGION_DIAGNOSTIC)
     try:
         lock = _oidc_registry_lock_acquire()
         try:
@@ -1580,8 +1780,8 @@ cdef void _oidc_diagnostic_dispatch(
             finally:
                 lock.release()
         if on_main:
-            _OIDC_MAIN_DIAGNOSTIC_DEPTH -= 1
-            if _OIDC_MAIN_DIAGNOSTIC_DEPTH == 0:
+            _oidc_main_region_exit(_OIDC_REGION_DIAGNOSTIC, region)
+            if not _oidc_main_region_active(_OIDC_REGION_DIAGNOSTIC):
                 _oidc_schedule_parked_main()
 
 

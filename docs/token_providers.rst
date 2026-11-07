@@ -141,6 +141,10 @@ drain. A source cannot wait for itself with ``close(wait=True)``.
 Interpreter exit must wait for admitted Python callbacks even after a provider
 is closed. That finalization wait cannot safely abandon Python frames and is
 not interrupted by Ctrl-C: a source without bounded I/O can prevent exit.
+With gevent or eventlet, a greenlet on the main thread that is suspended
+inside a provider call when the interpreter exits is the exception: it could
+not resume before the exit, so the exit does not wait for it, and its flush
+never finishes. Join such greenlets before the application returns.
 
 When the interpreter starts to exit, the client stops running Python token
 code on its native threads. Its own ``atexit`` hook does this, and it runs

@@ -173,7 +173,10 @@ tokens from a secrets vault.
 * ``RefreshingTokenProvider.close(wait=True, timeout=30)`` optionally drains an
   active source with a deadline. A timeout leaves the provider closed and raises
   ``TimeoutError``. Sources must bound their own I/O: interpreter exit cannot
-  safely abandon an executing Python callback even after provider close.
+  safely abandon an executing Python callback even after provider close. A
+  greenlet on the main thread suspended inside a provider call is the
+  exception: it cannot resume before the exit, which therefore does not wait
+  for it, and its flush never finishes. Join such greenlets before exiting.
 * While the interpreter exits, an application provider still supplies the
   token for a flush made on the main thread -- from ``logging.shutdown()``,
   or from an ``atexit`` callback registered before ``questdb`` was imported --

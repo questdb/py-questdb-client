@@ -158,6 +158,7 @@ from test_token_provider import (
     InvalidArgumentErrorTest,
     RefreshingTokenProviderTest,
     TokenCallbackForkTest,
+    TokenProviderGreenletTest,
     TokenProviderTypingTest,
     TokenUnavailableErrorTest,
 )

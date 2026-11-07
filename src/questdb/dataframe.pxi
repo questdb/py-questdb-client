@@ -4548,7 +4548,7 @@ cdef void_int _dataframe(
     cdef bint was_auto_flush = False
     cdef bint plan_has_content
     cdef bint defer_signals = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
-    global _OIDC_MAIN_DATAFRAME_DEPTH
+    cdef object signal_region = None
 
     # Refused, not counted, when a row or another frame is already
     # part-way through this buffer: the plan below clears the marker
@@ -4570,11 +4570,11 @@ cdef void_int _dataframe(
     if b == NULL:
         raise MemoryError()
     owner._row_depth += 1
-    # Raised only here, with nothing between it and the `try` whose
-    # `finally` lowers it: a refusal above that left it raised would defer
-    # every parked main-thread signal for the rest of the process.
+    # Entered only here, with nothing between it and the `try` whose
+    # `finally` leaves it: a refusal above that left the region open would
+    # defer every parked main-thread signal for the rest of the process.
     if defer_signals:
-        _OIDC_MAIN_DATAFRAME_DEPTH += 1
+        signal_region = _oidc_main_region_enter(_OIDC_REGION_DATAFRAME)
     try:
         df = _dataframe_freeze_claim(df)
         # Said before the plan is built, so a frame refused for its
@@ -4705,7 +4705,7 @@ cdef void_int _dataframe(
     finally:
         _ensure_has_gil(&gs)  # Note: We need the GIL for cleanup.
         if defer_signals:
-            _OIDC_MAIN_DATAFRAME_DEPTH -= 1
+            _oidc_main_region_exit(_OIDC_REGION_DATAFRAME, signal_region)
         plan_has_content = (plan.col_count != 0) and (plan.row_count != 0)
         if plan_has_content:
             line_sender_buffer_clear_marker(ls_buf)
