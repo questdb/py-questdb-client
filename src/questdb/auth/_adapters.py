@@ -496,12 +496,17 @@ def sqlalchemy_engine(
     a valid, auto-refreshed token. Requires
     ``acl.oidc.pg.token.as.password.enabled=true`` on the server.
 
-    Sign in once up front (``auth.sign_in()``) before the pool opens connections.
-    The per-connection injection is **non-interactive**: it reuses and silently
-    refreshes the cached token, but never launches a browser prompt from a pool
-    thread. If no token has been acquired yet it raises
-    :class:`OidcInteractionRequired` rather than blocking the pool on an
-    interactive sign-in.
+    Each new connection calls the provider's ``token()``, as a transport does.
+    With an :class:`OidcDeviceAuth`, sign in once up front (``auth.sign_in()``)
+    before the pool opens connections. The per-connection injection is
+    **non-interactive**: it reuses and silently refreshes the cached token, but
+    never launches a browser prompt from a pool thread. If no token has been
+    acquired yet it raises :class:`OidcInteractionRequired` rather than
+    blocking the pool on an interactive sign-in. A
+    :class:`RefreshingTokenProvider` that holds no usable token waits up to
+    its ``cold_wait`` for one and then raises
+    :class:`~questdb.auth.TokenUnavailableError`. Any other provider behaves
+    as its own ``token()`` does.
 
     :param auth: An :class:`OidcDeviceAuth`, e.g. from
         :meth:`OidcDeviceAuth.from_questdb`, or any provider
