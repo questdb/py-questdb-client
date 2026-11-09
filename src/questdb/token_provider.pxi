@@ -621,9 +621,28 @@ cdef void _tp_sink_exception(
             return
         _tp_sink_text_error(
             sink, True, -1, f'{_tp_exception_label(exc)}: {exc}')
-    except BaseException:
-        questdb_token_sink_set_error(
-            sink, True, -1, b'the token callback failed', 25)
+    except BaseException as check_exc:
+        _tp_sink_interrupted_while_classifying(sink, check_exc)
+
+
+cdef void _tp_sink_interrupted_while_classifying(
+        questdb_token_sink* sink, object exc) noexcept:
+    """Report a failure whose classification itself raised ``exc``.
+
+    Classifying runs Python -- the signal-handler test, the exception's
+    ``__str__`` -- so on the main thread a pending signal's handler raises
+    there, and its exception is the caller's: park it, as the OIDC
+    dispatchers do, rather than lose it with the failure. The dispatcher
+    schedules its delivery on the way out. Elsewhere no signal can arrive, and
+    the exception is an internal failure. Runs no bytecode itself.
+    """
+    cdef const char* msg
+    if questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT:
+        _oidc_park_main(exc)
+        msg = b'the token callback was interrupted'
+    else:
+        msg = b'the token callback failed'
+    questdb_token_sink_set_error(sink, True, -1, msg, strlen(msg))
 
 
 cdef void _tp_sink_unavailable(questdb_token_sink* sink) noexcept nogil:
@@ -767,7 +786,12 @@ cdef void _token_get_dispatch(
             _tp_sink_text_error(
                 sink, True, -1, 'the token provider was released')
             return
-        signal_codes = _oidc_signal_handler_codes() if on_main else {}
+        try:
+            signal_codes = _oidc_signal_handler_codes() if on_main else {}
+        except BaseException as exc:
+            # The snapshot runs Python: a pending signal's handler raised.
+            _tp_sink_interrupted_while_classifying(sink, exc)
+            return
         token = provider.token()
         # A value that is no usable token is a provider bug no retry can fix,
         # as native treats an empty or non-printable token: report it as
@@ -857,14 +881,27 @@ cdef void _token_rejected_dispatch(
         on_rejected = getattr(provider, 'on_rejected', None)
         if on_rejected is None:
             return
-        signal_codes = _oidc_signal_handler_codes() if on_main else {}
+        try:
+            signal_codes = _oidc_signal_handler_codes() if on_main else {}
+        except BaseException as exc:
+            # The snapshot runs Python: a pending signal's handler raised.
+            _oidc_park_main(exc)
+            return
         on_rejected(
             PyUnicode_FromStringAndSize(token, <Py_ssize_t>token_len),
             http_status)
     except BaseException as exc:
-        if _tp_on_main_thread() and (
+        try:
+            interrupted = _tp_on_main_thread() and (
                 not isinstance(exc, Exception)
-                or _oidc_raised_in_signal_handler(exc, signal_codes)):
+                or _oidc_raised_in_signal_handler(exc, signal_codes))
+        except BaseException as check_exc:
+            # Examining it runs Python, where a second pending signal's
+            # handler can raise. Escaping this noexcept callback, its
+            # exception was printed as unraisable and lost.
+            exc = check_exc
+            interrupted = _tp_on_main_thread()
+        if interrupted:
             _oidc_park_main(exc)
             _oidc_schedule_parked_main()
         # Otherwise ignored: the client pulls a token next either way.

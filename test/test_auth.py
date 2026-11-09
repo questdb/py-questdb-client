@@ -3038,6 +3038,39 @@ class NativeOidcIntegrationTest(unittest.TestCase):
 
     @unittest.skipUnless(
         os.name == 'posix', 'durable file token store requires POSIX')
+    def test_a_second_interrupt_at_sign_in_success_is_not_lost(self):
+        # The interrupt raised in the persistence diagnostic is the one
+        # sign_in() raises. A second one -- another signal, or the first
+        # one's queued sibling -- raised while the SUCCESS event is rendered
+        # was dropped. It surfaces too now, chained to the first.
+        with tempfile.TemporaryDirectory() as parent:
+            directory = os.path.join(parent, 'store')
+            with OidcTestServer() as server:
+                class Renderer(type(self._sabotaging_renderer(directory))):
+                    def on_success(self, identity, expires_in):
+                        raise SystemExit(5)
+
+                auth = make_discovered_auth(
+                    server,
+                    token_store=FileTokenStore.at(directory),
+                    renderer=Renderer())
+                handler = self._RaisingHandler(KeyboardInterrupt())
+                self._with_questdb_handler(handler)
+                with self.assertRaises(BaseException) as ctx:
+                    auth.sign_in()
+                surfaced = []
+                exc = ctx.exception
+                while exc is not None:
+                    surfaced.append(type(exc))
+                    exc = exc.__context__
+                self.assertEqual(
+                    sorted(cls.__name__ for cls in surfaced),
+                    ['KeyboardInterrupt', 'SystemExit'])
+                self.assertEqual(handler.fired, 1)
+                self.assertEqual(auth.token(), server.initial_access_token)
+
+    @unittest.skipUnless(
+        os.name == 'posix', 'durable file token store requires POSIX')
     def test_interrupt_in_persistence_diagnostic_reaches_token(self):
         # Same as above for the other foreground call a diagnostic can run
         # inside: a synchronous refresh in token() whose save fails.

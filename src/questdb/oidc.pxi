@@ -1683,10 +1683,18 @@ cdef void _oidc_park_event_interrupt(
     thread. Swallowing an interruption there made Ctrl-C print a traceback and
     change nothing, leaving sign_in() polling until the device code expired.
     Must not raise: it runs on the error path of a ``noexcept`` callback.
+
+    A second interruption -- two signals arriving together, or one whose
+    exception was queued for the main thread and is raised here by its pending
+    call -- is queued for the main thread rather than dropped, as
+    `_oidc_park_foreground_interrupt` does. Left unscheduled, it surfaces from
+    sign_in()'s native-return boundary, chained to the first.
     """
     try:
         if provider._interrupt is None:
             provider._interrupt = exc
+        elif questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT:
+            _oidc_park_main(exc)
         if kind in (QUESTDB_OIDC_EVENT_PROMPT, QUESTDB_OIDC_EVENT_WAITING):
             # Only the waiting phase needs cancelling. On SUCCESS/FAILURE the
             # flow is already ending; in particular, SUCCESS has already

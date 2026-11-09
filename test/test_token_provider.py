@@ -38,6 +38,7 @@ import importlib.util
 import os
 from pathlib import Path
 import platform
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1766,6 +1767,70 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                         # Pending delivery has completed, not merely moved to
                         # the next token invocation or client call.
                         sender.flush()
+                    finally:
+                        sender.close(flush=False)
+        ''')
+        self._run_with_pending_call_failures(script)
+
+    @unittest.skipUnless(hasattr(signal, 'setitimer'), 'requires setitimer')
+    def test_a_signal_while_a_provider_failure_is_classified_reaches_the_caller(
+            self):
+        # Classifying a provider's failure runs Python: the failure's text,
+        # and the signal-handler test, which calls into the `signal` module.
+        # A signal handled there raised inside the classification, which
+        # dropped its exception: a deadline that fired while a failing
+        # provider was examined never reached the flushing caller.
+        script = textwrap.dedent('''
+            import os
+            import signal
+            import zlib
+            import questdb
+            from questdb import _client
+            from mock_server import HttpServer
+            _client._debug_oidc_fail_pending_calls(
+                int(os.environ['QDB_TEST_PENDING_FAILURES']))
+            def deadline(signum, frame):
+                signal.signal(signal.SIGALRM, signal.SIG_IGN)
+                raise TimeoutError('signal deadline')
+            # A C call that outlasts a 1 ms timer and then fails, so the
+            # signal is first handled once the binding examines the failure.
+            corrupt = zlib.compress(bytes(64 << 20))
+            corrupt = corrupt[:-4] + bytes(4)
+            class Failure(Exception):
+                def __str__(self):
+                    signal.raise_signal(signal.SIGALRM)
+                    return 'provider failed'
+            for kind in ('token', 'on_rejected'):
+                calls = []
+                class Provider:
+                    def token(self):
+                        calls.append(1)
+                        if kind == 'token' and len(calls) == 1:
+                            raise Failure()
+                        return 'fresh' if len(calls) > 1 else 'stale'
+                    def on_rejected(self, token, status):
+                        signal.setitimer(signal.ITIMER_REAL, 0.001)
+                        zlib.decompress(corrupt)
+                signal.signal(signal.SIGALRM, deadline)
+                with HttpServer() as server:
+                    if kind == 'on_rejected':
+                        server.responses.append(
+                            (0, 401, 'text/plain', b'Unauthorized'))
+                    sender = questdb.Sender(
+                        questdb.Protocol.Http, '127.0.0.1', server.port,
+                        bearer_token_provider=Provider(), auto_flush=False,
+                        retry_timeout=1000, protocol_version=2)
+                    sender.establish()
+                    sender.row('t', columns={'v': 1},
+                               at=questdb.ServerTimestamp)
+                    try:
+                        try:
+                            sender.flush()
+                        except TimeoutError:
+                            pass
+                        else:
+                            raise AssertionError(
+                                f'{kind}: the signal was swallowed')
                     finally:
                         sender.close(flush=False)
         ''')
