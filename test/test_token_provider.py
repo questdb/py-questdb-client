@@ -1836,6 +1836,53 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
         ''')
         self._run_with_pending_call_failures(script)
 
+    def test_an_unprintable_provider_failure_stays_in_its_call(self):
+        # Classifying a failure formats it. A provider failure whose
+        # `__str__` raises interrupted nothing, so that error is the
+        # callback's own. It was parked as a signal's, though: the flush
+        # reported the callback as interrupted, and the error was raised
+        # again on the main thread once the caller had handled the flush's.
+        script = textwrap.dedent('''
+            import os
+            import questdb
+            from questdb import _client
+            from questdb.auth import TokenUnavailableError
+            from mock_server import HttpServer
+            _client._debug_oidc_fail_pending_calls(
+                int(os.environ['QDB_TEST_PENDING_FAILURES']))
+            class Unprintable(Exception):
+                response = None  # what an unreachable identity provider sent
+                def __str__(self):
+                    return f'HTTP {self.response.status_code}'
+            class Provider:
+                def token(self):
+                    raise Unprintable()
+            with HttpServer() as server:
+                sender = questdb.Sender(
+                    questdb.Protocol.Http, '127.0.0.1', server.port,
+                    bearer_token_provider=Provider(), auto_flush=False,
+                    retry_timeout=0, protocol_version=2)
+                try:
+                    sender.establish()
+                    for attempt in range(2):
+                        sender.row('t', columns={'v': attempt},
+                                   at=questdb.ServerTimestamp)
+                        try:
+                            sender.flush()
+                        except TokenUnavailableError as exc:
+                            assert 'the token callback failed' in str(exc), exc
+                        else:
+                            raise AssertionError('the flush succeeded')
+                        # Bytecode boundaries, where a parked exception is
+                        # raised.
+                        for _ in range(1000):
+                            pass
+                    assert not server.requests, server.requests
+                finally:
+                    sender.close(flush=False)
+        ''')
+        self._run_with_pending_call_failures(script)
+
     def test_http_callback_interrupt_with_a_failing_write_clears_the_buffer(self):
         # A parked interrupt is re-raised while the flush error is converted
         # when its pending call cannot be queued: always on PyPy, on CPython

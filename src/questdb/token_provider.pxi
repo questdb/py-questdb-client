@@ -622,26 +622,49 @@ cdef void _tp_sink_exception(
         _tp_sink_text_error(
             sink, True, -1, f'{_tp_exception_label(exc)}: {exc}')
     except BaseException as check_exc:
-        _tp_sink_interrupted_while_classifying(sink, check_exc)
+        _tp_sink_interrupted_while_classifying(sink, check_exc, signal_codes)
+
+
+cdef bint _tp_park_if_interrupted(object exc, object signal_codes) noexcept:
+    """Park ``exc`` for the main thread if it interrupted the callback.
+
+    The caller's exception -- one that is no ``Exception``, such as
+    ``KeyboardInterrupt``, or one a Python signal handler raised while the
+    callback ran -- is parked and raised on the main thread once the
+    transport call returns. Anything else is the callback's own failure,
+    which its caller reports to the sink. Only the main thread runs Python
+    signal handlers, so nothing is parked elsewhere. True if ``exc``, or an
+    exception raised while testing it, was parked.
+    """
+    if questdb_thread_ident() != _OIDC_MAIN_THREAD_IDENT:
+        return False
+    try:
+        if (isinstance(exc, Exception)
+                and not _oidc_raised_in_signal_handler(exc, signal_codes)):
+            return False
+    except BaseException as check_exc:
+        # The test runs Python too, where a second pending signal's handler
+        # can raise: that exception is the caller's.
+        exc = check_exc
+    _oidc_park_main(exc)
+    return True
 
 
 cdef void _tp_sink_interrupted_while_classifying(
-        questdb_token_sink* sink, object exc) noexcept:
+        questdb_token_sink* sink, object exc, object signal_codes) noexcept:
     """Report a failure whose classification itself raised ``exc``.
 
-    Classifying runs Python -- the signal-handler test, the exception's
-    ``__str__`` -- so on the main thread a pending signal's handler raises
-    there, and its exception is the caller's: park it, as the OIDC
-    dispatchers do, rather than lose it with the failure. The dispatcher
-    schedules its delivery on the way out. Elsewhere no signal can arrive, and
-    the exception is an internal failure. Runs no bytecode itself.
+    Classifying runs Python -- the signal-handler test, the failure's
+    ``__str__`` and attributes -- so on the main thread a pending signal's
+    handler can raise there, and its exception is the caller's: park it, as
+    the OIDC dispatchers do, rather than lose it with the failure. The
+    dispatcher schedules its delivery on the way out. Any other exception --
+    a ``__str__`` that raises, say -- is this callback's own failure, reported
+    as on any other thread rather than raised later into the caller's code.
     """
-    cdef const char* msg
-    if questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT:
-        _oidc_park_main(exc)
+    cdef const char* msg = b'the token callback failed'
+    if _tp_park_if_interrupted(exc, signal_codes):
         msg = b'the token callback was interrupted'
-    else:
-        msg = b'the token callback failed'
     questdb_token_sink_set_error(sink, True, -1, msg, strlen(msg))
 
 
@@ -789,8 +812,11 @@ cdef void _token_get_dispatch(
         try:
             signal_codes = _oidc_signal_handler_codes() if on_main else {}
         except BaseException as exc:
-            # The snapshot runs Python: a pending signal's handler raised.
-            _tp_sink_interrupted_while_classifying(sink, exc)
+            # The snapshot runs no provider code: a pending signal's handler
+            # raised.
+            _oidc_park_main(exc)
+            _tp_sink_text_error(
+                sink, True, -1, 'the token callback was interrupted')
             return
         token = provider.token()
         # A value that is no usable token is a provider bug no retry can fix,
@@ -891,18 +917,7 @@ cdef void _token_rejected_dispatch(
             PyUnicode_FromStringAndSize(token, <Py_ssize_t>token_len),
             http_status)
     except BaseException as exc:
-        try:
-            interrupted = _tp_on_main_thread() and (
-                not isinstance(exc, Exception)
-                or _oidc_raised_in_signal_handler(exc, signal_codes))
-        except BaseException as check_exc:
-            # Examining it runs Python, where a second pending signal's
-            # handler can raise. Escaping this noexcept callback, its
-            # exception was printed as unraisable and lost.
-            exc = check_exc
-            interrupted = _tp_on_main_thread()
-        if interrupted:
-            _oidc_park_main(exc)
+        if _tp_park_if_interrupted(exc, signal_codes):
             _oidc_schedule_parked_main()
         # Otherwise ignored: the client pulls a token next either way.
     finally:
