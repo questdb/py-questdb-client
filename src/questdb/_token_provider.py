@@ -100,11 +100,12 @@ class BearerTokenProvider(Protocol):
 
     A QWP/WebSocket sender, query or pool keeps retrying a failure in its
     background reconnects, whatever a
-    :class:`~questdb.auth.TokenUnavailableError` says; a connection the
-    caller waits for, such as a sender's ``initial_connect_retry=sync``
-    connect, retries only a retryable one. To stop the reconnects on a
-    failure that retrying can never clear, raise your own
-    :class:`~questdb.QuestDBError` with ``code``
+    :class:`~questdb.auth.TokenUnavailableError` says, its ``code``
+    included; a connection the caller waits for, such as a sender's
+    ``initial_connect_retry=sync`` connect, retries only a retryable one. To
+    stop the reconnects on a failure that retrying can never clear, raise
+    your own plain :class:`~questdb.QuestDBError`, not a
+    ``TokenUnavailableError``, with ``code``
     ``QuestDBErrorCode.InvalidApiCall``: the client then fails with
     ``ConfigError`` and stops reconnecting. An ``InvalidApiCall`` that a
     client call inside ``token()`` raised -- a pool at its

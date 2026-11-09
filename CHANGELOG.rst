@@ -170,11 +170,12 @@ tokens from a secrets vault.
   ``QuestDBErrorCode.InvalidApiCall``, as a Rust provider returns
   ``InvalidApiCall``. Its clients then stop: a QWP/WebSocket sender, query or
   pool fails with ``ConfigError`` and stops reconnecting, and an ILP/HTTP
-  flush fails at once. A token source cannot do this; close its
-  ``RefreshingTokenProvider`` instead. An ``InvalidApiCall`` that a client
-  call inside the provider raised -- a pool at its ``sender_pool_max`` cap, a
-  client that is closing -- and that escapes ``token()`` counts as
-  retryable.
+  flush fails at once. A ``TokenUnavailableError`` does not stop them,
+  whatever its ``code``: it is classified by ``retryable`` alone. A token
+  source cannot do this; close its ``RefreshingTokenProvider`` instead. An
+  ``InvalidApiCall`` that a client call inside the provider raised -- a pool
+  at its ``sender_pool_max`` cap, a client that is closing -- and that
+  escapes ``token()`` counts as retryable.
 * ``RefreshingTokenProvider.close(wait=True, timeout=30)`` optionally drains an
   active source with a deadline. A timeout leaves the provider closed and raises
   ``TimeoutError``. Sources must bound their own I/O: interpreter exit cannot
@@ -516,11 +517,11 @@ which is what says whether the sender will carry on:
   permanently closed provider (``close()`` is one-way; cancelling one
   ``sign_in()`` attempt does not close an ``OidcDeviceAuth``), by a scope that
   cannot yield the required token kind, and by an application
-  ``bearer_token_provider=`` that raised its own :class:`QuestDBError
-  <questdb.QuestDBError>` with ``code`` ``QuestDBErrorCode.InvalidApiCall``,
-  reported as ``ConfigError``. Queued rows are not deleted — a disk-backed
-  store-and-forward slot stays drainable by a later process — but this process
-  will not send them.
+  ``bearer_token_provider=`` that raised its own plain :class:`QuestDBError
+  <questdb.QuestDBError>` -- not a ``TokenUnavailableError`` -- with ``code``
+  ``QuestDBErrorCode.InvalidApiCall``, reported as ``ConfigError``. Queued
+  rows are not deleted — a disk-backed store-and-forward slot stays drainable
+  by a later process — but this process will not send them.
 
 A listener that pages on a permanent stop must qualify on ``cause_code``, not
 on the kind alone.
@@ -549,7 +550,9 @@ Other changes
   Background reconnects keep retrying every provider failure, except
   :class:`QuestDBError <questdb.QuestDBError>` with ``code`` set to
   ``QuestDBErrorCode.InvalidApiCall`` that an application provider raises
-  itself, which stops them.
+  itself, which stops them. A ``TokenUnavailableError`` is not such an
+  error, whatever its ``code``: it never stops them, and only its
+  ``retryable`` flag counts.
 
 - A 401 is retried with a refreshed token only when the server's
   ``WWW-Authenticate`` challenge allows it: no Bearer ``error``, or

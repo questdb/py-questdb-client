@@ -3426,7 +3426,8 @@ class ConnectionEventKind(TaggedEnum):
           close it), by a scope that cannot yield the required token kind,
           such as ``groups_in_token=True`` against an identity provider that
           returns no ID token, and by a ``bearer_token_provider=`` that
-          raised its own :class:`QuestDBError` with ``code``
+          raised its own plain :class:`QuestDBError` -- not a
+          :class:`~questdb.auth.TokenUnavailableError` -- with ``code``
           ``InvalidApiCall`` (see
           :class:`~questdb.auth.BearerTokenProvider`), which reports
           ``ConfigError``, as a closed

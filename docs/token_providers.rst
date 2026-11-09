@@ -250,12 +250,15 @@ disk-backed slot stays drainable by a later process. Raised from the source of
 a :class:`~questdb.auth.RefreshingTokenProvider`, it counts as retryable like
 any other exception.
 
-Only an ``InvalidApiCall`` your provider raises itself has that effect. The
-client raises the same code when it refuses a call -- a pool at its
-``sender_pool_max`` cap once ``acquire_timeout_ms`` runs out, a lease another
-thread holds, a client that is closing. Such a refusal, raised by a client
-call inside ``token()`` and let escape, counts as retryable: it is about that
-call, not the credential.
+Only an ``InvalidApiCall`` your provider raises itself has that effect, and
+only as a plain :class:`~questdb.QuestDBError`: a
+:class:`~questdb.auth.TokenUnavailableError` is classified by its
+``retryable`` flag alone, whatever its ``code``, and never stops the
+reconnects. The client raises the same code when it refuses a call -- a pool
+at its ``sender_pool_max`` cap once ``acquire_timeout_ms`` runs out, a lease
+another thread holds, a client that is closing. Such a refusal, raised by a
+client call inside ``token()`` and let escape, counts as retryable: it is
+about that call, not the credential.
 
 A provider may own the client it is attached to -- an object that implements
 ``token()`` and keeps its own :class:`~questdb.QuestDB` or

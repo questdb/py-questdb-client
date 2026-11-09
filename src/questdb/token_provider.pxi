@@ -221,15 +221,17 @@ class TokenUnavailableError(QuestDBError):
     only with initial-connect retry on: a sender's synchronous initial
     connect (``initial_connect_retry=sync``), or an eager
     :func:`questdb.connect` with ``initial_connect_retry=on``. Without it, the
-    connection makes one attempt. Background reconnects retry either kind. To
-    stop them on a failure that retrying can never clear, an application
-    provider raises its own :class:`~questdb.QuestDBError` with ``code``
+    connection makes one attempt. Background reconnects retry either kind,
+    whatever its ``code``. To stop them on a failure that retrying can never
+    clear, an application provider raises a plain
+    :class:`~questdb.QuestDBError` with ``code``
     ``QuestDBErrorCode.InvalidApiCall`` instead; a
     :class:`RefreshingTokenProvider` is stopped by closing it.
 
     The client raises it too, when a provider failed to supply a token; then
-    ``code`` is the failing operation's error code. Never put a token in the
-    message.
+    ``code`` is the failing operation's error code. On one a source or
+    provider raises, ``code`` only labels the error: clients classify it by
+    ``retryable``. Never put a token in the message.
     """
     def __init__(
             self, message, *, retryable=True, retry_after=None, code=None):
