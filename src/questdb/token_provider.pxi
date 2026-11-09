@@ -769,12 +769,28 @@ cdef void _token_get_dispatch(
             return
         signal_codes = _oidc_signal_handler_codes() if on_main else {}
         token = provider.token()
+        # A value that is no usable token is a provider bug no retry can fix,
+        # as native treats an empty or non-printable token: report it as
+        # permanent, so that a connect the caller waits for, a dataframe()
+        # call and an ILP/HTTP flush end at once rather than calling the
+        # provider for their whole retry budget. Background reconnects keep
+        # retrying whatever the classification.
         if not isinstance(token, str):
-            raise TypeError(
-                'a token provider must return a str, not '
+            _tp_sink_text_error(
+                sink, False, -1,
+                'TypeError: a token provider must return a str, not '
                 f'{_fqn(type(token))}; wrap a source that returns an expiry '
                 'in RefreshingTokenProvider')
-        encoded = token.encode('utf-8')
+            return
+        try:
+            encoded = token.encode('utf-8')
+        except UnicodeEncodeError as exc:
+            # Name the position only: the message must not carry the token.
+            _tp_sink_text_error(
+                sink, False, -1,
+                'ValueError: the token provider returned a str that is not '
+                f'valid Unicode ({exc.reason} at position {exc.start})')
+            return
         if not questdb_token_sink_set_token(sink, encoded, len(encoded), 0, 0):
             _tp_sink_text_error(
                 sink, True, -1, 'the token provider returned an unusable token')

@@ -145,14 +145,19 @@ tokens from a secrets vault.
   backoff, refreshes early when a server rejects the token with HTTP 401, and
   never shows a token in an error, log line or ``repr``.
 * Any callable returning a token, or an object with ``token()`` and an
-  optional ``on_rejected()``, works as a provider too. Reusing the same Python
+  optional ``on_rejected()``, works as a provider too. One that returns
+  something other than a ``str``, or a ``str`` that is not valid Unicode,
+  fails as permanent, so a connect the caller waits for ends at once. Reusing
+  the same Python
   provider across clients shares its native single-flight acquisition, including
   when passing repeated bound-method lookups. A ``RefreshingTokenProvider``
   such a provider calls -- ``bearer_token_provider=lambda: tokens.token()`` --
   still refreshes early when a server rejects its token with HTTP 401, and
   closing it still ends that provider's clients, reported as
-  ``ConfigError``. A method bound to a closed one, ``tokens.token``, is
-  refused as the provider itself is. A ``RefreshingTokenProvider`` subclass
+  ``ConfigError``, and so does closing an ``OidcDeviceAuth`` such a provider
+  calls (``lambda: auth.token()``). A method bound to a closed one,
+  ``tokens.token``, is refused as the provider itself is. A
+  ``RefreshingTokenProvider`` subclass
   that overrides ``token()`` or ``on_rejected()`` is attached as such a
   provider: clients call its methods. Closing it still ends them, reported as
   ``ConfigError``, and attaching it once closed fails as it does for

@@ -92,6 +92,22 @@ def _await(predicate, timeout=10.0):
         time.sleep(0.005)
 
 
+def _establish(sender):
+    try:
+        sender.establish()
+    finally:
+        sender.close()
+
+
+def _flush_one_row(sender):
+    try:
+        sender.establish()
+        sender.row('t', columns={'v': 1}, at=questdb.ServerTimestamp)
+        sender.flush()
+    finally:
+        sender.close()
+
+
 def _collect_until(predicate):
     def collected():
         gc.collect()
@@ -2349,8 +2365,10 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
     def test_an_unusable_token_does_not_spin_dataframe_retries(self):
         # Native refuses an empty or non-printable token before dialling, and
         # a borrow that waits gives up on it at once. dataframe() borrowed
-        # again in a tight loop until reconnect_max_duration ran out.
-        for token in ('', 'tok\n'):
+        # again in a tight loop until reconnect_max_duration ran out. A value
+        # that is not a str, or a str that is not valid Unicode, is refused
+        # by the binding and must end the call at once too.
+        for token in ('', 'tok\n', b'tok', 'tok\ud800', 123):
             with self.subTest(token=token):
                 calls = []
 
@@ -2371,6 +2389,99 @@ class BearerTokenProviderAttachTest(unittest.TestCase):
                 self.assertIn('token provider', str(caught.exception))
                 self.assertLessEqual(len(calls), 2)
                 self.assertLess(elapsed, 4.0)
+
+    def test_closing_an_oidc_auth_a_provider_calls_ends_its_clients(self):
+        # As closing a RefreshingTokenProvider that a provider of one's own
+        # calls ends that provider's clients, so does closing an
+        # OidcDeviceAuth: reached through `lambda: auth.token()`, its closed
+        # failure was retried for good, as if it were transient.
+        from questdb.auth import OidcDeviceAuth
+        auth = OidcDeviceAuth(
+            'questdb',
+            device_authorization_endpoint='https://idp.example/device',
+            token_endpoint='https://idp.example/token',
+            interactive=False,
+            open_browser=False)
+        auth.close()
+        calls = []
+
+        def provider():
+            calls.append(1)
+            return auth.token()
+
+        started = time.monotonic()
+        with self.assertRaises(questdb.QuestDBError) as caught:
+            _flush_one_row(questdb.Sender.from_conf(
+                'http::addr=127.0.0.1:9000;retry_timeout=5000;'
+                'protocol_version=2;auto_flush=off;',
+                bearer_token_provider=provider))
+        self.assertLess(time.monotonic() - started, 4.0)
+        self.assertIs(
+            caught.exception.code, questdb.QuestDBErrorCode.ConfigError)
+        self.assertIn('is closed', str(caught.exception))
+        self.assertEqual(len(calls), 1)
+
+        # A background connect stops at the first failure.
+        events = []
+        kind = questdb.ConnectionEventKind.CredentialUnavailable
+        with QwpAckServer() as server:
+            sender = questdb.Sender.from_conf(
+                f'ws::addr=127.0.0.1:{server.port};'
+                'initial_connect_retry=async;'
+                'reconnect_initial_backoff_millis=10;'
+                'reconnect_max_backoff_millis=10;',
+                bearer_token_provider=provider,
+                connection_listener=events.append)
+            try:
+                sender.establish()
+                _await(lambda: any(e.kind is kind for e in events))
+                time.sleep(0.3)
+            finally:
+                sender.close(flush=False)
+            self.assertEqual(
+                [e.cause_code for e in events if e.kind is kind],
+                [questdb.QuestDBErrorCode.ConfigError])
+            self.assertEqual(server.snapshot()['upgrade_authorizations'], [])
+
+    def test_a_token_that_is_no_str_fails_at_once_without_leaking_it(self):
+        # Refused by the binding, before native sees it, as permanent: a
+        # waited-for connect and an ILP/HTTP flush used to retry it as a
+        # transient failure for their whole retry budget.
+        connects = {
+            'waited QWP/WebSocket connect': lambda provider: _establish(
+                questdb.Sender.from_conf(
+                    'ws::addr=127.0.0.1:9000;initial_connect_retry=sync;'
+                    'reconnect_initial_backoff_millis=10;'
+                    'reconnect_max_backoff_millis=10;'
+                    'reconnect_max_duration_millis=5000;',
+                    bearer_token_provider=provider)),
+            'ILP/HTTP flush': lambda provider: _flush_one_row(
+                questdb.Sender.from_conf(
+                    'http::addr=127.0.0.1:9000;retry_timeout=5000;'
+                    'protocol_version=2;auto_flush=off;',
+                    bearer_token_provider=provider)),
+        }
+        for token, expected in (
+                (b'secret-tok', 'must return a str, not bytes'),
+                ('secret-tok\ud800', 'not valid Unicode'),
+                (None, 'must return a str, not NoneType')):
+            for name, connect in connects.items():
+                with self.subTest(token=token, call=name):
+                    calls = []
+
+                    def provider():
+                        calls.append(1)
+                        return token
+
+                    started = time.monotonic()
+                    with self.assertRaises(TokenUnavailableError) as caught:
+                        connect(provider)
+                    elapsed = time.monotonic() - started
+                    self.assertFalse(caught.exception.retryable)
+                    self.assertIn(expected, str(caught.exception))
+                    self.assertNotIn('secret', str(caught.exception))
+                    self.assertEqual(len(calls), 1)
+                    self.assertLess(elapsed, 4.0)
 
     @unittest.skipIf(pd is None, 'pandas not installed')
     def test_a_provider_cannot_drive_its_sender_inside_dataframe(self):

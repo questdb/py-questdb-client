@@ -1245,9 +1245,17 @@ cdef int _raise_oidc_auth_closed() except -1:
     `OidcCancelledError` -- the error native raises for a closed provider, and
     the one a transport already attached to it raises once it is closed --
     so one `except OidcError` covers every path.
+
+    It is marked as a closed `RefreshingTokenProvider`'s failure is
+    (`_provider_closed`). A provider of your own that calls `token()` and lets
+    the error escape -- `bearer_token_provider=lambda: auth.token()` -- then
+    ends its clients, as `oidc_auth=auth` does, instead of leaving them
+    retrying a provider that can never serve again.
     """
     from questdb.auth._errors import OidcCancelledError
-    raise OidcCancelledError('The OIDC authentication provider is closed.')
+    exc = OidcCancelledError('The OIDC authentication provider is closed.')
+    exc._provider_closed = True
+    raise exc
 
 
 cdef void_int _oidc_require_native_token(object oidc_auth) except -1:

@@ -193,13 +193,18 @@ once it is closed, a failure of its ``token()`` stops them as an
 provider calls -- ``lambda: tokens.token()`` -- ends your provider's clients
 the same way, as long as your provider lets the error escape, and a method
 bound to a closed provider, ``tokens.token``, is refused as the provider
-itself is.
+itself is. Closing an :class:`~questdb.auth.OidcDeviceAuth` that your provider
+calls -- ``lambda: auth.token()`` -- ends them the same way, although
+attaching it as ``oidc_auth=`` is the usual way to use one.
 
 A provider reports failures as a source does: raise
 :class:`~questdb.auth.TokenUnavailableError` to classify one; any other
 exception counts as retryable. A QWP/WebSocket sender, query or pool keeps
 retrying either kind in its background reconnects, and a connection that is
-waited for uses the classification as described under `Failures`_.
+waited for uses the classification as described under `Failures`_. A
+``token()`` that returns something other than a ``str``, or a ``str`` that
+is not valid Unicode such as one with a lone surrogate, fails as permanent:
+no retry can fix it.
 
 An ILP/HTTP sender has no background reconnects. Its flush retries a
 retryable failure on the flushing thread for up to ``retry_timeout``, fails
