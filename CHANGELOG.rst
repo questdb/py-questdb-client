@@ -534,6 +534,20 @@ unchanged, the new kind is appended as ``7``, and a 6.0 listener keeps
 working untouched. A listener that wants to distinguish the two conditions
 opts in by handling the new kind.
 
+Local and replicated durable acknowledgements
+*********************************************
+
+``request_durable_ack`` accepts ``local``, ``replicated`` and
+``local,replicated`` besides ``on`` and ``off``. ``local`` asks for an
+acknowledgement once the server has flushed the frames to its own disk; it
+needs a server running ``cairo.commit.mode=adaptive``, which QuestDB 10.1.0,
+QuestDB Enterprise 4.1.0 and earlier releases do not have. ``replicated`` is
+the new name of ``on``: the frames reached replication storage, on QuestDB
+Enterprise only. ``local,replicated`` asks for both. A connection fails unless
+the server grants every level requested, and QuestDB Enterprise 4.1.0 and
+earlier refuse the names ``replicated`` and ``local,replicated``: keep ``on``
+for them. See ``request_durable_ack`` under :ref:`sender_conf_reconnect`.
+
 Other changes
 ~~~~~~~~~~~~~
 

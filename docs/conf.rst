@@ -212,11 +212,30 @@ walking the ``addr`` server list.
 
   Default: 5000.
 
-* ``request_durable_ack`` - ``'on'`` | ``'off'``: Negotiate durable
-  acknowledgements: the server acknowledges frames only once they are
-  durably stored (e.g. uploaded to object storage on Enterprise
-  deployments). A server without the capability rejects the first
-  operation.
+* ``request_durable_ack`` - ``'off'`` | ``'local'`` | ``'replicated'`` |
+  ``'on'`` | ``'local,replicated'``: Negotiate durable acknowledgements,
+  which the server sends once frames are durably stored:
+
+  * ``'local'``: the server has flushed the frames to its own disk, which
+    survives a server power loss but not the loss of that disk or a failover
+    to another node. Needs a server running ``cairo.commit.mode=adaptive``,
+    which QuestDB 10.1.0, QuestDB Enterprise 4.1.0 and earlier releases do
+    not have.
+  * ``'replicated'``, or its original name ``'on'``: the frames reached
+    replication storage (e.g. object storage), so they survive the loss of
+    the server. QuestDB Enterprise only; Enterprise 4.1.0 and earlier
+    accept only ``'on'``.
+  * ``'local,replicated'``: both. Needs QuestDB Enterprise running
+    ``cairo.commit.mode=adaptive``, which a replicating primary does only
+    when the mode is set explicitly.
+
+  The connection fails unless the server grants every level requested.
+  The store-and-forward queue keeps each frame for replay until its durable
+  acknowledgement arrives (with ``'local,replicated'``, the replicated one).
+  This client's acknowledgement waits --
+  :meth:`PooledSender.wait <questdb.PooledSender.wait>`, ``flush(wait=True)``
+  and ``await_acked_fsn()`` -- wait for the ordinary OK acknowledgement,
+  whatever this is set to.
 
   Default: ``'off'``.
 
