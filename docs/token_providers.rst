@@ -257,6 +257,17 @@ thread holds, a client that is closing. Such a refusal, raised by a client
 call inside ``token()`` and let escape, counts as retryable: it is about that
 call, not the credential.
 
+A provider may own the client it is attached to -- an object that implements
+``token()`` and keeps its own :class:`~questdb.QuestDB` or
+:class:`~questdb.Sender`. The garbage collector reclaims such an object and
+its client together if both are left unclosed. On PyPy that holds only while
+the object holds no unclosed lease (:meth:`QuestDB.sender
+<questdb.QuestDB.sender>`, :meth:`QuestDB.reader <questdb.QuestDB.reader>`)
+or :class:`~questdb.QueryResult` of that client: PyPy cannot collect a cycle
+that runs through one, so the object, the client and its connections stay
+alive until the process exits. Close leases and results, or use them in a
+``with`` block, as you should anyway.
+
 .. _token_provider_reentrancy:
 
 Code that runs inside a client call

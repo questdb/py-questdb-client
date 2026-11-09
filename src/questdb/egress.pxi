@@ -23,8 +23,13 @@ cdef inline object _reader_err_to_py(questdb_error* err):
 # from its `__dealloc__`. `_close()` then writes through that slot, which
 # CPython 3.13+ does not type-check, so the process crashes (earlier
 # versions print an unraisable SystemError). Cycles through this handle stay
-# collectable: the OIDC provider and the bearer-token holder it references
-# have their own tp_clear.
+# collectable on CPython: the OIDC provider and the bearer-token holder it
+# references have their own tp_clear. Not on PyPy, whose collector cannot
+# see the typed fields a cursor or lease holds this handle (or its QuestDB)
+# by. A reference kept where PyPy does see it -- set through
+# `PyObject_GenericSetAttr` -- is gone from the dictionary `__dealloc__` can
+# read, and every release path needs it there, so the PyPy limitation is
+# documented instead (docs/token_providers.rst, "Application providers").
 @cython.no_gc_clear
 cdef class _ReaderHandle:
     """Owns a ``qwp_reader*``.
