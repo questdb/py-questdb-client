@@ -3092,8 +3092,16 @@ class NativeOidcIntegrationTest(unittest.TestCase):
                     initial_expires_in=4,
                     refresh_request_hook=sabotage_after_refresh_request
                     ) as server:
+                # The library's default timeout, not the helper's 5 s. Before
+                # sending, the refresh tombstones the stored parent token --
+                # store lock, unlink, directory fsync -- and native charges
+                # that to the request's timeout. A loaded CI agent once spent
+                # all 5 s there, so token() raised OidcNetworkError "timeout:
+                # global" for a refresh that was never sent. This test is
+                # about the interrupt, not the timeout.
                 auth = make_discovered_auth(
-                    server, token_store=FileTokenStore.at(directory))
+                    server, token_store=FileTokenStore.at(directory),
+                    timeout=30)
                 auth.sign_in()
                 credential_files = [
                     name for name in os.listdir(directory)
