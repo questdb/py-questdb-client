@@ -8294,6 +8294,37 @@ cdef object _capsule_slice_rows(
     return None
 
 
+cdef object _pandas_batch_matching_schema(
+        object df_slice, object schema, Py_ssize_t offset):
+    """Export one pandas batch to Arrow and require the first batch's schema.
+
+    Each batch is exported on its own, so pyarrow infers the type of an
+    object-dtype column or index (decimal scale, int vs float, str vs null)
+    from that batch's values alone. The native ingest reads every batch with
+    the schema of the first one, so a batch that infers a different type
+    would be decoded with the wrong layout.
+    """
+    cdef object table = _PYARROW.Table.from_pandas(df_slice)
+    cdef object field
+    cdef object first
+    if table.schema.equals(schema, check_metadata=False):
+        return table
+    for field in table.schema:
+        first = (schema.field(field.name)
+                 if schema.get_field_index(field.name) >= 0 else None)
+        if first is None or not field.equals(first):
+            raise QuestDBError(
+                QuestDBErrorCode.ArrowUnsupportedColumnKind,
+                f'Column {field.name!r} has Arrow type {field.type} from '
+                f'row {offset}, but {first.type if first else "no column"} '
+                'in the first batch. Give the column (or an object-dtype '
+                'index) one consistent type, e.g. with `astype()`, or send '
+                'the rows in separate calls.')
+    raise QuestDBError(
+        QuestDBErrorCode.ArrowUnsupportedColumnKind,
+        f'The Arrow schema from row {offset} differs from the first batch.')
+
+
 cdef struct direct_conn_source_t:
     # Pooled borrow when ``db != NULL``; otherwise a poolless standalone
     # connection opened from ``opts`` per call.
@@ -8544,6 +8575,9 @@ cdef bint _dataframe_client_try_capsule_path(
                         else:
                             row_slice = _capsule_slice_rows(
                                 sliceable, offset, chunk_rows)
+                            if _is_pandas_dataframe_object(sliceable):
+                                row_slice = _pandas_batch_matching_schema(
+                                    row_slice, schema, offset)
                         _capsule_consume_stream_with_hint(
                             conn, row_slice, c_table_name, c_ts_column_ptr,
                             at_scalar_set, at_scalar_nanos,
