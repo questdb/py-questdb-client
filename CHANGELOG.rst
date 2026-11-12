@@ -4,7 +4,7 @@
 Changelog
 =========
 
-6.1.0 (unreleased)
+6.1.0 (2026-11-12)
 ------------------
 
 Breaking changes
@@ -583,6 +583,11 @@ Other changes
   stream keeps its exception class, ``in_doubt`` and ``sender_error`` instead
   of being rebuilt as a plain :class:`QuestDBError <questdb.QuestDBError>`, so
   ``except OidcError`` and ``except QuestDBServerRejectionError`` still match.
+
+Build & dependencies
+~~~~~~~~~~~~~~~~~~~~
+
+- The bundled ``c-questdb-client`` native library is upgraded to 7.3.0.
 
 6.0.1 (2026-10-29)
 ------------------
