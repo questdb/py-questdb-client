@@ -53,6 +53,27 @@ NOT_GUARDED = {
     'ServerTimestampType':
         'the type of the `ServerTimestamp` sentinel. It carries no '
         'state and its only use is identity.',
+    'ExpiringToken':
+        'a value a token source returns: a token and its expiry, read '
+        'back through plain attributes. It holds no native state and '
+        'nothing on it reaches the client.',
+    'FetchFailure': 'as ExpiringToken, describing a failed fetch.',
+    'TokenProviderStatus':
+        'as ExpiringToken: a snapshot `RefreshingTokenProvider.status` '
+        'returns, taken before the caller sees it.',
+    'OidcDeviceAuth':
+        'a credential provider, not an ingestion or query handle: one '
+        'instance is shared by every client and thread it is attached '
+        'to, so each method is built to be called from anywhere, '
+        'including from inside a call on a client it serves. Its own '
+        're-entry rules -- from its renderer and persistence-warning '
+        'callbacks, and closing it under a call that is waiting for a '
+        'token -- are exercised in test_auth.py against a mock identity '
+        'provider, which the offline grid fixtures do not have.',
+    'RefreshingTokenProvider':
+        'as OidcDeviceAuth: a shared provider of Bearer tokens, whose '
+        'source callbacks and close() under a waiting call are '
+        'exercised in test_auth.py and test_token_provider.py.',
 }
 
 

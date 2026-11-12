@@ -12,3 +12,5 @@ numpy>=1.21.0
 pyarrow>=14.0.1
 fastparquet>=2023.10.1
 PyYAML>=6.0
+sqlalchemy>=2
+psycopg[binary]>=3
