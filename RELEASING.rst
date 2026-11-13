@@ -82,14 +82,35 @@ The source code distribution is for any other platforms that we don't have
 binaries for. I don't think it's _actually_ used by anyone, but it might get
 used by IDEs.
 
-From an up-to-date clone (with submodules initialized) on the release
-commit::
+Use the project's development venv for every Python command from here on.
+It comes with setuptools, Cython and twine (see ``DEV_NOTES.rst``; create it
+with ``./proj venv``). The system ``python3`` often lacks setuptools, and
+``setup.py sdist`` then fails at its first import.
+
+From an up-to-date clone on the release commit::
 
     cd ~/questdb/py-questdb-client
     git checkout main
     git pull
-    git submodule update --init --recursive
-    python3 setup.py sdist
+    git submodule update --init
+    rm -rf dist
+    venv/bin/python setup.py sdist
+
+``--init`` without ``--recursive`` is enough. The only nested submodule is
+the QuestDB server repo inside ``c-questdb-client``, which only its system
+tests use.
+
+``dist/`` has to start empty: the upload step sends everything in it, so
+files left over from an earlier release would go to PyPI too.
+
+Check the size of ``dist/questdb-X.Y.Z.tar.gz``. It should be a few
+megabytes (6.1.0 was 7.3 MB). ``MANIFEST.in`` takes the whole
+``c-questdb-client`` and ``rpyutils`` folders from disk, tracked or not, and
+filters out the build output it knows about. Anything else a local build
+leaves there goes into the package too, and PyPI rejects files over 100 MB
+by default. If it's much larger, find the cause with::
+
+    tar tzvf dist/questdb-X.Y.Z.tar.gz | sort -k5 -rn | head -20
 
 Download the macOS ARM binaries from GitHub Actions
 ---------------------------------------------------
@@ -146,7 +167,12 @@ Sanity-check the contents of ``dist/`` before uploading. You should see:
   (no ``cp314t``);
 * ``macosx`` wheels for both ``x86_64`` (from Azure) and ``arm64``
   (from GitHub Actions), CPython 3.10 through 3.14 plus ``cp314t``;
-* exactly one ``.tar.gz`` source distribution.
+* exactly one ``.tar.gz`` source distribution;
+* the new version in every file name, and no files from older releases.
+
+Then check that PyPI will accept the metadata of every file::
+
+    venv/bin/python -m twine check dist/*
 
 Tagging the release
 -------------------
@@ -156,6 +182,20 @@ In GitHub with a web browser create a new release with the tag "vX.Y.Z"
 
 The release notes should be copied from the ``CHANGELOG.rst`` file,
 but reformatted as Markdown.
+
+Point the release at the bump PR's merge commit on ``main``. GitHub creates
+the tag when the release is published, not when it's saved as a draft.
+
+The repository's ``restrict-tag-pushing`` ruleset blocks tag creation for
+everyone not on its bypass list, so publishing fails for anyone else. In
+that case, save the release as a draft and ask someone with bypass
+permission to publish it, either in the browser or with::
+
+    gh release edit vX.Y.Z --draft=false --latest
+
+``gh api repos/questdb/py-questdb-client/rulesets/<id>`` reports
+``current_user_can_bypass`` for the calling user (find ``<id>`` with
+``gh api repos/questdb/py-questdb-client/rulesets``).
 
 
 Uploading to PyPI
@@ -172,10 +212,13 @@ Once you've triple-checked everything is in ``dist/``, you can upload to PyPI.
 
 .. code-block:: bash
 
-    python3 -m pip install -U twine
-    python3 -m twine upload dist/*
+    venv/bin/python -m twine upload dist/*
 
-This will prompt you for your PyPI username and token.
+This will prompt you for your PyPI token. If it asks for a username, enter
+``__token__``.
+
+If the upload stops partway, run the same command with ``--skip-existing``
+added, so the files already on PyPI aren't sent again.
 
 Once the upload is complete, you can check the PyPI page to see if the new
 release is there: https://pypi.org/project/questdb/

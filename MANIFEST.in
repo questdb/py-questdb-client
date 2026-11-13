@@ -20,8 +20,23 @@ recursive-include src py.typed
 graft rpyutils
 graft c-questdb-client
 prune c-questdb-client/src/tests/json_tests.rs
-prune c-questdb-client/.git
-prune c-questdb-client/target
-prune c-questdb-client/questdb-rs/target
-prune c-questdb-client/questdb-rs-ffi/target
 prune c-questdb-client/build
+# The grafts above take every file on disk, tracked or not, so this list
+# strips what a working checkout accumulates. The sdist then matches one
+# built from a fresh clone of the release commit.
+#
+# Cargo build output at any depth, including the test crates under
+# c-questdb-client/system_test/. No tracked path has a target/ component.
+prune **/target
+prune **/__pycache__
+# Agent tooling and its local state; not needed to build.
+prune c-questdb-client/.claude
+# The submodule's .git is a gitdir pointer file in a submodule checkout and
+# a directory in a standalone clone, so both forms are dropped.
+prune c-questdb-client/.git
+exclude c-questdb-client/.git
+# The QuestDB server repo, a nested submodule used only by system tests.
+prune c-questdb-client/questdb
+# Untracked (gitignored in c-questdb-client); cargo writes it on a local
+# build of the crate. The tracked Cargo.lock files elsewhere stay in.
+exclude c-questdb-client/questdb-rs/Cargo.lock
