@@ -20,16 +20,31 @@ recursive-include src py.typed
 graft rpyutils
 graft c-questdb-client
 prune c-questdb-client/src/tests/json_tests.rs
-prune c-questdb-client/build
-# The grafts above take every file on disk, tracked or not, so this list
-# strips what a working checkout accumulates. The sdist then matches one
-# built from a fresh clone of the release commit.
+# The grafts above take every file on disk, tracked or not. The rules below
+# drop everything c-questdb-client/.gitignore lists, plus rpyutils' cargo
+# output and the submodule's git and agent files, so a working checkout gives
+# the same sdist as a fresh clone of the release commit. Keep them in sync
+# with that .gitignore.
 #
 # Cargo build output at any depth, including the test crates under
 # c-questdb-client/system_test/. No tracked path has a target/ component.
 prune **/target
 prune **/__pycache__
-# Agent tooling and its local state; not needed to build.
+# CMake build trees. c-questdb-client's `./proj build` writes build/ and
+# build_CXX20/, and corrosion puts its cargo output inside them rather than
+# in a target/ folder.
+prune c-questdb-client/**/build
+prune c-questdb-client/**/build_CXX20
+prune c-questdb-client/**/build_sanitize
+prune c-questdb-client/**/cmake-build-debug
+prune c-questdb-client/**/cmake-build-release
+# Editor, language-server and agent tool state.
+prune c-questdb-client/**/.vs
+prune c-questdb-client/**/.vscode
+prune c-questdb-client/**/.idea
+prune c-questdb-client/**/.cache
+prune c-questdb-client/**/.pi-subagents
+# Tracked agent tooling and its local state; not needed to build.
 prune c-questdb-client/.claude
 # The submodule's .git is a gitdir pointer file in a submodule checkout and
 # a directory in a standalone clone, so both forms are dropped.
@@ -37,6 +52,11 @@ prune c-questdb-client/.git
 exclude c-questdb-client/.git
 # The QuestDB server repo, a nested submodule used only by system tests.
 prune c-questdb-client/questdb
-# Untracked (gitignored in c-questdb-client); cargo writes it on a local
-# build of the crate. The tracked Cargo.lock files elsewhere stay in.
+# Untracked files that local builds and tools write. The tracked Cargo.lock
+# files stay in.
 exclude c-questdb-client/questdb-rs/Cargo.lock
+exclude c-questdb-client/include/questdb/ingress/line_sender.gen.h
+exclude c-questdb-client/cython/questdb/ingress/line_sender.pxd
+recursive-exclude c-questdb-client profile.out
+exclude c-questdb-client/corrosion/test/cpp2rust/cpp2rust/rust/rust_dependency/Cargo.lock
+exclude c-questdb-client/corrosion/test/rustflags/rustflags/rust/some_dependency/Cargo.lock
