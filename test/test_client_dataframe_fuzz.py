@@ -821,7 +821,8 @@ class TestClientDataframeFuzz(unittest.TestCase):
                 'v': [1, 2],
                 'ts': pd.Series(_datetime_array(2)),
             })
-            self.assertEqual(str(df.dtypes['sym']), 'str')
+            # pandas 3 names it `str`, the 2.x preview `string`.
+            self.assertIsInstance(df.dtypes['sym'], pd.StringDtype)
             client = qi.QuestDB.from_conf(self.conf)
             try:
                 client.dataframe(df, table_name='t', at='ts')

@@ -2,68 +2,12 @@
 Migration Guide
 ================
 
-5.0 to 6.0
+6.1 to 6.2
 ==========
 
-Four changes need action: ``QuestDB.close()`` raising instead of waiting for
-its own thread's lease, a sender's own callbacks no longer being able to
-append to it, the exception a commit raises once its sender is closed, and a
-warning an abandoned query result now surfaces instead of swallowing.
-
-* :meth:`QuestDB.close <questdb.QuestDB.close>` **raises instead of waiting
-  for a lease held by the calling thread.** It raises
-  ``QuestDBError(InvalidApiCall)`` while the calling thread owns an active pool
-  operation or a lease attributed to it; 5.0 waited, which never ended for a
-  same-thread lease. A sender lease handed to a worker stays attributed to the
-  borrowing thread until the worker first uses it, so a ``close()`` there that
-  5.0 would have waited through now raises. A reader lease (``db.reader()``)
-  stays attributed to the borrowing thread however it is used, so close the
-  pool from another thread while one is open. For a sender lease, have the
-  worker use the lease and signal that before closing, or close from a thread
-  that never held it::
-
-      sender = db.sender()
-      used = threading.Event()
-
-      def work():
-          with sender:
-              used.set()
-              sender.row('trades', columns={'price': 1.0},
-                         at=questdb.ServerTimestamp)
-
-      threading.Thread(target=work).start()
-      used.wait()
-      db.close()  # waits for the worker to return the lease
-
-* **A sender's own callbacks can no longer append to it.** Called from the
-  sender's own ``connection_listener`` or ``error_handler``, ``row()``,
-  ``dataframe()``, ``new_buffer()``, ``establish()``, ``transaction()`` and the
-  :class:`~questdb.SenderTransaction` operations raise
-  ``QuestDBError(InvalidApiCall)``, as ``flush()`` and ``close()`` already did,
-  even while the sender is idle. 5.0 accepted ``row()`` there. The read-only
-  ``max_name_len``, ``protocol_version``, ``connection_events_dropped`` and
-  ``connection_events_delivered`` also raise, from any thread, while the sender
-  is inside a native call such as ``flush()``. So do ``len()``, ``bytes()``,
-  truthiness, ``capacity()``, ``reserve()``, ``clear()`` and ``row()`` on a
-  :class:`~questdb.ingress.Buffer` that a native call is modifying (the internal buffer
-  during ``flush()``, an explicit one during ``flush(buffer)``, or any one
-  during ``dataframe()``, ``SenderTransaction.dataframe()`` included); a
-  ``flush(buffer, clear=False)`` only reads the buffer, so
-  concurrent reads and other ``clear=False`` flushes of it still work. Hand
-  listener events to another sender or to the owning thread instead::
-
-      events = queue.SimpleQueue()
-      sender = Sender.from_conf(conf, connection_listener=events.put)
-      ...
-      while not events.empty():  # on the sender's own thread
-          event = events.get()
-          sender.row('conn_events', symbols={'kind': event.kind.tag},
-                     at=questdb.ServerTimestamp)
-
-* :meth:`SenderTransaction.commit <questdb.SenderTransaction.commit>` **after
-  the owning sender was closed now raises** ``QuestDBError(InvalidApiCall)``
-  instead of an internal ``TypeError``. A commit whose flush fails leaves the
-  sender's buffer empty and the transaction completed, exactly as in 5.0.
+One change needs action: a warning an abandoned query result now surfaces
+instead of swallowing. The :ref:`changelog <changelog>` lists the breaking
+changes of earlier 6.x releases.
 
 * **An abandoned** :class:`~questdb.QueryResult` **now reports its**
   ``ResourceWarning`` **when promoted to an exception**. The finalizer previously
@@ -170,14 +114,24 @@ handle; the sender variants exist as conveniences and share the same path:
         sender.dataframe(frame, table_name='weather', at='ts')
 
 On success, each call returns only after every row in the source has been
-committed. Most loads queue their batches and commit once at the end. To keep
-memory bounded, a very large Arrow load checkpoints about every 100 batches.
-The client may checkpoint earlier if the connection cannot queue another batch
-or if a batch must be split to fit. If a later batch fails, the exception means
-that the load did not finish, not necessarily that no rows landed. Any already
-committed prefix from that call remains in the table, and retrying the entire
-DataFrame can duplicate it unless the table uses suitable
-``DEDUP UPSERT KEYS``.
+committed. The first successful batch on a fresh direct connection is already
+a commit boundary; subsequent batches are pipelined until the final commit.
+To keep memory bounded, a very large Arrow load adds a checkpoint about every
+100 batches, and the client may checkpoint earlier if deferred capacity fills
+or a batch must be split to fit. This interval caps the uncommitted tail; it is
+not a safe whole-source replay window.
+
+After a transient failure, the client replays the original source only if no
+batch was successfully published and the failed operation is not ``in_doubt``.
+Otherwise it raises. When any batch from the call may have committed, the
+public exception has ``in_doubt=True`` even if the final native write itself
+was provably not delivered. This includes local validation and Arrow stream
+errors after publication. Internal checkpoints do not reset this call-level
+status. The load may then have an already committed prefix, and an
+application-level retry of the entire DataFrame can duplicate
+it unless the table uses suitable ``DEDUP UPSERT KEYS``. A consumed one-shot
+stream can be non-replayable with ``in_doubt=False`` when no rows could have
+landed; its error asks the caller to supply a fresh reader.
 
 These calls are independent of ``sf_dir``, and none converts the DataFrame
 into row calls. ``dataframe()`` opens a direct connection just for that call

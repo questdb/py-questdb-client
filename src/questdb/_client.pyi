@@ -23,8 +23,14 @@
 ################################################################################
 
 __all__ = [
+    "Char",
     "ConnectionEvent",
     "ConnectionEventKind",
+    "DateMillis",
+    "ExecDone",
+    "Geohash",
+    "Long256",
+    "OidcDeviceAuth",
     "PooledReader",
     "PooledSender",
     "Protocol",
@@ -50,14 +56,96 @@ __all__ = [
     "WARN_HIGH_RECONNECTS",
 ]
 
+import os
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Union
+from ipaddress import IPv4Address
+from typing import (
+    Any, Callable, Dict, Iterable, Iterator, List, Literal, NamedTuple,
+    Optional, SupportsIndex, Tuple, Union)
+from uuid import UUID
 
 import numpy as np
 import pandas as pd
 from decimal import Decimal
+
+from .auth._config import OidcConfig
+from .auth._render import Renderer
+from .auth._store import FileTokenStore
+from .auth._token_provider import BearerTokenProvider, TokenSource
+
+
+class OidcDeviceAuth:
+    """Native-backed OAuth 2.0 device-flow token provider."""
+
+    def __init__(
+        self,
+        client_id: str,
+        *,
+        device_authorization_endpoint: str,
+        token_endpoint: str,
+        scope: str = "openid",
+        groups_in_token: bool = False,
+        audience: Optional[str] = None,
+        issuer: Optional[str] = None,
+        insecure: bool = False,
+        ca_bundle: Optional[Union[str, bytes, os.PathLike]] = None,
+        open_browser: Optional[bool] = None,
+        interactive: Optional[bool] = None,
+        qr: bool = False,
+        renderer: Optional[Renderer] = None,
+        default_interval: int = 5,
+        timeout: Union[float, timedelta] = 30,
+        token_store: Optional[FileTokenStore] = None,
+    ) -> None: ...
+
+    @classmethod
+    def from_questdb(
+        cls,
+        url: str,
+        *,
+        client_id: Optional[str] = None,
+        scope: Optional[str] = None,
+        audience: Optional[str] = None,
+        groups_in_token: Optional[bool] = None,
+        issuer: Optional[str] = None,
+        token_endpoint: Optional[str] = None,
+        device_authorization_endpoint: Optional[str] = None,
+        insecure: bool = False,
+        ca_bundle: Optional[Union[str, bytes, os.PathLike]] = None,
+        open_browser: Optional[bool] = None,
+        interactive: Optional[bool] = None,
+        qr: bool = False,
+        renderer: Optional[Renderer] = None,
+        default_interval: int = 5,
+        timeout: Union[float, timedelta] = 30,
+        token_store: Optional[FileTokenStore] = None,
+    ) -> OidcDeviceAuth: ...
+
+    def sign_in(self) -> None:
+        """Run the interactive device flow when sign-in is required."""
+
+    def cancel_sign_in(self) -> None:
+        """Cancel the current sign-in attempt without closing the provider."""
+
+    def token(self) -> str:
+        """Return a cached or silently refreshed token; never prompt."""
+
+    def headers(self) -> Dict[str, str]: ...
+
+    def clear(self) -> None: ...
+
+    def close(self) -> None:
+        """Close the provider and cancel device-poll or token-store lock waits."""
+
+    def __enter__(self) -> OidcDeviceAuth: ...
+
+    def __exit__(self, exc_type: object, exc_value: object,
+                 traceback: object) -> Literal[False]: ...
+
+    @property
+    def config(self) -> OidcConfig: ...
 
 class QuestDBErrorCode(Enum):
     """Category of Error."""
@@ -100,6 +188,7 @@ class QuestDBErrorCode(Enum):
     BatchTooLarge = ...
     StoreResendRequired = ...
     SymbolDictFull = ...
+    QueryTimeout = ...
     BadDataFrame = ...
 
 
@@ -122,10 +211,16 @@ class QuestDBError(Exception):
     @property
     def in_doubt(self) -> bool:
         """
-        Whether the failed operation may already have delivered its input.
+        Whether the failed ingestion operation may already have delivered
+        its input. For QWP ``dataframe()``, this covers the entire DataFrame,
+        including earlier batches from the same call, even when a later batch
+        fails local validation. For a sender flush, it describes that flush;
+        it does not summarize earlier independent calls on the sender.
 
-        Retrying the same input when this is true can duplicate rows unless the
-        destination table has an appropriate deduplication guarantee.
+        Retrying that input when this is true requires an appropriate
+        application- or table-level deduplication guarantee. A false value says
+        only that duplicate delivery is not known to be possible; a consumed
+        one-shot input may still be impossible to replay.
         """
 
     @property
@@ -159,6 +254,138 @@ class UnsupportedDataFrameShapeError(QuestDBError):
     column_failures: tuple
 
 
+class ExpiringToken:
+    """A token and when it expires: the result of one token-source fetch."""
+
+    token: str
+    expires_at: datetime
+    refresh_at: Optional[datetime]
+
+    def __init__(
+        self,
+        token: str,
+        expires_at: Union[datetime, float],
+        refresh_at: Optional[Union[datetime, float]] = None,
+    ) -> None: ...
+
+    @classmethod
+    def expires_in(
+        cls,
+        token: str,
+        lifetime: Union[float, timedelta],
+        refresh_at: Optional[Union[datetime, float]] = None,
+    ) -> "ExpiringToken":
+        """A token that expires ``lifetime`` from now. ``refresh_at`` is an
+        instant, as for the constructor, not a delay."""
+
+
+class TokenUnavailableError(QuestDBError):
+    """A token source or provider could not supply a token."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        retry_after: Optional[Union[float, timedelta]] = None,
+        code: Optional[QuestDBErrorCode] = None,
+    ) -> None: ...
+
+    @property
+    def retryable(self) -> bool:
+        """Whether retrying can succeed."""
+
+    @property
+    def retry_after(self) -> Optional[float]:
+        """The suggested wait before retrying, in seconds, or ``None``."""
+
+
+class FetchFailure:
+    """A failed fetch of a :class:`RefreshingTokenProvider`."""
+
+    retryable: bool
+    retry_after: Optional[float]
+    message: str
+    at: Optional[datetime]
+
+    def __init__(
+        self,
+        retryable: bool,
+        retry_after: Optional[float],
+        message: str,
+        at: Optional[datetime],
+    ) -> None: ...
+
+
+class TokenProviderStatus:
+    """A snapshot of a :class:`RefreshingTokenProvider`."""
+
+    closed: bool
+    token_expires_at: Optional[datetime]
+    last_success_at: Optional[datetime]
+    consecutive_failures: int
+    last_failure: Optional[FetchFailure]
+
+    def __init__(
+        self,
+        closed: bool,
+        token_expires_at: Optional[datetime],
+        last_success_at: Optional[datetime],
+        consecutive_failures: int,
+        last_failure: Optional[FetchFailure],
+    ) -> None: ...
+
+
+class RefreshingTokenProvider:
+    """A proactively refreshing token cache in front of a token source."""
+
+    def __init__(
+        self,
+        source: Union[TokenSource, Callable[[], Any]],
+        *,
+        name: Optional[str] = None,
+        refresh_margin: Optional[Union[float, timedelta]] = None,
+        min_refresh_interval: Optional[Union[float, timedelta]] = None,
+        handout_floor: Optional[Union[float, timedelta]] = None,
+        cold_wait: Optional[Union[float, timedelta]] = None,
+        backoff_initial: Optional[Union[float, timedelta]] = None,
+        backoff_max: Optional[Union[float, timedelta]] = None,
+        retry_after_max: Optional[Union[float, timedelta]] = None,
+        forced_min_interval: Optional[Union[float, timedelta]] = None,
+        forced_wait: Optional[Union[float, timedelta]] = None,
+    ) -> None: ...
+
+    def token(self) -> str:
+        """A usable token, waiting up to ``cold_wait`` for one."""
+
+    def headers(self) -> Dict[str, str]:
+        """``{"Authorization": "Bearer <token>"}``."""
+
+    def on_rejected(self, token: str, http_status: int = 401) -> None:
+        """A server rejected ``token`` with ``http_status``."""
+
+    def await_ready(self, timeout: Union[float, timedelta] = 30.0) -> bool:
+        """Wait for a usable token."""
+
+    def close(
+        self, *, wait: bool = False, timeout: Union[float, timedelta] = 30.0,
+    ) -> None:
+        """Stop refreshing; optionally drain the active source, or raise TimeoutError."""
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def closed(self) -> bool: ...
+
+    @property
+    def status(self) -> TokenProviderStatus: ...
+
+    def __enter__(self) -> "RefreshingTokenProvider": ...
+
+    def __exit__(self, exc_type, exc_value, traceback) -> Literal[False]: ...
+
+
 class ConnectionEventKind(Enum):
     """Connection-state transitions observed by the ingress pool."""
 
@@ -169,6 +396,7 @@ class ConnectionEventKind(Enum):
     EndpointAttemptFailed = ...
     AllEndpointsUnreachable = ...
     AuthFailed = ...
+    CredentialUnavailable = ...
 
     @property
     def tag(self) -> str: ...
@@ -348,6 +576,112 @@ class TimestampNanos:
     def value(self) -> int:
         """Number of nanoseconds (Unix epoch timestamp, UTC)."""
 
+
+class Char:
+    """A QuestDB CHAR value stored as one UTF-16 code unit.
+
+    A character outside the Basic Multilingual Plane needs a surrogate
+    pair and cannot fit. CHAR has no physical ``NULL`` sentinel:
+    ``'\\x00'`` is stored as code unit 0, though some SQL operations
+    treat it as CHAR's null/absent marker.
+    """
+
+    def __init__(self, value: str): ...
+    @property
+    def value(self) -> str: ...
+
+
+class DateMillis:
+    """A QuestDB DATE millisecond timestamp, not a civil date.
+
+    How ``row()`` writes a DATE column. DataFrames claim DATE from the
+    column's Arrow type instead — ``pa.timestamp('ms')``, ``pa.date32()``,
+    or ``pa.date64()`` — so there is no DATE cell type and no ``'date'``
+    kind for ``schema_overrides``. A NumPy ``datetime64[ms]`` dtype has no
+    route of its own to DATE and widens to a microsecond TIMESTAMP, unless
+    a ``df.attrs['questdb']`` claim names the column DATE and puts the
+    Arrow type back on it. That claim is written as ``{'kind': 'date'}``
+    under the column's entry in the version-1 claim mapping.
+    DATE is QWP-only: over ILP, datetime columns all land as TIMESTAMP.
+
+    ``INT64_MIN`` is QuestDB's ``NULL`` sentinel for DATE. It is accepted
+    and reads back as ``NULL``.
+
+    ``millis`` is any whole number that is not a ``bool``, so a
+    ``numpy.int64`` or a pandas cell works as a plain ``int`` does.
+
+    ``SupportsIndex`` is as near as an annotation gets. ``bool`` is a
+    subtype of ``int``, so no type can exclude it, and an object with
+    ``__index__`` that is not a ``numbers.Integral`` satisfies the
+    annotation without satisfying the constructor. Both are refused at
+    run time and neither is a type error.
+    """
+
+    def __init__(self, millis: SupportsIndex): ...
+    @classmethod
+    def from_datetime(cls, dt: datetime) -> DateMillis: ...
+    @classmethod
+    def now(cls) -> DateMillis: ...
+    @property
+    def value(self) -> int: ...
+
+
+class Long256:
+    """An unsigned 256-bit integer for a QuestDB LONG256 column.
+
+    The value must satisfy ``0 <= value < 2**256``. The one whose four
+    64-bit limbs are all ``0x8000000000000000`` is accepted but reads
+    back from QuestDB as ``NULL``.
+
+    ``value`` is any whole number that is not a ``bool``, so a
+    ``numpy.int64`` or a pandas cell works as a plain ``int`` does. As
+    for :class:`DateMillis`, the annotation cannot say so; the refusal
+    is at run time.
+    """
+
+    def __init__(self, value: SupportsIndex): ...
+    @property
+    def value(self) -> int: ...
+
+
+class Geohash:
+    """A QuestDB GEOHASH value represented by bits and precision.
+
+    ``bits`` is the value and ``precision`` its width in bits, 1 to 60.
+    This scalar wrapper requires ``0 <= bits < 2**precision``. Bulk
+    GEOHASH columns, whether NumPy, Arrow or object, deliberately do
+    not perform that per-value check; see :meth:`QuestDB.dataframe`.
+
+    Precision is pinned per column within one buffer's worth of rows: a
+    later cell disagreeing with the first is rejected by ``row()``
+    itself, and the buffer is rewound to what it held before that row.
+    A flush clears the pin, so a precision the server's column does not
+    have is the server's to reject, at flush time.
+
+    Both are any whole number that is not a ``bool``, so a
+    ``numpy.int64`` or a pandas cell works as a plain ``int`` does. As
+    for :class:`DateMillis`, the annotation cannot say so; the refusal
+    is at run time.
+    """
+
+    def __init__(self, bits: SupportsIndex, precision: SupportsIndex): ...
+    @classmethod
+    def from_string(cls, value: str) -> Geohash: ...
+    @property
+    def bits(self) -> int: ...
+    @property
+    def precision(self) -> int: ...
+
+
+TransactionColumnValue = Union[
+    None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime,
+    np.ndarray, Decimal]
+RowColumnValue = Union[
+    None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime,
+    np.ndarray, Decimal, UUID, IPv4Address, bytes, bytearray, memoryview, Char,
+    DateMillis, Long256, Geohash]
+
+
 class SenderTransaction:
     """
     A transaction for a specific table.
@@ -367,14 +701,12 @@ class SenderTransaction:
 
     def __init__(self, sender: Sender, table_name: str): ...
     def __enter__(self) -> SenderTransaction: ...
-    def __exit__(self, exc_type, _exc_value, _traceback) -> bool: ...
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool: ...
     def row(
         self,
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
-        columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
-        ] = None,
+        columns: Optional[Dict[str, TransactionColumnValue]] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> SenderTransaction:
         """
@@ -383,6 +715,9 @@ class SenderTransaction:
         The table name is taken from the transaction.
 
         **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 9.0.0 or higher.
+
+        UUID, IPV4, BINARY, CHAR, DATE, LONG256, and GEOHASH are QWP-only and
+        are not supported by this ILP/HTTP-only transaction API.
         """
 
     def dataframe(
@@ -413,8 +748,21 @@ class SenderTransaction:
 
         A rollback is also automatic at the end of a failed `with` block.
 
-        This will clear the buffer.
+        This will clear the buffer. When ``rollback()`` is called from
+        code that a ``row()`` or ``dataframe()`` on this sender runs
+        while it writes, such as a column value's conversion, it raises
+        :class:`QuestDBError <questdb.QuestDBError>` (``InvalidApiCall``)
+        and leaves the transaction as it was.
         """
+
+
+#: What ``schema_overrides`` accepts: a kind on its own, or a kind and its
+#: argument. Only ``'geohash'`` takes one, the precision in bits -- any
+#: whole number that is not a ``bool``, so a ``numpy.int64`` read out of
+#: an array works as a plain ``int`` does. The precision is validated but
+#: bulk values are not checked against it: a wrong precision can be accepted
+#: and store a different GEOHASH location or ``NULL``.
+SchemaOverrides = Dict[str, Union[str, Tuple[str, SupportsIndex]]]
 
 
 class Buffer:
@@ -464,13 +812,22 @@ class Buffer:
 
         This method is designed to be called only in conjunction with
         ``sender.flush(buffer, clear=False)``.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) if a
+        :func:`Buffer.row <questdb.ingress.Buffer.row>` or
+        :func:`Buffer.dataframe <questdb.ingress.Buffer.dataframe>` call
+        on this buffer is still in progress.
         """
 
     def __len__(self) -> int:
         """
         The current number of bytes currently in the buffer.
 
-        Equivalent (but cheaper) to ``len(bytes(buffer))``.
+        For ILP buffers this is exact, and equivalent (but cheaper) to
+        ``len(bytes(buffer))``. For QWP buffers it is an estimate of the
+        encoded size. Over QWP/WebSocket it is never below the size of the
+        frame a flush encodes, unless store-and-forward has fallen back to
+        sending full symbol dictionaries.
         """
 
     def  __bytes__(self) -> bytes:
@@ -481,9 +838,7 @@ class Buffer:
         table_name: str,
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
-        columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
-        ] = None,
+        columns: Optional[Dict[str, RowColumnValue]] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> Buffer:
         """
@@ -553,10 +908,40 @@ class Buffer:
               - `TIMESTAMP <https://questdb.com/docs/reference/api/ilp/columnset-types#timestamp>`_
             * - ``Decimal``
               - `DECIMAL <https://questdb.com/docs/reference/api/ilp/columnset-types#decimal>`_
+            * - ``UUID``
+              - UUID (QWP-only)
+            * - ``IPv4Address``
+              - IPV4 (QWP-only)
+            * - ``bytes``, ``bytearray``, or ``memoryview``
+              - BINARY (QWP-only)
+            * - ``Char``
+              - CHAR (QWP-only)
+            * - ``DateMillis``
+              - DATE (QWP-only)
+            * - ``Long256``
+              - LONG256 (QWP-only)
+            * - ``Geohash``
+              - GEOHASH (QWP-only)
             * - ``None``
               - *Column is skipped and not serialized.*
 
         **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 9.0.0 or higher.
+
+        The seven QWP-only types require protocol ``udp``, ``ws``, or ``wss``
+        and QuestDB 10 or newer, the first production QWP implementation.
+        Their reserved ``NULL`` sentinels are accepted:
+        IPV4 ``0.0.0.0``, DATE ``INT64_MIN``, UUID
+        ``80000000-0000-0000-8000-000000000000``, and LONG256 with all four
+        limbs equal to ``0x8000000000000000``. CHAR has no physical ``NULL``
+        sentinel: ``'\\x00'`` is stored as code unit 0, although some SQL
+        operations treat it as CHAR's null/absent marker. GEOHASH has no
+        collision, and empty BINARY ``b''`` is distinct from ``NULL``.
+
+        A bare ``int`` is a 64-bit LONG, so a value outside
+        ``-2**63 .. 2**63-1`` raises ``OverflowError``. On a QWP buffer the
+        message names ``Long256``, the wrapper that sends it as a 256-bit
+        LONG256 instead; an ILP buffer, which has no LONG256 to offer,
+        reports the bare conversion failure.
 
         If the destination table was already created, then the columns types
         will be cast to the types of the existing columns whenever possible
@@ -570,8 +955,8 @@ class Buffer:
             have the same effect as skipping the key: If the column already
             existed, it will be recorded as ``NULL``, otherwise it will not be
             created.
-        :param columns: A dictionary of column names to ``bool``, ``int``,
-            ``float``, ``str``, ``TimestampMicros`` or ``datetime`` values.
+        :param columns: A dictionary mapping column names to the supported
+            column values listed above.
             As a convenience, you can also pass a ``None`` value which will
             have the same effect as skipping the key: If the column already
             existed, it will be recorded as ``NULL``, otherwise it will not be
@@ -595,9 +980,12 @@ class Buffer:
         """
         Add a pandas DataFrame to the buffer.
 
-        Also see the :func:`Sender.dataframe` method if you're
-        not using the buffer explicitly. It supports the same parameters
-        and also supports auto-flushing.
+        Also see :func:`Sender.dataframe` if you are not using the buffer
+        explicitly. Over ILP and QWP/UDP it accepts the arguments shown here
+        and adds auto-flushing. Over QWP/WebSocket it instead uses the direct
+        columnar path, additionally accepting ``max_rows_per_batch`` and
+        ``schema_overrides``; see :meth:`QuestDB.dataframe` for that path's
+        supported column types and arguments.
 
         This feature requires the ``pandas``, ``numpy`` and ``pyarrow``
         package to be installed.
@@ -983,6 +1371,23 @@ class PooledSender:
     default at 1,000 rows, 100 milliseconds, or a cap-derived byte threshold,
     and can be configured through the ``auto_flush`` settings on the parent
     :class:`QuestDB` configuration.
+
+    A lease is used by one thread at a time. It may move to another
+    thread -- borrowed on one and used on a worker, say -- provided the
+    hand-off is synchronized and no two threads call into it at once. To
+    ingest from several threads, share the :class:`QuestDB` handle and
+    borrow one lease per thread. Every method holds the lease's lock for
+    its whole call, ``dataframe()`` included, so a call from a second
+    thread waits until the running one returns. Code that runs inside a
+    call -- a column value's conversion, the Arrow stream
+    ``dataframe()`` reads, or a handler on the ``questdb`` logger,
+    which ``dataframe()`` logs its warnings to -- therefore must not
+    wait on another thread that uses the same lease.
+
+    Close every lease, or use it in a ``with`` block. A lease collected
+    without ``close()`` returns its sender to the pool without sending
+    the rows still buffered in it, and reports how many it discarded
+    through the ``questdb`` logger at ``WARNING``.
     """
 
     def __enter__(self) -> PooledSender: ...
@@ -992,28 +1397,27 @@ class PooledSender:
         table_name: str,
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
-        columns: Optional[
-            Dict[
-                str,
-                Union[
-                    None,
-                    bool,
-                    int,
-                    float,
-                    str,
-                    TimestampMicros,
-                    TimestampNanos,
-                    datetime,
-                    np.ndarray,
-                    Decimal,
-                ],
-            ]
-        ] = None,
+        columns: Optional[Dict[str, RowColumnValue]] = None,
         at: Union[ServerTimestampType, TimestampNanos, datetime],
     ) -> PooledSender:
         """Append one row to this sender's QWP buffer. If a configured
-        auto-flush threshold is breached, this publishes without waiting for
-        an acknowledgement; a publish error propagates from ``row()``."""
+        auto-flush threshold is breached, or the buffer's size estimate
+        reaches the connection's frame cap, this publishes without waiting
+        for an acknowledgement. Every published frame fits the frame cap:
+        when the whole buffer does not, or its size estimate is past the
+        cap, the rows buffered before this one go out on their own and this
+        row starts the next batch.
+
+        Whatever this method raises, the row was not added.
+        ``BatchTooLarge`` means either it does not fit in a frame on its
+        own, or the rows buffered before it do not fit even without it, as
+        after the frame cap shrinks, and those rows are discarded. Any other
+        publish error propagates and leaves the rows buffered before it in
+        place.
+
+        See :func:`Buffer.row` for supported column types, protocol
+        restrictions, server requirements, and ``NULL``-sentinel behavior.
+        """
 
     def dataframe(
         self,
@@ -1024,7 +1428,7 @@ class PooledSender:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[SchemaOverrides] = None,
     ) -> PooledSender:
         """
         Bulk-load a DataFrame over a direct columnar connection borrowed
@@ -1048,7 +1452,14 @@ class PooledSender:
         """Wait for everything published through this lease to receive an
         OK ack; returns immediately if the lease published nothing. Only a
         terminal connection failure raises; server rejections go to the
-        pool's ``error_handler``."""
+        pool's ``error_handler``.
+
+        ``timeout_millis`` is a no-progress timeout (``0`` waits
+        indefinitely); when it expires this raises ``QuestDBError`` with
+        ``code`` set to ``QuestDBErrorCode.FailoverRetry`` and the rows stay
+        queued. While the lease cannot reconnect because an attached OIDC
+        provider needs a new sign-in, that error is
+        :class:`~questdb.auth.OidcInteractionRequired`."""
 
     def flush_and_get_fsn(self) -> Optional[int]:
         """Publish and clear buffered rows, returning the published
@@ -1066,7 +1477,11 @@ class PooledSender:
 
     def await_acked_fsn(self, fsn: int, timeout_millis: int = 0) -> bool:
         """Wait until the ack watermark reaches ``fsn``; ``False`` on
-        no-progress timeout. Only a terminal connection failure raises."""
+        no-progress timeout. Terminal connection failures raise. An OIDC
+        persistence callback can also receive retryable
+        :class:`~questdb.auth.OidcInteractionRequired` when reconnecting depends
+        on its return. The publication stays queued: return from the callback
+        and retry the ACK wait, not the publication."""
 
     def flush_and_keep_and_get_fsn(self) -> Optional[int]:
         """Publish without clearing the buffer; returns the frame's FSN."""
@@ -1095,8 +1510,9 @@ class PooledReader:
     :meth:`QuestDB.reader`; it holds one pooled reader connection for
     its lifetime and runs queries on it sequentially via :meth:`query`.
     ``close()`` (or leaving the ``with`` block) releases the
-    connection: back to the pool if the last query was drained cleanly,
-    dropped otherwise.
+    connection: back to the pool if the last query reached its terminal
+    on a live connection (a clean drain, a successful ``cancel()``, or a
+    server-side error), dropped otherwise.
 
     Queries are strictly sequential. Closing an undrained result
     terminates the lease; call ``cancel()`` before ``close()`` to
@@ -1112,6 +1528,7 @@ class PooledReader:
         binds: Optional[Union[list, tuple]] = None,
         *,
         reset_symbol_dict: bool = True,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
     ) -> QueryResult:
         """
         Execute a SQL query on the lease's connection and return a
@@ -1127,11 +1544,14 @@ class PooledReader:
         self,
         sql: str,
         binds: Optional[Union[list, tuple]] = None,
-    ) -> None:
+        *,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
+    ) -> Optional[ExecDone]:
         """
         Run a statement on the lease's connection and discard whatever
-        it returns. Mirrors :meth:`QuestDB.execute`; the lease stays
-        usable for the next call.
+        it returns. Mirrors :meth:`QuestDB.execute`, including the
+        :class:`ExecDone` ``(op_type, rows_affected)`` return value; the
+        lease stays usable for the next call.
         """
 
     def close(self) -> None:
@@ -1154,6 +1574,9 @@ class QuestDB:
     def from_conf(
         conf_str: str,
         *,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
+        bearer_token_provider: Optional[
+            Union[BearerTokenProvider, Callable[[], str]]] = None,
         connection_listener: Optional[Callable[[ConnectionEvent], None]] = None,
         connection_event_inbox_capacity: int = 0,
         error_handler: Optional[Callable[[SenderError], None]] = None,
@@ -1212,22 +1635,55 @@ class QuestDB:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[SchemaOverrides] = None,
     ) -> QuestDB:
         """
         Ingest a dataframe through the pooled columnar QWP path.
 
         Ingestion always uses the direct (non-store-and-forward) column
         sender, independent of ``sf_dir``. On success, the call returns only
-        after every DataFrame batch has been committed. Most loads queue their
-        batches and commit once at the end. Large Arrow inputs checkpoint about
-        every 100 batches to keep memory bounded. The client may checkpoint
-        earlier if the connection cannot queue another batch or if a batch must
-        be split to fit. If a later batch fails, the exception means that the
-        load did not finish, not necessarily that no rows landed. Any already
-        committed prefix from this call remains, and retrying the whole
-        DataFrame can duplicate it unless the destination table uses suitable
-        ``DEDUP UPSERT KEYS``.
+        after every DataFrame batch has been committed. The first successful
+        batch on a fresh direct connection is already a commit boundary;
+        subsequent batches are pipelined until the final commit. Large Arrow
+        inputs add a checkpoint about every 100 batches to bound the
+        uncommitted tail. The client may checkpoint earlier if deferred
+        capacity fills or a batch must be split to fit.
+
+        On a transient connection failure, the client re-sends the original,
+        replayable DataFrame only when no batch was successfully published and
+        the failed operation is not ``in_doubt``. Otherwise it raises rather
+        than replaying from row zero. If a batch from this call may have
+        committed, the raised error has ``in_doubt=True`` even when the final
+        native write alone was provably not delivered. This includes local
+        validation and Arrow stream errors after publication. Internal
+        checkpoints do not reset the call's delivery status. The load did not
+        finish, but any already committed prefix remains; an application-level
+        retry of the whole DataFrame can duplicate it unless the destination
+        table uses suitable ``DEDUP UPSERT KEYS``. A consumed one-shot stream
+        may instead be non-replayable with ``in_doubt=False`` when no rows
+        could have landed; that error asks for a fresh reader. Server-side
+        rejections (e.g. a schema mismatch) surface as a plain
+        :class:`QuestDBError`; the structured ``sender_error`` diagnostic
+        is attached only by the store-and-forward senders.
+
+        Bulk GEOHASH columns treat each integer as a raw bit pattern. The
+        declared precision must be in ``1..=60`` and fit the signed carrier,
+        but values are not checked against it. For example, ``32`` under
+        ``GEOHASH(5b)`` is accepted. A wrong precision can therefore let the
+        write succeed while storing a different GEOHASH location or ``NULL``;
+        the exact result is unspecified. This is a semantic data-integrity
+        risk, not a memory-safety risk for otherwise valid NumPy/Arrow buffers.
+        Validate bulk values before sending them. Malformed custom Arrow C
+        Data structures remain invalid input.
+
+        Arrow field metadata reaches the native client unchanged. A
+        ``questdb.column_type`` field claim the field's Arrow type cannot
+        carry, such as a ``'short'`` claim left on a column cast to
+        ``pa.int32()``, raises :class:`QuestDBError` with ``code`` set to
+        ``QuestDBErrorCode.ArrowIngest`` before anything is sent. The
+        refusal is deliberate; a ``df.attrs['questdb']`` claim that no
+        longer fits is logged and dropped instead. Drop a retyped field's
+        metadata with ``field.remove_metadata()`` to write it.
 
         ``at`` names the designated timestamp column (by name or index),
         or a fixed ``TimestampNanos`` / ``datetime`` shared by every row,
@@ -1247,26 +1703,65 @@ class QuestDB:
         - **pandas** ``pandas.DataFrame`` (NumPy-backed columns route
           through the legacy planner; pyarrow-backed columns route
           through the Arrow C Stream capsule path).
-        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``.
-          ``LazyFrame`` is materialised via
-          ``.collect(engine='streaming')`` (eager ``.collect()`` on
-          polars < 1.0).
+        - **polars** ``polars.DataFrame`` and ``polars.LazyFrame``
+          (polars 1.32 or later). ``LazyFrame`` is materialised via
+          ``.collect(engine='streaming')``.
         - **pyarrow** ``pa.Table``, ``pa.RecordBatch``, and
           ``pa.RecordBatchReader``.
         - Any object exposing the Arrow C Data Interface — i.e. with
-          ``__arrow_c_stream__`` (duckdb / cudf / modin / pyarrow-backed
+          ``__arrow_c_stream__`` (duckdb / cudf / pyarrow-backed
           pandas 2.2+) or ``__arrow_c_array__`` (single Arrow array
           exporters, wrapped into a one-batch ``pa.Table``).
+
+        Numbers, strings, symbols, timestamps, decimals and ``float64``
+        arrays land as their Arrow or NumPy type implies. The other column
+        types are stated by the column's type or by a label:
+
+        - **UUID**: ``uuid.UUID`` cells, ``pa.uuid()`` (pyarrow >= 18), or a
+          16-byte binary column with ``schema_overrides={'col': 'uuid'}``.
+          Bytes are RFC 4122 big-endian, as ``uuid.UUID.bytes``.
+        - **LONG256**: a 32-byte binary column labelled through
+          ``schema_overrides``, ``questdb.column_type`` field metadata or a
+          ``df.attrs['questdb']`` claim, or an object column of Python ints
+          under a ``df.attrs['questdb']`` claim. Bytes are little-endian, as
+          ``value.to_bytes(32, 'little')``.
+        - **IPV4**: ``ipaddress.IPv4Address`` cells, or ``'ipv4'`` on a
+          ``uint32`` column.
+        - **CHAR**: ``'char'`` on a ``uint16`` column.
+        - **GEOHASH**: ``('geohash', bits)`` on an integer column, signed or
+          unsigned; values are raw bit patterns, as described above.
+        - **DATE**: ``pa.timestamp('ms')``, ``pa.date32()`` or
+          ``pa.date64()``. NumPy ``datetime64[ms]`` widens to TIMESTAMP
+          unless a ``df.attrs['questdb']`` claim names it DATE.
+        - **BINARY**: ``bytes``, ``bytearray`` or ``memoryview`` cells, and
+          Arrow binary columns other than ``pa.fixed_size_binary(8)``. A 16-
+          or 32-byte column with no label is written as BINARY with a
+          ``questdb`` warning when it comes from native Arrow input, and is
+          refused with ``BadDataFrame`` in a pandas frame;
+          ``schema_overrides={'col': 'binary'}`` labels it as plain bytes.
+
+        ``schema_overrides`` needs a fully Arrow-backed frame: every column
+        an ``ArrowDtype``, as ``df.convert_dtypes(dtype_backend='pyarrow')``
+        makes it. Input that falls back to the NumPy planner raises
+        :class:`UnsupportedDataFrameShapeError`.
+
+        A frame from :meth:`QueryResult.to_pandas` carries its column types
+        in ``df.attrs['questdb']`` and writes back with them. A claim that
+        no longer fits its column is logged through the ``questdb`` logger
+        and dropped. ``help(questdb.QuestDB.dataframe)`` gives the full
+        contract for each type.
 
         ``max_rows_per_batch`` sets the pipelining granularity, not a
         safety limit: any batch exceeding the negotiated per-batch byte
         cap is split regardless of it, and a single row is never bounded
         by it. Each batch is one unit of client memory and server-side
-        apply. Sliceable Arrow inputs checkpoint about every 100 batches,
-        so ``max_rows_per_batch * 100`` rows approximates their periodic
-        replay window. The NumPy planner normally commits once after the
-        whole frame. Either path may checkpoint earlier when deferred
-        capacity fills. Raise ``max_rows_per_batch`` for narrow numeric
+        apply. The first successful batch on a fresh connection is a commit
+        boundary. Sliceable Arrow inputs add another checkpoint about every
+        100 batches, so ``max_rows_per_batch * 100`` rows approximates the
+        maximum periodic uncommitted tail, not a whole-source replay window.
+        The NumPy planner pipelines the remaining batches until its final
+        commit. Either path may checkpoint earlier when deferred capacity
+        fills. Raise ``max_rows_per_batch`` for narrow numeric
         rows; lower it for very wide rows or tight memory. Streaming Arrow
         input (``pa.RecordBatchReader``) is not re-batched — the producer's
         batch size governs its checkpoint window.
@@ -1278,6 +1773,7 @@ class QuestDB:
         binds: Optional[Union[list, tuple]] = None,
         *,
         reset_symbol_dict: bool = True,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
     ) -> QueryResult:
         """
         Execute a SQL query and return a :class:`QueryResult`.
@@ -1289,13 +1785,33 @@ class QuestDB:
         ``to_pandas()``. Set ``False`` to keep the dictionary warm across
         repeated identical queries. No-op against servers that predate the
         capability.
+
+        ``timeout`` runs this query under its own budget instead of the
+        server-wide ``query.timeout``, overriding the connect string's
+        ``query_timeout_ms``. An ``int`` is milliseconds; a
+        ``datetime.timedelta`` works too, with a positive value below one
+        millisecond rounded *up* to 1 ms. ``None`` (the default) keeps the
+        connect string's ``query_timeout_ms``; ``0`` clears it, so the query
+        runs under the server-wide ``query.timeout``.
+
+        Requires a server advertising ``CAP_QUERY_TIMEOUT``: against an older
+        one a non-zero timeout is refused before anything is sent, with
+        ``QuestDBErrorCode.UnsupportedServer``, rather than silently running
+        under the server default; the connection is untouched. On expiry the
+        error carries ``QuestDBErrorCode.QueryTimeout`` and the connection
+        stays usable — but do not retry a write on it, because a statement
+        that outlives its timeout is reported as done instead, and a DDL /
+        INSERT / UPDATE that timed out waiting for the table writer may still
+        be applied.
         """
 
     def execute(
         self,
         sql: str,
         binds: Optional[Union[list, tuple]] = None,
-    ) -> None:
+        *,
+        timeout: Optional[Union[int, np.integer, timedelta]] = None,
+    ) -> Optional[ExecDone]:
         """
         Run a statement and discard whatever it returns.
 
@@ -1303,8 +1819,13 @@ class QuestDB:
         clean end and returns the pooled connection. Statement output
         (a ``COPY`` status row, admin-function rows, a stray
         ``SELECT``) is discarded; use :meth:`query` when you want the
-        result. Returns ``None``: the protocol carries no
-        rows-affected count.
+        result. ``timeout`` behaves as on :meth:`query`.
+
+        Returns the statement's ``EXEC_DONE`` report as an
+        :class:`ExecDone` named tuple ``(op_type, rows_affected)``, or
+        ``None`` for a statement that streamed a result set instead. See
+        :attr:`QueryResult.exec_done` for the caveats on
+        ``rows_affected``.
         """
 
     def reader(self) -> PooledReader:
@@ -1343,22 +1864,141 @@ class QuestDB:
         Manually reap idle above-pool-size connections.
         """
 
-    def close(self):
+    def close(self, timeout: Optional[float] = ...) -> None:
         """
         Close the client and its connection pool.
 
-        Idempotent. Raises ``QuestDBError(InvalidApiCall)`` instead of
-        waiting while the calling thread owns an active pool operation or a
-        lease attributed to it: a sender lease belongs to the thread that last
-        used it, a reader lease always to the thread that borrowed it.
+        Closing is one-way: once a ``close()`` proceeds -- rather
+        than being refused outright, as from inside one of the
+        handle's own calls or callbacks -- the handle refuses new
+        work, while work already in flight drains: a call in progress
+        runs to completion, and an outstanding lease keeps working
+        until its holder closes it. The one exception is
+        :meth:`PooledSender.dataframe`, which forwards to
+        :meth:`dataframe` over a connection of its own from the pool,
+        so a load started through a lease after ``close()`` is new work
+        and is refused like any other. The native pool is torn down by
+        the first ``close()`` that finds nothing using the handle, or
+        when the handle itself is collected.
+
+        Calls on the handle and on its leases are counted per OS
+        thread. With greenlets -- gevent, eventlet, or ``greenlet``
+        used directly -- all greenlets on one thread count as one
+        caller, so ``close()`` is also refused while another greenlet
+        on the same thread is suspended inside a call on the handle or
+        on one of its leases. See :ref:`sender_threading`.
+
+        ``timeout`` sets how long this call waits for that drain.
+        Calls are the handle's own methods in progress, such as
+        ``dataframe()`` and ``query()``; anything done through a lease
+        counts as that lease, including a long ``lease.dataframe()``
+        already running when ``close()`` starts.
+
+        - Left out: a call in progress is waited for until it
+          returns, and an outstanding lease for up to a minute. A long
+          load through a lease needs a larger ``timeout``, or ``None``.
+        - A number of seconds: calls and leases alike are waited for
+          up to that long. ``0`` closes only if nothing is in flight.
+        - ``None``: calls and leases alike are waited for until they
+          are done.
+
+        ``close()`` cannot interrupt a call in progress. A
+        ``dataframe()`` reading a stream that never ends, or one
+        waiting on the very thread that calls ``close()``, keeps it
+        waiting until ``timeout`` runs out -- and, with no limit on
+        calls, for ever. A lease comes back only when its holder
+        closes it, so one held by the calling thread, or by a thread
+        that has since finished, never will: close every lease before
+        closing the handle.
+
+        When the limit runs out, ``QuestDBError`` is raised with
+        ``code`` set to ``QuestDBErrorCode.InvalidApiCall``, naming how
+        many leases and calls are still outstanding. The handle stays
+        closing -- it never goes back to open -- and a later
+        ``close()``, with any ``timeout``, resumes the wait and
+        finishes the teardown. Waiting for a concurrent ``close()`` on
+        another thread to finish its teardown is limited too: a number
+        of seconds covers that wait and the drain together; left out,
+        that wait gets a minute of its own; ``None`` puts no limit on
+        it.
+
+        ``timeout`` covers only this waiting. The teardown then spends
+        up to ``close_flush_timeout_millis`` (5 seconds by default)
+        draining each sender's queue. An in-memory queue drops whatever
+        it has not delivered by then; a disk-backed queue (``sf_dir``)
+        keeps it for replay on restart. The drop is not reported to
+        Python: it raises nothing and logs nothing through the
+        ``questdb`` logger. To be sure rows have arrived, close each
+        lease with ``close(wait=True)`` before closing the handle.
+
+        While it waits, it reports what it is still waiting for
+        through the ``questdb`` logger at ``WARNING``: every five
+        seconds for the first minute, then once a minute.
+
+        A number of seconds is a budget for the whole close,
+        including the close a ``with`` block makes on its way out:
+        when the most recent ``close()`` on the handle was given one,
+        leaving the block waits only for what is left of it, and not
+        at all once it has run out. To bound leaving a ``with`` block,
+        call ``close(timeout=...)`` as the block's last statement.
+        Otherwise, leaving the block closes with the limits of a
+        ``close()`` with no arguments.
+
+        Idempotent: closing a closed handle returns without doing
+        anything, and no ``close()`` returns success unless the
+        teardown has run.
+
         When called from inside one of this handle's own
-        ``error_handler`` / ``connection_listener`` callbacks, it does
-        not wait for a concurrent ``close()`` on another thread to
-        finish; the in-flight callback completes after that close
-        returns.
+        ``error_handler`` / ``connection_listener`` callbacks, it
+        never waits: it closes immediately when nothing is using the
+        handle, refuses when leases or calls are outstanding (close
+        from another thread to wait for the drain), and returns
+        without waiting when a concurrent ``close()`` is already
+        running -- possibly before that close finishes. The handle
+        only moves toward closed, never back to open.
+
+        A persistence-warning handler for this handle's OIDC provider may
+        not close it: called from the handler, ``close()`` raises
+        ``QuestDBError(InvalidApiCall)`` instead of waiting for the worker
+        delivering the warning or for its leases. A close on any other
+        thread first waits for such a handler to return, and gives up
+        with the same error after two seconds without starting to close
+        -- which is how a close that the handler delegated to another
+        thread, and waits for, is released. Called from any other OIDC
+        callback -- a renderer callback, or a persistence-warning handler
+        of another provider -- each wait above is limited to two seconds,
+        after which it raises the same error and leaves the handle
+        closing: a lease or call on another thread may be blocked on a
+        token the provider cannot supply until the callback returns.
         """
 
-    def __exit__(self, exc_type, _exc_val, _exc_tb): ...
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Close the handle at the end of a ``with`` block.
+
+        When the most recent :meth:`close` on the handle was given a
+        number of seconds, this close waits only for what is left of
+        that budget; otherwise it closes with the limits of a
+        :meth:`close` with no arguments.
+
+        Leaving the block on an exception still closes, but a close
+        that cannot finish is reported through the ``questdb`` logger
+        instead of raised, so it does not replace the exception being
+        reported. Leaving the block normally raises as :meth:`close`
+        does.
+        """
+
+
+class ExecDone(NamedTuple):
+    """A non-SELECT statement's terminal ``EXEC_DONE`` report, as returned
+    by :meth:`QuestDB.execute` / :meth:`PooledReader.execute` and carried on
+    :attr:`QueryResult.exec_done`. ``rows_affected`` is the number of rows
+    an ``INSERT`` or ``UPDATE`` touched, and ``0`` for a statement that
+    carries no count (one executed at parse time). ``op_type`` is the server's
+    QWP operation-type byte, carried through as an opaque ``int``."""
+
+    op_type: int
+    rows_affected: int
 
 
 class QueryResult:
@@ -1378,16 +2018,63 @@ class QueryResult:
     target is a polars / pandas frame, the dedicated methods avoid the
     re-reconciliation that ``polars.DataFrame(result)`` /
     ``to_arrow().to_pandas()`` pay on SYMBOL-heavy results.
+    ``to_arrow().to_pandas()`` needs pyarrow 23 or later for SYMBOL
+    columns, which use ``uint32`` dictionary indices.
+
+    polars (``polars.DataFrame(result)``, polars 1.32 or later) and duckdb
+    (``duckdb.from_arrow(result)``, duckdb 1.2 or later) read the result
+    through :meth:`__arrow_c_stream__` without pyarrow. duckdb reads when
+    you fetch, so fetch before the result is closed.
     """
+
+    def __arrow_c_schema__(self) -> Any:
+        """Arrow schema PyCapsule protocol (no pyarrow needed). It reads the
+        first batch to get the schema, and keeps that batch for
+        ``__arrow_c_stream__``. duckdb 1.5, ``pa.schema(result)`` and
+        ``polars.Schema(result)`` call it. After this call, read the result
+        only through the stream (``pa.table(result)``,
+        ``polars.DataFrame(result)``, duckdb); the other readers raise
+        ``InvalidApiCall`` on their first read. When the schema was read
+        first, later calls return the same schema, also after the stream was
+        taken."""
 
     def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
         """Arrow C stream PyCapsule protocol (no pyarrow needed). SYMBOL
         columns arrive compact — each batch's dictionary holds only the values
         it references — so a consumer that unifies per-batch dictionaries
-        (e.g. ``polars.DataFrame(result)``) reconciles them."""
+        (e.g. ``polars.DataFrame(result)`` on polars 1.32 or later)
+        reconciles them. Older polars misreads such a stream, so when polars
+        before 1.32 reads the result directly (``polars.DataFrame(result)``,
+        ``polars.from_arrow(result)``), the call raises ``InvalidApiCall``
+        and the result stays unread. A stream that reaches polars through
+        another library is not checked.
+
+        ``requested_schema`` is ignored, also when it does not match: the
+        stream always has the result's own schema, so check the schema you
+        get. ``pa.table(result, schema=...)`` and
+        ``polars.DataFrame(result, schema=...)`` cast the result;
+        ``pa.RecordBatchReader.from_stream(result, schema=...)`` (pyarrow 15
+        or later) returns the result's own schema.
+
+        The stream releases the result's connection when the consumer reads
+        the last batch, not when it releases the stream. A reader lease can
+        run its next query as soon as the stream is drained.
+
+        The stream does not replay a result: after a batch has been
+        delivered, a failover ends the stream with an error. The consumer
+        raises its own exception type, and the message contains
+        ``[FailoverWouldDuplicate]``; re-issue the query. polars raises a
+        ``ComputeError``, but polars before 1.37.1 raises a
+        ``PanicException``, which ``except Exception`` does not catch."""
 
     def to_arrow(self) -> Any:
-        """Read the full result into a ``pyarrow.Table``. Requires pyarrow."""
+        """Read the full result into a ``pyarrow.Table``. Requires pyarrow.
+
+        SYMBOL columns use ``uint32`` dictionary indices, which
+        ``Table.to_pandas()`` accepts only from pyarrow 23. For a pandas
+        frame, call :meth:`to_pandas` instead. DECIMAL columns with a
+        precision of 18 or less arrive as ``decimal32`` / ``decimal64``,
+        which need pyarrow 20 or later."""
 
     def to_pandas(
         self,
@@ -1397,11 +2084,18 @@ class QueryResult:
     ) -> pd.DataFrame:
         """Read the full result into a ``pandas.DataFrame``. With no arguments
         the result is materialised via numpy (pyarrow-free); passing
-        ``dtype_backend`` or ``types_mapper`` selects the pyarrow path."""
+        ``dtype_backend`` or ``types_mapper`` selects the pyarrow path.
+        With no arguments or a ``dtype_backend``, a ``GEOHASH`` column is
+        a signed integer sized by its precision: ``int8`` up to 7 bits,
+        ``int16`` to 15, ``int32`` to 31, ``int64`` to 60."""
 
     def to_polars(self) -> Any:
         """Read the full result into a ``polars.DataFrame``. Requires polars
-        and pyarrow."""
+        and pyarrow. If the polars ``Categorical`` fast path fails, it issues
+        a ``RuntimeWarning`` and builds the frame with ``polars.from_arrow``:
+        the values stay correct, but the read is slower. Under ``-W error``
+        that warning raises after the result was read, so the frame is lost;
+        run the query again."""
 
     def iter_arrow(self) -> Iterator[Any]:
         """Iterate result batches as ``pyarrow.RecordBatch``."""
@@ -1410,7 +2104,12 @@ class QueryResult:
         """Iterate result batches as ``polars.DataFrame`` (streaming /
         low-peak-memory). Batches share one ``Categories`` identity so
         ``polars.concat`` over them stitches cleanly. Requires polars and
-        pyarrow."""
+        pyarrow. If the ``Categorical`` fast path fails, it issues one
+        ``RuntimeWarning`` and builds the remaining frames with
+        ``polars.from_arrow``, cast to the same ``Categories``. If that cast
+        fails too, the warning says so: those frames have a plain
+        ``Categorical`` dtype, and ``polars.concat`` with the frames before
+        fails."""
 
     def iter_pandas(
         self,
@@ -1420,12 +2119,41 @@ class QueryResult:
     ) -> Iterator[pd.DataFrame]:
         """Iterate result batches as ``pandas.DataFrame``. With no arguments
         the batches are materialised via numpy (pyarrow-free); passing
-        ``dtype_backend`` or ``types_mapper`` selects the pyarrow path."""
+        ``dtype_backend`` or ``types_mapper`` selects the pyarrow path.
+        A ``GEOHASH`` column gets the signed integer type
+        :meth:`to_pandas` gives it."""
+
+    def columns(self) -> List[Tuple[str, str]]:
+        """Column names and QuestDB DDL type names, as
+        ``[(name, type_name), ...]``. Does not consume the rows —
+        :meth:`iter_rows` continues from the same stream — but rules out the
+        other materialisation methods. Empty for a non-SELECT. A ``DECIMAL``
+        is reported at its storage width's precision (18, 38 or 76), because
+        the wire carries only the scale, and an array column as ``DOUBLE[]``
+        / ``LONG[]`` whatever its dimensionality. A result with unread rows
+        is not at its terminal: call :meth:`cancel` before :meth:`close` to
+        keep its connection."""
+
+    def iter_rows(self) -> Iterator[Tuple[Any, ...]]:
+        """Iterate the result as tuples of Python objects, one batch at a
+        time, with ``None`` for SQL NULL. Needs neither pyarrow nor pandas.
+        Every call returns the same iterator; after :meth:`cancel` no
+        further rows are yielded, after :meth:`close` it raises. A fresh
+        call raises once the stream ended with an error or its iterator was
+        closed."""
+
+    @property
+    def exec_done(self) -> Optional[ExecDone]:
+        """A non-SELECT's terminal ``EXEC_DONE`` as an :class:`ExecDone`
+        ``(op_type, rows_affected)`` once the result has been drained, else
+        ``None``. ``rows_affected`` is ``0`` for a statement that carries no
+        count. Still available after :meth:`close`."""
 
     def cancel(self) -> None:
         """Cancel the query and drain to terminal. The result remains
         open until :meth:`close` or context exit. On failure, it is
-        closed. Idempotent after success."""
+        closed. Idempotent after success. A result not yet read cannot be
+        read afterwards: every read method raises."""
 
     def close(self) -> None:
         """Release the cursor and reader. Terminal connections return
@@ -1460,9 +2188,12 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
+        bearer_token_provider: Optional[
+            Union[BearerTokenProvider, Callable[[], str]]] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,
+        auth_timeout: Union[int, timedelta] = 15000,
         tls_verify: bool = True,
         tls_ca: Optional[TlsCa] = None,
         tls_roots=None,
@@ -1494,9 +2225,12 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
+        bearer_token_provider: Optional[
+            Union[BearerTokenProvider, Callable[[], str]]] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,
+        auth_timeout: Union[int, timedelta] = 15000,
         tls_verify: bool = True,
         tls_ca: Optional[TlsCa] = None,
         tls_roots=None,
@@ -1538,9 +2272,12 @@ class Sender:
         username: Optional[str] = None,
         password: Optional[str] = None,
         token: Optional[str] = None,
+        oidc_auth: Optional[OidcDeviceAuth] = None,
+        bearer_token_provider: Optional[
+            Union[BearerTokenProvider, Callable[[], str]]] = None,
         token_x: Optional[str] = None,
         token_y: Optional[str] = None,
-        auth_timeout: int = 15000,
+        auth_timeout: Union[int, timedelta] = 15000,
         tls_verify: bool = True,
         tls_ca: Optional[TlsCa] = None,
         tls_roots=None,
@@ -1600,6 +2337,11 @@ class Sender:
 
         Consult the `.auto_flush_rows`, `.auto_flush_bytes` and
         `.auto_flush_interval` properties for the current active thresholds.
+
+        Over ``ws`` and ``wss`` the byte threshold is on by default, so
+        auto-flush stays on with ``auto_flush_rows`` and
+        ``auto_flush_interval`` both off. Pass ``auto_flush=off`` to batch
+        by hand.
         """
 
     @property
@@ -1611,7 +2353,22 @@ class Sender:
     @property
     def auto_flush_bytes(self) -> Optional[int]:
         """
-        Byte-count threshold for the auto-flush logic, or None if disabled.
+        Byte-count threshold for the auto-flush logic, or None if disabled or
+        not yet known.
+
+        Over ``ws`` and ``wss`` the threshold is at most 90% of the
+        connection's frame cap, and by default it is 90% of that cap. The
+        cap is known once :func:`Sender.establish` has connected, so before
+        that the default reports ``None``. A server that does not advertise
+        a cap counts as having QuestDB's default, 2 MiB less 14 bytes,
+        unless the local limit is lower. An explicit threshold reads as
+        configured before :func:`Sender.establish` and after
+        :func:`Sender.close`; the cap lowers it only between the two.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when read over
+        ``ws`` or ``wss`` from this sender's own ``error_handler`` or
+        ``connection_listener``, or from any thread while this sender is
+        inside a native call such as :func:`Sender.flush`.
         """
 
     @property
@@ -1630,6 +2387,10 @@ class Sender:
 
         Protocol version 2 introduces binary floating point support and
         the array datatype.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when read from any
+        thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     @property
@@ -1637,6 +2398,10 @@ class Sender:
         """
         Returns the sender's maximum-configured maximum name length for table
         names and column names.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when read from any
+        thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     def establish(self):
@@ -1659,7 +2424,13 @@ class Sender:
         """
         Number of bytes of unsent data in the internal buffer.
 
-        Equivalent (but cheaper) to ``len(bytes(sender))``.
+        Equivalent (but cheaper) to ``len(bytes(sender))`` over ILP.
+
+        For QWP/UDP senders this returns an estimated size hint, not the
+        exact serialized byte count. For QWP/WebSocket senders it is an
+        estimate that is never below the size of the frame a flush
+        encodes, unless store-and-forward has fallen back to sending full
+        symbol dictionaries.
         """
 
     def __bytes__(self) -> bytes:
@@ -1681,9 +2452,7 @@ class Sender:
         table_name: str,
         *,
         symbols: Optional[Dict[str, Optional[str]]] = None,
-        columns: Optional[
-            Dict[str, Union[None, bool, int, float, str, TimestampMicros, TimestampNanos, datetime, np.ndarray, Decimal]]
-        ] = None,
+        columns: Optional[Dict[str, RowColumnValue]] = None,
         at: Union[TimestampNanos, datetime, ServerTimestampType],
     ) -> Sender:
         """
@@ -1692,9 +2461,37 @@ class Sender:
         This may be sent automatically depending on the ``auto_flush`` setting
         in the constructor.
 
-        Refer to the :func:`Buffer.row` documentation for details on arguments.
+        See :func:`Buffer.row` for supported column types, protocol
+        restrictions, server requirements, and ``NULL``-sentinel behavior.
 
-        **Note**: Support for NumPy arrays (``np.array``) requires QuestDB server version 9.0.0 or higher.
+        Raises :class:`QuestDBError` (``InvalidApiCall``) if called while
+        another ``row()`` on this sender is still in progress, or a
+        ``dataframe()`` over ``tcp``, ``http`` or ``udp``: from a column
+        value whose conversion runs Python code, or from a logging handler
+        that writes the ``questdb`` logger's records through this sender.
+        Such a ``dataframe()`` writes the frame into this sender's buffer,
+        and a row written while it runs could not be flushed until it
+        returned. Over ``ws`` and ``wss`` the frame goes out on a connection
+        of its own, so a row written from inside it is accepted and flushed
+        as usual.
+
+        Over ``ws`` and ``wss`` with auto-flush on, it also raises
+        ``InvalidApiCall``, without adding the row, when called from this
+        sender's own ``error_handler`` or ``connection_listener``. That
+        includes a logging handler that writes the ``questdb`` logger's
+        records through this sender while no ``error_handler`` is set, since
+        server rejections are then logged from inside that callback.
+
+        Over ``ws`` and ``wss``, auto-flush also publishes a buffer whose
+        size estimate reaches the connection's frame cap, and every published
+        frame fits that cap: when the whole buffer does not, or its size
+        estimate is past the cap, the rows buffered before this one go out
+        on their own and this row starts the next batch. Whatever this
+        method raises, the row was not added. ``BatchTooLarge`` means either
+        it does not fit in a frame on its own, or the rows buffered before
+        it do not fit even without it, as after the frame cap shrinks, and
+        those rows are discarded. Any other publish error also clears the
+        rows buffered before it, as :func:`Sender.flush` does.
         """
 
     def dataframe(
@@ -1706,7 +2503,7 @@ class Sender:
         symbols: Union[str, bool, List[int], List[str]] = "auto",
         at: Union[ServerTimestampType, int, str, TimestampNanos, datetime],
         max_rows_per_batch: int = 16384,
-        schema_overrides: Optional[Dict[str, object]] = None,
+        schema_overrides: Optional[SchemaOverrides] = None,
     ) -> Sender:
         """
         Write a Pandas DataFrame to QuestDB.
@@ -1719,6 +2516,10 @@ class Sender:
         and ``schema_overrides`` apply only there). The direct load has no
         ordering relationship with rows buffered via :meth:`row` and does not
         flush them.
+
+        ``table_name_col`` follows the same split: the row-serializing
+        protocols accept it, QWP/WebSocket writes one table per call and
+        rejects it with ``UnsupportedDataFrameShapeError``.
 
         Example:
 
@@ -1743,8 +2544,13 @@ class Sender:
             with qi.Sender.from_env() as sender:
                 sender.dataframe(df, table_name='race_metrics', at='ts')
 
-        This method builds on top of the :func:`Buffer.dataframe` method.
-        See its documentation for details on arguments.
+        Over QWP/WebSocket, supported column types and arguments mirror
+        :meth:`QuestDB.dataframe`, including UUID, IPV4, BINARY, GEOHASH,
+        LONG256, CHAR, DATE, ``schema_overrides`` and round-trip claims in
+        ``df.attrs['questdb']``. Over ILP and QWP/UDP, see
+        :func:`Buffer.dataframe` for the row-serializing mappings;
+        ``max_rows_per_batch`` and ``schema_overrides`` do not apply on those
+        protocols.
 
         Additionally, this method also supports auto-flushing the buffer
         as specified in the ``Sender``'s ``auto_flush`` constructor argument.
@@ -1794,6 +2600,12 @@ class Sender:
             transactionally. This feature requires ILP/HTTP and is not available
             when connecting over TCP. *Default: False.*
 
+        If the flush fails, the internal buffer is cleared, rows and all; a
+        buffer passed as ``buffer`` is left as it is. Over QWP/WebSocket a
+        buffer is published as one frame, and one whose encoded frame
+        exceeds the connection's frame cap raises :class:`QuestDBError`
+        (``BatchTooLarge``) without publishing anything.
+
         The Python GIL is released during the network IO operation.
         """
 
@@ -1814,12 +2626,22 @@ class Sender:
     def published_fsn(self) -> Optional[int]:
         """
         Highest QWP/WebSocket frame sequence number published locally.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when called from
+        this sender's own ``error_handler`` or ``connection_listener``, or
+        from any thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     def acked_fsn(self) -> Optional[int]:
         """
         Highest QWP/WebSocket frame sequence number completed by ACK or
         drop-and-continue rejection.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when called from
+        this sender's own ``error_handler`` or ``connection_listener``, or
+        from any thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     def await_acked_fsn(self, fsn: int, timeout_millis: int = 0) -> bool:
@@ -1838,11 +2660,21 @@ class Sender:
     def poll_error(self) -> Optional[SenderError]:
         """
         Poll the next structured QWP/WebSocket diagnostic.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when called from
+        this sender's own ``error_handler`` or ``connection_listener``, or
+        from any thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     def error_events_dropped(self) -> int:
         """
         Number of QWP/WebSocket diagnostics dropped from the bounded ring.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when called from
+        this sender's own ``error_handler`` or ``connection_listener``, or
+        from any thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     @property
@@ -1850,6 +2682,10 @@ class Sender:
         """
         Total connection events discarded by the listener inbox's
         drop-oldest policy. ``0`` when no listener is registered.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when read from any
+        thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     @property
@@ -1857,6 +2693,10 @@ class Sender:
         """
         Total connection events delivered to the listener. ``0`` when no
         listener is registered.
+
+        Raises :class:`QuestDBError` (``InvalidApiCall``) when read from any
+        thread while this sender is inside a native call such as
+        :func:`Sender.flush`.
         """
 
     def close_drain(self):
@@ -1878,7 +2718,7 @@ class Sender:
             closing.
         """
 
-    def __exit__(self, exc_type, _exc_val, _exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         """
         Flush pending and disconnect at the end of a ``with`` block.
 

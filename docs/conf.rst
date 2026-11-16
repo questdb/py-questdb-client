@@ -134,6 +134,21 @@ the Java client's configuration.
 
   Default: 4.
 
+* ``query_timeout_ms`` - ``int``: How long the server lets each statement
+  sent through :meth:`QuestDB.query <questdb.QuestDB.query>`,
+  :meth:`QuestDB.execute <questdb.QuestDB.execute>` or a reader lease run,
+  in place of its own ``query.timeout``. The server applies no ceiling, so a
+  value above ``query.timeout`` lets a long statement finish. A statement
+  that runs past it raises :class:`QuestDBError <questdb.QuestDBError>` with
+  ``code`` set to ``QuestDBErrorCode.QueryTimeout``. ``0`` leaves the
+  server's own timeout in place.
+
+  It needs a server that supports per-query timeouts. Against one that does
+  not, which includes QuestDB 10.0.1, every statement is refused with
+  ``QuestDBErrorCode.UnsupportedServer`` before it is sent.
+
+  Default: 0.
+
 * ``acquire_timeout_ms`` - ``int``: How long a borrow at the cap waits for
   a connection to be returned before failing. ``0`` fails fast.
 
@@ -169,8 +184,11 @@ background runner delivers them and reconnects on transient failures,
 walking the ``addr`` server list.
 
 * ``reconnect_max_duration_millis`` - ``int``: Total reconnect/failover
-  budget after a connection loss. Authentication and protocol-version
-  failures are terminal and are not retried.
+  budget after a connection loss. Protocol-version failures are terminal and
+  are not retried. A server that rejects the credential (HTTP 401 or 403)
+  stops a sender only before its first connection; once connected, the sender
+  keeps reconnecting with capped backoff and reports each rejected attempt
+  (see :ref:`token_rejections`).
 
   Default: 300000 (5 minutes).
 
@@ -194,11 +212,30 @@ walking the ``addr`` server list.
 
   Default: 5000.
 
-* ``request_durable_ack`` - ``'on'`` | ``'off'``: Negotiate durable
-  acknowledgements: the server acknowledges frames only once they are
-  durably stored (e.g. uploaded to object storage on Enterprise
-  deployments). A server without the capability rejects the first
-  operation.
+* ``request_durable_ack`` - ``'off'`` | ``'local'`` | ``'replicated'`` |
+  ``'on'`` | ``'local,replicated'``: Negotiate durable acknowledgements,
+  which the server sends once frames are durably stored:
+
+  * ``'local'``: the server has flushed the frames to its own disk, which
+    survives a server power loss but not the loss of that disk or a failover
+    to another node. Needs a server running ``cairo.commit.mode=adaptive``,
+    which QuestDB 10.1.0, QuestDB Enterprise 4.1.0 and earlier releases do
+    not have.
+  * ``'replicated'``, or its original name ``'on'``: the frames reached
+    replication storage (e.g. object storage), so they survive the loss of
+    the server. QuestDB Enterprise only; Enterprise 4.1.0 and earlier
+    accept only ``'on'``.
+  * ``'local,replicated'``: both. Needs QuestDB Enterprise running
+    ``cairo.commit.mode=adaptive``, which a replicating primary does only
+    when the mode is set explicitly.
+
+  The connection fails unless the server grants every level requested.
+  The store-and-forward queue keeps each frame for replay until its durable
+  acknowledgement arrives (with ``'local,replicated'``, the replicated one).
+  This client's acknowledgement waits --
+  :meth:`PooledSender.wait <questdb.PooledSender.wait>`, ``flush(wait=True)``
+  and ``await_acked_fsn()`` -- wait for the ordinary OK acknowledgement,
+  whatever this is set to.
 
   Default: ``'off'``.
 
@@ -262,6 +299,17 @@ Query egress (QWP/WebSocket)
 
 These keys shape :meth:`QuestDB.query <questdb.QuestDB.query>` /
 :meth:`QuestDB.reader <questdb.QuestDB.reader>` connections.
+
+* ``query_timeout_ms`` - ``int``: Default per-query timeout in milliseconds
+  for queries run through :class:`QuestDB <questdb.QuestDB>` and
+  :class:`PooledReader <questdb.PooledReader>`, replacing the server-wide
+  ``query.timeout``. ``timeout=`` on ``query()`` / ``execute()`` overrides it
+  per query, and ``timeout=0`` clears it. Requires a server advertising
+  ``CAP_QUERY_TIMEOUT``: against an older one every query is refused before
+  it is sent, with ``QuestDBErrorCode.UnsupportedServer``, while a non-zero
+  value is in effect; the connection is untouched by the refusal.
+
+  Default: 0 (no client-supplied timeout).
 
 * ``compression`` - ``'raw'`` | ``'zstd'`` | ``'auto'``: Result-set
   compression. ``auto`` accepts Zstandard when the server supports it;
@@ -350,6 +398,33 @@ the authentication process. The default is 15 seconds.
 
 See the :ref:`auth_and_tls_example` example for more details.
 
+Token providers (rotating Bearer tokens)
+----------------------------------------
+
+Token providers are the credentials with **no configuration-string key**. A
+rotating token provider is a live object, so it is passed as a Python keyword
+argument instead — ``oidc_auth=`` for OIDC device-flow sign-in, or
+``bearer_token_provider=`` for any other rotating Bearer token — to
+:func:`questdb.connect`, :class:`questdb.Sender`,
+:meth:`questdb.Sender.from_conf`, :meth:`questdb.Sender.from_env` or
+:meth:`questdb.QuestDB.from_conf`. The configuration-string keys
+``token_provider``, ``azure_resource``, ``azure_client_id`` and
+``azure_credential`` are rejected.
+
+The two are mutually exclusive with each other and with the fixed credentials
+above: passing one alongside ``token``, ``username`` or ``password`` raises
+:class:`~questdb.QuestDBError` with ``code`` set to
+``QuestDBErrorCode.ConfigError``. Supported on HTTP(S) and QWP/WebSocket; TCP
+and UDP are rejected. Use ``https::`` or ``wss::``: over plain ``http::`` or
+``ws::`` to a non-loopback host the token is sent in cleartext on every flush
+or (re)connect.
+
+For ``oidc_auth``, resolving a fresh token is bounded by the provider's own
+``timeout``, not by ``request_timeout`` or ``retry_timeout``: see
+:ref:`auth-token-wait`.
+
+See the :ref:`oidc_auth` guide and :ref:`refreshing_token_provider`.
+
 .. _sender_conf_tls:
 
 TLS
@@ -435,12 +510,15 @@ auto-flush by default, with the API-specific thresholds below. Set
 * ``auto_flush_bytes`` - ``int > 0`` | ``'off'``: The number of bytes that will
   trigger a flush. Set to ``'off'`` to disable.
 
-  *Default when auto-flush is enabled: off (TCP, HTTP, standalone
-  QWP/WebSocket) | max_datagram_size (QWP/UDP, 1400 by default) | 90% of the
-  effective frame cap (pooled QWP/WebSocket; before a server cap is known, the
-  lower of 8 MiB and 90% of the local queue cap). Explicit pooled thresholds
-  above 90% of the effective cap are clamped. The pooled byte count is a local
-  encoded-size estimate.*
+  *Default when auto-flush is enabled: off (TCP, HTTP) | max_datagram_size
+  (QWP/UDP, 1400 by default) | 90% of the effective frame cap (QWP/WebSocket,
+  standalone and pooled; until the server advertises its cap, 90% of the lower
+  of QuestDB's default cap, 2 MiB less 14 bytes, and the local queue cap).
+  Explicit QWP/WebSocket thresholds above 90% of
+  the effective cap are clamped. The QWP/WebSocket byte count is a local
+  encoded-size estimate. Over QWP/WebSocket, ``off`` disables only this
+  threshold: a buffer whose estimate reaches the full frame cap is still
+  published.*
 
 * ``auto_flush_interval`` - ``int > 0`` | ``'off'``: The time in milliseconds
   that will trigger a flush. Set to ``'off'`` to disable.

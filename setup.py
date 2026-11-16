@@ -83,6 +83,20 @@ def client_extension():
             (rpyutils_lib_dir, 'rpyutils'))]
     depends = list(extra_objects)
 
+    define_macros = [
+        ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION'),
+        ('QUESTDB_CLIENT_HAS_ARROW', '1'),
+        ('QUESTDB_CLIENT_ENABLE_ARROW', '1'),
+    ]
+    if platform.python_implementation() == 'PyPy':
+        # Cython 3.3.1 builds PyPy's extension types from type specs by
+        # default. For a class declaring both `cdef dict __dict__` and
+        # `cdef object __weakref__`, such as `Sender`, the spec carries two
+        # `Py_tp_members` slots, so importing the module fails with
+        # "SystemError: Multiple Py_tp_member slots are not supported".
+        # Keep the static types PyPy used up to Cython 3.3.0.
+        define_macros.append(('CYTHON_USE_TYPE_SPECS', '0'))
+
     return Extension(
         "questdb._client",
         ["src/questdb/_client.pyx"],
@@ -96,11 +110,7 @@ def client_extension():
         extra_link_args=extra_link_args,
         extra_objects=extra_objects,
         depends=depends,
-        define_macros = [
-            ('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION'),
-            ('QUESTDB_CLIENT_HAS_ARROW', '1'),
-            ('QUESTDB_CLIENT_ENABLE_ARROW', '1'),
-        ]
+        define_macros=define_macros,
     )
 
 
@@ -156,8 +166,9 @@ def cargo_build():
     # the released 2.x wheels: the knob is off by default at runtime and must
     # be explicitly set in the conf string, so compiling it in is safe.
     features = ['confstr-ffi', 'arrow', 'insecure-skip-verify']
+    ffi_cargo_args = cargo_args + ['--locked']
     subprocess.check_call(
-        cargo_args + ['--features', ','.join(features)],
+        ffi_cargo_args + ['--features', ','.join(features)],
         cwd=str(PROJ_ROOT / 'c-questdb-client' / 'questdb-rs-ffi'),
         env=env)
 
@@ -184,7 +195,7 @@ def readme():
 
 setup(
     name='questdb',
-    version='5.0.0',
+    version='6.1.0',
     platforms=['any'],
     python_requires='>=3.10',
     install_requires=['numpy>=1.21.0'],

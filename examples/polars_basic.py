@@ -56,7 +56,7 @@ def schema_overrides_example(host: str = 'localhost', port: int = 9000):
     """B-class wire types (IPv4 / Geohash / etc.) need an explicit hint
     because `arr.dtype` alone cannot disambiguate them from plain
     integer columns. `schema_overrides` injects the corresponding
-    `questdb.*` Arrow Field metadata. Requires pyarrow.
+    `questdb.*` Arrow Field metadata.
     """
     import polars as pl
 

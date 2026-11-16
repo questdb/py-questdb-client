@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import pathlib
+import select
 import socket
 import ssl
 import struct
@@ -17,13 +18,119 @@ QWP_STATUS_OK = 0x00
 QWP_FLAG_DEFER_COMMIT = 0x01
 
 
+class QwpRecordingProxy:
+    """Transparent TCP proxy that records QWP WebSocket upgrade auth."""
+
+    def __init__(self, target_host, target_port, *, host="127.0.0.1"):
+        self.host = host
+        self.target_host = target_host
+        self.target_port = target_port
+        self.port = None
+        self._sock = None
+        self._stop = threading.Event()
+        self._thread = None
+        self._handlers = []
+        self._lock = threading.Lock()
+        self.upgrade_authorizations = []
+        self.upgrade_paths = []
+        self.errors = []
+
+    def __enter__(self):
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind((self.host, 0))
+        self._sock.listen()
+        self._sock.settimeout(0.2)
+        self.port = self._sock.getsockname()[1]
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        self._stop.set()
+        try:
+            with socket.create_connection((self.host, self.port), timeout=0.2):
+                pass
+        except OSError:
+            pass
+        self._thread.join(timeout=2)
+        for handler in list(self._handlers):
+            handler.join(timeout=2)
+        self._sock.close()
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "upgrade_authorizations": list(
+                    self.upgrade_authorizations),
+                "upgrade_paths": list(self.upgrade_paths),
+                "errors": list(self.errors),
+            }
+
+    def _accept_loop(self):
+        while not self._stop.is_set():
+            try:
+                client, _addr = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if self._stop.is_set():
+                client.close()
+                break
+            handler = threading.Thread(
+                target=self._proxy_connection,
+                args=(client,),
+                daemon=True)
+            self._handlers.append(handler)
+            handler.start()
+
+    def _proxy_connection(self, client):
+        upstream = None
+        try:
+            upstream = socket.create_connection(
+                (self.target_host, self.target_port), timeout=5)
+            request = _read_until(client, b"\r\n\r\n")
+            with self._lock:
+                self.upgrade_authorizations.append(
+                    _optional_header(request, "Authorization"))
+                self.upgrade_paths.append(_request_path(request))
+            upstream.sendall(request)
+            self._relay(client, upstream)
+        except (BrokenPipeError, ConnectionResetError,
+                ConnectionAbortedError, ConnectionError):
+            pass
+        except Exception as exc:
+            with self._lock:
+                self.errors.append(repr(exc))
+        finally:
+            for stream in (client, upstream):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+
+    def _relay(self, client, upstream):
+        peers = {client: upstream, upstream: client}
+        while not self._stop.is_set():
+            readable, _, _ = select.select(list(peers), [], [], 0.2)
+            for source in readable:
+                data = source.recv(65536)
+                if not data:
+                    return
+                peers[source].sendall(data)
+
+
 class QwpAckServer:
     def __init__(self, *, host="127.0.0.1", ack_delay_s=0.0,
                  close_plan=None, max_batch_size=0,
                  defer_aware_acks=False, record_payloads=False,
                  error_status=None, error_message=b"mock rejection",
                  error_after_commit=False,
-                 tls=False):
+                 tls=False, required_authorization=None,
+                 close_after_upgrade_unless_authorization=None,
+                 durable_ack=False, idle_timeout_s=30, upgrade_gate=None):
         """
         `close_plan`: iterable consumed one value per accepted connection;
         a connection with value N is closed after handling its Nth binary
@@ -54,16 +161,41 @@ class QwpAckServer:
         self-signed certificate under ``test/certs`` (SAN: 127.0.0.1,
         localhost). Handshake failures are counted in
         ``tls_handshake_failures``, not ``errors``.
+
+        `required_authorization`: when set, record every WebSocket upgrade's
+        Authorization header and reject a mismatch with HTTP 401. This lets
+        authentication integration tests verify initial and reconnected
+        transport handshakes without implementing a complete QuestDB server.
+
+        `close_after_upgrade_unless_authorization`: when set, complete the
+        WebSocket upgrade for every credential but immediately close sessions
+        whose Authorization value does not match. This deterministically keeps
+        a reconnect loop active until a rotating provider supplies the expected
+        credential, without a test-side sleep or a server-auth rejection.
+
+        `idle_timeout_s`: seconds an upgraded connection may remain idle;
+        None waits indefinitely. The HTTP upgrade always retains its own
+        bounded timeout.
+
+        `upgrade_gate`: when set to a `threading.Event`, every connection
+        waits for it (at most 30 s) before answering the upgrade, so the
+        client has not learned the advertised cap until the test sets it.
         """
         self.host = host
         self.ack_delay_s = ack_delay_s
         self._close_iter = iter(close_plan) if close_plan is not None else None
         self.max_batch_size = max_batch_size
+        self.durable_ack = durable_ack
         self.defer_aware_acks = defer_aware_acks
         self.record_payloads = record_payloads
         self.error_status = error_status
         self.error_message = error_message
         self.error_after_commit = error_after_commit
+        self.required_authorization = required_authorization
+        self.close_after_upgrade_unless_authorization = (
+            close_after_upgrade_unless_authorization)
+        self.idle_timeout_s = idle_timeout_s
+        self.upgrade_gate = upgrade_gate
         self._tls_context = None
         if tls:
             self._tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -83,6 +215,8 @@ class QwpAckServer:
         self.binary_prefixes = []
         self.binary_payloads = []
         self.control_frame_count = 0
+        self.upgrade_authorizations = []
+        self.upgrade_paths = []
         self.errors = []
 
     def __enter__(self):
@@ -131,9 +265,33 @@ class QwpAckServer:
                 "binary_prefixes": list(self.binary_prefixes),
                 "binary_payloads": list(self.binary_payloads),
                 "control_frames": self.control_frame_count,
+                "upgrade_authorizations": list(
+                    self.upgrade_authorizations),
+                "upgrade_paths": list(self.upgrade_paths),
                 "errors": list(self.errors),
                 "tls_handshake_failures": self.tls_handshake_failures,
             }
+
+    def snapshot_when_closed(self, timeout_s=5.0):
+        """Return :meth:`snapshot` once every accepted connection has
+        finished. Call it after the client has closed.
+
+        A handler counts each frame as it reads it, on its own thread,
+        so a frame the client sent without waiting for an ack -- a
+        deferred frame under ``defer_aware_acks`` -- can still be unread
+        when the client call returns. A closed client's connections each
+        reach EOF once their frames are read, so the counts are final
+        when every handler has exited. Unlike
+        :meth:`wait_binary_frames_settled`, this has no quiet-period
+        fallback, which a slow runner's handler thread can outlast.
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            with self._lock:
+                finished = self.finished_count == self.accept_count
+            if finished or time.monotonic() >= deadline:
+                return self.snapshot()
+            time.sleep(0.001)
 
     def wait_binary_frames_settled(self, quiet_s=0.02, timeout_s=5.0):
         """Return the ``binary_frames`` count once no more are in flight.
@@ -214,8 +372,21 @@ class QwpAckServer:
                     pass
                 return
         try:
+            if self.upgrade_gate is not None:
+                self.upgrade_gate.wait(30)
             conn.settimeout(30)
             request = _read_until(conn, b"\r\n\r\n")
+            authorization = _optional_header(request, "Authorization")
+            with self._lock:
+                self.upgrade_authorizations.append(authorization)
+                self.upgrade_paths.append(_request_path(request))
+            if (self.required_authorization is not None
+                    and authorization != self.required_authorization):
+                conn.sendall(
+                    b"HTTP/1.1 401 Unauthorized\r\n"
+                    b"Content-Length: 0\r\n"
+                    b"Connection: close\r\n\r\n")
+                return
             key = _header(request, "Sec-WebSocket-Key")
             accept = _compute_accept(key)
             response = (
@@ -226,8 +397,17 @@ class QwpAckServer:
                 "X-QWP-Version: 1\r\n")
             if self.max_batch_size > 0:
                 response += f"X-QWP-Max-Batch-Size: {self.max_batch_size}\r\n"
+            if self.durable_ack:
+                response += "X-QWP-Durable-Ack: enabled\r\n"
             response += "\r\n"
             conn.sendall(response.encode("ascii"))
+            if (
+                    self.close_after_upgrade_unless_authorization is not None
+                    and authorization !=
+                    self.close_after_upgrade_unless_authorization):
+                _fin_close(conn)
+                return
+            conn.settimeout(self.idle_timeout_s)
             if close_after is not None and close_after == 0:
                 _fin_close(conn)
                 return
@@ -343,6 +523,19 @@ def _header(request, name):
         if line.lower().startswith(prefix):
             return line.split(":", 1)[1].strip()
     raise ValueError(f"missing HTTP header {name}")
+
+
+def _optional_header(request, name):
+    try:
+        return _header(request, name)
+    except ValueError:
+        return None
+
+
+def _request_path(request):
+    request_line = request.decode("iso-8859-1").split("\r\n", 1)[0]
+    parts = request_line.split()
+    return parts[1] if len(parts) >= 2 else None
 
 
 def _compute_accept(key):
