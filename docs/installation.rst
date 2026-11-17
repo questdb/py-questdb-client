@@ -52,6 +52,13 @@ Without the extra, you may still ingest data row-by-row through
 ``Sender.row()``, and read query results through the
 ``__arrow_c_stream__`` PyCapsule protocol.
 
+The :ref:`OIDC authentication helper <oidc_auth>` (:mod:`questdb.auth`) needs
+no extra dependencies for ``sign_in()`` / ``token()``. Some conveniences
+import the following lazily, only when used: ``sqlalchemy`` and ``psycopg`` /
+``psycopg2`` (PG-wire adapters), ``qrcode`` (terminal QR prompt;
+``qrcode[pil]`` or Pillow for the notebook PNG QR) and ``IPython``
+(rich Jupyter prompt).
+
 PIP
 ---
 
@@ -89,7 +96,7 @@ the following statements from a ``python3`` interactive shell:
 
     >>> import questdb
     >>> questdb.__version__
-    '6.0.1'
+    '6.1.0'
     >>> questdb.connect
     <function connect at 0x104b68240>
 

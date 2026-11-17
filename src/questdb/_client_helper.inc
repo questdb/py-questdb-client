@@ -13,8 +13,8 @@ static int Py_buffer_obj_is_set(Py_buffer* buf)
     return buf->obj != NULL;
 }
 
-// Nonzero while the interpreter is shutting down. Callbacks arriving from
-// native threads must not attempt to acquire the GIL past this point.
+// Nonzero while the interpreter is shutting down. This is only a fallback
+// check: OIDC callbacks use the admission/drain gate below for synchronization.
 static int qdb_py_is_finalizing(void)
 {
 #if PY_VERSION_HEX >= 0x030D0000
@@ -22,4 +22,244 @@ static int qdb_py_is_finalizing(void)
 #else
     return _Py_IsFinalizing();
 #endif
+}
+
+// CPython only. Cython gives a class declaring `cdef dict __dict__` its instance
+// dictionary eagerly, in tp_new. While that pointer is non-NULL, CPython's
+// specializing interpreter cannot cache a method lookup on the instance
+// (LOAD_ATTR_METHOD_LAZY_DICT requires a NULL dictionary), so every
+// `obj.method(...)` takes the generic lookup -- for `Sender`, every `row()`.
+// An empty dictionary carries nothing: drop it, and generic attribute access
+// recreates it on demand. PyPy keeps it.
+static void qdb_drop_empty_instance_dict(PyObject* obj)
+{
+#if !defined(PYPY_VERSION)
+    Py_ssize_t offset = Py_TYPE(obj)->tp_dictoffset;
+    if (offset > 0) {
+        PyObject** slot = (PyObject**)((char*)obj + offset);
+        PyObject* dict = *slot;
+        if (dict != NULL && PyDict_CheckExact(dict)
+                && PyDict_GET_SIZE(dict) == 0) {
+            *slot = NULL;
+            Py_DECREF(dict);
+        }
+    }
+#else
+    (void)obj;
+#endif
+}
+
+// Whether `obj` has an instance dictionary, read without creating one as
+// `obj.__dict__` does. -1 when its type keeps the dictionary elsewhere.
+static int qdb_instance_dict_is_set(PyObject* obj)
+{
+    Py_ssize_t offset = Py_TYPE(obj)->tp_dictoffset;
+    if (offset == 0)
+        return 0;
+    if (offset < 0)
+        return -1;
+    return *(PyObject**)((char*)obj + offset) != NULL;
+}
+
+// No Python objects or GIL acquisition in this gate. An admission covers the
+// ENTIRE foreign callback, including the interval before it acquires the GIL.
+// Shutdown closes admission and drains with the GIL released while Python is
+// still alive. Otherwise CPython <=3.13 can pthread_exit() through Rust's
+// non-unwinding callback ABI during finalization.
+//
+// Keep the gate allocated until process exit: detached native workers can still
+// call a trampoline after module teardown, and must be able to refuse admission.
+#include <pythread.h>
+#include <stdlib.h>
+
+typedef struct qdb_oidc_callback_gate {
+    PyThread_type_lock mutex;
+    // Held while any admitted callback runs on a thread other than `owner`.
+    PyThread_type_lock drained;
+    // Held while any admitted callback runs on the `owner` thread.
+    PyThread_type_lock owner_drained;
+    size_t active;
+    size_t owner_active;
+    // The interpreter's main thread, which runs the exit drain. A callback
+    // admitted on it while it drains can only be a greenlet suspended inside
+    // the callback, which cannot resume before the drain returns.
+    unsigned long owner;
+    int stopped;
+    // Deterministic native-only pre-GIL barrier, allocated only by tests.
+    PyThread_type_lock test_ready;
+    PyThread_type_lock test_release;
+    int test_pause_next;
+    int test_release_pending;
+} qdb_oidc_callback_gate;
+
+static qdb_oidc_callback_gate* qdb_oidc_gate = NULL;
+
+static int qdb_oidc_callback_gate_init(void)
+{
+    qdb_oidc_callback_gate* gate = calloc(1, sizeof(*gate));
+    if (gate == NULL)
+        return 0;
+    gate->mutex = PyThread_allocate_lock();
+    gate->drained = PyThread_allocate_lock();
+    gate->owner_drained = PyThread_allocate_lock();
+    if (gate->mutex == NULL || gate->drained == NULL
+            || gate->owner_drained == NULL) {
+        if (gate->mutex != NULL) PyThread_free_lock(gate->mutex);
+        if (gate->drained != NULL) PyThread_free_lock(gate->drained);
+        if (gate->owner_drained != NULL)
+            PyThread_free_lock(gate->owner_drained);
+        free(gate);
+        return 0;
+    }
+    gate->owner = PyThread_get_thread_ident();
+    // Also used after fork: never acquire/free the inherited locks, which may
+    // belong to vanished threads. An inherited callback's leave is a no-op.
+    qdb_oidc_gate = gate;
+    return 1;
+}
+
+// Name the thread that will run the exit drain: the interpreter's main thread.
+// Set at import and, after fork, in the child.
+static void qdb_oidc_callback_gate_set_owner(unsigned long owner)
+{
+    qdb_oidc_callback_gate* gate = qdb_oidc_gate;
+    PyThread_acquire_lock(gate->mutex, WAIT_LOCK);
+    if (gate->active == 0 && gate->owner_active == 0)
+        gate->owner = owner;
+    PyThread_release_lock(gate->mutex);
+}
+
+static qdb_oidc_callback_gate* qdb_oidc_callback_enter(void)
+{
+    qdb_oidc_callback_gate* gate = qdb_oidc_gate;
+    if (gate == NULL)
+        return NULL;
+    PyThread_acquire_lock(gate->mutex, WAIT_LOCK);
+    if (gate->stopped) {
+        PyThread_release_lock(gate->mutex);
+        return NULL;
+    }
+    // A callback leaves on the thread it entered on, which therefore
+    // recomputes the same answer.
+    if (PyThread_get_thread_ident() == gate->owner) {
+        if (gate->owner_active++ == 0)
+            PyThread_acquire_lock(gate->owner_drained, WAIT_LOCK);
+    } else if (gate->active++ == 0) {
+        PyThread_acquire_lock(gate->drained, WAIT_LOCK);
+    }
+    PyThread_release_lock(gate->mutex);
+    return gate;
+}
+
+static void qdb_oidc_callback_leave(qdb_oidc_callback_gate* gate)
+{
+    if (gate != qdb_oidc_gate)
+        return; // fork inside a callback
+    PyThread_acquire_lock(gate->mutex, WAIT_LOCK);
+    if (PyThread_get_thread_ident() == gate->owner) {
+        if (--gate->owner_active == 0)
+            PyThread_release_lock(gate->owner_drained);
+    } else if (--gate->active == 0) {
+        PyThread_release_lock(gate->drained);
+    }
+    PyThread_release_lock(gate->mutex);
+}
+
+static void qdb_oidc_callback_stop(void)
+{
+    PyThread_acquire_lock(qdb_oidc_gate->mutex, WAIT_LOCK);
+    qdb_oidc_gate->stopped = 1;
+    PyThread_release_lock(qdb_oidc_gate->mutex);
+}
+
+static void qdb_oidc_callback_drain(void)
+{
+    // Called only after stop, with the GIL released and no Python locks held.
+    // Callbacks on other threads are waited for: they run to completion with
+    // the GIL released here. Callbacks admitted on the draining thread itself
+    // can only be greenlets suspended inside one -- gevent I/O in a token
+    // provider, say -- since that thread is running this drain, and none of
+    // them can resume until it returns: waiting for them hung interpreter
+    // exit for good. None of them runs while finalization proceeds, and none
+    // is a thread that finalization would have to stop. Waited for only when
+    // another thread drains, as an embedding application's finalization may.
+    qdb_oidc_callback_gate* gate = qdb_oidc_gate;
+    PyThread_acquire_lock(gate->drained, WAIT_LOCK);
+    PyThread_release_lock(gate->drained);
+    if (PyThread_get_thread_ident() != gate->owner) {
+        PyThread_acquire_lock(gate->owner_drained, WAIT_LOCK);
+        PyThread_release_lock(gate->owner_drained);
+    }
+}
+
+static int qdb_oidc_callback_stopped(qdb_oidc_callback_gate* gate)
+{
+    int stopped;
+    PyThread_acquire_lock(gate->mutex, WAIT_LOCK);
+    stopped = gate->stopped;
+    PyThread_release_lock(gate->mutex);
+    return stopped;
+}
+
+static int qdb_oidc_callback_reopen_for_test(void)
+{
+    int idle;
+    PyThread_acquire_lock(qdb_oidc_gate->mutex, WAIT_LOCK);
+    idle = qdb_oidc_gate->active == 0 && qdb_oidc_gate->owner_active == 0;
+    if (idle) qdb_oidc_gate->stopped = 0;
+    PyThread_release_lock(qdb_oidc_gate->mutex);
+    return idle;
+}
+
+static int qdb_oidc_callback_pause_next_for_test(void)
+{
+    qdb_oidc_callback_gate* gate = qdb_oidc_gate;
+    int ok;
+    PyThread_acquire_lock(gate->mutex, WAIT_LOCK);
+    if (gate->test_ready == NULL)
+        gate->test_ready = PyThread_allocate_lock();
+    if (gate->test_release == NULL)
+        gate->test_release = PyThread_allocate_lock();
+    ok = gate->test_ready != NULL && gate->test_release != NULL;
+    if (ok) {
+        PyThread_acquire_lock(gate->test_ready, NOWAIT_LOCK);
+        PyThread_acquire_lock(gate->test_release, NOWAIT_LOCK);
+        gate->test_pause_next = 1;
+        gate->test_release_pending = 1;
+    }
+    PyThread_release_lock(gate->mutex);
+    return ok;
+}
+
+static void qdb_oidc_callback_before_gil(qdb_oidc_callback_gate* gate)
+{
+    int pause;
+    PyThread_acquire_lock(gate->mutex, WAIT_LOCK);
+    pause = gate->test_pause_next;
+    gate->test_pause_next = 0;
+    PyThread_release_lock(gate->mutex);
+    if (pause) {
+        PyThread_release_lock(gate->test_ready);
+        PyThread_acquire_lock(gate->test_release, WAIT_LOCK);
+    }
+}
+
+static int qdb_oidc_callback_try_paused_for_test(void)
+{
+    if (qdb_oidc_gate->test_ready == NULL)
+        return 0;
+    // PyPy implements the public nonblocking operation, but not CPython's
+    // timed-lock API. The Python test hook owns the timeout and polling sleep.
+    return PyThread_acquire_lock(qdb_oidc_gate->test_ready, NOWAIT_LOCK);
+}
+
+static void qdb_oidc_callback_resume_for_test(void)
+{
+    qdb_oidc_callback_gate* gate = qdb_oidc_gate;
+    PyThread_acquire_lock(gate->mutex, WAIT_LOCK);
+    if (gate->test_release_pending) {
+        gate->test_release_pending = 0;
+        PyThread_release_lock(gate->test_release);
+    }
+    PyThread_release_lock(gate->mutex);
 }

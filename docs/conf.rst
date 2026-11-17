@@ -184,8 +184,11 @@ background runner delivers them and reconnects on transient failures,
 walking the ``addr`` server list.
 
 * ``reconnect_max_duration_millis`` - ``int``: Total reconnect/failover
-  budget after a connection loss. Authentication and protocol-version
-  failures are terminal and are not retried.
+  budget after a connection loss. Protocol-version failures are terminal and
+  are not retried. A server that rejects the credential (HTTP 401 or 403)
+  stops a sender only before its first connection; once connected, the sender
+  keeps reconnecting with capped backoff and reports each rejected attempt
+  (see :ref:`token_rejections`).
 
   Default: 300000 (5 minutes).
 
@@ -209,11 +212,30 @@ walking the ``addr`` server list.
 
   Default: 5000.
 
-* ``request_durable_ack`` - ``'on'`` | ``'off'``: Negotiate durable
-  acknowledgements: the server acknowledges frames only once they are
-  durably stored (e.g. uploaded to object storage on Enterprise
-  deployments). A server without the capability rejects the first
-  operation.
+* ``request_durable_ack`` - ``'off'`` | ``'local'`` | ``'replicated'`` |
+  ``'on'`` | ``'local,replicated'``: Negotiate durable acknowledgements,
+  which the server sends once frames are durably stored:
+
+  * ``'local'``: the server has flushed the frames to its own disk, which
+    survives a server power loss but not the loss of that disk or a failover
+    to another node. Needs a server running ``cairo.commit.mode=adaptive``,
+    which QuestDB 10.1.0, QuestDB Enterprise 4.1.0 and earlier releases do
+    not have.
+  * ``'replicated'``, or its original name ``'on'``: the frames reached
+    replication storage (e.g. object storage), so they survive the loss of
+    the server. QuestDB Enterprise only; Enterprise 4.1.0 and earlier
+    accept only ``'on'``.
+  * ``'local,replicated'``: both. Needs QuestDB Enterprise running
+    ``cairo.commit.mode=adaptive``, which a replicating primary does only
+    when the mode is set explicitly.
+
+  The connection fails unless the server grants every level requested.
+  The store-and-forward queue keeps each frame for replay until its durable
+  acknowledgement arrives (with ``'local,replicated'``, the replicated one).
+  This client's acknowledgement waits --
+  :meth:`PooledSender.wait <questdb.PooledSender.wait>`, ``flush(wait=True)``
+  and ``await_acked_fsn()`` -- wait for the ordinary OK acknowledgement,
+  whatever this is set to.
 
   Default: ``'off'``.
 
@@ -375,6 +397,33 @@ control how long the client will wait for a response from the server during
 the authentication process. The default is 15 seconds.
 
 See the :ref:`auth_and_tls_example` example for more details.
+
+Token providers (rotating Bearer tokens)
+----------------------------------------
+
+Token providers are the credentials with **no configuration-string key**. A
+rotating token provider is a live object, so it is passed as a Python keyword
+argument instead — ``oidc_auth=`` for OIDC device-flow sign-in, or
+``bearer_token_provider=`` for any other rotating Bearer token — to
+:func:`questdb.connect`, :class:`questdb.Sender`,
+:meth:`questdb.Sender.from_conf`, :meth:`questdb.Sender.from_env` or
+:meth:`questdb.QuestDB.from_conf`. The configuration-string keys
+``token_provider``, ``azure_resource``, ``azure_client_id`` and
+``azure_credential`` are rejected.
+
+The two are mutually exclusive with each other and with the fixed credentials
+above: passing one alongside ``token``, ``username`` or ``password`` raises
+:class:`~questdb.QuestDBError` with ``code`` set to
+``QuestDBErrorCode.ConfigError``. Supported on HTTP(S) and QWP/WebSocket; TCP
+and UDP are rejected. Use ``https::`` or ``wss::``: over plain ``http::`` or
+``ws::`` to a non-loopback host the token is sent in cleartext on every flush
+or (re)connect.
+
+For ``oidc_auth``, resolving a fresh token is bounded by the provider's own
+``timeout``, not by ``request_timeout`` or ``retry_timeout``: see
+:ref:`auth-token-wait`.
+
+See the :ref:`oidc_auth` guide and :ref:`refreshing_token_provider`.
 
 .. _sender_conf_tls:
 
