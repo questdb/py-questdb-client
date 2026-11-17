@@ -291,6 +291,40 @@ class TestCapsulePathPyArrow(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
         self.assertGreaterEqual(stats['qwp1_frames'], 4)
 
+    @unittest.skipIf(
+        pa is None or pd is None
+        or not hasattr(pd.DataFrame, '__arrow_c_stream__'),
+        'needs pyarrow and pandas >= 2.2')
+    def test_pandas_object_index_type_changes_between_batches(self):
+        # An object-dtype index is exported as a column whose Arrow type
+        # pyarrow infers from the values of each batch. The first batch
+        # fixes decimal128(1, 0) and the second one infers decimal128(7, 6);
+        # decoding it with the first schema sent 1.123456 as 1123456. The
+        # mismatch must be refused, and the second batch must not be sent.
+        index = pd.Index(
+            [decimal.Decimal(1)] * 3 + [decimal.Decimal('1.123456')] * 3,
+            name='k', dtype=object)
+        df = pd.DataFrame({
+            'v': pd.Series(
+                list(range(6)), dtype=pd.ArrowDtype(pa.int64())),
+            'ts': pd.Series(
+                [_ts_us(2025, 1, 1) + i for i in range(6)],
+                dtype=pd.ArrowDtype(pa.timestamp('us'))),
+        })
+        df.index = index
+        with QwpAckServer(record_payloads=True) as server:
+            client = qi.QuestDB.from_conf(_client_conf(server.port))
+            try:
+                with self.assertRaisesRegex(
+                        qi.QuestDBError, r"Column 'k' has Arrow type "
+                        r"decimal128\(7, 6\) from row 3"):
+                    client.dataframe(
+                        df, table_name='t', at='ts', max_rows_per_batch=3)
+            finally:
+                client.close()
+            stats = server.snapshot()
+        payload = b''.join(stats['binary_payloads'])
+        self.assertNotIn((1_123_456).to_bytes(16, 'little'), payload)
 
     @unittest.skipIf(
         pa is None or pd is None
