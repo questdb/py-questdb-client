@@ -1488,11 +1488,13 @@ cdef ssize_t _dataframe_resolve_table_name(
     cdef size_t col_index = 0
     cdef PandasCol pandas_col
     cdef col_t* col
+    cdef str index_name
     if table_name is not None:
         if table_name_col is not None:
             raise ValueError(
                 'Can specify only one of `table_name` or `table_name_col`.')
         if isinstance(table_name, str):
+            table_name = _exact_str(table_name, 'table_name')
             try:
                 str_to_table_name_copy(b, <PyObject*>table_name, name_out)
                 return -1  # Magic value for "no column index".
@@ -1528,8 +1530,9 @@ cdef ssize_t _dataframe_resolve_table_name(
                 f'not an object of type {_fqn(type(df.index.name))}.')
 
         # If the index has a name, use that as the table name.
+        index_name = _exact_str(df.index.name, 'index name')
         try:
-            str_to_table_name_copy(b, <PyObject*>df.index.name, name_out)
+            str_to_table_name_copy(b, <PyObject*>index_name, name_out)
             return -1  # Magic value for "no column index".
         except QuestDBError as ie:
             raise ValueError(
@@ -1658,11 +1661,12 @@ cdef void_int _dataframe_resolve_symbols(
 
 
 cdef void_int _dataframe_get_loc(
-        object df, str col_name, str arg_name,
+        object df, object col_name, str arg_name,
         size_t* col_index_out) except -1:
     """
     Return the column index for `col_name`.
     """
+    col_name = _exact_str(col_name, arg_name)
     try:
         col_index_out[0] = df.columns.get_loc(col_name)
     except KeyError:
@@ -3004,7 +3008,9 @@ cdef void_int _dataframe_resolve_args(
     cdef PandasCol pandas_col
 
     cdef list pandas_cols = [
-        PandasCol(name, df.dtypes.iloc[index], series)
+        PandasCol(
+            _exact_str(name, 'name') if isinstance(name, str) else name,
+            df.dtypes.iloc[index], series)
         for index, (name, series) in enumerate(df.items())]
     cdef bint qwp_planner = field_targets is _FIELD_TARGETS_QWP
     if qwp_planner:
@@ -4549,6 +4555,11 @@ cdef void_int _dataframe(
     cdef bint plan_has_content
     cdef bint defer_signals = questdb_thread_ident() == _OIDC_MAIN_THREAD_IDENT
     cdef object signal_region = None
+
+    # A `str` subclass names a table like a plain `str`; anything else
+    # is refused here, as the typed `table_name: str` argument used to.
+    if table_name is not None:
+        table_name = _exact_str(table_name, 'table_name')
 
     # Refused, not counted, when a row or another frame is already
     # part-way through this buffer: the plan below clears the marker

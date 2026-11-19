@@ -696,6 +696,24 @@ cdef object _utf8_decode_error(
         'Cannot be encoded as UTF-8.')
 
 
+cdef str _exact_str(object value, str arg_name):
+    """
+    Return `value` as an exact `str`.
+
+    Cython `str` arguments and `PyUnicode_CheckExact` refuse subclasses such as
+    `numpy.str_` or a `(str, Enum)` member. `PyUnicode_FromObject` copies the
+    real string data (it does not call a subclass's own `__str__`, which for a
+    `(str, Enum)` member returns `'Kind.NAME'`).
+    """
+    if PyUnicode_CheckExact(<PyObject*>value):
+        return <str>value
+    if isinstance(value, str):
+        return <str>PyUnicode_FromObject(value)
+    raise TypeError(
+        f"Argument '{arg_name}' has incorrect type (expected str, got "
+        f"{_fqn(type(value))})")
+
+
 cdef str _fqn(type obj):
     if obj.__module__ == 'builtins':
         return obj.__qualname__
@@ -1430,13 +1448,13 @@ cdef class SenderTransaction:
     cdef bint _complete
     cdef bint _committing
 
-    def __cinit__(self, Sender sender, str table_name):
+    def __cinit__(self, Sender sender, object table_name):
         if not _is_http_protocol(sender._c_protocol):
             raise QuestDBError(
                 QuestDBErrorCode.InvalidApiCall,
                 'Transactions are only supported for ILP/HTTP.')
         self._sender = sender
-        self._table_name = table_name
+        self._table_name = _exact_str(table_name, 'table_name')
         self._complete = False
         self._committing = False
 
@@ -2304,8 +2322,8 @@ cdef class Buffer:
             self._column_int(name, value)
         elif PyFloat_CheckExact(<PyObject*>value):
             self._column_f64(name, value)
-        elif PyUnicode_CheckExact(<PyObject*>value):
-            self._column_str(name, value)
+        elif isinstance(value, str):
+            self._column_str(name, _exact_str(value, 'value'))
         elif isinstance(value, TimestampMicros):
             self._column_ts_micros(name, value)
         elif isinstance(value, TimestampNanos):
@@ -2426,7 +2444,7 @@ cdef class Buffer:
     cdef void_int _row(
             self,
             bint allow_auto_flush,
-            str table_name,
+            object table_name,
             dict symbols=None,
             dict columns=None,
             object at=None,
@@ -2444,16 +2462,18 @@ cdef class Buffer:
         # own flush, so `_marker_set` cannot answer that question.
         self._row_depth += 1
         try:
-            self._table(table_name)
+            self._table(_exact_str(table_name, 'table_name'))
             if symbols is not None:
                 for name, value in symbols.items():
                     if value is not None:
-                        self._symbol(name, value)
+                        self._symbol(
+                            _exact_str(name, 'name'),
+                            _exact_str(value, 'value'))
                         wrote_fields = True
             if columns is not None:
                 for name, value in columns.items():
                     if value is not None:
-                        self._column(name, value)
+                        self._column(_exact_str(name, 'name'), value)
                         wrote_fields = True
             if wrote_fields:
                 self._at(at if not isinstance(at, ServerTimestampType) else None)
@@ -2475,7 +2495,7 @@ cdef class Buffer:
 
     def row(
             self,
-            table_name: str,
+            table_name: object,
             *,
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
@@ -2633,7 +2653,7 @@ cdef class Buffer:
             self,
             df,  # : pd.DataFrame
             *,
-            table_name: Optional[str] = None,
+            table_name: Optional[object] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
             at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime]):
@@ -8156,12 +8176,15 @@ cdef object _capsule_get_column_names(object sliceable):
     or None if the input doesn't expose a uniform name list."""
     cdef object names
     names = getattr(sliceable, 'column_names', None)
-    if names is not None:
-        return list(names)
-    names = getattr(sliceable, 'columns', None)
-    if names is not None:
-        return list(names)
-    return None
+    if names is None:
+        names = getattr(sliceable, 'columns', None)
+    if names is None:
+        return None
+    # A label that is a `str` subclass (`numpy.str_`) is handed on as an
+    # exact `str`: the names are later encoded and matched by the planner.
+    return [
+        _exact_str(name, 'column name') if isinstance(name, str) else name
+        for name in names]
 
 
 cdef object _capsule_at_index_to_name(object sliceable, int idx):
@@ -9398,6 +9421,16 @@ cdef void_int _direct_dataframe_run(
         schema_overrides)
     if max_rows_per_batch <= 0:
         raise ValueError('max_rows_per_batch must be >= 1.')
+    # `str` subclasses (`numpy.str_`, `(str, Enum)` members) name things
+    # just like a plain `str`; the planners below need an exact one.
+    if table_name is not None:
+        table_name = _exact_str(table_name, 'table_name')
+    if isinstance(at, str):
+        at = _exact_str(at, 'at')
+    if isinstance(symbols, (list, tuple)):
+        symbols = type(symbols)(
+            _exact_str(entry, 'symbols') if isinstance(entry, str) else entry
+            for entry in symbols)
     src.slice_for_oidc = oidc_auth is not None
     if table_name is not None and table_name_col is not None:
         raise ValueError(
@@ -10253,7 +10286,7 @@ cdef class QuestDB:
             self,
             df,
             *,
-            table_name: Optional[str] = None,
+            table_name: Optional[object] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
             at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
@@ -12748,7 +12781,7 @@ cdef class Sender:
         else:
             return len(self._buffer)
 
-    def transaction(self, table_name: str):
+    def transaction(self, table_name: object):
         """
         Start a :ref:`sender_transaction` block.
         """
@@ -12760,10 +12793,10 @@ cdef class Sender:
         # here. Refusing here as well names the call the caller made.
         if self._buffer is not None:
             self._buffer._check_not_in_row('transaction')
-        return SenderTransaction(self, table_name)
+        return SenderTransaction(self, _exact_str(table_name, 'table_name'))
 
     def row(self,
-            table_name: str,
+            table_name: object,
             *,
             symbols: Optional[Dict[str, Optional[str]]]=None,
             columns: Optional[Dict[
@@ -12861,7 +12894,7 @@ cdef class Sender:
             self,
             df,  # : pd.DataFrame
             *,
-            table_name: Optional[str] = None,
+            table_name: Optional[object] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
             at: Union[ServerTimestampType, int, str, TimestampNanos, datetime.datetime],
@@ -13778,7 +13811,7 @@ cdef void_int _qwp_row_add(
         Sender sender,
         PooledSender pooled,
         Buffer buf,
-        str table_name,
+        object table_name,
         dict symbols,
         dict columns,
         object at) except -1:
@@ -13893,7 +13926,7 @@ cdef void_int _qwp_row_split(
         Sender sender,
         PooledSender pooled,
         Buffer buf,
-        str table_name,
+        object table_name,
         dict symbols,
         dict columns,
         object at) except -1:
@@ -13944,7 +13977,7 @@ cdef void_int _qwp_row_append(
         Sender sender,
         PooledSender pooled,
         Buffer buf,
-        str table_name,
+        object table_name,
         dict symbols,
         dict columns,
         object at) except -1:
@@ -14267,7 +14300,7 @@ cdef class PooledSender:
 
     def row(
             self,
-            table_name: str,
+            table_name: object,
             *,
             symbols: Optional[Dict[str, Optional[str]]] = None,
             columns: Optional[Dict[
@@ -14334,7 +14367,7 @@ cdef class PooledSender:
             self,
             df,
             *,
-            table_name: Optional[str] = None,
+            table_name: Optional[object] = None,
             table_name_col: Union[None, int, str] = None,
             symbols: Union[str, bool, List[int], List[str]] = 'auto',
             at: Union[ServerTimestampType, int, str, TimestampNanos,
