@@ -15783,6 +15783,144 @@ class TestTypeStub(unittest.TestCase):
         self.assertEqual(declared, sorted(qi.__all__))
 
 
+_StrEnumName = Enum('_StrEnumName', {
+    name.upper(): name for name in (
+        'tbl', 'tbl2', 'sym', 'val', 'col', 'text', 'ts', 'tbl_col',
+        'idx_tbl')}, type=str)
+
+
+class TestStrSubclassNames(unittest.TestCase):
+    """`str` subclasses (`numpy.str_`, `(str, Enum)` members) name tables,
+    columns and symbols just like a plain `str`."""
+
+    def _variants(self):
+        return (
+            ('numpy.str_', lambda text: np.str_(text)),
+            ('str enum', lambda text: _StrEnumName(text)))
+
+    def _row_text(self, make):
+        buf = qi.Buffer(protocol_version=2)
+        buf.row(
+            make('tbl'),
+            symbols={make('sym'): make('val')},
+            columns={make('col'): make('text'), 'n': 1},
+            at=qi.TimestampNanos(1000))
+        return bytes(buf).decode('utf-8')
+
+    def test_buffer_row_names_and_values(self):
+        for label, make in self._variants():
+            with self.subTest(label):
+                self.assertEqual(
+                    self._row_text(make).split(' ')[0],
+                    'tbl,sym=val')
+                self.assertIn('col="text"', self._row_text(make))
+
+    def test_buffer_row_non_str_name_still_rejected(self):
+        buf = qi.Buffer(protocol_version=2)
+        with self.assertRaisesRegex(
+                TypeError, "Argument 'table_name' has incorrect type"):
+            buf.row(1, columns={'a': 1}, at=qi.TimestampNanos(1))
+        with self.assertRaisesRegex(
+                TypeError, "Argument 'name' has incorrect type"):
+            buf.row('t', columns={1: 1}, at=qi.TimestampNanos(1))
+
+    def test_sender_transaction_and_row(self):
+        for label, make in self._variants():
+            with self.subTest(label):
+                with HttpServer() as server, qi.Sender(
+                        qi.Protocol.Http, '127.0.0.1', server.port,
+                        auto_flush=False) as sender:
+                    with sender.transaction(make('tbl')) as txn:
+                        txn.row(
+                            symbols={make('sym'): 'val'},
+                            at=qi.TimestampNanos(1000))
+                    sender.row(
+                        make('tbl2'),
+                        symbols={make('sym'): make('val')},
+                        at=qi.TimestampNanos(1000))
+                    sender.flush()
+                    sent = b''.join(server.requests).decode('utf-8')
+                self.assertIn('tbl,sym=val', sent)
+                self.assertIn('tbl2,sym=val', sent)
+
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_buffer_dataframe_names(self):
+        df = pd.DataFrame({
+            'sym': ['a'], 'col': [1.5],
+            'ts': pd.to_datetime([1000], unit='ns')})
+        for label, make in self._variants():
+            with self.subTest(label):
+                buf = qi.Buffer(protocol_version=2)
+                buf.dataframe(
+                    df, table_name=make('tbl'), symbols=[make('sym')],
+                    at=make('ts'))
+                self.assertTrue(bytes(buf).startswith(b'tbl,sym=a col='))
+                buf = qi.Buffer(protocol_version=2)
+                df2 = df.rename(columns={'sym': 'tbl_col'})
+                buf.dataframe(
+                    df2, table_name_col=make('tbl_col'), at=make('ts'))
+                self.assertTrue(bytes(buf).startswith(b'a col='))
+                named = df.copy()
+                named.index.name = make('idx_tbl')
+                buf = qi.Buffer(protocol_version=2)
+                buf.dataframe(named, symbols=False, at='ts')
+                self.assertTrue(bytes(buf).startswith(b'idx_tbl '))
+
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_buffer_dataframe_object_index_labels(self):
+        df = pd.DataFrame({
+            'sym': ['a'], 'col': [1.5],
+            'ts': pd.to_datetime([1000], unit='ns')})
+        df.columns = pd.Index(
+            [np.str_('sym'), 'col', np.str_('ts')], dtype=object)
+        buf = qi.Buffer(protocol_version=2)
+        buf.dataframe(
+            df, table_name='tbl', symbols=[np.str_('sym')],
+            at=np.str_('ts'))
+        self.assertTrue(bytes(buf).startswith(b'tbl,sym=a col='))
+
+    @unittest.skipIf(not pd, 'pandas not installed')
+    def test_arrow_path_names(self):
+        try:
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest('pyarrow not installed')
+        # `QuestDB.dataframe` (ws): `at`, `symbols` and `table_name` go
+        # through the Arrow planner (`str_to_column_name`,
+        # `_capsule_column_is_string_like`), not through `Buffer`.
+        df = pd.DataFrame({
+            'sym': ['a'], 'col': [1.5],
+            'ts': pd.to_datetime([1000], unit='ns')})
+        arrow_df = df.convert_dtypes(dtype_backend='pyarrow')
+        arrow_labels = arrow_df.copy()
+        arrow_labels.columns = pd.Index(
+            [np.str_('sym'), 'col', np.str_('ts')], dtype=object)
+        table = pa.Table.from_pandas(df)
+        for label, make in self._variants():
+            for frame_label, frame in (
+                    ('pandas-arrow', arrow_df),
+                    ('arrow table', table),
+                    ('numpy.str_ labels', arrow_labels)):
+                if label == 'str enum' and frame_label == 'numpy.str_ labels':
+                    continue
+                with self.subTest(label=label, frame=frame_label):
+                    with QwpAckServer() as server:
+                        conf = (
+                            f'ws::addr=127.0.0.1:{server.port};'
+                            'lazy_connect=true;sender_pool_min=1;'
+                            'sender_pool_max=1;pool_reap=manual;')
+                        with qi.QuestDB.from_conf(conf) as db:
+                            db.dataframe(
+                                frame, table_name=make('tbl'),
+                                symbols=[make('sym')], at=make('ts'))
+                            if frame_label == 'numpy.str_ labels':
+                                # Same frame, columns picked by index.
+                                for sym in ([0], 'auto'):
+                                    db.dataframe(
+                                        frame, table_name=make('tbl'),
+                                        symbols=sym, at=2)
+
+
 class TestEveryTestClassIsReachable(unittest.TestCase):
     """`proj.py test` and CI both run this file and nothing else, so a
     `TestCase` defined in a sibling module only runs if it is imported

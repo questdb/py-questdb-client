@@ -43,6 +43,7 @@ cdef extern from "Python.h":
     Py_UCS4* PyUnicode_4BYTE_DATA(PyObject* o)
 
     bint PyUnicode_CheckExact(PyObject* o)
+    unicode PyUnicode_FromObject(object obj)
 
     const char* PyUnicode_AsUTF8AndSize(PyObject* o, Py_ssize_t* size) except NULL
 
