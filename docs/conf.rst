@@ -425,6 +425,62 @@ For ``oidc_auth``, resolving a fresh token is bounded by the provider's own
 
 See the :ref:`oidc_auth` guide and :ref:`refreshing_token_provider`.
 
+.. _sender_conf_owned_by:
+
+Owner of auto-created tables (QWP/WebSocket)
+--------------------------------------------
+
+QWP/WebSocket ingestion creates the tables and columns a sender writes that do
+not exist yet, and QuestDB Enterprise grants the owner permissions on them to
+the principal that created them.
+
+* ``owned_by`` - QWP/WebSocket-only, ``str``: The user, group or service
+  account to receive those permissions instead, the way ``OWNED BY`` does in
+  SQL, for every table the sender creates and every column it adds. The
+  principal may name itself or one of its groups, and the built-in admin any
+  existing entity. An external user, one that authenticates with an OIDC
+  token (``oidc_auth=``, or ``bearer_token_provider=`` with an Entra ID
+  token, for example), cannot hold permissions itself, so it must name one of
+  its groups to have tables and columns auto-created at all. Writing to
+  existing tables and columns needs no owner. Requires QuestDB Enterprise
+  with access control.
+
+  Default: unset.
+
+.. code-block:: python
+
+    import questdb
+
+    with questdb.connect(
+            'wss::addr=db.example.com:9000;owned_by=fxIngest;',
+            bearer_token_provider=provider) as db:
+        ...
+
+It can also be passed as a keyword argument:
+``questdb.connect(..., owned_by='fxIngest')``,
+``Sender(Protocol.Wss, host, port, owned_by='fxIngest')``,
+``Sender.from_conf(conf, owned_by='fxIngest')`` or
+``Sender.from_env(owned_by='fxIngest')``.
+
+The owner is sent on the WebSocket upgrade of every connection, reconnects
+and failovers included, and the server checks it there:
+
+* An owner the principal may not name fails the connection with
+  :class:`QuestDBError <questdb.QuestDBError>`, ``code`` set to
+  ``QuestDBErrorCode.AuthError``, and the server's reason in the message, such
+  as ``owned_by refused: fxIngest does not exist``. QuestDB open source, and
+  QuestDB Enterprise with access control disabled, cannot set an owner, so
+  they refuse every owner the same way.
+* A server that predates ``owned_by`` ignores it, so the client fails the
+  connection itself with ``QuestDBErrorCode.ProtocolVersionError``, rather
+  than let the server create tables that the owner does not own.
+
+The server checks the owner again before it creates each table or column: if
+the principal may no longer name it, the write is rejected with a security
+error and nothing is created. ``http``, ``https``, ``tcp``, ``tcps`` and
+``udp`` reject ``owned_by``; the query side of :func:`questdb.connect`
+accepts it and ignores it.
+
 .. _sender_conf_tls:
 
 TLS
