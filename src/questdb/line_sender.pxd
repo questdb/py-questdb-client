@@ -561,6 +561,12 @@ cdef extern from "questdb/ingress/line_sender.h":
         line_sender_error** err_out
         ) noexcept nogil
 
+    bint line_sender_opts_owned_by(
+        line_sender_opts* opts,
+        line_sender_utf8 owner,
+        line_sender_error** err_out
+        ) noexcept nogil
+
     bint line_sender_opts_protocol_version(
         line_sender_opts* opts,
         line_sender_protocol_version version,

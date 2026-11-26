@@ -3901,6 +3901,160 @@ class TestQwpWebSocketTls(unittest.TestCase):
         self.assertEqual(stats['errors'], [])
 
 
+class TestQwpWebSocketOwnedBy(unittest.TestCase):
+    """`owned_by`: the owner of the tables and columns a QWP/WebSocket
+    sender auto-creates, named in `X-QWP-Owned-By` on every upgrade. A
+    connection the server does not confirm the owner on fails."""
+
+    OWNER = 'caf\u00e9 team'
+    OWNER_ENCODED = 'caf%C3%A9%20team'
+    ONLY_WEBSOCKET = (
+        'The "owned_by" setting is only supported for QWP/WebSocket.')
+
+    def _establish_error(self, sender):
+        try:
+            with self.assertRaises(qi.QuestDBError) as ctx:
+                sender.establish()
+        finally:
+            sender.close(False)
+        return ctx.exception
+
+    def test_owner_from_the_conf_string_is_sent_percent_encoded(self):
+        with QwpAckServer() as server:
+            with qi.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};'
+                    f'owned_by={self.OWNER};',
+                    auto_flush=False) as sender:
+                buf = sender.new_buffer()
+                buf.row(
+                    'trades', columns={'qty': 7},
+                    at=qi.TimestampNanos(1_700_000_000_000_000_000))
+                fsn = sender.flush_and_get_fsn(buf)
+                self.assertTrue(sender.await_acked_fsn(fsn, 10000))
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['qwp1_frames'], 1)
+        self.assertEqual(stats['upgrade_owned_by'], [self.OWNER_ENCODED])
+
+    def test_owner_keyword_of_every_constructor_is_sent(self):
+        with QwpAckServer() as server:
+            conf = f'ws::addr=127.0.0.1:{server.port};'
+            with mock.patch.dict(os.environ, {'QDB_CLIENT_CONF': conf}):
+                for make in (
+                        lambda: qi.Sender(
+                            qi.Protocol.Ws, '127.0.0.1', server.port,
+                            owned_by='init'),
+                        lambda: qi.Sender.from_conf(conf, owned_by='conf'),
+                        lambda: qi.Sender.from_env(owned_by='env'),
+                        lambda: qi.Sender.from_conf(conf)):
+                    with make():
+                        pass
+            stats = server.snapshot()
+        self.assertEqual(
+            stats['upgrade_owned_by'], ['init', 'conf', 'env', None])
+
+    def test_unconfirmed_owner_fails_the_connect(self):
+        # A server that predates `owned_by` ignores the header and leaves
+        # the echo out; the tables it auto-created would not get the owner.
+        for echo, echoed in ((False, '<no X-QWP-Owned-By header>'),
+                             ('other', 'other')):
+            with self.subTest(echo=echo), QwpAckServer(
+                    owned_by_echo=echo) as server:
+                err = self._establish_error(qi.Sender.from_conf(
+                    f'ws::addr=127.0.0.1:{server.port};owned_by=team_a;'))
+                stats = server.snapshot()
+            self.assertEqual(
+                err.code, qi.QuestDBErrorCode.ProtocolVersionError)
+            self.assertIn(
+                'WebSocket upgrade failed: server did not confirm owned_by, '
+                'it cannot set the owner of auto-created tables and columns '
+                f'[host=127.0.0.1, port={server.port}, owned_by=team_a, '
+                f'echoed={echoed}]',
+                str(err))
+            self.assertEqual(stats['upgrade_owned_by'], ['team_a'])
+            self.assertEqual(stats['binary_frames'], 0)
+
+    def test_refused_owner_reports_the_server_reason(self):
+        reason = 'owned_by refused: bob is not part of group team'
+        with QwpAckServer(owned_by_refusal=reason) as server:
+            err = self._establish_error(qi.Sender(
+                qi.Protocol.Ws, '127.0.0.1', server.port, owned_by='team'))
+        self.assertEqual(err.code, qi.QuestDBErrorCode.AuthError)
+        self.assertIn(f'HTTP status 403 [reason={reason}]', str(err))
+
+    def test_owner_is_rejected_by_other_protocols(self):
+        for protocol, port in ((qi.Protocol.Tcp, 9009),
+                               (qi.Protocol.Http, 9000),
+                               (qi.Protocol.Udp, 9007)):
+            with self.subTest(protocol=protocol):
+                with self.assertRaises(qi.QuestDBError) as ctx:
+                    qi.Sender(protocol, '127.0.0.1', port, owned_by='team_a')
+                self.assertEqual(
+                    ctx.exception.code, qi.QuestDBErrorCode.ConfigError)
+                self.assertIn(self.ONLY_WEBSOCKET, str(ctx.exception))
+                # The configuration string of a protocol other than ws/wss
+                # drops the keys Python does not know, but not this one: the
+                # tables would be created without the owner asked for.
+                with self.assertRaises(qi.QuestDBError) as ctx:
+                    qi.Sender.from_conf(
+                        f'{protocol.tag}::addr=127.0.0.1:{port};'
+                        'owned_by=team_a;')
+                self.assertEqual(
+                    ctx.exception.code, qi.QuestDBErrorCode.ConfigError)
+                self.assertIn(self.ONLY_WEBSOCKET, str(ctx.exception))
+
+    def test_owner_must_be_a_non_blank_str(self):
+        for owner in ('', '  '):
+            with self.subTest(owner=owner):
+                with self.assertRaisesRegex(
+                        qi.QuestDBError,
+                        '"owned_by" cannot be empty or blank'):
+                    qi.Sender(
+                        qi.Protocol.Ws, '127.0.0.1', 9000, owned_by=owner)
+        with self.assertRaisesRegex(
+                qi.QuestDBError, '"owned_by" cannot be empty or blank'):
+            qi.Sender.from_conf('ws::addr=127.0.0.1:9000;owned_by=;')
+        with self.assertRaises(TypeError):
+            qi.Sender(qi.Protocol.Ws, '127.0.0.1', 9000, owned_by=1)
+
+    def test_owner_in_the_conf_string_cannot_be_overridden(self):
+        with self.assertRaisesRegex(
+                ValueError, '"owned_by" is already present'):
+            qi.Sender.from_conf(
+                'ws::addr=127.0.0.1:9000;owned_by=team_a;',
+                owned_by='team_b')
+
+    def test_pool_names_the_owner_on_its_sender_connections(self):
+        import questdb
+        with QwpAckServer() as server:
+            # The query side of the pool accepts the key too, as one it
+            # does not use.
+            with questdb.connect(
+                    f'ws::addr=127.0.0.1:{server.port};lazy_connect=true;'
+                    'sender_pool_min=1;sender_pool_max=1;pool_reap=manual;',
+                    owned_by=self.OWNER) as db:
+                with db.sender() as sender:
+                    sender.row(
+                        'events', columns={'value': 1},
+                        at=qi.ServerTimestamp)
+                    sender.flush(wait=True)
+            stats = server.snapshot()
+        self.assertEqual(stats['errors'], [])
+        self.assertEqual(stats['binary_frames'], 1)
+        self.assertEqual(stats['upgrade_owned_by'], [self.OWNER_ENCODED])
+
+    def test_pool_fails_eagerly_where_the_owner_is_not_confirmed(self):
+        import questdb
+        with QwpAckServer(owned_by_echo=False) as server:
+            with self.assertRaises(qi.QuestDBError) as ctx:
+                questdb.connect(
+                    host='127.0.0.1', port=server.port, query_pool_min=0,
+                    owned_by='team_a')
+        self.assertEqual(
+            ctx.exception.code, qi.QuestDBErrorCode.ProtocolVersionError)
+        self.assertIn('server did not confirm owned_by', str(ctx.exception))
+
+
 # Handing out an Arrow C stream means handing out a real PyCapsule,
 # and building one from Python goes through the interpreter's own C
 # API. `ctypes.pythonapi` is the only route to it, and CPython is the

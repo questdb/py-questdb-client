@@ -4,6 +4,41 @@
 Changelog
 =========
 
+6.2.0 (unreleased)
+------------------
+
+New
+~~~
+
+Owner of auto-created tables (``owned_by``)
+*******************************************
+
+The new ``owned_by`` configuration key, also a keyword argument of
+:class:`Sender <questdb.Sender>`, :meth:`Sender.from_conf
+<questdb.Sender.from_conf>`, :meth:`Sender.from_env <questdb.Sender.from_env>`
+and :func:`questdb.connect`, names the user, group or service account that
+QuestDB Enterprise grants the owner permissions on the tables and columns a
+QWP/WebSocket sender auto-creates, the way ``OWNED BY`` does in SQL. An
+external user, one that authenticates with an OIDC token such as an Entra ID
+managed identity, cannot hold permissions itself, so it must name one of its
+groups to have tables and columns auto-created at all.
+
+The owner is sent on the WebSocket upgrade of every connection, and checked
+there. A server that refuses it fails the connection with
+``QuestDBErrorCode.AuthError`` and the server's reason; QuestDB open source
+refuses every owner. A server that does not confirm it, as one that predates
+the feature does, fails the connection with
+``QuestDBErrorCode.ProtocolVersionError`` rather than let it create tables
+without the owner. ``http``, ``https``, ``tcp``, ``tcps`` and ``udp`` reject
+the key. See :ref:`sender_conf_owned_by`.
+
+Other changes
+~~~~~~~~~~~~~
+
+- A QWP/WebSocket upgrade that the server rejects with a plain-text reason
+  carries it in the error message, as ``[reason=...]``, so that a refused
+  owner does not read like a rejected credential.
+
 6.1.0 (2026-11-12)
 ------------------
 

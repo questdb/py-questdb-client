@@ -129,7 +129,8 @@ class QwpAckServer:
                  error_status=None, error_message=b"mock rejection",
                  tls=False, required_authorization=None,
                  close_after_upgrade_unless_authorization=None,
-                 durable_ack=False, idle_timeout_s=30, upgrade_gate=None):
+                 durable_ack=False, idle_timeout_s=30, upgrade_gate=None,
+                 owned_by_echo=True, owned_by_refusal=None):
         """
         `close_plan`: iterable consumed one value per accepted connection;
         a connection with value N is closed after handling its Nth binary
@@ -174,6 +175,16 @@ class QwpAckServer:
         `upgrade_gate`: when set to a `threading.Event`, every connection
         waits for it (at most 30 s) before answering the upgrade, so the
         client has not learned the advertised cap until the test sets it.
+
+        `owned_by_echo`: how the upgrade answers a request that names an
+        owner in `X-QWP-Owned-By` (every request's value is recorded as
+        `upgrade_owned_by`): True echoes it, as a server that accepts the
+        owner does; False leaves the echo out, as a server that predates
+        `owned_by` does; a str is echoed instead.
+
+        `owned_by_refusal`: when set, refuse every upgrade that names an
+        owner with HTTP 403 and this plain-text reason, as a server does
+        with an owner the principal may not name.
         """
         self.host = host
         self.ack_delay_s = ack_delay_s
@@ -189,6 +200,8 @@ class QwpAckServer:
             close_after_upgrade_unless_authorization)
         self.idle_timeout_s = idle_timeout_s
         self.upgrade_gate = upgrade_gate
+        self.owned_by_echo = owned_by_echo
+        self.owned_by_refusal = owned_by_refusal
         self._tls_context = None
         if tls:
             self._tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -210,6 +223,7 @@ class QwpAckServer:
         self.control_frame_count = 0
         self.upgrade_authorizations = []
         self.upgrade_paths = []
+        self.upgrade_owned_by = []
         self.errors = []
 
     def __enter__(self):
@@ -261,6 +275,7 @@ class QwpAckServer:
                 "upgrade_authorizations": list(
                     self.upgrade_authorizations),
                 "upgrade_paths": list(self.upgrade_paths),
+                "upgrade_owned_by": list(self.upgrade_owned_by),
                 "errors": list(self.errors),
                 "tls_handshake_failures": self.tls_handshake_failures,
             }
@@ -370,15 +385,26 @@ class QwpAckServer:
             conn.settimeout(30)
             request = _read_until(conn, b"\r\n\r\n")
             authorization = _optional_header(request, "Authorization")
+            owned_by = _optional_header(request, "X-QWP-Owned-By")
             with self._lock:
                 self.upgrade_authorizations.append(authorization)
                 self.upgrade_paths.append(_request_path(request))
+                self.upgrade_owned_by.append(owned_by)
             if (self.required_authorization is not None
                     and authorization != self.required_authorization):
                 conn.sendall(
                     b"HTTP/1.1 401 Unauthorized\r\n"
                     b"Content-Length: 0\r\n"
                     b"Connection: close\r\n\r\n")
+                return
+            if owned_by is not None and self.owned_by_refusal is not None:
+                reason = self.owned_by_refusal.encode("utf-8")
+                conn.sendall(
+                    b"HTTP/1.1 403 Forbidden\r\n"
+                    b"Content-Type: text/plain\r\n"
+                    + f"Content-Length: {len(reason)}\r\n".encode("ascii")
+                    + b"Connection: close\r\n\r\n"
+                    + reason)
                 return
             key = _header(request, "Sec-WebSocket-Key")
             accept = _compute_accept(key)
@@ -392,6 +418,10 @@ class QwpAckServer:
                 response += f"X-QWP-Max-Batch-Size: {self.max_batch_size}\r\n"
             if self.durable_ack:
                 response += "X-QWP-Durable-Ack: enabled\r\n"
+            if owned_by is not None and self.owned_by_echo is not False:
+                echo = (owned_by if self.owned_by_echo is True
+                        else self.owned_by_echo)
+                response += f"X-QWP-Owned-By: {echo}\r\n"
             response += "\r\n"
             conn.sendall(response.encode("ascii"))
             if (

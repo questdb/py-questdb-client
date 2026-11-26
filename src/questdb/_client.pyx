@@ -11599,6 +11599,7 @@ cdef class Sender:
             object bearer_token_provider,
             str token_x,
             str token_y,
+            str owned_by,
             object auth_timeout,
             object tls_verify,
             object tls_ca,
@@ -11634,6 +11635,7 @@ cdef class Sender:
         cdef line_sender_utf8 c_token
         cdef line_sender_utf8 c_token_x
         cdef line_sender_utf8 c_token_y
+        cdef line_sender_utf8 c_owned_by
         cdef uint64_t c_auth_timeout
         cdef bint c_tls_verify
         cdef line_sender_ca c_tls_ca
@@ -11848,6 +11850,12 @@ cdef class Sender:
         if token_y is not None:
             str_to_utf8(b, <PyObject*>token_y, &c_token_y)
             if not line_sender_opts_token_y(self._opts, c_token_y, &err):
+                raise c_err_to_py(err)
+
+        if owned_by is not None:
+            # Native validates it: QWP/WebSocket only, and not blank.
+            str_to_utf8(b, <PyObject*>owned_by, &c_owned_by)
+            if not line_sender_opts_owned_by(self._opts, c_owned_by, &err):
                 raise c_err_to_py(err)
 
         if protocol_version is not None:
@@ -12071,6 +12079,7 @@ cdef class Sender:
             object bearer_token_provider=None,
             str token_x=None,
             str token_y=None,
+            str owned_by=None,  # QWP/WebSocket only
             object auth_timeout=None,  # default: 15000 milliseconds
             object tls_verify=None,  # default: True
             object tls_ca=None,  # TLS default: TlsCa.WebpkiAndOsRoots
@@ -12135,6 +12144,7 @@ cdef class Sender:
                 bearer_token_provider,
                 token_x,
                 token_y,
+                owned_by,
                 auth_timeout,
                 tls_verify,
                 tls_ca,
@@ -12173,6 +12183,7 @@ cdef class Sender:
             object bearer_token_provider=None,
             str token_x=None,
             str token_y=None,
+            str owned_by=None,  # QWP/WebSocket only
             object auth_timeout=None,  # default: 15000 milliseconds
             object tls_verify=None,  # default: True
             object tls_ca=None,  # TLS default: TlsCa.WebpkiAndOsRoots
@@ -12254,6 +12265,7 @@ cdef class Sender:
                 'token': token,
                 'token_x': token_x,
                 'token_y': token_y,
+                'owned_by': owned_by,
                 'auth_timeout': auth_timeout,
                 'tls_verify': tls_verify,
                 'tls_ca': tls_ca,
@@ -12293,6 +12305,7 @@ cdef class Sender:
                 'token',
                 'token_x',
                 'token_y',
+                'owned_by',
                 'auth_timeout',
                 'tls_verify',
                 'tls_ca',
@@ -12339,6 +12352,7 @@ cdef class Sender:
                 bearer_token_provider,
                 params.get('token_x'),
                 params.get('token_y'),
+                params.get('owned_by'),
                 params.get('auth_timeout'),
                 params.get('tls_verify'),
                 params.get('tls_ca'),
@@ -12378,6 +12392,7 @@ cdef class Sender:
             object bearer_token_provider=None,
             str token_x=None,
             str token_y=None,
+            str owned_by=None,  # QWP/WebSocket only
             object auth_timeout=None,  # default: 15000 milliseconds
             object tls_verify=None,  # default: True
             object tls_ca=None,  # TLS default: TlsCa.WebpkiAndOsRoots
@@ -12446,6 +12461,7 @@ cdef class Sender:
             bearer_token_provider=bearer_token_provider,
             token_x=token_x,
             token_y=token_y,
+            owned_by=owned_by,
             auth_timeout=auth_timeout,
             tls_verify=tls_verify,
             tls_ca=tls_ca,
